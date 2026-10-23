@@ -30,3 +30,14 @@ fn portable_pager_io_conformance() {
         run();
     }
 }
+
+#[path = "support/transaction.rs"]
+mod transaction;
+
+#[test]
+fn portable_transaction_conformance() {
+    for (name, run) in transaction::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

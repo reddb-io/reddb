@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators and pager orchestration shared; storage-backed runtime and sync pending
+Status: accepted architecture; persistence, portable query operators, B-tree/pager and live MVCC shared; storage-backed runtime and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -49,7 +49,8 @@ shortcut. `reddb-engine` now owns the storage-independent scalar evaluator,
 compiled row filters, sorting, binding algebra/iterators, joins, aggregation,
 set operations, subqueries and windows, relocated with their native unit tests.
 Native module paths re-export those exact types; runtime policy, authorization,
-MVCC and storage-backed query orchestration remain in `reddb-server`.
+durable transaction publication and storage-backed query orchestration remain in
+`reddb-server`.
 Canonical output-column labels and binary document decoding also have one owner.
 
 The page primitives now also live in `reddb-engine::storage`: 16 KiB pages,
@@ -121,9 +122,32 @@ native verification. A native-server integration additionally proves its public
 B-tree aliases produce and consume the same records through the portable pager.
 The test records are opaque B-tree values, not runtime entities. The production
 JS/TS API is unchanged: these lower-level reads/writes do not supply collection
-catalog semantics, RQL storage execution, MVCC, atomic application transactions,
+catalog semantics, RQL storage execution, runtime MVCC integration, atomic application transactions,
 or recovery of partially executed B-tree operations. Those runtime/WAL layers
 still need extraction before the application SDK can be released.
+
+Live optimistic MVCC state now lives in `reddb-engine::transaction`, including
+snapshot allocation, visibility, aborted outcomes, snapshot retention/pins,
+checkpoint exclusions, unique-key admission, SSI read/write tracking and the
+per-connection transaction/savepoint/tenant state machine. Native paths re-export
+the same types, including the shared entity identity. ADR 0065's dormant
+coordinator/lock/log/savepoint scaffold remains disabled. The native savepoint
+error classification and message remain unchanged through an adapter conversion.
+The commit preparation callback still precedes visibility and its returned
+publication guard remains held through child and parent visibility changes.
+The host retains first-committer-wins validation, pending-write finalization,
+WAL append/barriers and recovery; this extraction does not provide those pieces.
+
+Nine native/WASM conformance cases exercise statement versus transaction
+snapshots, active/aborted creators and deleters, failed preparation, publication
+guard lifetime, savepoint ownership, tenant separation, retained history,
+checkpoint exclusions, unique keys, SSI row/vault predicates and autocommit
+reservation/replay rules. These are volatile state tests in browser workers,
+not crash durability or application transaction SDK coverage. The native runtime
+transaction, WAL/checkpoint and vacuum suites remain required regression checks.
+The state manager retains O(active transactions + retained outcomes/pins + SSI
+read sets and conflict edges) memory and adds no IPC or storage operations.
+No browser transaction throughput or memory-budget claim follows from this move.
 
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format

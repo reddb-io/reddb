@@ -1,6 +1,6 @@
-//! Shared RedDB query execution, page primitives and durable page I/O.
-//! Pager orchestration, transactions and synchronization remain native until
-//! their portable boundaries are extracted.
+//! Shared RedDB query execution, durable page/B-tree storage and live MVCC state.
+//! Host runtimes own storage-backed dispatch, durable transaction publication
+//! and synchronization.
 
 // Relocated legacy code retains the native crate's lint policy. New modules
 // override these allowances so the workspace ratchets apply to new behavior.
@@ -18,4 +18,5 @@
 mod clock;
 pub mod query;
 pub mod storage;
+pub mod transaction;
 pub use reddb_types::{json, serde_json};

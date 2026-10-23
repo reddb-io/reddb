@@ -2,10 +2,11 @@
 //!
 //! The native pager uses these exact page, freelist, cache and byte-I/O
 //! implementations, including pager orchestration and allocation fences.
-//! WAL implementation, encryption and MVCC remain host/runtime policy.
+//! WAL implementation and encryption remain host/runtime policy.
 
 pub mod btree;
 pub mod crc32;
+pub mod entity_id;
 pub mod freelist;
 pub mod overflow;
 pub mod page;

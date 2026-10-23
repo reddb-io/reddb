@@ -63,7 +63,7 @@ barrier; portable pagers without a WAL reject nonzero page LSNs. Shared native/W
 fixtures cover failed allocation fences and WAL barriers. The OPFS restart fixture
 uses this complete pager and verifies checkpoint completion through another fresh
 pager. The production JS/TS API is unchanged: storage-backed queries, local
-transactions, runtime WAL/MVCC and encryption qualification remain pending.
+transactions, runtime WAL/MVCC integration and encryption qualification remain pending.
 Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 
@@ -133,9 +133,24 @@ OPFS data, writes again and executes a scalar query without reaching the HTTP
 host. This verifies the current artifact/scalar surface offline; storage-backed
 queries and application transactions still require the engine work below.
 
+## Shared transaction state
+
+The canonical native MVCC snapshot manager, visibility predicate, serializable
+read/write conflict tracking and per-connection transaction state now live in
+`reddb-engine::transaction`. The server uses the same types and algorithms.
+Native/WASM fixtures cover snapshot versus read-committed reads, aborted writers,
+savepoint sub-XIDs, failed commit preparation, publication-guard lifetime,
+retained vacuum horizons, checkpoint exclusions, unique-key reservations and
+serializable row/vault predicates with tenant separation.
+
+These are volatile engine assertions in a test-only WASM artifact. They do not
+expose transactions through the JS/TS SDK or qualify durable browser transaction
+recovery. Storage-backed dispatch, write conflict validation, WAL publication and
+recovery still require the runtime integration below.
+
 ## Remaining work toward the approved Browser design
 
-1. Extract the remaining storage-coupled executor/pager into the shared portable engine and
+1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and
    preserve native query/transaction semantics for tables, documents, KV, graph
    and vectors. Port clocks, crypto randomness and task scheduling.
 2. Build the application-facing SDK, local transaction/outbox atomicity, change

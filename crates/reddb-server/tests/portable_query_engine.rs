@@ -404,3 +404,42 @@ fn native_and_portable_btrees_share_records_splits_overflow_and_reclamation() {
     btree_fixture::verify(&tree, true)
         .expect("native cursor and point reads see portable mutations");
 }
+
+#[test]
+fn native_mvcc_paths_use_the_shared_manager_and_entity_identity() {
+    use reddb_engine::transaction::{state::TransactionState, IsolationLevel, SnapshotManager};
+    use reddb_server::storage::{transaction as native, unified::entity};
+
+    let id: entity::EntityId = reddb_engine::storage::entity_id::EntityId::new(1024);
+    assert_eq!(id.raw(), 1024);
+    assert_eq!(id.to_string(), "e1024");
+    let _: native::SnapshotManager = SnapshotManager::new();
+    let isolation: native::IsolationLevel = IsolationLevel::Serializable;
+    let state = TransactionState::new();
+    let writer: native::Xid = state.begin(1, isolation);
+    let manager: std::sync::Arc<native::SnapshotManager> = state.snapshot_manager();
+    manager.record_serializable_read(writer, "records", id);
+    let captured: native::Snapshot = manager.fresh_read_snapshot();
+    assert!(!native::is_visible(
+        writer,
+        0,
+        captured.xid,
+        &captured.in_progress,
+        &std::collections::HashSet::new()
+    ));
+    state
+        .commit(1, |_| Ok::<_, ()>(()))
+        .expect("commit prepares");
+    let committed = manager.fresh_read_snapshot();
+    assert!(native::is_visible(
+        writer,
+        0,
+        committed.xid,
+        &committed.in_progress,
+        &std::collections::HashSet::new()
+    ));
+    assert!(
+        !captured.sees(writer, 0),
+        "earlier snapshot keeps its exclusions"
+    );
+}

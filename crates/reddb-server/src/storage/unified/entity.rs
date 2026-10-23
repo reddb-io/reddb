@@ -4,7 +4,6 @@
 //! graph edges, or vectors with seamless interoperability.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 
 use reddb_types::Value;
@@ -22,33 +21,7 @@ use reddb_types::Value;
 /// `FIRST_USER_LABEL_ID` in the graph label registry.
 pub const FIRST_USER_ENTITY_ID: u64 = 1024;
 
-/// Unique identifier for any entity in the unified storage
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntityId(pub u64);
-
-impl EntityId {
-    /// Create a new entity ID
-    pub fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// Get the raw ID value
-    pub fn raw(&self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for EntityId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "e{}", self.0)
-    }
-}
-
-impl From<u64> for EntityId {
-    fn from(id: u64) -> Self {
-        Self(id)
-    }
-}
+pub use reddb_engine::storage::entity_id::EntityId;
 
 /// The kind of entity (what storage type it belongs to)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

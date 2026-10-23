@@ -103,7 +103,7 @@ const SEEDED_CONCEPTS: &[SeededConcept] = &[
     concept(
         "IsolationLevel",
         "crates/reddb-rql/src/core.rs",
-        &["crates/reddb-server/src/storage/transaction/mod.rs"],
+        &["crates/reddb-engine/src/transaction/mod.rs"],
         "#2165",
     ),
     concept(

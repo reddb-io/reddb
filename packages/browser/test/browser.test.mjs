@@ -119,7 +119,7 @@ for (const browser of browsers) {
       })
     }
 
-    test('shared Rust query and storage conformance executes in WASM', async () => {
+    test('shared Rust query, storage and MVCC conformance executes in WASM', async () => {
       const browserPage = await page()
       try {
         const passed = await browserPage.evaluate(async () => {
@@ -141,6 +141,11 @@ for (const browser of browsers) {
           'pager_barriers_and_restart', 'pager_failure_boundaries',
           'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
           'pager_recovery_failure_boundaries',
+          'mvcc_snapshot_isolation_and_read_committed', 'mvcc_failed_prepare_aborts_all_writers',
+          'mvcc_publication_guard_covers_visibility', 'mvcc_savepoints_and_connection_isolation',
+          'mvcc_retention_and_checkpoint_outcomes', 'mvcc_unique_keys_follow_outcomes',
+          'mvcc_serializable_write_skew', 'mvcc_serializable_vault_predicates',
+          'mvcc_autocommit_reservations_and_replay',
         ])
       } finally { await browserPage.close() }
     })
