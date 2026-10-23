@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.7
+
+### Patch Changes
+
+- [#2457](https://github.com/reddb-io/reddb/pull/2457) [`4c386c1`](https://github.com/reddb-io/reddb/commit/4c386c1c3d473dea3d0a736d1c60891dce22f8a2) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Isolate checkpoint WAL-image eviction by collection while preserving the shared memory budget. Later writes in another collection no longer force a full payload-tree rewrite when their own row or byte cache fills. Exact WAL-image validation, publication fences, and persistent formats are unchanged.
+
 ## 1.25.6
 
 ### Patch Changes
