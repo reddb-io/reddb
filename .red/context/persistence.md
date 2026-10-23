@@ -133,6 +133,12 @@ If the consumed-trunk fence fails, its pending state survives in memory and
 every allocation retry must complete both durable writes before using the
 loaded free pages.
 
+Exact WAL images retained for sparse checkpoint projection have a per-collection
+row limit and one shared byte budget. Pressure first evicts images from the
+collection responsible, preserving earlier proofs for other collections when
+the shared budget permits. Missing images retain full validation; oversized
+images do not invalidate unrelated cached proofs.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.
