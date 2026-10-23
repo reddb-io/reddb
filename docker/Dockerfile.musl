@@ -43,7 +43,7 @@ FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tini \
     && addgroup -S -g 10001 reddb \
     && adduser -S -u 10001 -G reddb -H -s /sbin/nologin reddb \
-    && install -d -o 10001 -g 10001 -m 0750 /data \
+    && install -d -o 10001 -g 10001 -m 0750 /data /data/red \
     && install -d -o 10001 -g 10001 -m 0750 /etc/reddb \
     && install -d -o 10001 -g 10001 -m 0750 /run/secrets
 
@@ -54,7 +54,7 @@ WORKDIR /data
 VOLUME /data
 EXPOSE 5050 55055 5000 55555
 
-ENV REDDB_DATA_PATH=/data/data.rdb
+ENV REDDB_DATA_PATH=/data/red/database.rdb
 ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000
