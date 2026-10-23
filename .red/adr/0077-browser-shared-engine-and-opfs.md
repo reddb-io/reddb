@@ -143,7 +143,9 @@ snapshots, active/aborted creators and deleters, failed preparation, publication
 guard lifetime, savepoint ownership, tenant separation, retained history,
 checkpoint exclusions, unique keys, SSI row/vault predicates and autocommit
 reservation/replay rules. These are volatile state tests in browser workers,
-not crash durability or application transaction SDK coverage. The native runtime
+not crash durability or application transaction SDK coverage. On Chromium/Firefox,
+the test host caches the conformance worker/WASM and repeats these assertions
+after a full offline browser restart with the HTTP listener stopped. The native runtime
 transaction, WAL/checkpoint and vacuum suites remain required regression checks.
 The state manager retains O(active transactions + retained outcomes/pins + SSI
 read sets and conflict edges) memory and adds no IPC or storage operations.

@@ -141,7 +141,9 @@ read/write conflict tracking and per-connection transaction state now live in
 Native/WASM fixtures cover snapshot versus read-committed reads, aborted writers,
 savepoint sub-XIDs, failed commit preparation, publication-guard lifetime,
 retained vacuum horizons, checkpoint exclusions, unique-key reservations and
-serializable row/vault predicates with tenant separation.
+serializable row/vault predicates with tenant separation. On Chromium/Firefox,
+the test host also caches this separate conformance artifact and reruns the suite
+after a full offline browser restart with the HTTP listener stopped.
 
 These are volatile engine assertions in a test-only WASM artifact. They do not
 expose transactions through the JS/TS SDK or qualify durable browser transaction

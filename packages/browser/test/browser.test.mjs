@@ -41,6 +41,34 @@ function nativeTree(action, path) {
   execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-engine', '--example', 'browser_btree', '--', action, path], { cwd: root, stdio: 'inherit' })
 }
 
+async function sharedConformance(browserPage) {
+  const passed = await browserPage.evaluate(async () => {
+    const worker = new Worker('/packages/browser/test/query-worker.js', { type: 'module' })
+    try {
+      return await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.passed)
+        worker.onerror = (event) => reject(new Error(event.message))
+      })
+    } finally { worker.terminate() }
+  })
+  assert.deepEqual(passed, [
+    'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
+    'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
+    'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
+    'btree_persisted_round_trip', 'btree_reclamation_and_cursor_lifetime', 'btree_bounds_and_corruption',
+    'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
+    'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
+    'pager_barriers_and_restart', 'pager_failure_boundaries',
+    'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
+    'pager_recovery_failure_boundaries',
+    'mvcc_snapshot_isolation_and_read_committed', 'mvcc_failed_prepare_aborts_all_writers',
+    'mvcc_publication_guard_covers_visibility', 'mvcc_savepoints_and_connection_isolation',
+    'mvcc_retention_and_checkpoint_outcomes', 'mvcc_unique_keys_follow_outcomes',
+    'mvcc_serializable_write_skew', 'mvcc_serializable_vault_predicates',
+    'mvcc_autocommit_reservations_and_replay',
+  ])
+}
+
 before(async () => {
   fixtures = await mkdtemp(resolve(tmpdir(), 'reddb-browser-interop-'))
   const path = resolve(fixtures, 'native.rdb')
@@ -122,31 +150,7 @@ for (const browser of browsers) {
     test('shared Rust query, storage and MVCC conformance executes in WASM', async () => {
       const browserPage = await page()
       try {
-        const passed = await browserPage.evaluate(async () => {
-          const worker = new Worker('/packages/browser/test/query-worker.js', { type: 'module' })
-          try {
-            return await new Promise((resolve, reject) => {
-              worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.passed)
-              worker.onerror = (event) => reject(new Error(event.message))
-            })
-          } finally { worker.terminate() }
-        })
-        assert.deepEqual(passed, [
-          'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
-          'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
-          'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
-          'btree_persisted_round_trip', 'btree_reclamation_and_cursor_lifetime', 'btree_bounds_and_corruption',
-          'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
-          'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
-          'pager_barriers_and_restart', 'pager_failure_boundaries',
-          'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
-          'pager_recovery_failure_boundaries',
-          'mvcc_snapshot_isolation_and_read_committed', 'mvcc_failed_prepare_aborts_all_writers',
-          'mvcc_publication_guard_covers_visibility', 'mvcc_savepoints_and_connection_isolation',
-          'mvcc_retention_and_checkpoint_outcomes', 'mvcc_unique_keys_follow_outcomes',
-          'mvcc_serializable_write_skew', 'mvcc_serializable_vault_predicates',
-          'mvcc_autocommit_reservations_and_replay',
-        ])
+        await sharedConformance(browserPage)
       } finally { await browserPage.close() }
     })
 
@@ -298,7 +302,7 @@ for (const browser of browsers) {
       }), { invalid: 'INVALID_ARGUMENT', closed: 'CLOSED' })
     })
 
-    storageTest('cached JS and WASM boot, write and reopen after a browser restart entirely offline', async () => {
+    storageTest('cached JS and WASM boot, run shared MVCC, write and reopen after a browser restart entirely offline', async () => {
       const first = await page()
       await first.evaluate(async () => {
         await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
@@ -328,6 +332,7 @@ for (const browser of browsers) {
           await reopened.close()
           return { online: navigator.onLine, before, after, scalar }
         })
+        await sharedConformance(restarted)
         assert.deepEqual(result, {
           online: false,
           before: [[10, 20]],
