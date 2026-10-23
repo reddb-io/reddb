@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.25.7"
+version = "1.26.0"
 dependencies = [
  "crc32fast",
  "parking_lot",

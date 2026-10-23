@@ -20,4 +20,8 @@ export interface Artifact {
 }
 
 /** Open/create an exclusively owned OPFS .rdb file. Another owner returns FILE_BUSY. */
-export function openArtifact(options: { name: string }): Promise<Artifact>
+export function openArtifact(options: {
+  name: string
+  /** Fresh module Worker supplied by a bundler (e.g. Vite ?worker). The artifact owns its lifetime. */
+  worker?: Worker
+}): Promise<Artifact>

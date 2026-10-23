@@ -9,7 +9,7 @@ export class BrowserError extends Error {
 }
 
 /** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
-export async function openArtifact({ name } = {}) {
+export async function openArtifact({ name, worker: suppliedWorker } = {}) {
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
@@ -17,7 +17,10 @@ export async function openArtifact({ name } = {}) {
     throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
   }
 
-  const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })
+  if (suppliedWorker !== undefined && !(suppliedWorker instanceof Worker)) {
+    throw new BrowserError('INVALID_ARGUMENT', 'worker must be a dedicated Worker instance')
+  }
+  const worker = suppliedWorker ?? new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })
   const pending = new Map()
   let sequence = 0
   let closed = false

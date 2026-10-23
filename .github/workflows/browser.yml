@@ -38,6 +38,7 @@ on:
       - 'Cargo.lock'
       - 'pnpm-lock.yaml'
       - '.github/workflows/browser.yml'
+      - '.github/workflows/browser-release.yml'
   workflow_dispatch:
 
 permissions:
@@ -92,7 +93,7 @@ jobs:
           cargo test --locked -p reddb-io-server --lib runtime::transaction_state
           cargo test --locked -p reddb-io-server --lib runtime::table_row_mvcc_resolver
           cargo test --locked -p reddb-io --test grouped_mvcc_transactions
-          cargo test --locked -p reddb-io-server --test vault_transactions --test vacuum_snapshot_horizon --test checkpoint_open_transaction --test checkpoint_concurrent_transaction
+          cargo test --locked -p reddb-io-server --test vault_transactions --test vacuum_snapshot_horizon --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
         run: cargo check --locked --workspace --all-targets
@@ -135,3 +136,5 @@ jobs:
         run: pnpm --filter @reddb-io/browser build
       - name: Verify native OPFS where available and explicit unsupported behavior
         run: pnpm --filter @reddb-io/browser test
+      - name: Verify installable package, TypeScript and offline bundled consumers
+        run: pnpm --filter @reddb-io/browser test:distribution

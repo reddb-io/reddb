@@ -1,6 +1,6 @@
 # RedDB Browser — experimental persistence and query engine
 
-This private package is the first building block of RedDB Browser. It runs the
+This experimental package is the first distribution of RedDB Browser. It runs the
 canonical Rust `.rdb` artifact publication/recovery code, RQL parser and shared
 scalar evaluator in a dedicated WebAssembly worker, persisting through a real
 OPFS sync access handle.
@@ -14,8 +14,31 @@ application cache. Sync is optional and must never gate local reads or writes.
 
 **It is not a database SDK yet.** It executes storage-free scalar SELECTs;
 queries over stored data, five-model local transactions, synchronization,
-conflict resolution and forwarding between tabs remain pending. It must not be
-published or substituted for `@reddb-io/client`.
+conflict resolution and forwarding between tabs remain pending. It is published on the `experimental` npm channel and does not replace the remote `@reddb-io/client`.
+
+## Use from JS/TS
+
+See the [application guide](https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md) for installation,
+Vite/React/Vue/Svelte, plain JavaScript, Worker ownership and offline assets.
+
+```sh
+npm add @reddb-io/browser@experimental
+```
+
+```ts
+import { openArtifact } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const artifact = await openArtifact({ name: 'my-app', worker: new RedDBWorker() })
+try {
+  console.log(await artifact.executeScalar('SELECT 42 AS answer'))
+} finally {
+  await artifact.close()
+}
+```
+
+Consumers receive built JS/Worker/WASM assets and TypeScript declarations; they
+need no Rust toolchain. The commands below are for engine/package contributors.
 
 ## Build and verify
 

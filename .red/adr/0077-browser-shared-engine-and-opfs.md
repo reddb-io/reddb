@@ -236,8 +236,11 @@ artifact. Operator fixtures run identically as native Rust tests and a separate
 test-only WASM artifact inside browser workers. Native runtime differential tests
 compare the scalar corpus against actual `RedDBRuntime` results. Query timing
 uses the host's monotonic clock (`Instant` natively, `performance.now` in WASM).
-The private package still cannot be released as the database SDK: storage-backed
-five-model execution, local transactions and sync remain pending.
+The package is released independently as `@reddb-io/browser@experimental` with
+JS, TypeScript declarations, Worker and WASM assets. This artifact/scalar release
+is not yet a complete database SDK: storage-backed five-model execution, local
+transactions and sync remain pending. See `docs/clients/browser.md` for installation
+and frontend integration.
 
 Cost sketch: filtering 10,000 rows visits 10,000 rows; comparison sorting is on
 the order of 10,000 × log2(10,000), about 133,000 comparisons. The relocated row

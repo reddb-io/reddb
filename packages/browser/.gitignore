@@ -1,3 +1,5 @@
 src/wasm/
 test/wasm/
 test-results/
+LICENSE
+*.tgz
