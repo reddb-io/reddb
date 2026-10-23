@@ -425,6 +425,7 @@ pub(crate) struct StoreCommitCoordinator {
     /// when the adaptive window is doing its job. Strict-mode
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
+    wal_generation: AtomicU64,
 }
 
 impl StoreCommitCoordinator {
@@ -491,6 +492,7 @@ impl StoreCommitCoordinator {
             queue,
             state,
             fsync_count,
+            wal_generation: AtomicU64::new(0),
         })
     }
 
@@ -530,47 +532,143 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
+        self.append_actions_impl(actions, false).map(|_| ())
+    }
+
+    pub(super) fn append_checkpoint_actions(
+        &self,
+        actions: &[StoreWalAction],
+    ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
+        self.append_actions_impl(actions, true)
+    }
+
+    fn append_actions_impl(
+        &self,
+        actions: &[StoreWalAction],
+        retain: bool,
+    ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
+        use super::checkpoint_wal::CheckpointWalBatch;
         if actions.is_empty() {
-            return Ok(());
+            return Ok(CheckpointWalBatch::default());
         }
         let _epoch = self.queue.epoch.read();
-
         let tx_id = NEXT_STORE_TX_ID.fetch_add(1, Ordering::SeqCst);
-
-        // Strict mode: bypass the queue, write + fsync inline. Strict
-        // commits are exactly one-fsync-per-call by contract, so the
-        // coalescing win of the queue doesn't apply and we'd pay an
-        // extra hop through the drain loop.
-        if matches!(self.mode, DurabilityMode::Strict) {
-            let commit_lsn = {
-                let mut wal = self.wal.lock();
-                wal.append(&WalRecord::TxCommitBatch {
-                    tx_id,
-                    actions: actions.iter().map(StoreWalAction::encode).collect(),
-                })?;
-                wal.current_lsn()
-            };
-            self.force_sync()?;
-            let _ = commit_lsn;
-            return Ok(());
-        }
-
-        // Grouped / Async path — lock-free enqueue. Encode every
-        // WalRecord into one contiguous byte blob OUTSIDE any lock,
-        // then hand it to the queue with a single fetch_add+push.
-        let encoded_actions: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
-        let wal_bytes = encoded_actions.iter().fold(0u64, |total, payload| {
-            total.saturating_add(payload.len() as u64)
+        let encoded: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
+        let wal_bytes = encoded.iter().fold(0u64, |total, action| {
+            total.saturating_add(action.len() as u64)
         });
-        let blob = WalRecord::TxCommitBatch {
-            tx_id,
-            actions: encoded_actions,
-        }
-        .encode();
+        let (blob, mut references) = if retain {
+            CheckpointWalBatch::encode(
+                tx_id,
+                &encoded,
+                self.wal_generation.load(Ordering::Acquire),
+            )?
+        } else {
+            (
+                WalRecord::TxCommitBatch {
+                    tx_id,
+                    actions: encoded,
+                }
+                .encode(),
+                CheckpointWalBatch::default(),
+            )
+        };
+        let start_lsn = if matches!(self.mode, DurabilityMode::Strict) {
+            let start = self.wal.lock().append_bytes(&blob)?;
+            self.force_sync()?;
+            start
+        } else {
+            let length = blob.len() as u64;
+            let end = self.queue.enqueue(blob);
+            self.wait_until_durable(end, wal_bytes)?;
+            end.checked_sub(length).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid WAL batch offset")
+            })?
+        };
+        references.relocate(start_lsn)?;
+        Ok(references)
+    }
 
-        let commit_lsn = self.queue.enqueue(blob);
-        self.wait_until_durable(commit_lsn, wal_bytes)?;
-        Ok(())
+    /// Compare exact durable bytes in bounded chunks. A proof from an older
+    /// truncated WAL generation cannot prove a row in the current file.
+    pub(super) fn checkpoint_row_matches(
+        &self,
+        reference: super::checkpoint_wal::WalRowReference,
+        expected: &[u8],
+    ) -> io::Result<bool> {
+        if expected.len() != reference.length as usize {
+            return Ok(false);
+        }
+        let mut position = 0;
+        let mut matches = true;
+        let present = self.visit_checkpoint_row(reference, |chunk| {
+            matches &= chunk == &expected[position..position + chunk.len()];
+            position += chunk.len();
+        })?;
+        Ok(present && matches)
+    }
+
+    /// Materialize only one already-validated durable row for a projection batch.
+    pub(super) fn checkpoint_row_bytes(
+        &self,
+        reference: super::checkpoint_wal::WalRowReference,
+    ) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let present = self.visit_checkpoint_row(reference, |chunk| {
+            if bytes.is_empty() {
+                bytes.reserve_exact(reference.length as usize);
+            }
+            bytes.extend_from_slice(chunk);
+        })?;
+        if !present {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "checkpoint WAL reference changed during projection",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn visit_checkpoint_row(
+        &self,
+        reference: super::checkpoint_wal::WalRowReference,
+        mut visit: impl FnMut(&[u8]),
+    ) -> io::Result<bool> {
+        use std::io::{Read, Seek, SeekFrom};
+        let _epoch = self.queue.epoch.read_recursive();
+        if reference.generation != self.wal_generation.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let end = reference
+            .offset
+            .checked_add(u64::from(reference.length))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "WAL proof offset overflow")
+            })?;
+        let (state_lock, _) = &*self.state;
+        if end > state_lock.lock().durable_lsn {
+            return Ok(false);
+        }
+        let mut file = std::fs::File::open(&self.wal_path)?;
+        file.seek(SeekFrom::Start(reference.offset))?;
+        let mut buffer = [0u8; 16 * 1024];
+        let mut checksum = crc32fast::Hasher::new();
+        let mut remaining = reference.length as usize;
+        while remaining != 0 {
+            let length = remaining.min(buffer.len());
+            let chunk = &mut buffer[..length];
+            file.read_exact(chunk)?;
+            checksum.update(chunk);
+            visit(chunk);
+            remaining -= length;
+        }
+        if checksum.finalize() != reference.checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "checkpoint WAL proof checksum mismatch",
+            ));
+        }
+        Ok(true)
     }
 
     /// Encode + enqueue a single, non-batched [`WalRecord`] (issue
@@ -619,6 +717,7 @@ impl StoreCommitCoordinator {
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
         let _epoch = self.queue.epoch.write();
+        self.wal_generation.fetch_add(1, Ordering::AcqRel);
         let mut wal = self.wal.lock();
         wal.truncate()?;
         let durable = wal.durable_lsn();
@@ -928,10 +1027,10 @@ impl UnifiedStore {
         // Deferred transactions need a committed WAL batch even in Strict
         // mode. WAL-only versions have no pager pages to flush yet.
         if let Some(commit) = &self.commit {
-            commit
-                .append_actions(&actions.actions)
+            let references = commit
+                .append_checkpoint_actions(&actions.actions)
                 .map_err(StoreError::Io)?;
-            self.remember_checkpoint_rows(actions.actions);
+            self.remember_checkpoint_rows(actions.actions, references);
             Ok(())
         } else {
             self.flush_paged_state()
@@ -1001,16 +1100,29 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions);
         }
+        let mut references = super::checkpoint_wal::CheckpointWalBatch::default();
         let result = match self.config.durability_mode {
             DurabilityMode::Strict => {
                 if let Some(commit) = &self.commit {
-                    commit.append_actions(&actions).map_err(StoreError::Io)?;
+                    if track {
+                        references = commit
+                            .append_checkpoint_actions(&actions)
+                            .map_err(StoreError::Io)?;
+                    } else {
+                        commit.append_actions(&actions).map_err(StoreError::Io)?;
+                    }
                 }
                 self.flush_paged_state()
             }
             DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
-                    commit.append_actions(&actions).map_err(StoreError::Io)?;
+                    if track {
+                        references = commit
+                            .append_checkpoint_actions(&actions)
+                            .map_err(StoreError::Io)?;
+                    } else {
+                        commit.append_actions(&actions).map_err(StoreError::Io)?;
+                    }
                     Ok(())
                 } else {
                     self.flush_paged_state()
@@ -1019,7 +1131,7 @@ impl UnifiedStore {
         };
         result?;
         if track {
-            self.remember_checkpoint_rows(actions);
+            self.remember_checkpoint_rows(actions, references);
         }
         Ok(())
     }

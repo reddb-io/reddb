@@ -433,6 +433,7 @@ struct RetiredBTree {
 
 mod builder;
 mod checkpoint_delta;
+mod checkpoint_wal;
 mod commit;
 mod impl_entities;
 mod impl_file;

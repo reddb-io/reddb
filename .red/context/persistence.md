@@ -136,8 +136,11 @@ loaded free pages.
 Exact WAL images retained for sparse checkpoint projection have a per-collection
 row limit and one shared byte budget. Pressure first evicts images from the
 collection responsible, preserving earlier proofs for other collections when
-the shared budget permits. Missing images retain full validation; oversized
-images do not invalidate unrelated cached proofs.
+the shared budget permits. Half of the same allowance retains compact references
+to successful appends in the existing WAL. A reference includes its truncation
+generation, byte offset, length and checksum; projection compares the exact WAL
+bytes with the current canonical row before modifying the tree. Missing images
+can use those proofs, while missing or stale proofs retain full validation.
 
 ## Fault model & integrity tooling
 
@@ -189,19 +192,24 @@ mutations belong to the published generation.
 Sparse paged checkpoints may project a bounded set of changed table rows into
 an unpinned live tree after the existing WAL sync fence. A contiguous volatile
 segment mutation journal accounts for every changed ID, and each different
-row must exactly match a retained successful WAL append. Up to 1,024 deferred
+row must exactly match a retained successful WAL append. Up to 8,192 deferred
 row IDs per collection remember which raw MVCC rows were omitted or normalized
 in the published image. Later commits and rollbacks revisit those IDs alongside
 new mutations instead of scanning unchanged payloads. A different projected
 image still requires an exact retained canonical WAL record. Low-level rollback
 of a non-active xid invalidates this reuse proof. Pinned readers, unknown edits,
 segment replacement and tracking exhaustion retain the conservative
-replacement-tree path. Mutation tracking is bounded by 256
-mutations per segment, 1,024 changed IDs and at most 8 MiB of retained records
+replacement-tree path. Mutation tracking is bounded by 8,192
+mutations per segment, 8,192 changed IDs and at most 8 MiB shared by retained
+records and WAL references
 (a smaller page-cache-derived allowance applies to smaller budgets); its bytes
 participate in store memory observations, as do the deferred-ID vectors. A successful publication resets the
 retained-record allowance. Exhaustion evicts retained images without disabling
-later retention; evicted or oversized images still require conservative validation.
+later retention. WAL references are invalidated on truncation, even when an
+offset is reused. All sources are validated before tree mutation, then read in
+projection batches capped at 1 MiB except for a single oversized row. Normalized
+MVCC images have a separate 8 MiB temporary allowance; exhaustion keeps the
+conservative path.
 The ordinary inline KV path retains no records.
 The catalog publication and WAL truncation fences remain in their existing
 order. Versioned table updates encode the canonical segment-assigned sequence
