@@ -84,8 +84,11 @@ Paged loading and WAL replay preserve stored sequence identities. Automatic
 inserts encode the segment-assigned identity and fence the complete inline
 mutation plus WAL append against checkpoint publication. A completed inline
 insert may advance its existing tree-reuse proof only when the before/after
-segment revisions show exactly that one mutation. Untracked edits, sealing,
-visibility changes and versioned rows retain conservative validation. Durable
+segment revisions show exactly that one mutation. Sparse checkpoint journals
+follow segment identities across growing-to-sealed transitions; a new growing
+segment must account for all mutations from revision zero. Missing old segment
+identities, incomplete journals, untracked edits, visibility changes and
+versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
 
