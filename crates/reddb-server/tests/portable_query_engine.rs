@@ -172,3 +172,66 @@ fn native_pager_recovers_the_shared_dwb_frame_after_a_torn_home_write() {
         page.as_bytes()
     );
 }
+
+#[test]
+fn shared_page_io_preserves_native_encryption_and_authentication() {
+    use reddb_engine::storage::{page::PageType, pager_io};
+    use reddb_file::BorrowedStdFile;
+    use reddb_server::storage::{
+        encryption::SecureKey,
+        engine::pager::{Pager, PagerConfig, PagerError},
+    };
+
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("encrypted-pages.rdb");
+    let config = || PagerConfig {
+        encryption: Some(SecureKey::new(&[0x42; 32])),
+        ..PagerConfig::default()
+    };
+    let payload = b"authenticated page I/O";
+    let id = {
+        let pager = Pager::open(&path, config()).expect("encrypted pager opens");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        // Keep the fixture payload within the native encrypted page's usable
+        // prefix; its tail is reserved for the canonical crypto envelope.
+        page.as_bytes_mut()[128..128 + payload.len()].copy_from_slice(payload);
+        let id = page.page_id();
+        pager
+            .write_page_encrypted(id, page)
+            .expect("write encrypted page");
+        pager.sync().expect("sync encrypted page and header");
+        id
+    };
+    assert!(matches!(
+        Pager::open_default(&path),
+        Err(PagerError::EncryptionRequired)
+    ));
+    {
+        let pager =
+            Pager::open(&path, config()).expect("encryption marker survives root publication");
+        let page = pager
+            .read_page_decrypted(id)
+            .expect("authenticated read through shared byte I/O");
+        assert_eq!(&page.as_bytes()[128..128 + payload.len()], payload);
+    }
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open closed encrypted file");
+        let mut file = BorrowedStdFile(&mut file);
+        let mut cipher_page = pager_io::read_page(&mut file, id, false)
+            .expect("read cipher bytes without a page CRC");
+        cipher_page.as_bytes_mut()[200] ^= 1;
+        pager_io::write_pages(&mut file, &[(id, cipher_page)], true)
+            .expect("persist tampered ciphertext fixture");
+    }
+    let pager = Pager::open(&path, config()).expect("header remains valid");
+    assert!(
+        pager.read_page_decrypted(id).is_err(),
+        "AES authentication still rejects tampering"
+    );
+}
