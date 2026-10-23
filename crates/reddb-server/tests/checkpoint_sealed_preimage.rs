@@ -42,8 +42,14 @@ fn identity(runtime: &RedDBRuntime, logical_id: u64) -> (EntityId, u64) {
         .get_collection("checkpoint_payload")
         .expect("collection");
     let mut result = None;
+    let expected = logical_id.to_string();
     manager.for_each_entity(|entity| {
-        if entity.data.as_row().expect("row").columns[0].to_string() == logical_id.to_string() {
+        let row = entity.data.as_row().expect("row");
+        if row
+            .get_field("id")
+            .or_else(|| row.columns.first())
+            .is_some_and(|value| value.to_string() == expected)
+        {
             result = Some((entity.id, entity.sequence_id));
             return false;
         }
