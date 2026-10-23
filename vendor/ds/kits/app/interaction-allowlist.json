@@ -1,0 +1,35 @@
+{
+  "$comment": "kit-lint rule 8 (wave 6A): interactive elements that draw their own states instead of the quietControl() contract, each with the reason it is not a quiet control. An entry that matches nothing fails as stale.",
+  "allow": [
+    {
+      "file": "src/composites/ContextMenu.svelte",
+      "element": "a",
+      "reason": "A menu option: Bits moves data-highlighted with the pointer and the keyboard, so the listbox highlight (bg-foreground/10) is its hover and its focus at once (DESIGN.md, options in a listbox). A separate :hover fill would show two highlighted rows."
+    },
+    {
+      "file": "src/composites/Menubar.svelte",
+      "element": "a",
+      "reason": "A menu option: Bits moves data-highlighted with the pointer and the keyboard, so the listbox highlight is its hover and its focus at once (DESIGN.md, options in a listbox)."
+    },
+    {
+      "file": "src/composites/SidebarLayout.svelte",
+      "element": "button",
+      "reason": "The drawer backdrop is the scrim over the whole page below the md step: pressing anywhere outside the drawer closes it. It is not a control a pointer aims at, and a quiet fill across the viewport on hover would read as a flash, not a state."
+    },
+    {
+      "file": "react/src/MenuRows.tsx",
+      "element": "Bits.Item",
+      "reason": "A managed menu option: Base UI supplies data-highlighted for keyboard and pointer feedback through the same canonical menu recipe as the Svelte adapter."
+    },
+    {
+      "file": "react/src/MenuRows.tsx",
+      "element": "a",
+      "reason": "A native link inside a managed menu option; the menu highlight owns pointer and keyboard feedback rather than a second hover row."
+    },
+    {
+      "file": "react/src/SidebarLayout.tsx",
+      "element": "button",
+      "reason": "The mobile drawer backdrop is the viewport scrim, matching the Svelte adapter. Hovering the whole page must not paint a quiet-control fill."
+    }
+  ]
+}
