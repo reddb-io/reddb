@@ -8,7 +8,7 @@
 
   Update ctutils to 0.4.4 in all Rust lockfiles to address RUSTSEC-2026-0385.
 
-- [#2456](https://github.com/reddb-io/reddb/pull/2456) [`a143dd6`](https://github.com/reddb-io/reddb/commit/a143dd614e19723c0c3db81a2fd405b3ea3f5fc3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share native pager byte I/O, superblock publication and double-write recovery with the WebAssembly core. Keep the native file mutex through protected writeback batches and propagate superblock metadata I/O errors. Persistent formats, WAL-first fences and allocation semantics remain unchanged. The Browser package remains private while storage-backed execution and transactions are completed.
+- [#2456](https://github.com/reddb-io/reddb/pull/2456) [`a143dd6`](https://github.com/reddb-io/reddb/commit/a143dd614e19723c0c3db81a2fd405b3ea3f5fc3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share native pager byte I/O, superblock publication and double-write recovery with the WebAssembly core. Keep the native file mutex through protected writeback batches and propagate superblock metadata I/O errors. Persistent formats, WAL-first fences and allocation semantics remain unchanged. The Browser package is distributed separately on the experimental npm channel; storage-backed execution and application transactions remain in development.
 
 ## 1.26.0
 
