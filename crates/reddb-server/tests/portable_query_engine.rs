@@ -565,7 +565,7 @@ fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
 #[test]
 fn shared_entity_codec_preserves_native_dump_payloads_and_metadata() {
     use reddb_engine::storage::entity_codec::write_entity_binary;
-    use reddb_server::storage::unified::{Metadata, MetadataValue, UnifiedStore};
+    use reddb_server::storage::{Metadata, MetadataValue, UnifiedStore};
 
     let directory = tempfile::tempdir().expect("native dump fixture");
     let path = directory.path().join("codec.rdb");

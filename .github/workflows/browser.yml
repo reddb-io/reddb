@@ -21,6 +21,7 @@ on:
       - 'crates/reddb-server/tests/portable_query_engine.rs'
       - 'crates/reddb-server/tests/pager_*.rs'
       - 'crates/reddb-server/tests/vault_transactions.rs'
+      - 'crates/reddb-server/tests/vault_import_corruption.rs'
       - 'crates/reddb-server/tests/vacuum_snapshot_horizon.rs'
       - 'crates/reddb-server/tests/checkpoint_open_transaction.rs'
       - 'crates/reddb-server/tests/checkpoint_concurrent_transaction.rs'
@@ -74,7 +75,7 @@ jobs:
           version: '28.3'
       - name: Compare portable execution with the native runtime and query regressions
         if: runner.os == 'Linux'
-        run: cargo test --locked -p reddb-io-server --test portable_query_engine --test runtime_query_behavior --test dead_storage_modules
+        run: cargo test --locked -p reddb-io-server --test portable_query_engine --test runtime_query_behavior --test dead_storage_modules --test vault_import_corruption
       - name: Verify the native adapter and shared allocation/checkpoint orchestration
         if: runner.os == 'Linux'
         run: |
