@@ -207,8 +207,11 @@ impl RedDBRuntime {
             .map(|resume| resume.snapshot_offset)
             .unwrap_or(0);
 
+        let request_auth = crate::replication::request_auth::ReplicaRequestAuth::from_env()
+            .map_err(|message| RedDBError::InvalidOperation(message.into()))?;
         loop {
             let mut request = tonic::Request::new(crate::grpc::proto::Empty {});
+            request_auth.authorize(&mut request);
             request.metadata_mut().insert(
                 "x-reddb-snapshot-max-bytes",
                 chunk_bytes
