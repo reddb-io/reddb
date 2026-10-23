@@ -55,8 +55,15 @@ interrupt each write/flush in page publication, root publication and recovery,
 and check short reads, checksums and bounded frames. A test-only OPFS worker
 recovers a torn page after a full browser restart with networking disabled
 and the HTTP host disconnected.
-Those fixtures are excluded from the production SDK. Full pager orchestration,
-allocation fences, native WAL-first policy, encryption and MVCC remain pending.
+Those fixtures are excluded from the production SDK. Pager orchestration now
+also lives in `reddb-engine`: cached I/O, deferred reclamation, freelist and
+allocation fences, physical-tail reservation and checkpoint markers. The native
+adapter supplies file locks, encryption and its WAL writer through a synchronous
+barrier; portable pagers without a WAL reject nonzero page LSNs. Shared native/WASM
+fixtures cover failed allocation fences and WAL barriers. The OPFS restart fixture
+uses this complete pager and verifies checkpoint completion through another fresh
+pager. The production JS/TS API is unchanged: storage-backed queries, local
+transactions, runtime WAL/MVCC and encryption qualification remain pending.
 Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 

@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators and durable page I/O implemented; pager orchestration, runtime and sync pending
+Status: accepted architecture; persistence, portable query operators and pager orchestration shared; storage-backed runtime and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -49,7 +49,7 @@ shortcut. `reddb-engine` now owns the storage-independent scalar evaluator,
 compiled row filters, sorting, binding algebra/iterators, joins, aggregation,
 set operations, subqueries and windows, relocated with their native unit tests.
 Native module paths re-export those exact types; runtime policy, authorization,
-MVCC, pager and storage-backed query orchestration remain in `reddb-server`.
+MVCC and storage-backed query orchestration remain in `reddb-server`.
 Canonical output-column labels and binary document decoding also have one owner.
 
 The page primitives now also live in `reddb-engine::storage`: 16 KiB pages,
@@ -79,8 +79,28 @@ multi-frame writes. A separate test-only WASM fixture uses the production OPFS
 bridge, tears a real home page after staging sync, closes the failed handle and
 recovers through a fresh worker after a full offline browser restart. This is
 page-level I/O recovery, not transaction or five-model execution. The production
-SDK does not expose these pager fixtures. Full pager orchestration, allocation,
-WAL/MVCC, checkpointing and storage-backed execution are still pending.
+SDK does not expose these pager fixtures.
+
+Pager orchestration is now shared too: `reddb-engine::storage::pager::Pager<F, W>`
+owns cached reads/writes, freelist publication, deferred reclamation, consumed-trunk
+fences, mirrored reused-page ownership, physical-tail reservation and checkpoint
+markers. The native pager retains its file-opening/locking/CoW probes, encryption
+binding, optional native WAL writer, prefetch and flush-on-drop policy, and delegates
+the page algorithms to this exact implementation. `WalBarrier` is the host's
+synchronous durability boundary; a portable `NoWal` pager rejects nonzero page LSNs.
+The native adapter retains the existing optional-WAL behavior; a poisoned WAL slot
+now returns an I/O error instead of silently bypassing the barrier.
+
+Shared native/WASM fixtures exercise dirty eviction, deferred reclamation, both
+superblock fallback paths after reuse, every consumed-trunk ownership-fence
+write/flush, WAL-before-data ordering and failure, partial physical tails and
+checkpoint restart. The real OPFS fixture now opens the complete shared pager,
+recovers a torn home page through a fresh worker after offline browser restart,
+then completes the interrupted checkpoint and verifies it with another pager.
+Native/portable/native interoperability includes allocation, reclamation and
+checkpoint state. File codecs and versions are unchanged. These are pager
+operations, not database transactions: storage-backed execution, the runtime
+WAL implementation and MVCC still need extraction and browser integration.
 
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format

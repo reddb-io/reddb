@@ -1,11 +1,15 @@
 use std::cell::{Cell, RefCell};
 use std::io::{self, SeekFrom};
+use std::rc::Rc;
 
 use reddb_engine::storage::{page::Page, page::PageType, page::PAGE_SIZE, pager_io};
 use reddb_file::VfsFile;
 
 #[path = "pager_restart.rs"]
 mod restart;
+
+#[path = "pager_orchestration_restart.rs"]
+mod orchestration_restart;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
@@ -18,7 +22,7 @@ struct MemoryFile {
     bytes: RefCell<Vec<u8>>,
     durable: RefCell<Vec<u8>>,
     position: u64,
-    operations: RefCell<Vec<Operation>>,
+    operations: Rc<RefCell<Vec<Operation>>>,
     fail_at: Option<usize>,
     fail_len: Cell<bool>,
 }
@@ -288,7 +292,359 @@ pub fn pager_superblock_failure_boundaries() {
     }
 }
 
-pub const CASES: [(&str, fn()); 5] = [
+fn open_pager(
+    file: MemoryFile,
+    create: bool,
+) -> reddb_engine::storage::pager::Pager<MemoryFile, reddb_engine::storage::pager::NoWal> {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig};
+    Pager::open_owned(
+        file,
+        "shared-pager.rdb".into(),
+        PagerConfig {
+            cache_size: 2,
+            ..PagerConfig::default()
+        },
+        NoWal,
+        create,
+    )
+    .expect("shared pager opens")
+}
+
+fn pager_state(
+    pager: &reddb_engine::storage::pager::Pager<MemoryFile, reddb_engine::storage::pager::NoWal>,
+) -> Vec<u8> {
+    pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("read fixture durable bytes")
+}
+
+pub fn pager_orchestration_restart() {
+    let pager = open_pager(MemoryFile::default(), true);
+    let mut ids = Vec::new();
+    for value in 0..96u8 {
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).expect("allocate");
+        let id = page.page_id();
+        page.insert_cell(b"key", &[value]).expect("cell fits");
+        pager.write_page(id, page).expect("write");
+        ids.push(id);
+    }
+    assert!(
+        pager.cache_len() <= pager.cache_capacity() && pager.cache_len() < 96,
+        "small cache forces dirty eviction"
+    );
+    pager.sync().expect("sync allocation and data");
+    let pager = open_pager(MemoryFile::from_bytes(pager_state(&pager)), false);
+    for (index, id) in ids.iter().enumerate() {
+        assert_eq!(
+            pager
+                .read_page(*id)
+                .expect("read evicted page")
+                .read_cell(0)
+                .expect("cell")
+                .1,
+            vec![u8::try_from(index).expect("fixture value fits")]
+        );
+    }
+    pager.enable_deferred_reclamation().expect("defer frees");
+    for id in &ids[..4] {
+        pager.free_page(*id).expect("defer");
+    }
+    assert_eq!(pager.free_page_count().expect("free count"), 0);
+    let (pending, published) = pager.deferred_reclamation_pages().expect("deferred pages");
+    assert_eq!(pending, ids[..4]);
+    assert!(published.is_empty());
+    pager
+        .complete_deferred_publication(&[], &pending)
+        .expect("publish removed roots");
+    pager.sync().expect("persist freelist");
+    let pager = open_pager(MemoryFile::from_bytes(pager_state(&pager)), false);
+    let reused = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("reuse free page")
+        .page_id();
+    assert!(
+        ids[..4].contains(&reused) || reused == pager_io::FIRST_ALLOCATABLE_PAGE + 96,
+        "freelist may also reuse its consumed trunk"
+    );
+    pager
+        .sync()
+        .expect("mirror allocation ownership to both roots");
+    let bytes = pager_state(&pager);
+    for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let mut damaged = bytes.clone();
+        let start = copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+        damaged[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE].fill(0);
+        let recovered = open_pager(MemoryFile::from_bytes(damaged), false);
+        assert_ne!(
+            recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate through sibling")
+                .page_id(),
+            reused,
+            "sibling root cannot reuse live ownership"
+        );
+    }
+}
+
+pub fn pager_orchestration_wal_barrier() {
+    use reddb_engine::storage::pager::{Pager, PagerConfig, WalBarrier};
+    struct Barrier {
+        operations: Rc<RefCell<Vec<Operation>>>,
+        failed: Cell<bool>,
+        seen: Cell<u64>,
+    }
+    impl WalBarrier for Barrier {
+        fn flush_until(&self, lsn: u64) -> io::Result<()> {
+            assert!(
+                self.operations.borrow().is_empty(),
+                "WAL barrier precedes every data-file write"
+            );
+            self.seen.set(lsn);
+            if self.failed.get() {
+                Err(io::Error::other("injected WAL failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for fail in [false, true] {
+        let file = MemoryFile::default();
+        let operations = Rc::clone(&file.operations);
+        let barrier = Barrier {
+            operations: Rc::clone(&operations),
+            failed: Cell::new(fail),
+            seen: Cell::new(0),
+        };
+        let pager = Pager::open_owned(
+            file,
+            "wal.rdb".into(),
+            PagerConfig::default(),
+            barrier,
+            true,
+        )
+        .expect("pager");
+        operations.borrow_mut().clear();
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).expect("allocate");
+        let id = page.page_id();
+        page.set_lsn(42);
+        pager.write_page(id, page).expect("write");
+        assert_eq!(pager.flush().is_err(), fail);
+        assert_eq!(pager.wal_barrier().seen.get(), 42);
+        assert_eq!(
+            operations.borrow().is_empty(),
+            fail,
+            "failed WAL must prevent home or DWB writes"
+        );
+    }
+    let pager = open_pager(MemoryFile::default(), true);
+    let mut page = pager.allocate_page(PageType::BTreeLeaf).expect("allocate");
+    let id = page.page_id();
+    page.set_lsn(1);
+    pager.write_page(id, page).expect("write");
+    assert!(pager.flush().is_err(), "NoWal rejects nonzero LSN");
+}
+
+pub fn pager_orchestration_checkpoint_recovery() {
+    let file = MemoryFile::default();
+    // Borrowed fixture handle lets us inspect durable bytes after pager teardown.
+    let mut file = file;
+    orchestration_restart::create(BorrowedMemoryFile(&mut file))
+        .expect("create shared pager fixture");
+    let initial = file.durable.borrow().clone();
+    let mut complete = MemoryFile::from_bytes(initial.clone());
+    complete.operations.borrow_mut().clear();
+    orchestration_restart::update(BorrowedMemoryFile(&mut complete)).expect("successful update");
+    let operations = complete.operations.borrow().len();
+    for fail_at in 1..=operations {
+        for retain_pending in [false, true] {
+            let mut interrupted = MemoryFile::from_bytes(initial.clone());
+            interrupted.fail_at = Some(fail_at);
+            assert!(orchestration_restart::update(BorrowedMemoryFile(&mut interrupted)).is_err());
+            let bytes = if retain_pending {
+                interrupted.bytes.into_inner()
+            } else {
+                interrupted.durable.into_inner()
+            };
+            let reopened = open_pager(MemoryFile::from_bytes(bytes), false);
+            let value = reopened
+                .read_page(orchestration_restart::PAGE_ID)
+                .expect("recover whole page")
+                .read_cell(0)
+                .expect("cell")
+                .1;
+            assert!(
+                value == b"before" || value == b"after",
+                "recover a complete page"
+            );
+            assert!(reopened.header().expect("header").checkpoint_in_progress);
+        }
+    }
+    orchestration_restart::recover(BorrowedMemoryFile(&mut complete))
+        .expect("complete interrupted checkpoint");
+    orchestration_restart::verify(BorrowedMemoryFile(&mut complete))
+        .expect("checkpoint survives fresh pager");
+}
+
+struct BorrowedMemoryFile<'a>(&'a mut MemoryFile);
+impl VfsFile for BorrowedMemoryFile<'_> {
+    fn try_clone(&self) -> io::Result<Self> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn file_len(&self) -> io::Result<u64> {
+        self.0.file_len()
+    }
+    fn set_len(&self, size: u64) -> io::Result<()> {
+        self.0.set_len(size)
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.write_all(bytes)
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(bytes)
+    }
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.0.seek(pos)
+    }
+    fn sync_all(&self) -> io::Result<()> {
+        self.0.sync_all()
+    }
+}
+
+pub fn pager_orchestration_open_policy() {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig};
+    let file = MemoryFile::default();
+    assert!(
+        Pager::open_owned(
+            file,
+            "empty.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            false
+        )
+        .is_err(),
+        "empty existing file is not recreated"
+    );
+    let mut corrupt = MemoryFile::from_bytes(vec![42; PAGE_SIZE]);
+    assert!(Pager::open_owned(
+        BorrowedMemoryFile(&mut corrupt),
+        "corrupt.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true
+    )
+    .is_err());
+    assert!(Pager::open_owned(
+        BorrowedMemoryFile(&mut corrupt),
+        "corrupt.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false
+    )
+    .is_err());
+    assert_eq!(
+        *corrupt.bytes.borrow(),
+        vec![42; PAGE_SIZE],
+        "corruption is preserved"
+    );
+    let pager = open_pager(MemoryFile::default(), true);
+    let bytes = pager_state(&pager);
+    let mut partial = bytes.clone();
+    partial.extend_from_slice(&[1; 17]);
+    let reopened = open_pager(MemoryFile::from_bytes(partial), false);
+    assert_eq!(
+        reopened
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate past partial tail")
+            .page_id(),
+        pager_io::FIRST_ALLOCATABLE_PAGE + 1
+    );
+    let read_only = Pager::open_owned(
+        MemoryFile::from_bytes(bytes),
+        "readonly.rdb".into(),
+        PagerConfig {
+            read_only: true,
+            ..PagerConfig::default()
+        },
+        NoWal,
+        false,
+    )
+    .expect("read only opens");
+    assert!(read_only.allocate_page(PageType::BTreeLeaf).is_err());
+    assert!(read_only
+        .free_page(pager_io::FIRST_ALLOCATABLE_PAGE)
+        .is_err());
+    assert!(read_only.complete_checkpoint(42).is_err());
+}
+
+pub fn pager_orchestration_allocation_fence() {
+    let initial = open_pager(MemoryFile::default(), true);
+    let mut ids = Vec::new();
+    for _ in 0..8 {
+        ids.push(
+            initial
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate")
+                .page_id(),
+        );
+    }
+    initial.sync().expect("persist allocated pages");
+    for id in &ids {
+        initial.free_page(*id).expect("free");
+    }
+    initial.sync().expect("persist freelist trunk");
+    let baseline = pager_state(&initial);
+    // Each ownership fence writes and flushes a superblock, then flushes the
+    // file. Neither copy may still own the trunk when its pages are reused.
+    for fail_at in 1..=6 {
+        let pager = open_pager(MemoryFile::from_bytes(baseline.clone()), false);
+        let trunk = pager.header().expect("header").freelist_head;
+        assert_ne!(trunk, 0);
+        pager
+            .with_file(|file| {
+                file.operations.borrow_mut().clear();
+                file.fail_at = Some(fail_at);
+            })
+            .expect("inject ownership fence failure");
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        pager
+            .with_file(|file| file.fail_at = None)
+            .expect("restore file I/O");
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("retry completes both fences before reuse");
+        let bytes = pager_state(&pager);
+        for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+            let header = reddb_file::decode_database_header(
+                &bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE],
+            )
+            .expect("valid fenced root");
+            assert_ne!(
+                header.freelist_head, trunk,
+                "both roots relinquish consumed trunk before reuse"
+            );
+        }
+    }
+}
+
+pub const CASES: [(&str, fn()); 10] = [
+    ("pager_orchestration_restart", pager_orchestration_restart),
+    (
+        "pager_orchestration_allocation_fence",
+        pager_orchestration_allocation_fence,
+    ),
+    (
+        "pager_orchestration_wal_barrier",
+        pager_orchestration_wal_barrier,
+    ),
+    (
+        "pager_orchestration_checkpoint_recovery",
+        pager_orchestration_checkpoint_recovery,
+    ),
+    (
+        "pager_orchestration_open_policy",
+        pager_orchestration_open_policy,
+    ),
     ("pager_barriers_and_restart", pager_barriers_and_restart),
     ("pager_failure_boundaries", pager_failure_boundaries),
     (

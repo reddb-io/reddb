@@ -284,3 +284,82 @@ fn shared_page_io_preserves_opaque_crypto_envelopes_and_authentication() {
         "authentication still rejects tampering"
     );
 }
+
+#[test]
+fn native_and_portable_pagers_share_allocation_and_checkpoint_state() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager as PortablePager, PagerConfig as PortableConfig},
+    };
+    use reddb_file::{OpenMode, StdVfs, Vfs};
+    use reddb_server::storage::engine::pager::Pager;
+
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("shared-orchestration.rdb");
+    let id = {
+        let pager = Pager::open_default(&path).expect("native create");
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).expect("allocate");
+        let id = page.page_id();
+        page.insert_cell(b"native", b"before").expect("cell fits");
+        pager.write_page(id, page).expect("write");
+        pager.sync().expect("native data and allocation durable");
+        pager
+            .set_checkpoint_in_progress(true, 42)
+            .expect("checkpoint start");
+        id
+    };
+    let portable_id = {
+        let file = StdVfs
+            .open(&path, OpenMode::create_keep())
+            .expect("owned file after native close");
+        let pager =
+            PortablePager::open_owned(file, path.clone(), PortableConfig::default(), NoWal, false)
+                .expect("portable open");
+        assert!(pager.header().expect("header").checkpoint_in_progress);
+        assert_eq!(
+            pager
+                .read_page(id)
+                .expect("native page")
+                .read_cell(0)
+                .expect("native cell")
+                .1,
+            b"before"
+        );
+        pager.enable_deferred_reclamation().expect("defer frees");
+        pager.free_page(id).expect("defer native page");
+        pager
+            .complete_deferred_publication(&[], &[id])
+            .expect("publish removal");
+        pager.sync().expect("persist portable freelist");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("portable allocation");
+        let portable_id = page.page_id();
+        page.insert_cell(b"portable", b"after").expect("cell fits");
+        pager.write_page(portable_id, page).expect("portable write");
+        pager
+            .sync()
+            .expect("data and both allocation roots durable");
+        pager.complete_checkpoint(42).expect("checkpoint complete");
+        portable_id
+    };
+    let pager = Pager::open_default(&path).expect("native reopen");
+    assert_eq!(
+        pager
+            .read_page(portable_id)
+            .expect("portable page")
+            .read_cell(0)
+            .expect("portable cell")
+            .1,
+        b"after"
+    );
+    assert_eq!(pager.header().expect("header").checkpoint_lsn, 42);
+    assert!(!pager.header().expect("header").checkpoint_in_progress);
+    assert_ne!(
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("next native allocation")
+            .page_id(),
+        portable_id
+    );
+}

@@ -10,6 +10,8 @@ on:
       - 'crates/reddb-server/src/runtime/join_filter/**'
       - 'crates/reddb-server/src/runtime/evaluator_differential.rs'
       - 'crates/reddb-server/tests/portable_query_engine.rs'
+      - 'crates/reddb-server/tests/pager_*.rs'
+      - 'crates/reddb-server/tests/paged_checkpoint_rebuild.rs'
       - 'crates/reddb-server/tests/dead_storage_modules.rs'
       - 'crates/reddb-wasm/**'
       - 'crates/reddb-rql/**'
@@ -59,6 +61,11 @@ jobs:
       - name: Compare portable execution with the native runtime and query regressions
         if: runner.os == 'Linux'
         run: cargo test --locked -p reddb-io-server --test portable_query_engine --test runtime_query_behavior --test dead_storage_modules
+      - name: Verify the native adapter and shared allocation/checkpoint orchestration
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked -p reddb-io-server --lib storage::engine::pager
+          cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
         run: cargo check --locked --workspace --all-targets

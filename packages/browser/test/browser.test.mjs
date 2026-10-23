@@ -127,6 +127,8 @@ for (const browser of browsers) {
           'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
           'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
           'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
+          'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
+          'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
           'pager_barriers_and_restart', 'pager_failure_boundaries',
           'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
           'pager_recovery_failure_boundaries',
@@ -325,7 +327,7 @@ for (const browser of browsers) {
       }
     })
 
-    storageTest('shared pager recovers a torn OPFS page after a full browser restart offline', async () => {
+    storageTest('shared pager recovers allocation and checkpoint state after a torn OPFS write offline', async () => {
       async function fixture(phase) {
         const current = await page()
         try {
@@ -356,6 +358,7 @@ for (const browser of browsers) {
           await context.close()
           await launch({ offline: true })
           assert.deepEqual(await fixture(2), { phase: 2, recovered: true })
+          assert.deepEqual(await fixture(3), { phase: 3, recovered: false })
           assert.equal(networkRequests.length, requestsBefore, `offline pager recovery reached the HTTP host: ${networkRequests.slice(requestsBefore).join(', ')}`)
         })
       } finally {

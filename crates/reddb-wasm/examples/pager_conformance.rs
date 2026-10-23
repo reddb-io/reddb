@@ -5,7 +5,7 @@
 mod browser;
 
 #[cfg(target_arch = "wasm32")]
-#[path = "../../reddb-engine/tests/support/pager_restart.rs"]
+#[path = "../../reddb-engine/tests/support/pager_orchestration_restart.rs"]
 mod fixture;
 
 #[cfg(target_arch = "wasm32")]
@@ -23,16 +23,17 @@ pub fn run_pager_fixture(
 ) -> Result<(), wasm_bindgen::JsValue> {
     let mut file = browser::BrowserFile::new(handle);
     let result = match phase {
-        0 => fixture::create(&mut file),
-        1 => fixture::verify(&mut file, b"before").and_then(|()| fixture::update(&mut file)),
+        0 => fixture::create(file),
+        1 => fixture::update(file),
         2 => {
             assert!(
                 reddb_engine::storage::pager_io::read_page(&mut file, fixture::PAGE_ID, true)
                     .is_err(),
                 "fixture has an interrupted home-page write"
             );
-            fixture::recover(&mut file)
+            fixture::recover(file)
         }
+        3 => fixture::verify(file),
         _ => return Err(js_sys::Error::new("invalid fixture phase").into()),
     };
     result.map_err(|error| js_sys::Error::new(&error.to_string()).into())

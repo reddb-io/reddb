@@ -32,14 +32,19 @@
 //! - Turso `core/storage/pager.rs:54-134` - HeaderRef::from_pager()
 //! - Turso `core/storage/pager.rs:120` - pager.add_dirty(&page)
 
-use super::freelist::FreeList;
-use super::page::{Page, PageError, PageType, PAGE_SIZE};
-use super::page_cache::PageCache;
+#[cfg(test)]
+use super::page::PageType;
+use super::page::{Page, PAGE_SIZE};
 use crate::storage::wal::writer::WalWriter;
 use fs2::FileExt;
-use reddb_engine::storage::pager_io::{self, FIRST_ALLOCATABLE_PAGE};
+pub use reddb_engine::storage::pager::{DatabaseHeader, ExtentId, PagerError, PhysicalFileHeader};
+use reddb_engine::storage::pager::{
+    Pager as SharedPager, PagerConfig as SharedPagerConfig, WalBarrier,
+};
 #[cfg(test)]
-use reddb_engine::storage::pager_io::{DWB_ZONE_BYTES, DWB_ZONE_START_PAGE};
+use reddb_engine::storage::pager_io::{
+    DWB_ZONE_BYTES, DWB_ZONE_START_PAGE, FIRST_ALLOCATABLE_PAGE,
+};
 use std::fs::{File, OpenOptions};
 #[cfg(test)]
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -47,154 +52,9 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-
-pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
-
-/// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
-
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
-
-/// Pager error types
-#[derive(Debug)]
-pub enum PagerError {
-    /// I/O error
-    Io(std::io::Error),
-    /// Page error
-    Page(PageError),
-    /// Invalid database file
-    InvalidDatabase(String),
-    /// Database is read-only
-    ReadOnly,
-    /// Page not found
-    PageNotFound(u32),
-    /// Database is locked
-    Locked,
-    /// A Mutex or RwLock was poisoned (another thread panicked while holding it)
-    LockPoisoned,
-    /// Database is encrypted but no key was supplied.
-    EncryptionRequired,
-    /// Plain (unencrypted) database opened with an encryption key.
-    PlainDatabaseRefusesKey,
-    /// Encryption key validation failed for an encrypted database.
-    InvalidKey,
-    /// Both superblock copies failed validation (ADR 0074 §2).
-    SuperblockZoneUnrecoverable(PathBuf),
-    /// The internal manifest zone failed its checksum (ADR 0074 §2).
-    ManifestZoneCorrupt(PathBuf),
-    /// The in-file double-write zone failed validation (ADR 0074 §2).
-    DwbZoneCorrupt(PathBuf),
-    /// The store still carries a retired phase-1 pager sidecar (ADR 0038 §4).
-    LegacySidecarStore { sidecar: PathBuf },
-    /// The store predates the phase-3 in-file DWB layout marker (ADR 0038 §4).
-    LegacyPagedStore { path: PathBuf },
-}
-
-/// A contiguous run of database pages reserved for vector-turbo payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtentId {
-    pub start_page: u32,
-    pub n_pages: u32,
-}
-
-impl std::fmt::Display for PagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "I/O error: {}", e),
-            Self::Page(e) => write!(f, "Page error: {}", e),
-            Self::InvalidDatabase(msg) => write!(f, "Invalid database: {}", msg),
-            Self::ReadOnly => write!(f, "Database is read-only"),
-            Self::PageNotFound(id) => write!(f, "Page {} not found", id),
-            Self::Locked => write!(f, "Database is locked"),
-            Self::LockPoisoned => write!(f, "Internal lock poisoned (concurrent thread panicked)"),
-            Self::EncryptionRequired => write!(
-                f,
-                "Database is encrypted but no key was supplied (set PagerConfig::encryption)"
-            ),
-            Self::PlainDatabaseRefusesKey => write!(
-                f,
-                "Plain (unencrypted) database opened with an encryption key — refusing"
-            ),
-            Self::InvalidKey => write!(f, "Encryption key validation failed for this database"),
-            Self::SuperblockZoneUnrecoverable(path) => write!(
-                f,
-                "superblock zone of {} is unrecoverable: both ping-pong copies failed \
-                 validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with red salvage \
-                 (ADR 0074 §4); it reads the damaged file without writing to it and \
-                 reports what it could not verify.",
-                path.display()
-            ),
-            Self::ManifestZoneCorrupt(path) => write!(
-                f,
-                "internal manifest zone of {} failed its checksum: the zone that names \
-                 collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
-                 and `red salvage` to extract what survives (ADR 0074 §2/§4).",
-                path.display()
-            ),
-            Self::DwbZoneCorrupt(path) => write!(
-                f,
-                "double-write zone of {} failed validation: page recovery cannot prove \
-                 whether the protected in-place write completed. The store will not be opened \
-                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
-                 rows (ADR 0074 §2/§4).",
-                path.display()
-            ),
-            Self::LegacySidecarStore { sidecar } => write!(
-                f,
-                "refusing to open a legacy sidecar-backed store: found {}. The superblock \
-                 pair, internal manifest, and double-write recovery state now live inside the \
-                 .rdb file (ADR 0038 §2/§4), \
-                 and the engine never reads the retired sidecars silently. Convert the store \
-                 first with the offline migration tool \
-                 (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is reversible.",
-                sidecar.display()
-            ),
-            Self::LegacyPagedStore { path } => write!(
-                f,
-                "refusing to open a pre-phase-3 paged store: {} does not carry the layout marker \
-                 for the in-file double-write zone. Convert the store first with the offline \
-                 migration tool (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is \
-                 reversible.",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PagerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Page(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for PagerError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<PageError> for PagerError {
-    fn from(e: PageError) -> Self {
-        Self::Page(e)
-    }
-}
-
-impl From<pager_io::PagerIoError> for PagerError {
-    fn from(error: pager_io::PagerIoError) -> Self {
-        match error {
-            pager_io::PagerIoError::Io(error) => Self::Io(error),
-            pager_io::PagerIoError::Page(error) => Self::Page(error),
-            pager_io::PagerIoError::InvalidDatabase(message) => Self::InvalidDatabase(message),
-        }
-    }
-}
 
 /// Pager configuration
 #[derive(Debug, Clone)]
@@ -230,65 +90,68 @@ impl Default for PagerConfig {
     }
 }
 
-/// Page I/O Manager
-///
-/// Handles reading/writing pages and manages the page cache.
+/// Native host adapter for the shared pager.
 pub struct Pager {
-    /// Database file path
-    path: PathBuf,
-    /// File handle
-    file: Mutex<File>,
-    /// Exclusive file lock (held for lifetime, released on drop)
+    core: SharedPager<NativePagerFile, NativeWalBarrier>,
     _lock_file: Option<File>,
-    /// Whether mutable pages are protected by the in-file DWB zone.
-    dwb_enabled: bool,
-    /// Page cache
-    cache: PageCache,
-    /// Free page list
-    freelist: RwLock<FreeList>,
-    /// Store-managed frees stay unavailable until their removal from the
-    /// durable catalog has crossed a publication boundary.
-    deferred_reclamation: Mutex<DeferredPageReclamation>,
-    /// Reused page ownership must reach both superblock copies before a
-    /// manifest can refer to those pages, including single-slot recovery.
-    allocation_reused: std::sync::atomic::AtomicBool,
-    /// A consumed trunk cannot be reused until both header fences succeed.
-    allocation_fence_pending: std::sync::atomic::AtomicBool,
-    /// Database header
-    header: RwLock<DatabaseHeader>,
-    /// Configuration
     config: PagerConfig,
-    /// Dirty flag for header
-    header_dirty: Mutex<bool>,
-    /// Optional WAL writer for WAL-first flush ordering.
-    ///
-    /// When set, [`Pager::flush`] computes the maximum `header.lsn` of
-    /// every dirty page and calls [`WalWriter::flush_until`] before
-    /// passing the batch to the double-write buffer. This guarantees
-    /// the postgres-style invariant: a page on disk implies its WAL
-    /// record is already durable.
-    ///
-    /// Wired in via [`Pager::set_wal_writer`] post-construction so
-    /// existing callers that build a Pager without a WAL keep working
-    /// unchanged. See `PLAN.md` § Target 3.
-    wal: RwLock<Option<Arc<Mutex<WalWriter>>>>,
-    /// Optional page encryptor + header. When set, `read_page` /
-    /// `write_page` route through AES-GCM transparently and page 0
-    /// bypasses encryption (it carries the encryption marker +
-    /// header itself). When `None`, all pages are stored plaintext
-    /// and any DB header carrying the `RDBE` marker is rejected at
-    /// open time.
     pub(crate) encryption: Option<(
         crate::storage::encryption::PageEncryptor,
         crate::storage::encryption::EncryptionHeader,
     )>,
 }
 
+#[doc(hidden)]
+pub struct NativePagerFile(File);
+
+impl reddb_file::VfsFile for NativePagerFile {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn file_len(&self) -> std::io::Result<u64> {
+        Ok(self.0.metadata()?.len())
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.0.set_len(len)
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(&mut self.0, bytes)
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, bytes)
+    }
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.0, pos)
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.0.sync_all()
+    }
+}
+
+#[doc(hidden)]
 #[derive(Default)]
-struct DeferredPageReclamation {
-    enabled: bool,
-    pending: std::collections::BTreeSet<u32>,
-    published: std::collections::BTreeSet<u32>,
+pub struct NativeWalBarrier(RwLock<Option<Arc<Mutex<WalWriter>>>>);
+
+impl WalBarrier for NativeWalBarrier {
+    fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
+        let wal = self
+            .0
+            .read()
+            .map_err(|_| std::io::Error::other("WAL slot lock poisoned"))?
+            .clone();
+        if let Some(wal) = wal {
+            let mut writer = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            writer.flush_until(lsn)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Pager {
+    type Target = SharedPager<NativePagerFile, NativeWalBarrier>;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
 #[path = "pager/impl.rs"]
