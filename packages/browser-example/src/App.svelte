@@ -32,6 +32,7 @@
   let networkState = $state('')
   let offlineState = $state('Preparando o cache da aplicação…')
   let offlineReady = $state(false)
+  let pendingUpdate = $state<ServiceWorker>()
 
   async function action(operation: () => Promise<void>) {
     if (busy) return
@@ -101,6 +102,20 @@
     storageStatus = 'Arquivo reaberto por um novo Worker. Contador lido dos bytes persistidos.'
   }
 
+  async function activateUpdate() {
+    const worker = pendingUpdate
+    if (!worker) return
+    await artifact?.close()
+    artifact = undefined
+    if (navigator.serviceWorker.controller !== worker) {
+      await new Promise<void>(resolve => {
+        navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true })
+        worker.postMessage({ type: 'ACTIVATE_UPDATE' })
+      })
+    }
+    window.location.reload()
+  }
+
   async function prepareOffline() {
     try {
       if (import.meta.env.DEV) {
@@ -108,6 +123,27 @@
         return
       }
       const registration = await navigator.serviceWorker.register(new URL('./service-worker.js', document.baseURI), { scope: './' })
+      const offerUpdate = () => {
+        if (!registration.waiting || !navigator.serviceWorker.controller) return
+        pendingUpdate = registration.waiting
+        offlineReady = false
+        offlineState = 'Ative a atualização disponível para preparar esta versão para uso offline.'
+      }
+      const watchInstalling = () => {
+        const worker = registration.installing
+        if (!worker) return
+        const changed = () => {
+          if (worker.state !== 'installed' && worker.state !== 'redundant') return
+          worker.removeEventListener('statechange', changed)
+          offerUpdate()
+        }
+        worker.addEventListener('statechange', changed)
+        changed()
+      }
+      registration.addEventListener('updatefound', watchInstalling)
+      watchInstalling()
+      // An update check may fail offline while the installed application remains usable.
+      if (registration.active && navigator.onLine) void registration.update().catch(() => {})
       if (!registration.active && registration.installing) {
         const worker = registration.installing
         await new Promise<void>((resolve, reject) => {
@@ -127,6 +163,7 @@
       }
       offlineState = 'Cache pronto. Você pode desligar a rede e recarregar esta página.'
       offlineReady = true
+      offerUpdate()
     } catch (failure) {
       offlineState = `Cache offline indisponível: ${failure instanceof Error ? failure.message : String(failure)}`
     }
@@ -185,6 +222,12 @@
         <Stack gap="none" class="h-full min-h-0" onkeydown={(event) => {
           if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void action(query) }
         }}>
+          <Alert id="app-update" tone="info" hidden={!pendingUpdate}>
+            <Stack direction="row" align="center" justify="between" gap="sm" wrap>
+              <Text>Nova versão disponível. Atualize a aplicação para carregar a revisão publicada.</Text>
+              <Button id="update-app" disabled={busy || !pendingUpdate} onclick={() => void action(activateUpdate)}>Atualizar aplicação</Button>
+            </Stack>
+          </Alert>
           <form id="query-form" class="browser-editor" onsubmit={(event) => { event.preventDefault(); void action(query) }}>
             <Stack direction="row" align="center" justify="between" gap="sm" wrap class="browser-toolbar">
               <h2 class="text-body font-medium">Consulta RQL</h2>
@@ -264,7 +307,7 @@
 
   {#snippet footer()}
     <Stack direction="row" align="center" justify="between" gap="sm" wrap class="browser-statusbar">
-      <StatusIndicator id="engine-state" tone={engineTone} label={engineState} />
+      <StatusIndicator id="engine-state" tone={engineTone} label={engineState} aria-live="polite" />
       <Text id="network-state" as="span" role="caption">{networkState}</Text>
       <Link href="../#/clients/browser">Integrar com JS/TS</Link>
     </Stack>

@@ -16,6 +16,7 @@ let temporary
 let server
 let origin = process.env.REDDB_BROWSER_EXAMPLE_URL
 let requests = 0
+let updateRevision = false
 
 before(async () => {
   temporary = await mkdtemp(resolve(tmpdir(), 'reddb-browser-example-'))
@@ -28,7 +29,10 @@ before(async () => {
     const path = resolve(output, relative)
     if (!path.startsWith(`${output}${sep}`)) { response.writeHead(403).end(); return }
     try {
-      const body = await readFile(path)
+      let body = await readFile(path)
+      if (relative === 'service-worker.js' && updateRevision) {
+        body = Buffer.from(body.toString().replace(/(const current = prefix \+ '[^']*)'/, "$1-update-test'"))
+      }
       const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' }[extname(path)] || 'application/octet-stream'
       response.writeHead(200, { 'Content-Type': type }).end(body)
     } catch { response.writeHead(404).end() }
@@ -222,4 +226,45 @@ test('query workspace follows the DS reference with a code editor, real result g
     const containedFile = await page.getByRole('complementary').boundingBox()
     assert.ok(containedFile.y >= containedResults.y + containedResults.height, 'the layout follows its own container on a wide viewport')
   } finally { await browser.close() }
+})
+
+
+test('an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline', { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await ready(page)
+    await page.getByRole('button', { name: 'Gravar marcador' }).click()
+    await page.waitForFunction(() => document.querySelector('#record-count').textContent === '1')
+    updateRevision = true
+    await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update())
+    await page.locator('#app-update').waitFor({ state: 'visible' })
+    assert.equal(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).waiting?.state), 'installed')
+    assert.equal(await page.getByRole('button', { name: 'Recarregar página' }).isDisabled(), true)
+    await Promise.all([
+      page.waitForEvent('load'),
+      page.getByRole('button', { name: 'Atualizar aplicação' }).click(),
+    ])
+    await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+    await page.waitForFunction(() => !document.querySelector('#reload').disabled)
+    assert.equal(await page.locator('#record-count').textContent(), '1')
+    assert.equal(await page.locator('#app-update').isHidden(), true)
+    const port = server.address().port
+    await new Promise(resolve => server.close(resolve))
+    const before = requests
+    try {
+      await context.setOffline(true)
+      await page.goto(`${origin}?v=update-test`)
+      await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+      await page.waitForFunction(() => !document.querySelector('#reload').disabled)
+      assert.equal(await page.locator('#record-count').textContent(), '1')
+      await page.getByRole('button', { name: 'Gravar marcador' }).click()
+      await page.waitForFunction(() => document.querySelector('#record-count').textContent === '2')
+      assert.equal(requests, before, 'the versioned navigation must use the offline cache')
+    } finally {
+      server.listen(port, '127.0.0.1')
+      await once(server, 'listening')
+    }
+  } finally { updateRevision = false; await browser.close() }
 })

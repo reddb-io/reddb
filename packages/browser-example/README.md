@@ -57,8 +57,11 @@ REDDB_BROWSER_EXAMPLE_URL=https://reddb-io.github.io/reddb/browser/ \
 Deployment is part of the existing GitHub Pages documentation workflow. It builds
 these sources into `docs/browser/` for the upload; generated output is not committed.
 The example's versioned offline cache is restricted to its own path and never clears
-other applications' caches. Service worker updates use the normal browser lifecycle,
-so a new build takes over after existing tabs close.
+other applications' caches. Service worker updates are offered through an explicit
+"Atualizar aplicação" action. The control waits for current work to finish, closes
+the local artifact, activates the cached update and reloads. The normal browser
+lifecycle also activates an update after existing tabs close. Version parameters
+on the page URL still support offline reload after the current worker is active.
 
 ## Vendored Design System
 
@@ -107,3 +110,7 @@ establish visual adherence on their own.
 Rendered examples of the application composition:
 
 [Desktop, dark](docs/playground-desktop-dark.png) · [Desktop, light](docs/playground-desktop.png) · [Mobile, dark](docs/playground-mobile-dark.png).
+
+The local browser suite also installs a changed worker revision, verifies that it
+waits for explicit activation, updates through the real UI, retains a persisted
+marker and reloads a versioned page URL without any HTTP request.
