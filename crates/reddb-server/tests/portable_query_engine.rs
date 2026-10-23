@@ -94,19 +94,21 @@ fn portable_page_io_updates_a_native_pager_file() {
         pager.sync().expect("sync page and allocation");
         id
     };
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .expect("open closed native file");
-    let mut file = BorrowedStdFile(&mut file);
-    let mut page = pager_io::read_page(&mut file, id, true).expect("portable read of native page");
-    assert_eq!(page.read_cell(0).expect("native cell").1, b"before");
-    page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
-    page.insert_cell(b"key", b"after").expect("new cell fits");
-    page.update_checksum();
-    pager_io::write_pages(&mut file, &[(id, page)], true).expect("portable protected write");
-    drop(file);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open closed native file");
+        let mut file = BorrowedStdFile(&mut file);
+        let mut page =
+            pager_io::read_page(&mut file, id, true).expect("portable read of native page");
+        assert_eq!(page.read_cell(0).expect("native cell").1, b"before");
+        page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
+        page.insert_cell(b"key", b"after").expect("new cell fits");
+        page.update_checksum();
+        pager_io::write_pages(&mut file, &[(id, page)], true).expect("portable protected write");
+    }
     let pager = Pager::open_default(&path).expect("native pager reopens portable write");
     assert_eq!(
         pager
@@ -128,18 +130,18 @@ fn native_pager_recovers_the_shared_dwb_frame_after_a_torn_home_write() {
 
     let directory = tempfile::tempdir().expect("temporary database directory");
     let path = directory.path().join("portable-torn-page.rdb");
-    let (id, mut page) = {
+    let id = {
         let pager = Pager::open_default(&path).expect("native pager creates a file");
         let mut page = pager
             .allocate_page(PageType::BTreeLeaf)
             .expect("allocate page");
         page.insert_cell(b"key", b"before").expect("cell fits");
         let id = page.page_id();
-        pager.write_page(id, page.clone()).expect("write page");
+        pager.write_page(id, page).expect("write page");
         pager.sync().expect("sync page and allocation");
-        (id, page)
+        id
     };
-    page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
+    let mut page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
     page.insert_cell(b"key", b"after").expect("new cell fits");
     page.update_checksum();
     {
