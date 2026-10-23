@@ -78,7 +78,8 @@ transient during boot and are not fatal as long as queries succeed.
 RedWire query parameters retain `Float32Array`, `Float64Array`, `Uint8Array`
 and `Buffer` views through normalization, avoiding intermediate number arrays
 and base64 strings. The request owns its encoded bytes before `query()` yields;
-later mutations of caller-owned views do not change the sent request. HTTP/gRPC
+later mutations of caller-owned views do not change the sent request. The
+transport drops input-view references before waiting for the network. HTTP/gRPC
 keep the same JSON-compatible parameter envelopes. See the measured
 [encoding results](../../docs/perf/client-codecs-2026-10-23.md).
 

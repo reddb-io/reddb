@@ -2,7 +2,11 @@
 
 The production change preserves typed vectors/byte views through RedWire query
 normalization, avoiding JS array and base64 round trips. HTTP/gRPC retain their
-JSON-compatible representation. The canonical Rust vector encoder fills a
+JSON-compatible representation. The transport releases input-view references
+after encoding and before network suspension; a separate pending-request GC
+regression verifies that a 1 MiB caller backing buffer can then be collected.
+This retention check is outside the timed encoding pipeline below.
+The canonical Rust vector encoder fills a
 pre-sized output region with identical little-endian bytes, including signed
 zero, infinities and NaN payloads.
 

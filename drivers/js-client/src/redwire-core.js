@@ -359,6 +359,8 @@ export class RedWireClient {
       kind = isSelectQuery(sql) ? MessageKind.QueryBinary : MessageKind.Query
       payload = new TextEncoder().encode(sql)
     }
+    // The encoded payload owns its bytes; release caller views before suspending.
+    params = undefined
     await writeFrame(this.socket, kind, corr, payload)
     const resp = await this.reader.next()
     if (resp.kind === MessageKind.Result) {
