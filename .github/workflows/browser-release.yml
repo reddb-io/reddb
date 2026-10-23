@@ -86,4 +86,12 @@ jobs:
       - name: Verify registry visibility
         run: |
           version=$(node -p "JSON.parse(require('node:fs').readFileSync('packages/browser/package.json')).version")
-          npm view "@reddb-io/browser@$version" version dist.integrity dist.tarball --json
+          # New packages remain unavailable while npm processes the upload.
+          for attempt in $(seq 1 30); do
+            if npm view "@reddb-io/browser@$version" version dist.integrity dist.tarball --json --prefer-online; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo '::error::Published Browser package is still unavailable from npm'
+          exit 1
