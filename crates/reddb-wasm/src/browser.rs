@@ -22,9 +22,18 @@ extern "C" {
     fn flush(this: &SyncFile) -> Result<(), JsValue>;
 }
 
-struct BrowserFile {
+pub(crate) struct BrowserFile {
     handle: SyncFile,
     position: u64,
+}
+
+impl BrowserFile {
+    pub(crate) fn new(handle: SyncFile) -> Self {
+        Self {
+            handle,
+            position: 0,
+        }
+    }
 }
 
 fn io_error(error: JsValue) -> io::Error {
@@ -146,14 +155,7 @@ pub struct BrowserArtifact {
 #[wasm_bindgen]
 impl BrowserArtifact {
     pub fn open(handle: SyncFile, name: &str) -> Result<BrowserArtifact, JsValue> {
-        let file = EmbeddedRdbFile::open(
-            BrowserFile {
-                handle,
-                position: 0,
-            },
-            name,
-        )
-        .map_err(js_error)?;
+        let file = EmbeddedRdbFile::open(BrowserFile::new(handle), name).map_err(js_error)?;
         Ok(Self { file })
     }
 
@@ -164,10 +166,7 @@ impl BrowserArtifact {
     ) -> Result<BrowserArtifact, JsValue> {
         let created_at_unix_ms = exact_integer(created_at_unix_ms).map_err(js_error)?;
         let file = EmbeddedRdbFile::create(
-            BrowserFile {
-                handle,
-                position: 0,
-            },
+            BrowserFile::new(handle),
             name,
             &[],
             u128::from(created_at_unix_ms),

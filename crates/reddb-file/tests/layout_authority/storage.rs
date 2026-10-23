@@ -1043,6 +1043,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     let page_impl = read(root.join("crates/reddb-engine/src/storage/page/impl.rs"));
     let pager = read(root.join("crates/reddb-server/src/storage/engine/pager.rs"));
     let pager_impl = read(root.join("crates/reddb-server/src/storage/engine/pager/impl.rs"));
+    let pager_io = read(root.join("crates/reddb-engine/src/storage/pager_io.rs"));
     let column_block = read(root.join("crates/reddb-server/src/storage/unified/column_block.rs"));
     let bloom_segment = read(root.join("crates/reddb-server/src/storage/index/bloom_segment.rs"));
     let vector_btree =
@@ -1097,6 +1098,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     for (label, text) in [
         ("reddb-engine/storage/page.rs", page.as_str()),
         ("reddb-engine/storage/page/impl.rs", page_impl.as_str()),
+        ("reddb-engine/storage/pager_io.rs", pager_io.as_str()),
         ("storage/engine/pager.rs", pager.as_str()),
         ("storage/engine/pager/impl.rs", pager_impl.as_str()),
         ("storage/unified/column_block.rs", column_block.as_str()),
@@ -1529,8 +1531,12 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
             && page_impl.contains("reddb_file::database_header_page_count")
             && pager.contains("pub use reddb_file::{DatabaseHeader, PhysicalFileHeader}")
             && pager.contains("reddb_file::encode_paged_dwb_frame")
-            && pager_impl.contains("reddb_file::encode_paged_dwb_frame")
-            && pager_impl.contains("reddb_file::decode_paged_dwb_frame")
+            && pager_impl.contains("pager_io::write_pages")
+            && pager_impl.contains("pager_io::recover_from_dwb")
+            && pager_impl.contains("pager_io::write_superblock_slot")
+            && pager_io.contains("reddb_file::encode_paged_dwb_frame")
+            && pager_io.contains("reddb_file::decode_paged_dwb_frame")
+            && pager_io.contains("reddb_file::seal_paged_superblock_slot")
             && pager_impl.contains("reddb_file::decode_database_header")
             && pager_impl.contains("reddb_file::encode_database_header")
             && pager_impl.contains("reddb_file::paged_encryption_marker_present")

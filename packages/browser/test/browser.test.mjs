@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -16,7 +17,20 @@ let server
 let origin
 let fixtures
 let nativeFixture
-let networkRequests = 0
+const networkRequests = []
+
+async function withHostOffline(run) {
+  // Also disconnect the HTTP listener: startup and recovery must succeed
+  // without a reachable host, including across a complete browser restart.
+  const { port } = server.address()
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  try {
+    await run()
+  } finally {
+    server.listen(port, '127.0.0.1')
+    await once(server, 'listening')
+  }
+}
 
 function nativeArtifact(action, path) {
   execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-file', '--example', 'browser_artifact', '--', action, path], { cwd: root, stdio: 'inherit' })
@@ -28,7 +42,7 @@ before(async () => {
   nativeArtifact('create', path)
   nativeFixture = [...await readFile(path)]
   server = createServer(async (request, response) => {
-    networkRequests++
+    networkRequests.push(request.url)
     try {
       const path = resolve(root, `.${decodeURIComponent(new URL(request.url, 'http://localhost').pathname)}`)
       if (!path.startsWith(`${root}${sep}`)) { response.writeHead(403).end(); return }
@@ -113,6 +127,9 @@ for (const browser of browsers) {
           'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
           'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
           'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
+          'pager_barriers_and_restart', 'pager_failure_boundaries',
+          'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
+          'pager_recovery_failure_boundaries',
         ])
       } finally { await browserPage.close() }
     })
@@ -272,13 +289,14 @@ for (const browser of browsers) {
       })
       await first.waitForFunction(() => navigator.serviceWorker.controller)
       await context.setOffline(true)
-      const requestsBefore = networkRequests
       try {
-        await first.evaluate(async () => {
-          if (navigator.onLine) throw new Error('Test requires offline mode')
-          const file = await RedDBBrowser.openArtifact({ name: 'offline' })
-          await file.append([new Uint8Array([10, 20])])
-          await file.close()
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          await first.evaluate(async () => {
+            if (navigator.onLine) throw new Error('Test requires offline mode')
+            const file = await RedDBBrowser.openArtifact({ name: 'offline' })
+            await file.append([new Uint8Array([10, 20])])
+            await file.close()
         })
         await context.close()
         await launch({ offline: true })
@@ -300,7 +318,46 @@ for (const browser of browsers) {
           after: [[10, 20], [30, 40]],
           scalar: { columns: ['answer'], rows: [[42]] },
         })
-        assert.equal(networkRequests, requestsBefore, 'offline boot and operations must not reach the HTTP host')
+        assert.equal(networkRequests.length, requestsBefore, `offline boot and operations reached the HTTP host: ${networkRequests.slice(requestsBefore).join(', ')}`)
+        })
+      } finally {
+        await context.setOffline(false)
+      }
+    })
+
+    storageTest('shared pager recovers a torn OPFS page after a full browser restart offline', async () => {
+      async function fixture(phase) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (phase) => {
+            const worker = new Worker('/packages/browser/test/pager-worker.js', { type: 'module' })
+            try {
+              return await new Promise((resolve, reject) => {
+                worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+                worker.onerror = (event) => reject(new Error(event.message))
+                worker.postMessage({ phase })
+              })
+            } finally { worker.terminate() }
+          }, phase)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          assert.deepEqual(await fixture(0), { phase: 0, recovered: false })
+          assert.deepEqual(await fixture(1), { phase: 1, interrupted: true })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await fixture(2), { phase: 2, recovered: true })
+          assert.equal(networkRequests.length, requestsBefore, `offline pager recovery reached the HTTP host: ${networkRequests.slice(requestsBefore).join(', ')}`)
+        })
       } finally {
         await context.setOffline(false)
       }

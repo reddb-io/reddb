@@ -1,5 +1,6 @@
-//! Shared RedDB query execution and storage primitives. Pager I/O, transactions
-//! and synchronization remain native until their portable boundaries are extracted.
+//! Shared RedDB query execution, page primitives and durable page I/O.
+//! Pager orchestration, transactions and synchronization remain native until
+//! their portable boundaries are extracted.
 
 // Relocated legacy code retains the native crate's lint policy. New modules
 // override these allowances so the workspace ratchets apply to new behavior.

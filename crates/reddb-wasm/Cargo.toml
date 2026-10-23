@@ -21,3 +21,7 @@ js-sys = "=0.3.97"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "pager_conformance"
+crate-type = ["cdylib"]

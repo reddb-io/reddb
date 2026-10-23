@@ -74,3 +74,99 @@ fn shared_pages_round_trip_through_the_native_pager() {
         (b"key".to_vec(), b"portable value".to_vec())
     );
 }
+
+#[test]
+fn portable_page_io_updates_a_native_pager_file() {
+    use reddb_engine::storage::{page::PageType, pager_io};
+    use reddb_file::BorrowedStdFile;
+    use reddb_server::storage::engine::pager::Pager;
+
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("portable-pager.rdb");
+    let id = {
+        let pager = Pager::open_default(&path).expect("native pager creates a file");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.insert_cell(b"key", b"before").expect("cell fits");
+        let id = page.page_id();
+        pager.write_page(id, page).expect("write page");
+        pager.sync().expect("sync page and allocation");
+        id
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open closed native file");
+    let mut file = BorrowedStdFile(&mut file);
+    let mut page = pager_io::read_page(&mut file, id, true).expect("portable read of native page");
+    assert_eq!(page.read_cell(0).expect("native cell").1, b"before");
+    page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
+    page.insert_cell(b"key", b"after").expect("new cell fits");
+    page.update_checksum();
+    pager_io::write_pages(&mut file, &[(id, page)], true).expect("portable protected write");
+    drop(file);
+    let pager = Pager::open_default(&path).expect("native pager reopens portable write");
+    assert_eq!(
+        pager
+            .read_page(id)
+            .expect("native page")
+            .read_cell(0)
+            .expect("updated cell")
+            .1,
+        b"after"
+    );
+}
+
+#[test]
+fn native_pager_recovers_the_shared_dwb_frame_after_a_torn_home_write() {
+    use reddb_engine::storage::{page::PageType, page::PAGE_SIZE, pager_io};
+    use reddb_file::{BorrowedStdFile, VfsFile};
+    use reddb_server::storage::engine::pager::Pager;
+    use std::io::SeekFrom;
+
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("portable-torn-page.rdb");
+    let (id, mut page) = {
+        let pager = Pager::open_default(&path).expect("native pager creates a file");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.insert_cell(b"key", b"before").expect("cell fits");
+        let id = page.page_id();
+        pager.write_page(id, page.clone()).expect("write page");
+        pager.sync().expect("sync page and allocation");
+        (id, page)
+    };
+    page = reddb_engine::storage::page::Page::new(PageType::BTreeLeaf, id);
+    page.insert_cell(b"key", b"after").expect("new cell fits");
+    page.update_checksum();
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open closed native file");
+        let mut file = BorrowedStdFile(&mut file);
+        let frame = reddb_file::encode_paged_dwb_frame([(id, page.as_bytes())]);
+        file.seek(SeekFrom::Start(pager_io::dwb_zone_offset()))
+            .expect("seek DWB");
+        file.write_all(&frame).expect("stage complete DWB frame");
+        file.sync_all().expect("DWB is durable before home write");
+        file.seek(SeekFrom::Start(u64::from(id) * PAGE_SIZE as u64))
+            .expect("seek home page");
+        file.write_all(&page.as_bytes()[..PAGE_SIZE / 2])
+            .expect("torn home-page prefix");
+        file.sync_all().expect("fixture torn page reaches storage");
+        assert!(pager_io::read_page(&mut file, id, true).is_err());
+    }
+    let pager = Pager::open_default(&path).expect("native open replays the shared DWB frame");
+    assert_eq!(
+        pager
+            .read_page(id)
+            .expect("recovered native page")
+            .as_bytes(),
+        page.as_bytes()
+    );
+}

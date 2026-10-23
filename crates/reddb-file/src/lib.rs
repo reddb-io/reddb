@@ -337,7 +337,7 @@ pub use vector_ivf_index::{
     decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
     IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
 };
-pub use vfs::{OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
+pub use vfs::{BorrowedStdFile, OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,

@@ -13,3 +13,8 @@ execFileSync(process.env.WASM_BINDGEN || 'wasm-bindgen', [
   resolve(metadata.target_directory, 'wasm32-unknown-unknown/release/examples/browser_conformance.wasm'),
   '--target', 'web', '--out-dir', out, '--out-name', 'conformance',
 ], { cwd: root, stdio: 'inherit' })
+execFileSync('cargo', [`+${toolchain}`, 'build', '--locked', '-p', 'reddb-io-wasm', '--example', 'pager_conformance', '--target', 'wasm32-unknown-unknown', '--release'], { cwd: root, stdio: 'inherit' })
+execFileSync(process.env.WASM_BINDGEN || 'wasm-bindgen', [
+  resolve(metadata.target_directory, 'wasm32-unknown-unknown/release/examples/pager_conformance.wasm'),
+  '--target', 'web', '--out-dir', out, '--out-name', 'pager',
+], { cwd: root, stdio: 'inherit' })

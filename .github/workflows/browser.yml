@@ -96,7 +96,7 @@ jobs:
           tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
           printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Check browser Rust bindings
-        run: cargo clippy --locked -p reddb-io-wasm -p reddb-io-engine --lib --example browser_conformance --target wasm32-unknown-unknown --no-deps -- -D warnings
+        run: cargo clippy --locked -p reddb-io-wasm -p reddb-io-engine --lib --example browser_conformance --example pager_conformance --target wasm32-unknown-unknown --no-deps -- -D warnings
       - name: Build the real WASM artifact
         run: pnpm --filter @reddb-io/browser build
       - name: Verify native OPFS where available and explicit unsupported behavior

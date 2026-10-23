@@ -1,4 +1,5 @@
 use super::*;
+use reddb_file::BorrowedStdFile;
 
 pub(super) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
@@ -485,14 +486,9 @@ impl Pager {
     /// which decode as "slot never written".
     fn read_superblock_zone(&self) -> Result<[u8; SUPERBLOCK_ZONE_SIZE], PagerError> {
         let mut file = self.file_lock()?;
-        let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-        let mut zone = [0u8; SUPERBLOCK_ZONE_SIZE];
-        let readable = len.min(SUPERBLOCK_ZONE_SIZE as u64) as usize;
-        if readable > 0 {
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut zone[..readable])?;
-        }
-        Ok(zone)
+        Ok(pager_io::read_superblock_zone(&mut BorrowedStdFile(
+            &mut file,
+        ))?)
     }
 
     /// The newest valid superblock copy, with its slot image.
@@ -534,16 +530,13 @@ impl Pager {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
-        reddb_file::seal_paged_superblock_slot(slot, copy_index, generation)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-
         let mut file = self.file_lock()?;
-        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+        Ok(pager_io::write_superblock_slot(
+            &mut BorrowedStdFile(&mut file),
+            slot,
             copy_index,
-        )))?;
-        file.write_all(slot)?;
-        file.sync_all()?;
-        Ok(())
+            generation,
+        )?)
     }
 
     /// Publish `mutate`'s edit of the newest slot image into the *stale* copy.
@@ -624,23 +617,11 @@ impl Pager {
     /// Read a page from disk (bypassing cache)
     fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
         let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-
-        let mut buf = [0u8; PAGE_SIZE];
-        file.read_exact(&mut buf)?;
-
-        let page = Page::from_bytes(buf);
-
-        // Page 0 is the superblock zone, not a checksummed page: its two slots
-        // are sealed independently, so no whole-page checksum can hold across
-        // a ping-pong write. Slot CRCs are its integrity contract.
-        if self.config.verify_checksums && page_id != 0 {
-            page.verify_checksum()?;
-        }
-
-        Ok(page)
+        Ok(pager_io::read_page(
+            &mut BorrowedStdFile(&mut file),
+            page_id,
+            self.config.verify_checksums,
+        )?)
     }
 
     /// Write a page to disk (bypassing cache)
@@ -648,14 +629,12 @@ impl Pager {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
-
         let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(page.as_bytes())?;
-
-        Ok(())
+        Ok(pager_io::write_page(
+            &mut BorrowedStdFile(&mut file),
+            page_id,
+            page,
+        )?)
     }
 
     /// Read a page (cache-aware)
@@ -688,17 +667,10 @@ impl Pager {
             return Ok(page);
         }
 
-        // Cache miss - read from disk (skip checksum verification)
+        // Cache miss - use the same byte I/O without a page CRC check.
         let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-
-        let mut buf = [0u8; PAGE_SIZE];
-        file.read_exact(&mut buf)?;
+        let page = pager_io::read_page(&mut BorrowedStdFile(&mut file), page_id, false)?;
         drop(file);
-
-        let page = Page::from_bytes(buf);
 
         // Add to cache (no checksum verification)
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
@@ -1275,55 +1247,10 @@ impl Pager {
         reddb_file::layout::pager_dwb_shadow_path(db_path)
     }
 
-    fn dwb_zone_offset() -> u64 {
-        DWB_ZONE_START_PAGE as u64 * PAGE_SIZE as u64
-    }
-
-    fn write_dwb_zone_frame(&self, buf: &[u8]) -> Result<(), PagerError> {
-        if buf.len() > DWB_ZONE_BYTES {
-            return Err(PagerError::InvalidDatabase(
-                "DWB frame exceeds the reserved in-file zone".to_string(),
-            ));
-        }
-        let mut file = self.file_lock()?;
-        file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
-        file.write_all(buf)?;
-        file.sync_all()?;
-        Ok(())
-    }
-
     /// Clear the in-file DWB zone with valid reserved pages.
     fn clear_dwb_zone(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
-        for page_id in DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE {
-            let mut page = Page::new(PageType::Header, page_id);
-            page.update_checksum();
-            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
-            file.write_all(page.as_bytes())?;
-        }
-        file.sync_all()?;
-        Ok(())
-    }
-
-    fn dwb_zone_is_clear(buf: &[u8]) -> bool {
-        if buf.len() != DWB_ZONE_BYTES {
-            return false;
-        }
-        for (idx, chunk) in buf.chunks_exact(PAGE_SIZE).enumerate() {
-            let Ok(page) = Page::from_slice(chunk) else {
-                return false;
-            };
-            if page.verify_checksum().is_err() {
-                return false;
-            }
-            if page.page_id() != DWB_ZONE_START_PAGE + idx as u32 {
-                return false;
-            }
-            if page.page_type().ok() != Some(PageType::Header) {
-                return false;
-            }
-        }
-        true
+        Ok(pager_io::clear_dwb_zone(&mut BorrowedStdFile(&mut file))?)
     }
 
     /// Read the internal manifest page (page 1), the zone the superblock roots.
@@ -1342,38 +1269,17 @@ impl Pager {
     /// 3. Write all pages to their final locations in the .rdb file
     /// 4. Clear the DWB zone (marks as consumed)
     fn write_pages_through_dwb(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
-        if self.dwb_enabled {
-            for chunk in pages.chunks(DWB_MAX_PAGES_PER_FRAME.max(1)) {
-                let buf = reddb_file::encode_paged_dwb_frame(
-                    chunk
-                        .iter()
-                        .map(|(page_id, page)| (*page_id, page.as_bytes())),
-                );
-
-                // Write DWB zone and fsync
-                self.write_dwb_zone_frame(&buf)?;
-
-                // Now write pages to their final locations
-                for (page_id, page) in chunk {
-                    self.write_page_raw(*page_id, page)?;
-                }
-                {
-                    let file = self.file_lock()?;
-                    file.sync_all()?;
-                }
-
-                // Reset the zone to its inactive page images.
-                self.clear_dwb_zone()?;
-            }
-
-            Ok(())
-        } else {
-            // DWB disabled — write directly
-            for (page_id, page) in pages {
-                self.write_page_raw(*page_id, page)?;
-            }
-            Ok(())
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
         }
+        // Keep the file locked through staging, home writes and clearing so
+        // another page writer cannot interleave with a protected batch.
+        let mut file = self.file_lock()?;
+        Ok(pager_io::write_pages(
+            &mut BorrowedStdFile(&mut file),
+            pages,
+            self.dwb_enabled,
+        )?)
     }
 
     /// Recover from double-write buffer after a crash.
@@ -1381,50 +1287,8 @@ impl Pager {
     /// If the DWB zone contains valid pages, they were written before the crash
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
-        let len = {
-            let file = self.file_lock()?;
-            file.metadata()?.len()
-        };
-        let zone_end = Self::dwb_zone_offset() + DWB_ZONE_BYTES as u64;
-        if len < zone_end {
-            return Ok(());
-        }
-
-        let mut buf = vec![0u8; DWB_ZONE_BYTES];
-        {
-            let mut file = self.file_lock()?;
-            file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
-            file.read_exact(&mut buf)?;
-        }
-        if buf.get(0..4) != Some(reddb_file::DWB_MAGIC.as_slice()) {
-            if Self::dwb_zone_is_clear(&buf) {
-                return Ok(());
-            }
-            self.clear_dwb_zone()?;
-            return Ok(());
-        }
-
-        let entries = match reddb_file::decode_paged_dwb_frame(&buf) {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.clear_dwb_zone()?;
-                return Ok(());
-            }
-        };
-
-        // DWB is valid — re-apply pages to main file
-        for entry in entries {
-            let page = Page::from_bytes(entry.page);
-            self.write_page_raw(entry.page_id, &page)?;
-        }
-
-        // Sync and clean up
-        {
-            let file = self.file_lock()?;
-            file.sync_all()?;
-        }
-
-        self.clear_dwb_zone()
+        let mut file = self.file_lock()?;
+        Ok(pager_io::recover_from_dwb(&mut BorrowedStdFile(&mut file))?)
     }
 
     /// Finish a consumed trunk's durable ownership change, retaining errors

@@ -7,6 +7,9 @@ const assets = [
   '../src/worker.js',
   '../src/wasm/reddb_wasm.js',
   '../src/wasm/reddb_wasm_bg.wasm',
+  './pager-worker.js',
+  './wasm/pager.js',
+  './wasm/pager_bg.wasm',
 ].map((path) => new URL(path, self.location.href).href)
 
 self.addEventListener('install', (event) => {

@@ -10,9 +10,16 @@ mod portable;
 mod storage;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/pager.rs"]
+mod pager;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
-    let cases = portable::CASES.iter().chain(storage::CASES.iter());
+    let cases = portable::CASES
+        .iter()
+        .chain(storage::CASES.iter())
+        .chain(pager::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

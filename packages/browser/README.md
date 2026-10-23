@@ -49,7 +49,14 @@ without synchronous storage. The same worker also checks the shared 16 KiB page
 layout, checksum corruption detection, freelist trunk recovery, pinned-page
 eviction and dirty writeback. Native unit tests for these primitives run from
 `reddb-engine`; native module paths retain the same types, with pager restart
-coverage. Pager I/O, allocation fences, WAL/DWB ordering and MVCC are still native.
+coverage. The native pager now shares byte I/O, sealed superblock writes and
+in-file double-write staging/recovery over `VfsFile` with WASM. Shared fixtures
+interrupt each write/flush in page publication, root publication and recovery,
+and check short reads, checksums and bounded frames. A test-only OPFS worker
+recovers a torn page after a full browser restart with networking disabled
+and the HTTP host disconnected.
+Those fixtures are excluded from the production SDK. Full pager orchestration,
+allocation fences, native WAL-first policy, encryption and MVCC remain pending.
 Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 

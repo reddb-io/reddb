@@ -1,6 +1,7 @@
 //! Native path opening, process locks, and append-tail caching.
 
 use super::*;
+use crate::vfs::BorrowedStdFile as NativeFile;
 use fs2::FileExt;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -375,35 +376,4 @@ fn now_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
-}
-
-// Borrow the already-locked handle. This adapter stays private so importing
-// VfsFile never makes std::io methods on a native File ambiguous for callers.
-struct NativeFile<'a>(&'a mut File);
-
-impl VfsFile for NativeFile<'_> {
-    fn try_clone(&self) -> std::io::Result<Self> {
-        Err(std::io::ErrorKind::Unsupported.into())
-    }
-    fn file_len(&self) -> std::io::Result<u64> {
-        self.0.metadata().map(|metadata| metadata.len())
-    }
-    fn set_len(&self, len: u64) -> std::io::Result<()> {
-        self.0.set_len(len)
-    }
-    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        std::io::Write::write_all(self.0, bytes)
-    }
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(self.0, bytes)
-    }
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        std::io::Seek::seek(self.0, position)
-    }
-    fn sync_all(&self) -> std::io::Result<()> {
-        self.0.sync_all()
-    }
-    fn sync_data(&self) -> std::io::Result<()> {
-        self.0.sync_data()
-    }
 }

@@ -37,7 +37,11 @@ use super::page::{Page, PageError, PageType, PAGE_SIZE};
 use super::page_cache::PageCache;
 use crate::storage::wal::writer::WalWriter;
 use fs2::FileExt;
+use reddb_engine::storage::pager_io::{self, FIRST_ALLOCATABLE_PAGE};
+#[cfg(test)]
+use reddb_engine::storage::pager_io::{DWB_ZONE_BYTES, DWB_ZONE_START_PAGE};
 use std::fs::{File, OpenOptions};
+#[cfg(test)]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -48,12 +52,6 @@ pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
 
 /// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
-const DWB_ZONE_START_PAGE: u32 = 3;
-const DWB_ZONE_PAGES: u32 = 64;
-const DWB_ZONE_BYTES: usize = DWB_ZONE_PAGES as usize * PAGE_SIZE;
-const DWB_MAX_PAGES_PER_FRAME: usize =
-    (DWB_ZONE_BYTES - reddb_file::PAGED_DWB_HEADER_SIZE) / reddb_file::PAGED_DWB_ENTRY_SIZE;
-const FIRST_ALLOCATABLE_PAGE: u32 = DWB_ZONE_START_PAGE + DWB_ZONE_PAGES;
 
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -185,6 +183,16 @@ impl From<std::io::Error> for PagerError {
 impl From<PageError> for PagerError {
     fn from(e: PageError) -> Self {
         Self::Page(e)
+    }
+}
+
+impl From<pager_io::PagerIoError> for PagerError {
+    fn from(error: pager_io::PagerIoError) -> Self {
+        match error {
+            pager_io::PagerIoError::Io(error) => Self::Io(error),
+            pager_io::PagerIoError::Page(error) => Self::Page(error),
+            pager_io::PagerIoError::InvalidDatabase(message) => Self::InvalidDatabase(message),
+        }
     }
 }
 

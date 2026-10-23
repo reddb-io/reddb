@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators and page primitives implemented; pager I/O, runtime and sync pending
+Status: accepted architecture; persistence, portable query operators and durable page I/O implemented; pager orchestration, runtime and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -60,8 +60,27 @@ Native unit tests moved with the code, including the native cache concurrency
 tests. Shared native/WASM fixtures cover page headers and cells, checksums and
 corruption, multi-trunk freelist recovery, pinning, eviction and dirty writeback.
 A native pager restart test checks that shared page types cross the existing
-file-I/O boundary. This does not yet port the pager's WAL/DWB ordering,
-allocation fences, encryption, checkpointing or MVCC into the browser.
+file-I/O boundary.
+
+`reddb-engine::storage::pager_io` now also owns raw page I/O, sealed superblock
+slot writes and the in-file double-write staging/replay algorithms over
+`VfsFile`. The native pager calls those same functions, borrowing its existing
+locked file without cloning it. Staging sync precedes home writes, home sync
+precedes zone clearing, and clearing is synced before the next frame. The file
+mutex now spans a complete protected batch, preventing interleaved page writers
+from overwriting its recovery frame. Metadata-read failures propagate as I/O
+errors rather than looking like an empty superblock zone. Codecs, file versions,
+allocation fences, native WAL-first policy and encryption remain unchanged.
+
+Shared native/WASM tests interrupt every write/flush in page publication,
+superblock publication and DWB recovery, retaining or losing pending writes.
+They verify complete pages, the surviving root, retryable recovery and bounded
+multi-frame writes. A separate test-only WASM fixture uses the production OPFS
+bridge, tears a real home page after staging sync, closes the failed handle and
+recovers through a fresh worker after a full offline browser restart. This is
+page-level I/O recovery, not transaction or five-model execution. The production
+SDK does not expose these pager fixtures. Full pager orchestration, allocation,
+WAL/MVCC, checkpointing and storage-backed execution are still pending.
 
 The experimental `executeScalar` entrypoint executes storage-free SELECT
 expressions in the worker with the same evaluator and exact JSON integer/decimal
@@ -80,6 +99,10 @@ This is a portability step, not a throughput or browser memory-budget claim.
 Page payload memory remains capacity × 16 KiB (256 resident pages = 4 MiB),
 plus cache metadata and existing copies during read/writeback; no new IPC,
 disk operation or allocation policy is introduced by sharing these modules.
+Protected writeback for 63 pages remains about 3 MiB of writes (63 × 16 KiB
+home bytes, the staged frame and the 1 MiB zone clear) and three barriers;
+no per-page IPC is introduced. Holding the native file mutex through those existing barriers
+serializes the protected batch; it is not a throughput claim.
 
 New sync contracts belong to `reddb-wire` (ADR 0046). They require consistent
 snapshot/cursor bootstrap, durable resumability, transactional/idempotent upload,
