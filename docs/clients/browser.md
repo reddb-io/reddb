@@ -12,6 +12,16 @@ optional synchronization are still being integrated. `append` and `checkpoint`
 accept native binary WAL/snapshot payloads; they do not execute SQL or provide a
 save-game/CRUD API.
 
+## Try the browser example
+
+Open the [interactive playground](https://reddb-io.github.io/reddb/browser/).
+It installs the published npm package and bundles JS, Worker and WASM with the page.
+Run a scalar SELECT, append an opaque binary test marker, reopen the OPFS artifact,
+then disable networking and reload once the offline cache is ready. The marker is
+artifact I/O evidence, not a collection record or application transaction.
+
+[Example source and local commands](https://github.com/reddb-io/reddb/tree/main/packages/browser-example).
+
 ## Install
 
 ```sh

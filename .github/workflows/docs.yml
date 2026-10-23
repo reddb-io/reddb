@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
     paths:
       - 'docs/**'
+      - 'packages/browser-example/**'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -27,6 +29,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+
+      - name: Build the self-contained browser example
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example
+          pnpm --filter @reddb-io/browser-example build
+          cp -R packages/browser-example/dist docs/browser
 
       - name: Setup Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
