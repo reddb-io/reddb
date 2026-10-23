@@ -3034,6 +3034,7 @@ dependencies = [
  "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-rql",
+ "reddb-io-types",
  "wasm-bindgen",
 ]
 

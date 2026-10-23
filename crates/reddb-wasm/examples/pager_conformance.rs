@@ -1,6 +1,10 @@
 //! Test-only OPFS fixture; never linked into the application WASM artifact.
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../../reddb-engine/tests/support/codec_corpus.rs"]
+mod codec_corpus;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../src/browser.rs"]
 mod browser;
 

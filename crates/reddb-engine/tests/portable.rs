@@ -1,3 +1,6 @@
+#[path = "support/codec_corpus.rs"]
+mod codec_corpus;
+
 #[path = "support/portable.rs"]
 mod portable;
 
@@ -48,6 +51,17 @@ mod entity;
 #[test]
 fn portable_entity_read_conformance() {
     for (name, run) in entity::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/entity_codec.rs"]
+mod entity_codec;
+
+#[test]
+fn portable_entity_codec_conformance() {
+    for (name, run) in entity_codec::CASES {
         eprintln!("{name}");
         run();
     }

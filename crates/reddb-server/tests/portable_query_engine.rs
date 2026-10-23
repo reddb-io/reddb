@@ -1,3 +1,6 @@
+#[path = "../../reddb-engine/tests/support/codec_corpus.rs"]
+mod codec_corpus;
+
 use reddb_engine::query::scalar;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::{json, Value};
@@ -555,6 +558,49 @@ fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
         assert_eq!(
             reddb_server::runtime::mvcc::entity_visible_with_context(None, &row),
             status.is_empty()
+        );
+    }
+}
+
+#[test]
+fn shared_entity_codec_preserves_native_dump_payloads_and_metadata() {
+    use reddb_engine::storage::entity_codec::write_entity_binary;
+    use reddb_server::storage::unified::{Metadata, MetadataValue, UnifiedStore};
+
+    let directory = tempfile::tempdir().expect("native dump fixture");
+    let path = directory.path().join("codec.rdb");
+    let store = UnifiedStore::new();
+    let mut metadata = Metadata::new();
+    metadata.set("fixture", MetadataValue::String("native metadata".into()));
+    let mut expected = vec![];
+    for entity in codec_corpus::entities() {
+        let collection = format!("codec_{}", entity.id.raw());
+        let id = store
+            .insert_auto(&collection, entity)
+            .expect("native insertion");
+        let manager = store.get_collection(&collection).expect("collection");
+        manager
+            .set_metadata(id, metadata.clone())
+            .expect("native metadata");
+        let stored = manager.get(id).expect("native entity");
+        let mut encoded = vec![];
+        write_entity_binary(&mut encoded, &stored, reddb_file::STORE_VERSION_CURRENT);
+        expected.push((collection, id, encoded));
+    }
+    store.save_to_file(&path).expect("native dump saved");
+    drop(store);
+    let reopened = UnifiedStore::load_from_file(&path).expect("native dump reopens");
+    for (collection, id, bytes) in expected {
+        let manager = reopened
+            .get_collection(&collection)
+            .expect("restored collection");
+        let entity = manager.get(id).expect("restored entity");
+        let mut encoded = vec![];
+        write_entity_binary(&mut encoded, &entity, reddb_file::STORE_VERSION_CURRENT);
+        assert_eq!(encoded, bytes, "payload for {collection}");
+        assert_eq!(
+            manager.get_metadata(id).expect("metadata").fields,
+            metadata.fields
         );
     }
 }

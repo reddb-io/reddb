@@ -120,7 +120,7 @@ B-tree file; the browser imports it, verifies and mutates the tree with the host
 HTTP listener stopped, then restarts entirely offline and exports the file for
 native verification. A native-server integration additionally proves its public
 B-tree aliases produce and consume the same records through the portable pager.
-The test records are opaque B-tree values, not runtime entities. The production
+The test records include opaque values and encoded entities described below. The production
 JS/TS API is unchanged: these lower-level reads/writes do not supply collection
 catalog semantics, RQL storage execution, runtime MVCC integration, atomic application transactions,
 or recovery of partially executed B-tree operations. Those runtime/WAL layers
@@ -156,8 +156,8 @@ with native aliases for rows/documents, graph nodes/edges, vectors, time-series,
 queues, embeddings and cross-references. The canonical binary document-key decoder
 feeds the existing bloom algorithm. The host wall clock supplies Unix seconds
 (`SystemTime` natively, `Date.now / 1000` in WASM); monotonic query timing is
-unchanged. Native entity/value serialization remains in its existing adapter.
-No codec, field encoding or file version changes in this move.
+unchanged. Native entity/value serialization now delegates to the shared codec
+below. No field encoding or file version changes in this move.
 
 `SnapshotContext`, raw own/aborted-sub-XID visibility, logical-ID SSI read tracking
 and table-row version selection are shared too. `TableRowVersionStore` supplies
@@ -176,6 +176,28 @@ retains O(V) candidate materialization and filtering for V physical versions of
 one logical row; current-row lookup retains its native store behavior. SSI sets
 continue to key on logical identity, not physical version IDs. No throughput or
 browser memory-budget qualification follows from these assertions.
+
+The native entity/value codec is now shared too. `reddb-file::native_value`
+owns the persisted value tags, varints, Zstd threshold/level and checked byte
+cursor; `reddb-engine::storage::entity_codec` adapts those bytes to the shared
+logical entity model. Native dump, paged-record and WAL orchestration retain
+thin delegates and their existing metadata/policy code. A frozen corpus from
+the original native writer checks all values and eight entities across V1–V12.
+Checked lengths, iterative array decoding bounded by the existing JSON depth
+limit and verified compressed lengths reject malformed input before unchecked
+indexing. No new ordinary value-size policy or full memory qualification is
+introduced.
+
+Four identical native/WASM cases cover byte equality, version gates, value and
+entity truncation, malformed lengths/tags, nesting and compression. The existing
+native/browser/native OPFS fixture also decodes and updates encoded entities,
+retains their opaque metadata, restarts entirely offline and verifies the export
+natively. Native dump coverage independently retains real native metadata. These
+fixtures provide no application schemas, stored-data RQL or transactional entity
+publication. Runtime dispatch and durable transaction/WAL integration remain
+pending. Codec work is O(encoded bytes), with an array stack bounded by 128
+levels and compression/decompression proportional to payload size; this makes
+no browser memory or throughput promise.
 
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format

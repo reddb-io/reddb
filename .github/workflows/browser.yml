@@ -9,6 +9,8 @@ on:
       - 'crates/reddb-server/src/storage/engine/**'
       - 'crates/reddb-server/src/storage/transaction/**'
       - 'crates/reddb-server/src/storage/unified/entity.rs'
+      - 'crates/reddb-server/src/storage/unified/store.rs'
+      - 'crates/reddb-server/src/storage/unified/store/**'
       - 'crates/reddb-server/src/runtime/transaction_state.rs'
       - 'crates/reddb-server/src/runtime/execution_context.rs'
       - 'crates/reddb-server/src/runtime/table_row_mvcc_resolver.rs'

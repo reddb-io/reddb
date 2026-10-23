@@ -72,9 +72,10 @@ overflow chains. Native APIs alias these implementations through a page-access
 contract; the browser executes them in test-only WASM fixtures. Conformance covers
 splits, scans, seeks, updates/deletes, large values and reclamation. An additional
 OPFS test mutates a native-created tree, restarts the browser with the HTTP host
-stopped, and reopens the exported file natively. These are opaque B-tree records,
-not runtime collections or atomic database transactions. No raw tree API is added
-to the production SDK.
+stopped, and reopens the exported file natively. The fixture includes native
+encoded entities as well as opaque B-tree values. These lower-level records do
+not supply runtime collection schemas or atomic database transactions. No raw
+tree API is added to the production SDK.
 
 ## Current query contract
 
@@ -167,9 +168,29 @@ auth/tenant/moderation gates and statement-frame lifetime remain in the host.
 Native persisted-row tests cover both dump and paged reopen through the shared
 entity/visibility selector. Six new native/WASM cases exercise the representation
 and read rules, repeated offline on Chromium/Firefox. They use in-memory fixtures
-in WASM, not browser-persisted collections. Native entity/value serialization and
-storage-backed execution still need a portable integration before JS/TS can query
-those collections. This milestone changes no file bytes or application API.
+in WASM, not browser-persisted collections.
+
+Native value tags, checked decoding and Zstd compression now have one owner in
+`reddb-file::native_value`; the logical entity adapter lives in
+`reddb-engine::storage::entity_codec`. Native dump, paged-record and WAL paths
+use that same adapter. A frozen corpus produced by the original native writer
+checks all store versions V1–V12 and all value variants, including exact integers,
+compressed text/blob values, document bodies, MVCC fields and auxiliary data.
+Four native/WASM conformance cases compare the original bytes and reject
+truncated values, invalid lengths/tags, inconsistent compressed lengths and
+excessive array nesting. Arrays use a checked cursor and an explicit decoding
+stack bounded by the existing JSON nesting limit. This is not a general
+browser memory-budget qualification.
+
+The OPFS tree fixture now imports eight encoded native entities, decodes and
+updates their sequence/timestamps in WASM, restarts the browser offline with the
+HTTP host stopped, and exports for native verification. It retains opaque
+metadata bytes without interpreting native metadata policy. A separate native
+dump test checks the complete entity corpus and actual native metadata. These
+remain test-only records without application collection schemas or transactional
+publication. Storage-backed execution and durable runtime transaction/WAL
+integration are still needed before JS/TS can query collections. No file bytes,
+format versions or public application APIs change.
 
 ## Remaining work toward the approved Browser design
 

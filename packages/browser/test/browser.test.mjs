@@ -69,6 +69,8 @@ async function sharedConformance(browserPage) {
     'entity_models_and_metadata', 'entity_document_field_bloom', 'entity_auxiliary_and_timestamps',
     'entity_own_subtransaction_visibility', 'entity_logical_version_selection',
     'entity_serializable_logical_identity',
+    'entity_codec_native_v1_v12_goldens', 'entity_codec_value_tags_and_truncation',
+    'entity_codec_invalid_lengths_and_depth', 'entity_codec_optional_tails_and_truncation',
   ])
 }
 
@@ -349,7 +351,7 @@ for (const browser of browsers) {
       }
     })
 
-    storageTest('native B-tree survives offline WASM writes and browser restart, then reopens natively', async () => {
+    storageTest('native B-tree and encoded entities survive offline WASM writes and browser restart, then reopen natively', async () => {
       async function fixture(phase) {
         const current = await page()
         try {

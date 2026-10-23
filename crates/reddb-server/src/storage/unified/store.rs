@@ -29,8 +29,8 @@ use parking_lot::RwLock;
 
 use super::context_index::ContextIndex;
 use super::entity::{
-    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
-    GraphNodeKind, NodeData, RefType, RowData, TimeSeriesPointKind, UnifiedEntity, VectorData,
+    CrossRef, EmbeddingSlot, EntityData, EntityId, EntityKind, RefType, RowData,
+    TimeSeriesPointKind, UnifiedEntity,
 };
 use super::entity_cache::EntityCache;
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
@@ -40,7 +40,7 @@ use crate::api::{DurabilityMode, GroupCommitOptions};
 use crate::physical::{ManifestEvent, ManifestEventKind};
 use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
-use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
+use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
 
 pub use reddb_file::{

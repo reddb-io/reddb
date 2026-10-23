@@ -2,6 +2,10 @@
 //! This is built separately and never included in the application WASM bundle.
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/codec_corpus.rs"]
+mod codec_corpus;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/portable.rs"]
 mod portable;
 
@@ -22,6 +26,10 @@ mod transaction;
 mod entity;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/entity_codec.rs"]
+mod entity_codec;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -29,7 +37,8 @@ pub fn run_conformance() -> String {
         .chain(storage::CASES.iter())
         .chain(pager::CASES.iter())
         .chain(transaction::CASES.iter())
-        .chain(entity::CASES.iter());
+        .chain(entity::CASES.iter())
+        .chain(entity_codec::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

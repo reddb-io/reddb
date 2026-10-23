@@ -1,4 +1,7 @@
 //! Test-only native host for B-tree/OPFS interoperability.
+
+#[path = "../tests/support/codec_corpus.rs"]
+mod codec_corpus;
 use reddb_file::{OpenMode, StdVfs, Vfs};
 use std::path::PathBuf;
 

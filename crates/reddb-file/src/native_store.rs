@@ -656,7 +656,7 @@ fn read_native_u8(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileRes
     Ok(bytes[0])
 }
 
-fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
+pub fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
         value >>= 7;
@@ -664,7 +664,7 @@ fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
     out.push(value as u8);
 }
 
-fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
+pub fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
         value >>= 7;
@@ -672,7 +672,11 @@ fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
     out.push(value as u8);
 }
 
-fn read_native_varu32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u32> {
+pub(crate) fn read_native_varu32(
+    data: &[u8],
+    pos: &mut usize,
+    err: &'static str,
+) -> RdbFileResult<u32> {
     let mut result = 0u32;
     let mut shift = 0u32;
     for _ in 0..5 {
@@ -688,7 +692,11 @@ fn read_native_varu32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFil
     ))
 }
 
-fn read_native_varu64(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u64> {
+pub(crate) fn read_native_varu64(
+    data: &[u8],
+    pos: &mut usize,
+    err: &'static str,
+) -> RdbFileResult<u64> {
     let mut result = 0u64;
     let mut shift = 0u32;
     for _ in 0..10 {

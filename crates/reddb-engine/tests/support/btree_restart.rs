@@ -1,13 +1,66 @@
 //! Test-only persisted B-tree records, shared by the native and OPFS fixtures.
-//! These opaque records exercise the tree; they are not runtime entities or transactions.
+//! Includes native encoded entities, but no application schemas or transactions.
 use reddb_engine::storage::{
     btree::{BTree, BTreeError},
     page::{Page, PageType},
     page_store::PageStore,
     pager::{NoWal, Pager, PagerConfig, PagerError},
 };
+use reddb_engine::storage::{
+    entity::UnifiedEntity,
+    entity_codec::{read_entity_binary, write_entity_binary},
+};
 use reddb_file::VfsFile;
 use std::{collections::BTreeMap, sync::Arc};
+
+use crate::codec_corpus as corpus;
+const ENTITY_METADATA: &[u8] = b"opaque-metadata-fixture";
+
+fn entity_key(entity: &UnifiedEntity) -> Vec<u8> {
+    format!("entity:{}", entity.id.raw()).into_bytes()
+}
+
+fn entity_record(entity: &UnifiedEntity) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_entity_binary(&mut bytes, entity, reddb_file::STORE_VERSION_CURRENT);
+    reddb_file::encode_native_entity_record_frame(&bytes, Some(ENTITY_METADATA))
+}
+
+fn decode_entity(record: &[u8]) -> UnifiedEntity {
+    let frame = reddb_file::decode_native_entity_record_frame(record)
+        .expect("valid RER1 frame")
+        .expect("entity frame");
+    assert_eq!(frame.metadata, ENTITY_METADATA);
+    let mut consumed = 0;
+    let entity = read_entity_binary(
+        frame.entity,
+        &mut consumed,
+        reddb_file::STORE_VERSION_CURRENT,
+    )
+    .expect("persisted logical entity");
+    assert_eq!(consumed, frame.entity.len());
+    entity
+}
+
+fn verify_entities<P: PageStore>(tree: &BTree<P>, updated: bool) -> Result<(), BTreeError> {
+    for expected in corpus::entities() {
+        let record = tree
+            .get(&entity_key(&expected))?
+            .expect("persisted entity record");
+        let entity = decode_entity(&record);
+        assert_eq!(entity.id, expected.id);
+        assert_eq!(entity.kind, expected.kind);
+        assert_eq!(entity.logical_id(), expected.logical_id());
+        assert_eq!(entity.xmin, expected.xmin);
+        assert_eq!(entity.xmax, expected.xmax);
+        assert_eq!(entity.sequence_id, if updated { 100 } else { 99 });
+        assert_eq!(entity.updated_at, if updated { 123500 } else { 123499 });
+        if entity.id.raw() == 1024 {
+            assert_eq!(entity.data.as_row().expect("row").columns, corpus::values());
+        }
+    }
+    Ok(())
+}
 
 pub const RECORD_COUNT: u32 = 600;
 const COLLECTION: &str = "browser-btree-fixture";
@@ -46,6 +99,13 @@ pub fn expected(updated: bool) -> BTreeMap<Vec<u8>, Vec<u8>> {
         }
         records.insert(b"overflow".to_vec(), bytes(9, 90_000));
     }
+    for mut entity in corpus::entities() {
+        if updated {
+            entity.sequence_id += 1;
+            entity.updated_at += 1;
+        }
+        records.insert(entity_key(&entity), entity_record(&entity));
+    }
     records
 }
 
@@ -55,6 +115,7 @@ pub fn seed<P: PageStore>(tree: &BTree<P>) -> Result<(), BTreeError> {
 }
 
 pub fn verify<P: PageStore>(tree: &BTree<P>, updated: bool) -> Result<(), BTreeError> {
+    verify_entities(tree, updated)?;
     let records = expected(updated);
     assert_eq!(tree.count()?, records.len());
     for (key, value) in &records {
@@ -85,6 +146,14 @@ pub fn mutate<P: PageStore>(tree: &BTree<P>) -> Result<(), BTreeError> {
         tree.insert(&id.to_be_bytes(), &value(id))?;
     }
     tree.upsert(b"overflow", &bytes(9, 90_000))?;
+    for original in corpus::entities() {
+        let key = entity_key(&original);
+        let record = tree.get(&key)?.expect("original entity frame");
+        let mut entity = decode_entity(&record);
+        entity.sequence_id += 1;
+        entity.updated_at += 1;
+        tree.upsert(&key, &entity_record(&entity))?;
+    }
     verify(tree, true)
 }
 
