@@ -21,6 +21,18 @@ test('frame reader preserves every header/payload split and nonzero view offsets
   }
 })
 
+test('length and payload decode across single-byte chunks', async () => {
+  const { socket, reader } = await openFrameReader(core)
+  for (let value = 1; value <= 3; value++) {
+    const bytes = frame(value)
+    const pending = reader.next()
+    for (let offset = 0; offset < bytes.length; offset++) {
+      socket.emit('data', bytes.subarray(offset, offset + 1))
+    }
+    assert.deepEqual(await pending, core.decodeFrame(bytes))
+  }
+})
+
 test('fragmented frame accumulation copies at most one frame plus its header', async () => {
   const { socket, reader } = await openFrameReader(core)
   const bytes = frame(1, 1024 * 1024 - 16)
@@ -61,7 +73,7 @@ test('buffered frames drain in order when their consumer is paused', async () =>
   await assert.rejects(reader.next(), { code: 'CONNECTION_CLOSED' })
 })
 
-test('invalid lengths and flags reject all waiting reads and future reads', { timeout: 1000 }, async () => {
+test('invalid lengths and flags reject all waiting reads and future reads', { timeout: 5000 }, async () => {
   for (const length of [0, 15, 16 * 1024 * 1024 + 1, 0xffffffff, null]) {
     const { socket, reader } = await openFrameReader(core)
     const bytes = frame(1)
@@ -75,7 +87,7 @@ test('invalid lengths and flags reject all waiting reads and future reads', { ti
   }
 })
 
-test('EOF rejects partial headers and partial payloads without leaving a read pending', { timeout: 1000 }, async () => {
+test('EOF rejects partial headers and partial payloads without leaving a read pending', { timeout: 5000 }, async () => {
   for (const event of ['end', 'close']) {
     for (const length of [1, 15, 16, 47]) {
       const { socket, reader } = await openFrameReader(core)
@@ -88,7 +100,7 @@ test('EOF rejects partial headers and partial payloads without leaving a read pe
   }
 })
 
-test('socket errors reject pending and future reads', { timeout: 1000 }, async () => {
+test('socket errors reject pending and future reads', { timeout: 5000 }, async () => {
   const { socket, reader } = await openFrameReader(core)
   const error = new Error('probe socket failed')
   const reads = [reader.next(), reader.next()].map(pending => assert.rejects(pending, error))

@@ -37,3 +37,22 @@ its typed view avoids a 12 KiB JS number array and a reconstructed 6 KiB f32
 array per request. Rust fills a pre-sized byte region instead of extending the
 output Vec once per component. Payload tags, endianness and frame bytes remain
 unchanged.
+
+## Frame accumulation
+
+Compare the production receive reader against a separate baseline checkout:
+
+```sh
+REDDB_BENCH_BASELINE=../client-frame-baseline REDDB_BENCH_OUTPUT=client-frames.json \
+  node drivers/js-client/bench/run-frames.mjs
+```
+
+This runner needs the Playwright dependencies above, but does not build or load
+WASM. It exercises contiguous, fragmented, coalesced and single-byte input in
+Node, Chromium, Firefox and WebKit. Twenty paired samples alternate implementation
+order, with at least 20 ms per sample. Input creation, anonymous handshake and full
+byte comparisons are outside the timer; accumulation, payload decoding and Promise
+delivery are inside. It counts accumulator `Uint8Array.set` writes separately,
+excluding the decoder's final payload slice. These counts are cumulative memory
+traffic, not peak RAM. Socket events are scripted; this is not a network, WebSocket
+delivery or end-to-end database benchmark. WebKit is Playwright's Linux port.
