@@ -92,6 +92,11 @@ versioned rows retain conservative validation. Durable
 replay reconciliation seeds the current raw tree generation before runtime
 visibility normalization is attached.
 
+Bulk inserts record each installed entity in the same bounded mutation journal
+without clearing earlier changes. Their paged and WAL records encode the
+installed segment image after sequence assignment. Empty or rejected batches
+do not change the journal; tracking exhaustion keeps conservative validation.
+
 Updating an existing row may relocate it from a sealed segment to the growing
 segment. This physical move adopts its existing sequence identity and advances
 the destination allocator, while rebuilding indexes and tracking the mutation.

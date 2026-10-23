@@ -709,7 +709,16 @@ impl UnifiedStore {
             })
             .collect();
 
-        // Pre-serialize for B-tree while we still have references.
+        // Move entities into segment before serializing their canonical image:
+        // bulk insertion assigns sequence identities used by checkpoint proofs.
+        let t0 = std::time::Instant::now();
+        let ids = manager.bulk_insert(entities)?;
+        let t_manager = t0.elapsed();
+        for id in &ids {
+            self.register_entity_id(*id);
+        }
+
+        // Serialize for B-tree and WAL from the installed segment rows.
         // `serialize_entity_record` is pure; with `n >= 1024` the
         // rayon dispatch cost is amortised and the 16-core serialize
         // fan-out becomes the biggest single win on insert_bulk. For
@@ -719,35 +728,31 @@ impl UnifiedStore {
         let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> =
             if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
                 let fv = self.format_version();
-                let serial_map = |e: &UnifiedEntity| {
-                    (
-                        e.id.raw().to_be_bytes().to_vec(),
-                        Self::serialize_entity_record(e, None, fv),
-                    )
+                let serial_map = |id: &EntityId| {
+                    manager
+                        .get_with(*id, |entity| {
+                            (
+                                id.raw().to_be_bytes().to_vec(),
+                                Self::serialize_entity_record(entity, None, fv),
+                            )
+                        })
+                        .expect("bulk-inserted entity must remain in the fenced segment")
                 };
                 // Gate chosen to match the bench's `BULK_BATCH_SIZE=1000`.
                 // Rayon's dispatch overhead is ~30µs/batch — on a 15-col
                 // row serializing for ~40µs the break-even is around
                 // 200-300 rows on a 16-core host. Keep a safety margin
                 // at 512.
-                if entities.len() >= 512 {
+                if ids.len() >= 512 {
                     use rayon::prelude::*;
-                    Some(entities.par_iter().map(serial_map).collect())
+                    Some(ids.par_iter().map(serial_map).collect())
                 } else {
-                    Some(entities.iter().map(serial_map).collect())
+                    Some(ids.iter().map(serial_map).collect())
                 }
             } else {
                 None
             };
         let t_serialize = t0.elapsed();
-
-        // Move entities into segment
-        let t0 = std::time::Instant::now();
-        let ids = manager.bulk_insert(entities)?;
-        let t_manager = t0.elapsed();
-        for id in &ids {
-            self.register_entity_id(*id);
-        }
 
         // Update graph label index for bulk-inserted GraphNode entities
         for (label, entity_id) in graph_labels.iter().flatten() {
