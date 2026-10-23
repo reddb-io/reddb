@@ -1,0 +1,3294 @@
+//! Unified Segment System
+//!
+//! Implements the Growing → Sealed segment lifecycle pattern. Segments are the
+//! fundamental unit of storage that handle entities of all types.
+//!
+//! # Write Path
+//!
+//! 1. WAL write (durability)
+//! 2. Growing-segment entity storage in RAM (HashMap mode or flat-vector mode
+//!    with epoch-published lock-free reads)
+//! 3. `seal()` freezes the growing segment into a Sealed segment and builds
+//!    pruning summaries over the immutable data
+//!
+//! # Read Path
+//!
+//! 1. Growing segment entity storage (most recent writes)
+//! 2. Sealed segments (older, immutable, zone-map guarded)
+//!
+//! # Lifecycle
+//!
+//! ```text
+//! Growing (in-memory, accepts writes)
+//!    ↓ seal() when full or manually triggered
+//! Sealed (immutable, zone maps built)
+//!    ↓ flush() for persistence
+//! Flushed (on disk, can be mmap'd)
+//!    ↓ archive() for cold storage
+//! Archived (compressed, infrequently accessed)
+//! ```
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
+use super::metadata::{Metadata, MetadataFilter, MetadataStorage};
+use super::segment_graph_index::SegmentGraphIndex;
+use super::segment_key_lookup::SegmentKeyLookup;
+use super::segment_unique_key::SegmentUniqueKey;
+use reddb_types::value_compare::partial_compare_values;
+use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
+
+/// Unique identifier for a segment
+pub type SegmentId = u64;
+
+/// Segment state in its lifecycle
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentState {
+    /// Accepts writes, partial/no index
+    Growing,
+    /// Transitioning, building indices
+    Sealing,
+    /// Immutable, fully indexed
+    Sealed,
+    /// Persisted to disk
+    Flushed,
+    /// Compressed, cold storage
+    Archived,
+}
+
+impl SegmentState {
+    /// Check if segment accepts writes
+    pub fn is_writable(&self) -> bool {
+        matches!(self, Self::Growing)
+    }
+
+    /// Check if segment is queryable
+    pub fn is_queryable(&self) -> bool {
+        !matches!(self, Self::Sealing)
+    }
+
+    /// Check if segment is immutable
+    pub fn is_immutable(&self) -> bool {
+        matches!(self, Self::Sealed | Self::Flushed | Self::Archived)
+    }
+}
+
+/// Configuration for segments
+#[derive(Debug, Clone)]
+pub struct SegmentConfig {
+    /// Maximum entities before auto-sealing
+    pub max_entities: usize,
+    /// Maximum memory bytes before auto-sealing
+    pub max_bytes: usize,
+    /// Maximum age in seconds before auto-sealing
+    pub max_age_secs: u64,
+    /// Enable vector indexing when sealed
+    pub build_vector_index: bool,
+    /// Enable graph indexing when sealed
+    pub build_graph_index: bool,
+    /// Compression level for archived segments (0-9)
+    pub compression_level: u8,
+}
+
+impl Default for SegmentConfig {
+    fn default() -> Self {
+        Self {
+            max_entities: 100_000,
+            max_bytes: 256 * 1024 * 1024, // 256 MB
+            max_age_secs: 3600,           // 1 hour
+            build_vector_index: true,
+            build_graph_index: true,
+            compression_level: 6,
+        }
+    }
+}
+
+/// Segment statistics
+#[derive(Debug, Clone, Default)]
+pub struct SegmentStats {
+    /// Number of entities
+    pub entity_count: usize,
+    /// Number of deleted entities
+    pub deleted_count: usize,
+    /// Approximate memory usage in bytes
+    pub memory_bytes: usize,
+    /// Number of vectors
+    pub vector_count: usize,
+    /// Number of graph nodes
+    pub node_count: usize,
+    /// Number of graph edges
+    pub edge_count: usize,
+    /// Number of table rows
+    pub row_count: usize,
+    /// Number of cross-references
+    pub cross_ref_count: usize,
+}
+
+/// Segment error types
+#[derive(Debug, Clone)]
+pub enum SegmentError {
+    /// Segment is not writable
+    NotWritable,
+    /// Entity not found
+    NotFound(EntityId),
+    /// Entity already exists
+    AlreadyExists(EntityId),
+    /// Segment is full
+    Full,
+    /// Invalid operation for current state
+    InvalidState(SegmentState),
+    /// Internal error
+    Internal(String),
+}
+
+impl std::fmt::Display for SegmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotWritable => write!(f, "segment is not writable"),
+            Self::NotFound(id) => write!(f, "entity not found: {}", id),
+            Self::AlreadyExists(id) => write!(f, "entity already exists: {}", id),
+            Self::Full => write!(f, "segment is full"),
+            Self::InvalidState(state) => write!(f, "invalid operation for state: {:?}", state),
+            Self::Internal(msg) => write!(f, "internal error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SegmentError {}
+
+use crate::clock::current_unix_secs;
+
+fn entity_id_from_probe_key(key: &[u8]) -> Option<EntityId> {
+    if let Ok(text) = std::str::from_utf8(key) {
+        if let Ok(raw) = text.parse::<u64>() {
+            return Some(EntityId::new(raw));
+        }
+    }
+
+    let bytes: [u8; 8] = key.try_into().ok()?;
+    Some(EntityId::new(u64::from_le_bytes(bytes)))
+}
+
+const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
+
+/// Approximate cost of one entry in the `deleted` tombstone map: the entity
+/// id and deletion ordinal plus hashbrown's control byte and load-factor slack.
+///
+/// Tombstones outlive the entity they bury — a sealed segment holds its
+/// `deleted` map for as long as the segment lives. That map is the memory
+/// consolidation reclaims even in HashMap mode, where the entity body itself
+/// was already freed by `force_delete`.
+const TOMBSTONE_ENTRY_BYTES: u64 = 24;
+
+#[derive(Debug, Clone)]
+struct UpdateIndexSnapshot {
+    pk_column_name: Option<String>,
+    pk_value: Option<Value>,
+    pk_index_key: Option<(String, String)>,
+    cross_refs: Vec<CrossRef>,
+}
+
+impl UpdateIndexSnapshot {
+    fn from_entity(entity: &UnifiedEntity) -> Self {
+        let (pk_column_name, pk_value) = match &entity.data {
+            EntityData::Row(row) => (
+                row.schema
+                    .as_deref()
+                    .and_then(|schema| schema.first().cloned()),
+                row.columns.first().cloned(),
+            ),
+            _ => (None, None),
+        };
+        let pk_index_key = pk_value
+            .as_ref()
+            .map(|value| (entity.kind.collection().to_string(), format!("{:?}", value)));
+        Self {
+            pk_column_name,
+            pk_value,
+            pk_index_key,
+            cross_refs: entity.cross_refs().to_vec(),
+        }
+    }
+}
+
+/// A unified segment that stores all entity types
+pub trait UnifiedSegment: Send + Sync {
+    /// Get segment ID
+    fn id(&self) -> SegmentId;
+
+    /// Get current state
+    fn state(&self) -> SegmentState;
+
+    /// Get collection/namespace name
+    fn collection(&self) -> &str;
+
+    /// Get statistics
+    fn stats(&self) -> SegmentStats;
+
+    /// O(1) live entity count (entities minus tombstones)
+    fn entity_count(&self) -> usize;
+
+    /// Check if entity exists
+    fn contains(&self, id: EntityId) -> bool;
+
+    /// Get an entity by ID
+    fn get(&self, id: EntityId) -> Option<&UnifiedEntity>;
+
+    /// Get mutable reference to entity
+    fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity>;
+
+    /// Insert a new entity
+    fn insert(&mut self, entity: UnifiedEntity) -> Result<EntityId, SegmentError>;
+
+    /// Update an existing entity
+    fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError>;
+
+    /// HOT-update: like update but receives the set of field names that actually
+    /// changed. Allows skipping index work when indexed columns are unaffected.
+    /// Default: falls back to full update.
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        let _ = modified_columns;
+        self.update(entity)
+    }
+
+    /// Delete an entity
+    fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError>;
+
+    /// Get metadata for an entity
+    fn get_metadata(&self, id: EntityId) -> Option<Metadata>;
+
+    /// Set metadata for an entity
+    fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError>;
+
+    /// Seal the segment (make immutable)
+    fn seal(&mut self) -> Result<(), SegmentError>;
+
+    /// Check if should auto-seal based on config
+    fn should_seal(&self, config: &SegmentConfig) -> bool;
+
+    /// Iterate over all entities
+    fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_>;
+
+    /// Iterate over entities of a specific kind
+    fn iter_kind(&self, kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_>;
+
+    /// Search entities by metadata filter
+    fn filter_metadata(
+        &self,
+        filters: &[(String, super::metadata::MetadataFilter)],
+    ) -> Vec<EntityId>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Zone map: per-column min/max for segment pruning
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tracks the min and max observed `Value` for one column in a segment.
+/// Used to skip segments that cannot satisfy a range or equality predicate.
+#[derive(Debug, Clone)]
+pub struct ColZone {
+    pub min: Value,
+    pub max: Value,
+    min_key: Option<CanonicalKey>,
+    max_key: Option<CanonicalKey>,
+}
+
+impl ColZone {
+    fn payload_bytes(&self) -> usize {
+        super::memory_size::value_heap_bytes(&self.min)
+            .saturating_add(super::memory_size::value_heap_bytes(&self.max))
+            .saturating_add(
+                self.min_key
+                    .as_ref()
+                    .map_or(0, super::memory_size::canonical_heap_bytes),
+            )
+            .saturating_add(
+                self.max_key
+                    .as_ref()
+                    .map_or(0, super::memory_size::canonical_heap_bytes),
+            )
+    }
+
+    fn new(v: Value) -> Self {
+        Self {
+            min_key: value_to_canonical_key(&v),
+            max_key: value_to_canonical_key(&v),
+            min: v.clone(),
+            max: v,
+        }
+    }
+
+    fn with_bounds(min: Value, max: Value) -> Self {
+        Self {
+            min_key: value_to_canonical_key(&min),
+            max_key: value_to_canonical_key(&max),
+            min,
+            max,
+        }
+    }
+
+    fn update(&mut self, v: &Value) {
+        if compare_zone_values(v, None, &self.min, self.min_key.as_ref())
+            .map(|o| o == std::cmp::Ordering::Less)
+            .unwrap_or(false)
+        {
+            self.min = v.clone();
+            self.min_key = value_to_canonical_key(v);
+        }
+        if compare_zone_values(v, None, &self.max, self.max_key.as_ref())
+            .map(|o| o == std::cmp::Ordering::Greater)
+            .unwrap_or(false)
+        {
+            self.max = v.clone();
+            self.max_key = value_to_canonical_key(v);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MultiColZone {
+    pub intervals: Vec<ColZone>,
+}
+
+impl MultiColZone {
+    fn can_skip(&self, pred: &ZoneColPred<'_>) -> bool {
+        !self.intervals.is_empty() && self.intervals.iter().all(|zone| pred.can_skip(zone))
+    }
+}
+
+fn compare_zone_values(
+    left: &Value,
+    left_key: Option<&CanonicalKey>,
+    right: &Value,
+    right_key: Option<&CanonicalKey>,
+) -> Option<std::cmp::Ordering> {
+    partial_compare_values(left, right).or_else(|| {
+        let left_key = left_key.cloned().or_else(|| value_to_canonical_key(left))?;
+        let right_key = right_key
+            .cloned()
+            .or_else(|| value_to_canonical_key(right))?;
+        (left_key.family() == right_key.family()).then(|| left_key.cmp(&right_key))
+    })
+}
+
+/// Tag-only variant of `ZoneColPred` — used where the Value is stored separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneColPredKind {
+    Eq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+/// A predicate on a single column that can be checked against a `ColZone`.
+#[derive(Debug, Clone)]
+pub enum ZoneColPred<'a> {
+    Eq(&'a Value),
+    Gt(&'a Value),
+    Gte(&'a Value),
+    Lt(&'a Value),
+    Lte(&'a Value),
+}
+
+impl<'a> ZoneColPred<'a> {
+    /// Returns `true` when the entire segment can be skipped (no row can match).
+    pub fn can_skip(&self, zone: &ColZone) -> bool {
+        match self {
+            // Equality: skip if val < min OR val > max
+            ZoneColPred::Eq(val) => {
+                compare_zone_values(val, None, &zone.min, zone.min_key.as_ref())
+                    .map(|o| o == std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+                    || compare_zone_values(val, None, &zone.max, zone.max_key.as_ref())
+                        .map(|o| o == std::cmp::Ordering::Greater)
+                        .unwrap_or(false)
+            }
+            // col > val: skip if max <= val (all rows have col ≤ val, none > val)
+            ZoneColPred::Gt(val) => {
+                compare_zone_values(&zone.max, zone.max_key.as_ref(), val, None)
+                    .map(|o| o != std::cmp::Ordering::Greater)
+                    .unwrap_or(false)
+            }
+            // col >= val: skip if max < val
+            ZoneColPred::Gte(val) => {
+                compare_zone_values(&zone.max, zone.max_key.as_ref(), val, None)
+                    .map(|o| o == std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+            }
+            // col < val: skip if min >= val
+            ZoneColPred::Lt(val) => {
+                compare_zone_values(&zone.min, zone.min_key.as_ref(), val, None)
+                    .map(|o| o != std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+            }
+            // col <= val: skip if min > val
+            ZoneColPred::Lte(val) => {
+                compare_zone_values(&zone.min, zone.min_key.as_ref(), val, None)
+                    .map(|o| o == std::cmp::Ordering::Greater)
+                    .unwrap_or(false)
+            }
+        }
+    }
+}
+
+/// The two physical kinds used by graph materialization passes.
+#[derive(Clone, Copy)]
+pub enum GraphEntityKind {
+    Node,
+    Edge,
+}
+
+impl GraphEntityKind {
+    fn mask(self) -> u8 {
+        match self {
+            Self::Node => 1,
+            Self::Edge => 2,
+        }
+    }
+
+    pub fn matches(self, kind: &EntityKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Node, EntityKind::GraphNode(_)) | (Self::Edge, EntityKind::GraphEdge(_))
+        )
+    }
+}
+
+/// Maximum physical positions examined under one segment read guard.
+pub const SCAN_BATCH_SIZE: usize = 256;
+
+/// Bounded ID provenance shared by segment journals and checkpoint projection.
+pub const CHECKPOINT_MUTATIONS_MAX: usize = 8192;
+
+/// Stable append-only positions, bounded when a scan opens the segment.
+pub struct SegmentScanCursor {
+    flat_end: usize,
+    hash_end: usize,
+    deleted_end: usize,
+    position: usize,
+}
+
+impl SegmentScanCursor {
+    pub fn remaining(&self) -> usize {
+        self.flat_end + self.hash_end - self.position
+    }
+
+    pub fn finished(&self) -> bool {
+        self.remaining() == 0
+    }
+}
+
+/// One indexed key at a time, with an exclusive resume ID and a source-wide
+/// upper bound captured before any batch. MVCC is checked during live hydration.
+pub struct GraphIndexCursor {
+    key_index: usize,
+    after: Option<EntityId>,
+    upper: EntityId,
+}
+
+impl GraphIndexCursor {
+    pub fn finished(&self, keys: &[EntityId]) -> bool {
+        self.key_index == keys.len()
+    }
+}
+
+/// Growing segment implementation (in-memory, writable)
+pub struct GrowingSegment {
+    /// Segment ID
+    id: SegmentId,
+    /// Collection/namespace name
+    collection: String,
+    /// Current state
+    state: SegmentState,
+    /// Creation timestamp
+    created_at: u64,
+    /// Last write timestamp
+    last_write_at: u64,
+
+    /// Entity storage (HashMap for random access)
+    entities: HashMap<EntityId, UnifiedEntity>,
+    /// Append-only positions for HashMap-resident IDs. Deleted entries stay
+    /// until the segment is reclaimed; flat storage already has stable positions.
+    hash_scan_ids: Vec<EntityId>,
+    /// Flat entity storage for bulk inserts (no HashMap overhead, O(1) by offset)
+    /// Used when entity IDs are sequential from base_entity_id
+    flat_entities: Vec<UnifiedEntity>,
+    /// Base entity ID for flat_entities (flat_entities[0].id == base_entity_id)
+    base_entity_id: u64,
+    /// Whether flat storage is active (bulk insert mode)
+    use_flat: bool,
+    /// Deleted entity IDs (tombstones)
+    // Ordinals never change or disappear during the segment lifetime. Cursors
+    // skip old tombstones but keep IDs relocated after their capture boundary.
+    deleted: HashMap<EntityId, usize>,
+    /// Metadata storage (type-aware)
+    metadata: MetadataStorage,
+
+    /// Primary key index: (collection, pk_value) → EntityId
+    pk_index: BTreeMap<(String, String), EntityId>,
+    /// Lazy schema-aware unique-key lookups, independent of the legacy
+    /// first-column index. Protected by the owning segment's entity lock.
+    unique_key_lookup: parking_lot::RwLock<Vec<SegmentUniqueKey>>,
+    unique_key_lookup_bytes: AtomicU64,
+    key_lookup: Option<SegmentKeyLookup>,
+    /// Type index: kind → EntityIds
+    kind_index: HashMap<String, HashSet<EntityId>>,
+    /// Conservative physical presence, independent of kind_index and MVCC.
+    /// Bits only accumulate; unrestricted mutable access sets both bits.
+    graph_kind_mask: u8,
+    /// Retains every physical graph version until physical reclamation.
+    graph_read_index: parking_lot::RwLock<Option<SegmentGraphIndex>>,
+    graph_read_index_bytes: AtomicU64,
+    /// Cross-reference index: source → Vec<(target, ref_type)>
+    cross_ref_forward: HashMap<EntityId, Vec<(EntityId, RefType)>>,
+    /// Reverse cross-reference index: target → Vec<(source, ref_type)>
+    cross_ref_reverse: HashMap<EntityId, Vec<(EntityId, RefType)>>,
+
+    /// Per-column zone maps: col_name → (min, max) for segment pruning
+    col_zones: HashMap<String, ColZone>,
+    zone_payload_bytes: usize,
+    /// Sealed-only minmax-multi summaries built from canonical ordering.
+    sealed_col_zones: HashMap<String, MultiColZone>,
+
+    /// Sequence counter for ordering
+    sequence: AtomicU64,
+    /// Volatile checkpoint invalidation; never part of the storage format.
+    checkpoint_revision: u64,
+    checkpoint_mutations: std::collections::VecDeque<(u64, EntityId)>,
+    /// Approximate payload bytes of the entities physically resident in this
+    /// segment. Resident means "still occupying memory", which includes
+    /// tombstoned entities in flat mode (their slot must stay so positional
+    /// lookup by `id - base_entity_id` keeps working).
+    memory_bytes: AtomicU64,
+    /// Payload bytes of the tombstoned entities that are still resident.
+    /// `memory_bytes - dead_entity_bytes` is the live payload.
+    dead_entity_bytes: u64,
+    /// Count of tombstoned entities that are still resident.
+    dead_resident_count: usize,
+
+    /// Epoch counter for lock-free reads of `flat_entities`.
+    ///
+    /// Updated with `Release` ordering after every flat-mode insert so that
+    /// readers can safely access `flat_entities[0..published_flat_len]` by
+    /// loading with `Acquire` ordering, without holding the segment RwLock.
+    /// Only meaningful when `use_flat == true`; always 0 in HashMap mode.
+    published_flat_len: AtomicUsize,
+}
+
+impl GrowingSegment {
+    pub fn may_contain_graph_kind(&self, kind: GraphEntityKind) -> bool {
+        self.graph_kind_mask & kind.mask() != 0
+    }
+
+    fn observe_graph_kind(&mut self, kind: &EntityKind) {
+        self.graph_kind_mask |= match kind {
+            EntityKind::GraphNode(_) => GraphEntityKind::Node.mask(),
+            EntityKind::GraphEdge(_) => GraphEntityKind::Edge.mask(),
+            _ => 0,
+        };
+    }
+
+    pub fn scan_cursor(&self) -> SegmentScanCursor {
+        SegmentScanCursor {
+            flat_end: self.flat_entities.len(),
+            hash_end: self.hash_scan_ids.len(),
+            deleted_end: self.deleted.len(),
+            position: 0,
+        }
+    }
+
+    /// Append-only slots survive insertions, deletions and sealing. The caller
+    /// owns the segment read guard and must not re-enter storage in `visit`.
+    /// IDs must be hydrated through the manager: retired sources can be stale.
+    pub fn scan_batch(
+        &self,
+        cursor: &mut SegmentScanCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(EntityId),
+    ) -> bool {
+        for _ in 0..SCAN_BATCH_SIZE {
+            if cursor.finished() {
+                break;
+            }
+            if !before_work() {
+                return false;
+            }
+            let id = if cursor.position < cursor.flat_end {
+                self.flat_entities[cursor.position].id
+            } else {
+                self.hash_scan_ids[cursor.position - cursor.flat_end]
+            };
+            cursor.position += 1;
+            let eligible = match self.deleted.get(&id) {
+                Some(&ordinal) => ordinal >= cursor.deleted_end,
+                // Unpublished consolidation eviction leaves an unused position
+                // without a tombstone. It must not become a candidate later.
+                None => self.get(id).is_some(),
+            };
+            if eligible {
+                visit(id);
+            }
+        }
+        true
+    }
+
+    /// Direct iteration without Box<dyn> trait dispatch. Returns false to stop early.
+    /// Uses concrete iterator types to avoid heap allocation per call.
+    #[inline]
+    pub fn for_each_fast<F>(&self, mut f: F) -> bool
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        if self.use_flat {
+            // Sequential Vec — best cache locality
+            if self.deleted.is_empty() {
+                for entity in &self.flat_entities {
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+                // Also walk the HashMap — entities added via per-row
+                // `insert()` after flat mode was initialized land there.
+                for entity in self.entities.values() {
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+            } else {
+                for entity in &self.flat_entities {
+                    if self.deleted.contains_key(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+                for entity in self.entities.values() {
+                    if self.deleted.contains_key(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+            }
+        } else {
+            // HashMap values — random order, no boxing
+            if self.deleted.is_empty() {
+                for entity in self.entities.values() {
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+            } else {
+                for entity in self.entities.values() {
+                    if self.deleted.contains_key(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Create a new growing segment
+    pub fn new(id: SegmentId, collection: impl Into<String>) -> Self {
+        let now = current_unix_secs();
+
+        Self {
+            id,
+            collection: collection.into(),
+            state: SegmentState::Growing,
+            created_at: now,
+            last_write_at: now,
+            entities: HashMap::new(),
+            hash_scan_ids: Vec::new(),
+            flat_entities: Vec::new(),
+            base_entity_id: 0,
+            use_flat: false,
+            deleted: HashMap::new(),
+            metadata: MetadataStorage::new(),
+            pk_index: BTreeMap::new(),
+            unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
+            unique_key_lookup_bytes: AtomicU64::new(0),
+            key_lookup: Some(SegmentKeyLookup::default()),
+            kind_index: HashMap::new(),
+            graph_read_index: parking_lot::RwLock::new(Some(SegmentGraphIndex::default())),
+            graph_read_index_bytes: AtomicU64::new(0),
+            graph_kind_mask: 0,
+            cross_ref_forward: HashMap::new(),
+            cross_ref_reverse: HashMap::new(),
+            col_zones: HashMap::new(),
+            zone_payload_bytes: 0,
+            sealed_col_zones: HashMap::new(),
+            sequence: AtomicU64::new(0),
+            checkpoint_revision: 0,
+            checkpoint_mutations: std::collections::VecDeque::new(),
+            memory_bytes: AtomicU64::new(0),
+            dead_entity_bytes: 0,
+            dead_resident_count: 0,
+            published_flat_len: AtomicUsize::new(0),
+        }
+    }
+
+    /// Get next sequence number
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn checkpoint_revision(&self) -> u64 {
+        self.checkpoint_revision
+    }
+
+    fn mark_checkpoint_entity_dirty(&mut self, id: EntityId) {
+        self.checkpoint_revision = self
+            .checkpoint_revision
+            .checked_add(1)
+            .expect("segment mutation counter must not overflow");
+        if self.checkpoint_mutations.len() == CHECKPOINT_MUTATIONS_MAX {
+            self.checkpoint_mutations.pop_front();
+        }
+        self.checkpoint_mutations
+            .push_back((self.checkpoint_revision, id));
+    }
+
+    pub fn checkpoint_mutations_since(&self, revision: u64) -> Option<Vec<EntityId>> {
+        if revision == self.checkpoint_revision {
+            return Some(Vec::new());
+        }
+        let mut expected = revision.checked_add(1)?;
+        let mut ids = Vec::new();
+        for &(sequence, id) in &self.checkpoint_mutations {
+            if sequence <= revision {
+                continue;
+            }
+            if sequence != expected {
+                return None;
+            }
+            ids.push(id);
+            expected = expected.checked_add(1)?;
+        }
+        (expected == self.checkpoint_revision.checked_add(1)?).then_some(ids)
+    }
+
+    pub fn checkpoint_tracking_bytes(&self) -> usize {
+        self.checkpoint_mutations.capacity() * std::mem::size_of::<(u64, EntityId)>()
+    }
+
+    fn has_live_entity(&self, id: EntityId) -> bool {
+        if self.deleted.contains_key(&id) {
+            return false;
+        }
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if self
+                    .flat_entities
+                    .get(idx)
+                    .is_some_and(|entity| entity.id == id)
+                {
+                    return true;
+                }
+            }
+            // Same fallback as `get()` — entities added via `insert()`
+            // after flat mode was initialized live only in the HashMap.
+            self.entities.contains_key(&id)
+        } else {
+            self.entities.contains_key(&id)
+        }
+    }
+
+    fn update_existing_entity_in_place(
+        &mut self,
+        entity: &UnifiedEntity,
+    ) -> Result<UpdateIndexSnapshot, SegmentError> {
+        self.mark_checkpoint_entity_dirty(entity.id);
+        self.invalidate_unique_key_lookup();
+        if self
+            .get(entity.id)
+            .is_some_and(|old| SegmentKeyLookup::key(old) != SegmentKeyLookup::key(entity))
+        {
+            if let Some(mut index) = self.key_lookup.take() {
+                index.remove(
+                    self.get(entity.id)
+                        .expect("invariant: existing replacement row"),
+                );
+                index.insert(entity);
+                self.key_lookup = Some(index);
+            }
+        }
+        if (self.graph_kind_mask != 0
+            || matches!(
+                entity.kind,
+                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            ))
+            && self
+                .get(entity.id)
+                .is_some_and(|old| !SegmentGraphIndex::same_keys(old, entity))
+        {
+            self.invalidate_graph_read_index();
+        }
+        // Record before replacement, including forced sealed updates. Failed
+        // updates may leave a false positive, never a false negative.
+        self.observe_graph_kind(&entity.kind);
+        if self.use_flat {
+            let raw = entity.id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if let Some(slot) = self
+                    .flat_entities
+                    .get_mut(idx)
+                    .filter(|slot| slot.id == entity.id)
+                {
+                    let snapshot = UpdateIndexSnapshot::from_entity(slot);
+                    let old_bytes = Self::estimate_entity_size(slot);
+                    slot.clone_from(entity);
+                    self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
+                    return Ok(snapshot);
+                }
+            }
+            let Some(slot) = self.entities.get_mut(&entity.id) else {
+                return Err(SegmentError::NotFound(entity.id));
+            };
+            let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            let old_bytes = Self::estimate_entity_size(slot);
+            slot.clone_from(entity);
+            self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
+            Ok(snapshot)
+        } else {
+            let Some(slot) = self.entities.get_mut(&entity.id) else {
+                return Err(SegmentError::NotFound(entity.id));
+            };
+            let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            let old_bytes = Self::estimate_entity_size(slot);
+            slot.clone_from(entity);
+            self.replace_entity_memory(old_bytes, Self::estimate_entity_size(entity));
+            Ok(snapshot)
+        }
+    }
+
+    fn apply_hot_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        modified_columns: &[String],
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let old = self.update_existing_entity_in_place(entity)?;
+        self.reindex_for_update(&old, entity, Some(modified_columns));
+        self.update_col_zones_from_entity(entity);
+        if let Some(metadata) = metadata {
+            self.metadata.set_all(entity.id, metadata);
+        }
+        Ok(())
+    }
+
+    fn apply_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let old = self.update_existing_entity_in_place(entity)?;
+        self.reindex_for_update(&old, entity, None);
+        self.update_col_zones_from_entity(entity);
+        if let Some(metadata) = metadata {
+            self.metadata.set_all(entity.id, metadata);
+        }
+        Ok(())
+    }
+
+    pub fn update_hot_batch_with_metadata<'a, I>(&mut self, items: I) -> Result<(), SegmentError>
+    where
+        I: IntoIterator<Item = (&'a UnifiedEntity, &'a [String], Option<&'a Metadata>)>,
+    {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        let items: Vec<(&UnifiedEntity, &[String], Option<&Metadata>)> =
+            items.into_iter().collect();
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        for (entity, _, _) in &items {
+            if !self.has_live_entity(entity.id) {
+                return Err(SegmentError::NotFound(entity.id));
+            }
+        }
+
+        for (entity, modified_columns, metadata) in items {
+            self.apply_hot_update_with_metadata(entity, modified_columns, metadata)?;
+        }
+
+        self.last_write_at = current_unix_secs();
+        Ok(())
+    }
+
+    /// Preserve the first removal order, including repeated flat deletes.
+    fn record_tombstone(&mut self, id: EntityId) -> bool {
+        self.mark_checkpoint_entity_dirty(id);
+        let ordinal = self.deleted.len();
+        match self.deleted.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ordinal);
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(_) => false,
+        }
+    }
+
+    /// Tombstone a flat-mode entity in place. Its slot stays so that positional
+    /// lookup by `id - base_entity_id` keeps working, so its payload keeps
+    /// costing memory until consolidation merges the segment away.
+    ///
+    /// Returns `false` when the entity was already tombstoned.
+    fn tombstone_flat_entity(&mut self, idx: usize, id: EntityId) -> bool {
+        self.invalidate_unique_key_lookup();
+        if !self.record_tombstone(id) {
+            return false;
+        }
+        if let Some(index) = self.key_lookup.as_mut() {
+            index.remove(&self.flat_entities[idx]);
+        }
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.remove(&self.flat_entities[idx]);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
+        let size = Self::estimate_entity_size(&self.flat_entities[idx]) as u64;
+        self.dead_entity_bytes += size;
+        self.dead_resident_count += 1;
+        self.metadata.remove_all(id);
+        true
+    }
+
+    /// Remove a HashMap-resident entity. The payload is freed immediately; only
+    /// the tombstone survives, and consolidation reclaims that.
+    ///
+    /// Returns `false` when the entity is not present.
+    fn remove_hashmap_entity(&mut self, id: EntityId) -> bool {
+        self.invalidate_unique_key_lookup();
+        let Some(entity) = self.entities.remove(&id) else {
+            return false;
+        };
+        self.release_memory(Self::estimate_entity_size(&entity));
+        self.unindex_entity(&entity);
+        self.metadata.remove_all(id);
+        self.record_tombstone(id);
+        true
+    }
+
+    pub fn delete_batch(&mut self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut deleted_ids = Vec::with_capacity(ids.len());
+
+        if self.use_flat {
+            for &id in ids {
+                let raw = id.raw();
+                if raw < self.base_entity_id {
+                    if self.remove_hashmap_entity(id) {
+                        deleted_ids.push(id);
+                    }
+                    continue;
+                }
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    if self.tombstone_flat_entity(idx, id) {
+                        deleted_ids.push(id);
+                    }
+                } else if self.remove_hashmap_entity(id) {
+                    deleted_ids.push(id);
+                }
+            }
+        } else {
+            for &id in ids {
+                if self.remove_hashmap_entity(id) {
+                    deleted_ids.push(id);
+                }
+            }
+        }
+
+        if !deleted_ids.is_empty() {
+            self.last_write_at = current_unix_secs();
+        }
+
+        Ok(deleted_ids)
+    }
+
+    /// Update memory estimate
+    fn add_memory(&self, bytes: usize) {
+        self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn replace_entity_memory(&self, previous: usize, current: usize) {
+        if current >= previous {
+            self.add_memory(current - previous);
+        } else {
+            self.release_memory(previous - current);
+        }
+    }
+
+    /// This segment's approximate resident bytes. One relaxed load — the
+    /// arena's contribution to the shared accounting pool (ADR 0073 §2).
+    /// Unlike `stats()` this never walks the entity map, so a stats reader
+    /// does not pay `O(entities)` to observe memory.
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes.load(Ordering::Relaxed)
+            + self.zone_payload_bytes as u64
+            + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
+            + self
+                .key_lookup
+                .as_ref()
+                .map_or(0, SegmentKeyLookup::memory_bytes)
+            + self.graph_read_index_bytes.load(Ordering::Relaxed)
+            + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
+    }
+
+    /// Release a resident entity's payload from the memory estimate. Only for
+    /// paths that physically drop the entity (HashMap removal, eviction).
+    fn release_memory(&self, bytes: usize) {
+        let mut current = self.memory_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes as u64);
+            match self.memory_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Entities physically present, live or tombstoned-but-resident.
+    pub fn resident_entity_count(&self) -> usize {
+        self.flat_entities.len() + self.entities.len()
+    }
+
+    /// Entities visible to readers.
+    pub fn live_entity_count(&self) -> usize {
+        self.resident_entity_count()
+            .saturating_sub(self.dead_resident_count)
+    }
+
+    /// Tombstones this segment carries — including the ones whose entity body
+    /// was already freed. The set itself is what leaks without consolidation.
+    pub fn tombstone_count(&self) -> usize {
+        self.deleted.len()
+    }
+
+    /// Approximate bytes this segment holds: resident entity payloads plus the
+    /// tombstone set.
+    pub fn resident_bytes(&self) -> u64 {
+        self.memory_bytes() + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+    }
+
+    /// Bytes a consolidation of this segment would return to the budget: the
+    /// payloads of resident tombstones plus the tombstone set that buries them.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.dead_entity_bytes + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+    }
+
+    /// Snapshot the ids of every live entity, in iteration order.
+    ///
+    /// Consolidation copies a segment across several maintenance ticks, so it
+    /// needs a stable cursor into the segment that survives concurrent
+    /// tombstoning. Ids are stable; iteration position is not.
+    pub fn live_entity_ids(&self) -> Vec<EntityId> {
+        let mut ids = Vec::with_capacity(self.live_entity_count());
+        self.for_each_fast(|entity| {
+            ids.push(entity.id);
+            true
+        });
+        ids
+    }
+
+    /// Move an existing entity into a writable segment without assigning a
+    /// new sequence identity. A pending update's preimage must still match
+    /// its durable checkpoint after the MVCC delete stamp is normalized.
+    pub fn insert_preserving_sequence(
+        &mut self,
+        entity: UnifiedEntity,
+    ) -> Result<EntityId, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+        if self.entities.contains_key(&entity.id) {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+        let id = entity.id;
+        self.adopt_entity(entity, None);
+        self.last_write_at = current_unix_secs();
+        Ok(id)
+    }
+
+    /// Take an entity from another segment, preserving its identity.
+    ///
+    /// Unlike `insert`, this keeps `sequence_id` — the merged segment is the
+    /// same rows, not new ones, and callers (`physical_collection_roots`, MVCC
+    /// ordering) read that field. All derived structures are rebuilt: kind
+    /// index, primary-key index, cross-reference forward/reverse indexes, and
+    /// per-column zone maps.
+    pub fn adopt_entity(&mut self, entity: UnifiedEntity, metadata: Option<Metadata>) {
+        let id = entity.id;
+
+        // Keep the sequence counter ahead of every adopted entity, so a later
+        // insert into this segment cannot re-issue a live sequence number.
+        let next = entity.sequence_id.saturating_add(1);
+        if self.sequence.load(Ordering::Relaxed) < next {
+            self.sequence.store(next, Ordering::Relaxed);
+        }
+
+        self.add_memory(Self::estimate_entity_size(&entity));
+        self.index_entity(&entity);
+        self.update_col_zones_from_entity(&entity);
+        self.entities.insert(id, entity);
+
+        if let Some(metadata) = metadata {
+            if !metadata.is_empty() {
+                self.metadata.set_all(id, &metadata);
+            }
+        }
+    }
+
+    /// Physically remove an entity without leaving a tombstone.
+    ///
+    /// Only legal on a segment nobody can see yet — the half-built merged
+    /// segment, when the swap discovers a copied row was deleted from its
+    /// source mid-consolidation. A tombstone here would defeat the whole point.
+    pub fn evict_entity(&mut self, id: EntityId) -> bool {
+        self.mark_checkpoint_entity_dirty(id);
+        self.invalidate_unique_key_lookup();
+        let Some(entity) = self.entities.remove(&id) else {
+            return false;
+        };
+        self.release_memory(Self::estimate_entity_size(&entity));
+        self.unindex_entity(&entity);
+        for cross_ref in entity.cross_refs() {
+            if let Some(reverse) = self.cross_ref_reverse.get_mut(&cross_ref.target) {
+                reverse.retain(|(source, _)| *source != id);
+            }
+        }
+        self.metadata.remove_all(id);
+        true
+    }
+
+    /// Estimate memory for an entity
+    fn estimate_entity_size(entity: &UnifiedEntity) -> usize {
+        super::memory_size::entity_bytes(entity)
+    }
+
+    /// Update per-column zone maps from a newly inserted entity's fields.
+    ///
+    /// Handles both insert paths:
+    /// - **Named** (`row.named`): individual inserts where fields are a `HashMap<String, Value>`
+    /// - **Positional** (`row.columns` + `row.schema`): bulk-inserted entities stored as `Vec<Value>`
+    ///   keyed by the shared schema. Previously this path was silently skipped, meaning zone maps
+    ///   were always empty for bulk-loaded tables and segment pruning never fired.
+    fn update_column_zone(&mut self, column: &str, value: &Value) {
+        if matches!(value, Value::Null) {
+            return;
+        }
+        match self.col_zones.entry(column.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let before = entry.get().payload_bytes();
+                entry.get_mut().update(value);
+                self.zone_payload_bytes = self
+                    .zone_payload_bytes
+                    .saturating_sub(before)
+                    .saturating_add(entry.get().payload_bytes());
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let zone = ColZone::new(value.clone());
+                self.zone_payload_bytes =
+                    self.zone_payload_bytes.saturating_add(zone.payload_bytes());
+                entry.insert(zone);
+            }
+        }
+    }
+
+    fn update_col_zones_from_entity(&mut self, entity: &UnifiedEntity) {
+        if let EntityData::Row(row) = &entity.data {
+            if let Some(named) = &row.named {
+                for (column, value) in named {
+                    self.update_column_zone(column, value);
+                }
+            } else if let Some(schema) = &row.schema {
+                for (column, value) in schema.iter().zip(&row.columns) {
+                    self.update_column_zone(column, value);
+                }
+            }
+        }
+    }
+
+    fn rebuild_sealed_col_zones(&mut self) {
+        let mut values_by_col: HashMap<String, Vec<(CanonicalKey, Value)>> = HashMap::new();
+        let mut family_by_col: HashMap<String, reddb_types::CanonicalKeyFamily> = HashMap::new();
+        let mut mixed_family_cols = HashSet::new();
+        let mut unsupported_cols = HashSet::new();
+
+        let mut observe_row = |row: &super::entity::RowData| {
+            for (col, value) in row.iter_fields() {
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                let Some(key) = value_to_canonical_key(value) else {
+                    unsupported_cols.insert(col.to_string());
+                    continue;
+                };
+                match family_by_col.get(col).copied() {
+                    Some(existing) if existing != key.family() => {
+                        mixed_family_cols.insert(col.to_string());
+                    }
+                    None => {
+                        family_by_col.insert(col.to_string(), key.family());
+                    }
+                    _ => {}
+                }
+                values_by_col
+                    .entry(col.to_string())
+                    .or_default()
+                    .push((key, value.clone()));
+            }
+        };
+
+        if self.use_flat {
+            for entity in &self.flat_entities {
+                if self.deleted.contains_key(&entity.id) {
+                    continue;
+                }
+                if let EntityData::Row(row) = &entity.data {
+                    observe_row(row);
+                }
+            }
+        } else {
+            for entity in self.entities.values() {
+                if self.deleted.contains_key(&entity.id) {
+                    continue;
+                }
+                if let EntityData::Row(row) = &entity.data {
+                    observe_row(row);
+                }
+            }
+        }
+
+        let mut sealed_col_zones = HashMap::new();
+        for (col, mut entries) in values_by_col {
+            if mixed_family_cols.contains(&col)
+                || unsupported_cols.contains(&col)
+                || entries.is_empty()
+            {
+                continue;
+            }
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            entries.dedup_by(|left, right| left.0 == right.0);
+
+            let intervals = build_minmax_multi_intervals(&entries, SEALED_MULTI_ZONE_MAX_INTERVALS);
+            if intervals.len() > 1 {
+                sealed_col_zones.insert(col, MultiColZone { intervals });
+            }
+        }
+
+        let previous = self
+            .sealed_col_zones
+            .values()
+            .flat_map(|zones| &zones.intervals)
+            .map(ColZone::payload_bytes)
+            .fold(0, usize::saturating_add);
+        let current = sealed_col_zones
+            .values()
+            .flat_map(|zones| &zones.intervals)
+            .map(ColZone::payload_bytes)
+            .fold(0, usize::saturating_add);
+        self.zone_payload_bytes = self
+            .zone_payload_bytes
+            .saturating_sub(previous)
+            .saturating_add(current);
+        self.sealed_col_zones = sealed_col_zones;
+    }
+
+    /// Returns `true` when this segment can be entirely skipped for the given predicates.
+    /// A segment is skipped only if ALL predicates say so (conservative: any non-skippable
+    /// predicate forces the scan to proceed).
+    pub fn can_skip_zone_preds(&self, preds: &[(&str, ZoneColPred<'_>)]) -> bool {
+        if preds.is_empty() {
+            return false;
+        }
+        for (col, pred) in preds {
+            if let Some(zone) = self.sealed_col_zones.get(*col) {
+                if zone.can_skip(pred) {
+                    return true;
+                }
+                continue;
+            }
+            if let Some(zone) = self.col_zones.get(*col) {
+                if pred.can_skip(zone) {
+                    return true; // ONE predicate suffices to skip
+                }
+            }
+        }
+        false
+    }
+
+    /// Index an entity
+    fn index_entity(&mut self, entity: &UnifiedEntity) {
+        self.mark_checkpoint_entity_dirty(entity.id);
+        if let Some(index) = self.key_lookup.as_mut() {
+            index.insert(entity);
+        }
+        self.hash_scan_ids.push(entity.id);
+        self.observe_graph_kind(&entity.kind);
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.insert(entity);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
+        let indexes = self.unique_key_lookup.get_mut();
+        for index in indexes.iter_mut() {
+            index.insert(entity);
+        }
+        self.unique_key_lookup_bytes.store(
+            indexes
+                .iter()
+                .map(|index| index.memory_bytes() as u64)
+                .sum(),
+            Ordering::Relaxed,
+        );
+        // Kind index
+        let kind_key = entity.kind.storage_type().to_string();
+        self.kind_index
+            .entry(kind_key)
+            .or_default()
+            .insert(entity.id);
+
+        // Primary key index (if applicable)
+        if let EntityData::Row(row) = &entity.data {
+            if let Some(first_col) = row.columns.first() {
+                let pk_str = format!("{:?}", first_col);
+                self.pk_index
+                    .insert((entity.kind.collection().to_string(), pk_str), entity.id);
+            }
+        }
+
+        // Cross-reference indices
+        for cross_ref in entity.cross_refs() {
+            self.cross_ref_forward
+                .entry(cross_ref.source)
+                .or_default()
+                .push((cross_ref.target, cross_ref.ref_type));
+
+            self.cross_ref_reverse
+                .entry(cross_ref.target)
+                .or_default()
+                .push((cross_ref.source, cross_ref.ref_type));
+        }
+    }
+
+    fn invalidate_graph_read_index(&mut self) {
+        *self.graph_read_index.get_mut() = None;
+        self.graph_read_index_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// The owning segment read lock keeps candidates stable. Callers must not
+    /// re-enter storage in `visit`; collect IDs and evaluate RLS after unlocking.
+
+    #[cfg(test)]
+    pub fn visit_graph_index_candidates(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> bool {
+        let Some(cached) = self.graph_read_index_for_query(before_work) else {
+            return false;
+        };
+        let index = cached.as_ref().expect("complete graph index");
+        for key in keys {
+            if !before_work() {
+                return false;
+            }
+            for id in index.candidates(kind, *key) {
+                if !before_work() {
+                    return false;
+                }
+                if let Some(entity) = self.get(id) {
+                    if !visit(entity) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn graph_read_index_for_query(
+        &self,
+        before_work: &mut impl FnMut() -> bool,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<SegmentGraphIndex>>> {
+        let mut cached = self.graph_read_index.read();
+        if cached.is_none() {
+            drop(cached);
+            let mut writer = self.graph_read_index.write();
+            if writer.is_none() {
+                let mut index = SegmentGraphIndex::default();
+                // Only unrestricted structural mutation invalidates the index.
+                // A stopped rebuild is discarded, never published partially.
+                if !self.for_each_fast(|entity| {
+                    if !before_work() {
+                        return false;
+                    }
+                    index.insert(entity);
+                    true
+                }) {
+                    return None;
+                }
+                self.graph_read_index_bytes
+                    .store(index.memory_bytes(), Ordering::Relaxed);
+                *writer = Some(index);
+            }
+            cached = parking_lot::RwLockWriteGuard::downgrade(writer);
+        }
+        Some(cached)
+    }
+
+    pub fn graph_index_cursor(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        before_work: &mut impl FnMut() -> bool,
+    ) -> Option<GraphIndexCursor> {
+        let cached = self.graph_read_index_for_query(before_work)?;
+        let index = cached.as_ref().expect("complete graph index");
+        let mut upper = EntityId::new(0);
+        for key in keys {
+            if !before_work() {
+                return None;
+            }
+            if let Some(last) = index.candidates(kind, *key).next_back() {
+                upper = upper.max(last);
+            }
+        }
+        Some(GraphIndexCursor {
+            key_index: 0,
+            after: None,
+            upper,
+        })
+    }
+
+    /// Collect at most SCAN_BATCH_SIZE physical index entries without payload
+    /// copies. Resume by key seek, never by rescanning an already consumed prefix.
+    pub fn graph_index_batch(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        cursor: &mut GraphIndexCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(EntityId),
+    ) -> bool {
+        self.graph_index_batch_with_limit(kind, keys, cursor, before_work, visit, SCAN_BATCH_SIZE)
+    }
+
+    pub fn graph_index_batch_with_limit(
+        &self,
+        kind: GraphEntityKind,
+        keys: &[EntityId],
+        cursor: &mut GraphIndexCursor,
+        before_work: &mut impl FnMut() -> bool,
+        visit: &mut impl FnMut(EntityId),
+        limit: usize,
+    ) -> bool {
+        assert!(
+            limit > 0 && limit <= SCAN_BATCH_SIZE,
+            "bounded graph index batch"
+        );
+        let Some(cached) = self.graph_read_index_for_query(before_work) else {
+            return false;
+        };
+        let index = cached.as_ref().expect("complete graph index");
+        let mut count = 0;
+        while !cursor.finished(keys) && count < limit {
+            let key = keys[cursor.key_index];
+            if !before_work() {
+                return false;
+            }
+            for id in index
+                .candidates_after(kind, key, cursor.after, cursor.upper)
+                .take(limit - count)
+            {
+                if !before_work() {
+                    return false;
+                }
+                cursor.after = Some(id);
+                count += 1;
+                visit(id);
+            }
+            if count == limit && cursor.after != Some(cursor.upper) {
+                break;
+            }
+            cursor.key_index += 1;
+            cursor.after = None;
+        }
+        true
+    }
+
+    /// Probe one declared UNIQUE/PRIMARY KEY against physical rows. Cache all
+    /// current definitions together so alternating constraints never rebuilds
+    /// the same segment. Schema changes replace the set; mutations invalidate it.
+    /// The caller owns MVCC conflict policy and null-key admission.
+    pub fn find_unique_key_conflict(
+        &self,
+        columns: &[Vec<String>],
+        key_index: usize,
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
+    ) -> Option<EntityId> {
+        assert!(
+            key_index < columns.len(),
+            "constraint index belongs to current schema"
+        );
+        let cached = self.unique_key_lookup.read();
+        if cached.iter().map(|index| &index.columns).eq(columns.iter()) {
+            return self.find_unique_key_candidate(
+                &cached[key_index],
+                signatures,
+                exclude_id,
+                reserves_key,
+            );
+        }
+        drop(cached);
+        let mut cached = self.unique_key_lookup.write();
+        if !cached.iter().map(|index| &index.columns).eq(columns.iter()) {
+            let mut indexes: Vec<_> = columns
+                .iter()
+                .map(|columns| SegmentUniqueKey::new(columns))
+                .collect();
+            self.for_each_fast(|entity| {
+                for index in &mut indexes {
+                    index.insert(entity);
+                }
+                true
+            });
+            self.unique_key_lookup_bytes.store(
+                indexes
+                    .iter()
+                    .map(|index| index.memory_bytes() as u64)
+                    .sum(),
+                Ordering::Relaxed,
+            );
+            *cached = indexes;
+        }
+        self.find_unique_key_candidate(&cached[key_index], signatures, exclude_id, reserves_key)
+    }
+
+    fn find_unique_key_candidate(
+        &self,
+        index: &SegmentUniqueKey,
+        signatures: &[String],
+        exclude_id: Option<EntityId>,
+        reserves_key: &impl Fn(&UnifiedEntity) -> bool,
+    ) -> Option<EntityId> {
+        index.candidates(signatures).iter().copied().find(|id| {
+            if Some(*id) == exclude_id {
+                return false;
+            }
+            let Some(
+                entity @ UnifiedEntity {
+                    data: EntityData::Row(row),
+                    ..
+                },
+            ) = self.get(*id)
+            else {
+                return false;
+            };
+            index
+                .columns
+                .iter()
+                .zip(signatures)
+                .all(|(column, signature)| {
+                    row.get_field(column)
+                        .is_some_and(|value| format!("{value:?}") == *signature)
+                })
+                && reserves_key(entity)
+        })
+    }
+
+    fn invalidate_unique_key_lookup(&mut self) {
+        *self.unique_key_lookup.get_mut() = Vec::new();
+        self.unique_key_lookup_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// Only matching-key candidates reach `visible`; no result vector or row clones.
+    /// Raw mutable rows are rechecked alongside indexed candidates.
+    pub fn find_key_entity(
+        &self,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&UnifiedEntity> {
+        // Writers may temporarily take the index while updating its candidates,
+        // but publish it again before releasing their exclusive segment guard.
+        let index = self
+            .key_lookup
+            .as_ref()
+            .expect("segment owns its key index");
+        self.find_key_candidate(index, key, newest, visible)
+    }
+
+    fn find_key_candidate(
+        &self,
+        index: &SegmentKeyLookup,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&UnifiedEntity> {
+        self.select_key_entity(
+            index
+                .candidates(key)
+                .iter()
+                .chain(index.mutated_candidates())
+                .filter_map(|id| self.get(*id)),
+            key,
+            newest,
+            visible,
+        )
+    }
+
+    fn select_key_entity<'a>(
+        &self,
+        entities: impl Iterator<Item = &'a UnifiedEntity>,
+        key: &str,
+        newest: bool,
+        visible: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Option<&'a UnifiedEntity> {
+        let mut best: Option<&UnifiedEntity> = None;
+        for entity in entities {
+            // Fingerprint collisions must never become logical-key matches.
+            if SegmentKeyLookup::key(entity) != Some(key) || !visible(entity) {
+                continue;
+            }
+            if !newest {
+                return Some(entity);
+            }
+            if best.is_none_or(|current| entity.xmin >= current.xmin) {
+                best = Some(entity);
+            }
+        }
+        best
+    }
+
+    /// Check whether an early-exit probe key exists in this segment.
+    pub fn may_contain_exact_key(&self, key: &[u8]) -> bool {
+        if let Some(id) = entity_id_from_probe_key(key) {
+            return self.has_live_entity(id);
+        }
+
+        let Ok(pk_str) = std::str::from_utf8(key) else {
+            return false;
+        };
+        let pk_key = (self.collection.clone(), pk_str.to_string());
+        self.pk_index
+            .get(&pk_key)
+            .is_some_and(|id| self.has_live_entity(*id))
+    }
+
+    /// Remove entity from indices
+    fn unindex_entity(&mut self, entity: &UnifiedEntity) {
+        if let Some(index) = self.key_lookup.as_mut() {
+            index.remove(entity);
+        }
+        if let Some(index) = self.graph_read_index.get_mut() {
+            index.remove(entity);
+            self.graph_read_index_bytes
+                .store(index.memory_bytes(), Ordering::Relaxed);
+        }
+        // Kind index
+        let kind_key = entity.kind.storage_type().to_string();
+        if let Some(set) = self.kind_index.get_mut(&kind_key) {
+            set.remove(&entity.id);
+        }
+
+        // Primary key index
+        if let EntityData::Row(row) = &entity.data {
+            if let Some(first_col) = row.columns.first() {
+                let pk_str = format!("{:?}", first_col);
+                self.pk_index
+                    .remove(&(entity.kind.collection().to_string(), pk_str));
+            }
+        }
+
+        // Cross-reference indices
+        self.cross_ref_forward.remove(&entity.id);
+        // Note: reverse refs from this entity still need cleanup
+    }
+
+    /// Selective re-index for updates.
+    ///
+    /// Skips index work that is not needed:
+    /// - `kind_index`: entity kind is immutable, so remove+reinsert is always
+    ///   a no-op; we skip it entirely and keep the existing entry.
+    /// - `pk_index`: only updated when the primary-key column (first column of
+    ///   a Row entity) actually changed. When `modified_columns` is provided,
+    ///   we check membership; otherwise we compare old vs new pk value.
+    /// - `cross_ref`: only rebuilt when the refs actually differ.
+    fn reindex_for_update(
+        &mut self,
+        old: &UpdateIndexSnapshot,
+        new: &UnifiedEntity,
+        modified_columns: Option<&[String]>,
+    ) {
+        // kind_index: kind is immutable — the existing entry is already correct.
+        // No remove + reinsert needed.
+
+        // pk_index: only update when pk column is touched
+        let pk_changed = match &new.data {
+            EntityData::Row(new_row) => {
+                if let Some(cols) = modified_columns {
+                    // Caller told us exactly what changed — check if first schema column modified
+                    // pk is the first column; check by name against the schema or by position 0
+                    let pk_col_name = old.pk_column_name.as_deref().or_else(|| {
+                        new_row
+                            .schema
+                            .as_deref()
+                            .and_then(|schema| schema.first().map(|name| name.as_str()))
+                    });
+                    match pk_col_name {
+                        Some(pk_name) => cols.iter().any(|c| c.eq_ignore_ascii_case(pk_name)),
+                        // No schema — fall back to value comparison
+                        None => old.pk_value.as_ref() != new_row.columns.first(),
+                    }
+                } else {
+                    old.pk_value.as_ref() != new_row.columns.first()
+                }
+            }
+            // Non-row types don't use pk_index
+            _ => false,
+        };
+
+        if pk_changed {
+            // Remove old pk entry
+            if let Some((collection, pk_str)) = &old.pk_index_key {
+                self.pk_index.remove(&(collection.clone(), pk_str.clone()));
+            }
+            // Insert new pk entry
+            if let EntityData::Row(row) = &new.data {
+                if let Some(first_col) = row.columns.first() {
+                    let pk_str = format!("{:?}", first_col);
+                    self.pk_index
+                        .insert((new.kind.collection().to_string(), pk_str), new.id);
+                }
+            }
+        }
+
+        // cross_ref: only rebuild when refs actually changed
+        let new_refs = new.cross_refs();
+        if old.cross_refs.as_slice() != new_refs {
+            // Remove stale forward refs
+            self.cross_ref_forward.remove(&new.id);
+            // Prune stale entries from reverse index
+            for cross_ref in &old.cross_refs {
+                if let Some(rev) = self.cross_ref_reverse.get_mut(&cross_ref.target) {
+                    rev.retain(|(src, _)| *src != new.id);
+                }
+            }
+            // Add new refs
+            for cross_ref in new_refs {
+                self.cross_ref_forward
+                    .entry(cross_ref.source)
+                    .or_default()
+                    .push((cross_ref.target, cross_ref.ref_type));
+                self.cross_ref_reverse
+                    .entry(cross_ref.target)
+                    .or_default()
+                    .push((cross_ref.source, cross_ref.ref_type));
+            }
+        }
+    }
+
+    /// Get entities referencing the given entity
+    pub fn get_references_to(&self, id: EntityId) -> Vec<(EntityId, RefType)> {
+        self.cross_ref_reverse.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Get entities referenced by the given entity
+    pub fn get_references_from(&self, id: EntityId) -> Vec<(EntityId, RefType)> {
+        self.cross_ref_forward.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Get age in seconds
+    pub fn age_secs(&self) -> u64 {
+        let now = current_unix_secs();
+        now.saturating_sub(self.created_at)
+    }
+
+    /// Get time since last write
+    pub fn idle_secs(&self) -> u64 {
+        let now = current_unix_secs();
+        now.saturating_sub(self.last_write_at)
+    }
+
+    /// Turbo bulk insert — minimal allocations per entity.
+    ///
+    /// Optimizations vs normal insert:
+    /// - Skips cross-refs
+    /// - Resolves kind_index once per consecutive run of the same storage type
+    /// - Pre-allocates kind_index HashSet
+    /// - Skips contains_key check (caller guarantees unique IDs)
+    /// - Uses Relaxed ordering for sequence counter
+    pub fn bulk_insert(
+        &mut self,
+        entities: Vec<UnifiedEntity>,
+    ) -> Result<Vec<EntityId>, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        for entity in &entities {
+            self.mark_checkpoint_entity_dirty(entity.id);
+        }
+
+        if let Some(index) = self.key_lookup.as_mut() {
+            for entity in &entities {
+                index.insert(entity);
+            }
+        }
+
+        let indexes = self.unique_key_lookup.get_mut();
+        for index in indexes.iter_mut() {
+            for entity in &entities {
+                index.insert(entity);
+            }
+        }
+        self.unique_key_lookup_bytes.store(
+            indexes
+                .iter()
+                .map(|index| index.memory_bytes() as u64)
+                .sum(),
+            Ordering::Relaxed,
+        );
+
+        let n = entities.len();
+
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // A collection may receive a mixed-model batch. Index each item's actual
+        // type while retaining batched lookup/reservation for homogeneous input.
+        for run in
+            entities.chunk_by(|left, right| left.kind.storage_type() == right.kind.storage_type())
+        {
+            let kind = run[0].kind.storage_type();
+            self.observe_graph_kind(&run[0].kind);
+            if matches!(
+                run[0].kind,
+                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            ) {
+                if let Some(index) = self.graph_read_index.get_mut() {
+                    for entity in run {
+                        index.insert(entity);
+                    }
+                    self.graph_read_index_bytes
+                        .store(index.memory_bytes(), Ordering::Relaxed);
+                }
+            }
+            let kind_set = match self.kind_index.get_mut(kind) {
+                Some(ids) => ids,
+                None => self.kind_index.entry(kind.to_string()).or_default(),
+            };
+            kind_set.reserve(run.len());
+            kind_set.extend(run.iter().map(|entity| entity.id));
+        }
+
+        let now = current_unix_secs();
+
+        let base_seq = self.sequence.fetch_add(n as u64, Ordering::Relaxed);
+
+        let mut ids = Vec::with_capacity(n);
+
+        // Use flat storage (Vec) instead of HashMap — saves ~80 bytes/entity overhead
+        if self.flat_entities.is_empty() && self.entities.is_empty() {
+            // First bulk insert: initialize flat storage
+            self.base_entity_id = entities.first().map(|e| e.id.raw()).unwrap_or(0);
+            self.use_flat = true;
+        }
+
+        // Collect zone-update values per column position, not per
+        // (row, col). The old code did `col.to_string()` + HashMap
+        // probe per cell — 15 cols × 25k rows = 375K String
+        // allocations per bulk_insert call for the typed_insert bench.
+        //
+        // New shape: accumulate `Vec<Value>` per column index; after
+        // the scan, walk each non-empty column exactly once, resolve
+        // its name via the shared schema, and apply all observations
+        // under a single HashMap entry. 375K allocs → ~ncols allocs.
+        let mut columnar_zone_updates: Vec<Vec<Value>> = Vec::new();
+        let mut columnar_schema: Option<std::sync::Arc<Vec<String>>> = None;
+        // Named-row fallback (non-prevalidated path) still uses the
+        // per-cell vec — these rows don't share a schema, so there's
+        // no columnar shortcut.
+        let mut named_zone_updates: Vec<(String, Value)> = Vec::new();
+
+        // Payload bytes for the whole batch, applied with one atomic add.
+        // `bulk_insert` used to skip memory tracking entirely, which left the
+        // budget blind to the rows that dominate a bulk-loaded store — and
+        // blind to what consolidation reclaims from them.
+        let mut batch_bytes: usize = 0;
+
+        if self.use_flat {
+            self.flat_entities.reserve(n);
+            for (i, mut entity) in entities.into_iter().enumerate() {
+                entity.sequence_id = base_seq + i as u64;
+                let id = entity.id;
+                ids.push(id);
+                batch_bytes += Self::estimate_entity_size(&entity);
+                if let EntityData::Row(row) = &entity.data {
+                    if row.schema.is_some() && !row.columns.is_empty() {
+                        if columnar_zone_updates.is_empty() {
+                            columnar_zone_updates = vec![Vec::with_capacity(n); row.columns.len()];
+                            columnar_schema = row.schema.clone();
+                        }
+                        for (ci, val) in row.columns.iter().enumerate() {
+                            if !matches!(val, Value::Null) {
+                                if let Some(bucket) = columnar_zone_updates.get_mut(ci) {
+                                    bucket.push(val.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        for (col, val) in row.iter_fields() {
+                            if !matches!(val, Value::Null) {
+                                named_zone_updates.push((col.to_string(), val.clone()));
+                            }
+                        }
+                    }
+                }
+                // Position-based `flat_entities` access in `get(id)`
+                // assumes IDs are contiguous starting at
+                // `base_entity_id`. When IDs ARE contiguous (the bulk
+                // ingest hot path) this saves a HashMap probe per
+                // lookup. But the global ID counter can jump between
+                // bulk calls — CREATE INDEX, catalog DDL, even other
+                // collections in the same store reserve IDs from the
+                // same allocator. If we blindly `push` a gap entity
+                // its actual position in the Vec no longer matches
+                // `id - base`, and `flat_entities[id - base].id == id`
+                // fails — the entity becomes invisible to `get(id)`.
+                //
+                // Route gap entities into the HashMap fallback
+                // (`self.entities`). `get(id)` already falls through
+                // there when the flat probe misses.
+                let expected = self.base_entity_id + self.flat_entities.len() as u64;
+                if id.raw() == expected {
+                    self.flat_entities.push(entity);
+                } else {
+                    self.hash_scan_ids.push(id);
+                    self.entities.insert(id, entity);
+                }
+            }
+        } else {
+            // Fallback to HashMap for non-sequential inserts
+            self.entities.reserve(n);
+            self.hash_scan_ids.reserve(n);
+            let mut pairs = Vec::with_capacity(n);
+            for (i, mut entity) in entities.into_iter().enumerate() {
+                entity.sequence_id = base_seq + i as u64;
+                let id = entity.id;
+                ids.push(id);
+                batch_bytes += Self::estimate_entity_size(&entity);
+                if let EntityData::Row(row) = &entity.data {
+                    for (col, val) in row.iter_fields() {
+                        if !matches!(val, Value::Null) {
+                            named_zone_updates.push((col.to_string(), val.clone()));
+                        }
+                    }
+                }
+                self.hash_scan_ids.push(id);
+                pairs.push((id, entity));
+            }
+            self.entities.extend(pairs);
+        }
+
+        // Apply the accumulated zone updates.
+        // Columnar path: one `col_zones.entry` call per column (not
+        // per cell). Named-fallback path: unchanged.
+        if !columnar_zone_updates.is_empty() {
+            let schema = columnar_schema.as_ref();
+            for (ci, values) in columnar_zone_updates.into_iter().enumerate() {
+                if values.is_empty() {
+                    continue;
+                }
+                let Some(col_name) = schema.and_then(|s| s.get(ci)) else {
+                    continue;
+                };
+                // Enter the HashMap once per column. `raw_entry_mut`
+                // avoids the String::clone when the column already
+                // exists in the map — but that's nightly-only, so we
+                // pay one `clone()` per call-per-column (ncols total)
+                // instead of the old ncols×nrows.
+                let mut iter = values.into_iter();
+                if let Some(first) = iter.next() {
+                    let previous = self
+                        .col_zones
+                        .get(col_name)
+                        .map_or(0, ColZone::payload_bytes);
+                    let zone = self
+                        .col_zones
+                        .entry(col_name.clone())
+                        .and_modify(|z| z.update(&first))
+                        .or_insert_with(|| ColZone::new(first));
+                    for v in iter {
+                        zone.update(&v);
+                    }
+                    self.zone_payload_bytes = self
+                        .zone_payload_bytes
+                        .saturating_sub(previous)
+                        .saturating_add(zone.payload_bytes());
+                }
+            }
+        }
+        for (col, val) in named_zone_updates {
+            self.update_column_zone(&col, &val);
+        }
+
+        self.add_memory(batch_bytes);
+        self.last_write_at = now;
+
+        // Publish the new flat length so lock-free readers can see the new entities.
+        if self.use_flat {
+            self.published_flat_len
+                .store(self.flat_entities.len(), Ordering::Release);
+        }
+
+        Ok(ids)
+    }
+
+    /// Delete from this segment regardless of its seal state.
+    /// Used to mutate sealed segments when DELETE touches bulk-inserted entities.
+    pub fn force_delete(&mut self, id: EntityId) -> bool {
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    self.tombstone_flat_entity(idx, id);
+                    return true;
+                }
+            }
+            return self.remove_hashmap_entity(id);
+        }
+
+        self.remove_hashmap_entity(id)
+    }
+
+    /// Update an entity in this segment regardless of its seal state.
+    /// Used to mutate sealed segments when UPDATE touches bulk-inserted entities.
+    pub fn force_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        modified_columns: &[String],
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        self.apply_hot_update_with_metadata(entity, modified_columns, metadata)
+    }
+}
+
+impl UnifiedSegment for GrowingSegment {
+    fn id(&self) -> SegmentId {
+        self.id
+    }
+
+    fn state(&self) -> SegmentState {
+        self.state
+    }
+
+    fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    fn stats(&self) -> SegmentStats {
+        let mut stats = SegmentStats {
+            entity_count: self.live_entity_count(),
+            deleted_count: self.deleted.len(),
+            memory_bytes: self.resident_bytes() as usize,
+            ..Default::default()
+        };
+
+        for entity in self.entities.values() {
+            match &entity.kind {
+                EntityKind::TableRow { .. } => stats.row_count += 1,
+                EntityKind::GraphNode(_) => stats.node_count += 1,
+                EntityKind::GraphEdge(_) => stats.edge_count += 1,
+                EntityKind::Vector { .. } => stats.vector_count += 1,
+                EntityKind::TimeSeriesPoint(_) => stats.row_count += 1,
+                EntityKind::QueueMessage { .. } => stats.row_count += 1,
+            }
+            stats.cross_ref_count += entity.cross_refs().len();
+        }
+
+        stats
+    }
+
+    fn entity_count(&self) -> usize {
+        self.live_entity_count()
+    }
+
+    fn contains(&self, id: EntityId) -> bool {
+        self.has_live_entity(id)
+    }
+
+    fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
+        if self.deleted.contains_key(&id) {
+            return None;
+        }
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if let Some(entity) = self.flat_entities.get(idx).filter(|e| e.id == id) {
+                    return Some(entity);
+                }
+            }
+            // Fall through: once flat mode is initialized by a bulk_insert,
+            // subsequent per-row `insert()` calls still write into the
+            // HashMap (see the impl below) so reads must check both. Without
+            // this fallback, a post-bulk single-row insert silently
+            // disappears from `get()` / `query_all()`.
+            self.entities.get(&id)
+        } else {
+            self.entities.get(&id)
+        }
+    }
+
+    fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
+        self.mark_checkpoint_entity_dirty(id);
+        self.invalidate_unique_key_lookup();
+        self.invalidate_graph_read_index();
+        if self.deleted.contains_key(&id) || !self.state.is_writable() {
+            return None;
+        }
+        if let Some(mut index) = self.key_lookup.take() {
+            if let Some(entity) = self.get(id) {
+                index.mark_mutated(entity);
+            }
+            self.key_lookup = Some(index);
+        }
+        // The caller can replace the kind through this reference. Conservatively
+        // disable both graph pruning passes until a new segment is rebuilt.
+        self.graph_kind_mask = GraphEntityKind::Node.mask() | GraphEntityKind::Edge.mask();
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if self
+                    .flat_entities
+                    .get(idx)
+                    .map(|e| e.id == id)
+                    .unwrap_or(false)
+                {
+                    return self.flat_entities.get_mut(idx);
+                }
+            }
+            // Fall through to HashMap for entities inserted via
+            // per-row `insert()` after flat mode was activated.
+            self.entities.get_mut(&id)
+        } else {
+            self.entities.get_mut(&id)
+        }
+    }
+
+    fn insert(&mut self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        if self.entities.contains_key(&entity.id) {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+
+        // Assign sequence ID
+        entity.sequence_id = self.next_sequence();
+
+        // Estimate and track memory
+        let size = Self::estimate_entity_size(&entity);
+        self.add_memory(size);
+
+        // Index the entity
+        self.index_entity(&entity);
+
+        // Update column zone maps for range-based segment pruning
+        self.update_col_zones_from_entity(&entity);
+
+        // Store
+        let id = entity.id;
+        self.entities.insert(id, entity);
+
+        // Update write timestamp
+        self.last_write_at = current_unix_secs();
+
+        Ok(id)
+    }
+
+    fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        self.apply_update_with_metadata(&entity, None)?;
+        self.last_write_at = current_unix_secs();
+
+        Ok(())
+    }
+
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        self.apply_hot_update_with_metadata(&entity, modified_columns, None)?;
+        self.last_write_at = current_unix_secs();
+        Ok(())
+    }
+
+    fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        // For flat storage, use tombstone (don't remove from Vec to keep indices valid)
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    self.tombstone_flat_entity(idx, id);
+                    return Ok(true);
+                }
+            }
+            return Ok(self.remove_hashmap_entity(id));
+        }
+
+        Ok(self.remove_hashmap_entity(id))
+    }
+
+    fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
+        if !self.has_live_entity(id) {
+            return None;
+        }
+        Some(self.metadata.get_all(id))
+    }
+
+    fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        self.mark_checkpoint_entity_dirty(id);
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        if !self.has_live_entity(id) {
+            return Err(SegmentError::NotFound(id));
+        }
+
+        self.metadata.set_all(id, &metadata);
+        Ok(())
+    }
+
+    fn seal(&mut self) -> Result<(), SegmentError> {
+        if self.state != SegmentState::Growing {
+            return Err(SegmentError::InvalidState(self.state));
+        }
+
+        self.state = SegmentState::Sealing;
+
+        // Build indices on the sealed data:
+        // - HNSW/IVF for vectors (future)
+        // - B-tree for sorted access (future)
+        // - Inverted index for text search (future)
+        self.rebuild_sealed_col_zones();
+
+        self.state = SegmentState::Sealed;
+        Ok(())
+    }
+
+    fn should_seal(&self, config: &SegmentConfig) -> bool {
+        // Check entity count
+        if self.entities.len() >= config.max_entities {
+            return true;
+        }
+
+        // Check memory usage
+        if self.memory_bytes.load(Ordering::Relaxed) as usize >= config.max_bytes {
+            return true;
+        }
+
+        // Check age
+        if self.age_secs() >= config.max_age_secs {
+            return true;
+        }
+
+        false
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
+        let base: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
+            // Chain flat entities (from bulk_insert) with any entities
+            // that landed in the HashMap via per-row `insert()` after
+            // flat mode was activated.
+            Box::new(self.flat_entities.iter().chain(self.entities.values()))
+        } else {
+            Box::new(self.entities.values())
+        };
+        if self.deleted.is_empty() {
+            base
+        } else {
+            Box::new(base.filter(|e| !self.deleted.contains_key(&e.id)))
+        }
+    }
+
+    fn iter_kind(&self, kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
+        // The iterator borrows the segment, so the index cannot change underneath
+        // it. Borrow the ID set as well instead of copying O(kind count) entries.
+        let ids = self.kind_index.get(kind_filter);
+        // In flat mode entities live in `flat_entities`, not `entities` —
+        // chain both so iter_kind doesn't drop bulk-inserted entities.
+        let flat: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
+            Box::new(self.flat_entities.iter())
+        } else {
+            Box::new(std::iter::empty())
+        };
+        Box::new(flat.chain(self.entities.values()).filter(move |e| {
+            if self.deleted.contains_key(&e.id) {
+                return false;
+            }
+            if let Some(ids) = ids {
+                ids.contains(&e.id)
+            } else {
+                false
+            }
+        }))
+    }
+
+    fn filter_metadata(
+        &self,
+        filters: &[(String, super::metadata::MetadataFilter)],
+    ) -> Vec<EntityId> {
+        // For growing segments, we iterate and filter. In flat mode the
+        // IDs live in `flat_entities`, not `entities`, so chain both.
+        let flat_ids: Box<dyn Iterator<Item = EntityId> + '_> = if self.use_flat {
+            Box::new(self.flat_entities.iter().map(|e| e.id))
+        } else {
+            Box::new(std::iter::empty())
+        };
+        flat_ids
+            .chain(self.entities.keys().copied())
+            .filter(|id| {
+                if self.deleted.contains_key(id) {
+                    return false;
+                }
+                let metadata = self.metadata.get_all(*id);
+                metadata.matches_all(filters)
+            })
+            .collect()
+    }
+}
+
+fn build_minmax_multi_intervals(
+    entries: &[(CanonicalKey, Value)],
+    max_intervals: usize,
+) -> Vec<ColZone> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    if entries.len() == 1 || max_intervals <= 1 {
+        return vec![ColZone::with_bounds(
+            entries[0].1.clone(),
+            entries[entries.len() - 1].1.clone(),
+        )];
+    }
+
+    let mut split_points = if entries.len() <= max_intervals {
+        (1..entries.len()).collect::<Vec<_>>()
+    } else {
+        let target_splits = max_intervals - 1;
+        let mut selected = select_gap_split_points(entries, target_splits);
+        if selected.len() < target_splits {
+            for bucket in 1..max_intervals {
+                let idx = bucket * entries.len() / max_intervals;
+                if idx == 0 || idx >= entries.len() || selected.contains(&idx) {
+                    continue;
+                }
+                selected.push(idx);
+                if selected.len() >= target_splits {
+                    break;
+                }
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        selected
+    };
+
+    split_points.push(entries.len());
+
+    let mut out = Vec::with_capacity(split_points.len());
+    let mut start = 0usize;
+    for end in split_points {
+        if end <= start {
+            continue;
+        }
+        out.push(ColZone::with_bounds(
+            entries[start].1.clone(),
+            entries[end - 1].1.clone(),
+        ));
+        start = end;
+    }
+
+    if out.is_empty() {
+        out.push(ColZone::with_bounds(
+            entries[0].1.clone(),
+            entries[entries.len() - 1].1.clone(),
+        ));
+    }
+
+    out
+}
+
+fn select_gap_split_points(entries: &[(CanonicalKey, Value)], max_splits: usize) -> Vec<usize> {
+    let mut gaps = Vec::new();
+    for idx in 1..entries.len() {
+        if let Some(score) = canonical_gap_score(&entries[idx - 1].0, &entries[idx].0) {
+            if score > 0.0 {
+                gaps.push((score, idx));
+            }
+        }
+    }
+    gaps.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    gaps.into_iter()
+        .take(max_splits)
+        .map(|(_, idx)| idx)
+        .collect()
+}
+
+fn canonical_gap_score(left: &CanonicalKey, right: &CanonicalKey) -> Option<f64> {
+    if left.family() != right.family() {
+        return None;
+    }
+    match (left, right) {
+        (CanonicalKey::Signed(_, l), CanonicalKey::Signed(_, r)) => {
+            Some(r.saturating_sub(*l) as f64)
+        }
+        (CanonicalKey::Unsigned(_, l), CanonicalKey::Unsigned(_, r)) => {
+            Some(r.saturating_sub(*l) as f64)
+        }
+        (CanonicalKey::Float(l), CanonicalKey::Float(r)) => {
+            Some((f64::from_bits(*r) - f64::from_bits(*l)).abs())
+        }
+        _ => None,
+    }
+}
+
+// Implement the std::sync::Arc<parking_lot::RwLock<GrowingSegment>> as UnifiedSegment
+// This is needed because we store growing segments in the sealed list after sealing
+impl UnifiedSegment for std::sync::Arc<parking_lot::RwLock<GrowingSegment>> {
+    fn id(&self) -> SegmentId {
+        self.read().id()
+    }
+
+    fn state(&self) -> SegmentState {
+        self.read().state()
+    }
+
+    fn collection(&self) -> &str {
+        // This is a limitation - we'd need to store collection in the Arc wrapper
+        "unknown"
+    }
+
+    fn stats(&self) -> SegmentStats {
+        self.read().stats()
+    }
+
+    fn entity_count(&self) -> usize {
+        self.read().entity_count()
+    }
+
+    fn contains(&self, id: EntityId) -> bool {
+        self.read().contains(id)
+    }
+
+    fn get(&self, _id: EntityId) -> Option<&UnifiedEntity> {
+        // This is tricky with RwLock - we can't return a reference
+        // In production, we'd use a different approach
+        None
+    }
+
+    fn get_mut(&mut self, _id: EntityId) -> Option<&mut UnifiedEntity> {
+        None
+    }
+
+    fn insert(&mut self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+        self.write().insert(entity)
+    }
+
+    fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        self.write().update(entity)
+    }
+
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        self.write().update_hot(entity, modified_columns)
+    }
+
+    fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
+        self.write().delete(id)
+    }
+
+    fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
+        self.read().get_metadata(id)
+    }
+
+    fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        self.write().set_metadata(id, metadata)
+    }
+
+    fn seal(&mut self) -> Result<(), SegmentError> {
+        self.write().seal()
+    }
+
+    fn should_seal(&self, config: &SegmentConfig) -> bool {
+        self.read().should_seal(config)
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
+        // Cannot return iterator with RwLock
+        Box::new(std::iter::empty())
+    }
+
+    fn iter_kind(&self, _kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
+        Box::new(std::iter::empty())
+    }
+
+    fn filter_metadata(&self, filters: &[(String, MetadataFilter)]) -> Vec<EntityId> {
+        self.read().filter_metadata(filters)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::entity::RowData;
+    use crate::storage::metadata::MetadataValue;
+    use reddb_types::Value;
+
+    fn keyed_row(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(key), Value::Integer(id as i64)],
+            vec!["key".into(), "value".into()],
+        ));
+        entity.set_xmin(xmin);
+        entity.set_xmax(xmax);
+        entity
+    }
+
+    fn keyed_probe(segment: &GrowingSegment, key: &str) -> Option<EntityId> {
+        segment
+            .find_key_entity(key, true, &mut |_| true)
+            .map(|entity| entity.id)
+    }
+
+    #[test]
+    fn bulk_checkpoint_journal_preserves_prior_changes_and_ignores_rejected_batches() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment.insert(keyed_row(1, "one", 1, 0)).expect("row");
+        segment
+            .bulk_insert(vec![keyed_row(2, "two", 1, 0), keyed_row(3, "three", 1, 0)])
+            .expect("batch");
+        assert_eq!(
+            segment.checkpoint_mutations_since(0),
+            Some(vec![EntityId::new(1), EntityId::new(2), EntityId::new(3)])
+        );
+        let revision = segment.checkpoint_revision();
+        segment.bulk_insert(Vec::new()).expect("empty batch");
+        assert_eq!(segment.checkpoint_revision(), revision);
+        segment.seal().expect("seal segment");
+        assert!(matches!(
+            segment.bulk_insert(vec![keyed_row(4, "four", 1, 0)]),
+            Err(SegmentError::NotWritable)
+        ));
+        assert_eq!(segment.checkpoint_revision(), revision);
+        assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![]));
+    }
+
+    #[test]
+    fn bulk_checkpoint_journal_exhaustion_keeps_a_bounded_complete_suffix() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=CHECKPOINT_MUTATIONS_MAX as u64 + 1)
+                    .map(|id| keyed_row(id, "key", 1, 0))
+                    .collect(),
+            )
+            .expect("large batch");
+        assert!(segment.checkpoint_mutations_since(0).is_none());
+        assert_eq!(
+            segment
+                .checkpoint_mutations_since(1)
+                .expect("complete suffix")
+                .len(),
+            CHECKPOINT_MUTATIONS_MAX
+        );
+        let revision = segment.checkpoint_revision();
+        let id = EntityId::new(CHECKPOINT_MUTATIONS_MAX as u64 + 2);
+        segment
+            .bulk_insert(vec![keyed_row(id.raw(), "next", 1, 0)])
+            .expect("later batch");
+        assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![id]));
+        assert_eq!(segment.checkpoint_mutations.len(), CHECKPOINT_MUTATIONS_MAX);
+    }
+
+    #[test]
+    fn key_lookup_visits_only_requested_key_versions() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=4096)
+                    .map(|id| keyed_row(id, &format!("other-{id}"), 1, 0))
+                    .collect(),
+            )
+            .expect("unrelated rows");
+        segment
+            .insert(keyed_row(5000, "wanted", 2, 8))
+            .expect("old version");
+        segment
+            .insert(keyed_row(5001, "wanted", 8, 0))
+            .expect("new version");
+        let mut visits = 0;
+        let result = segment.find_key_entity("wanted", true, &mut |entity| {
+            visits += 1;
+            entity.xmin < 8
+        });
+        assert_eq!(result.map(|entity| entity.id), Some(EntityId::new(5000)));
+        assert_eq!(
+            visits, 2,
+            "unrelated rows must never reach visibility evaluation"
+        );
+        assert_eq!(keyed_probe(&segment, "wanted"), Some(EntityId::new(5001)));
+        let mut misses = 0;
+        assert!(segment
+            .find_key_entity("absent", true, &mut |_| {
+                misses += 1;
+                true
+            })
+            .is_none());
+        assert_eq!(misses, 0);
+
+        // A bucket collision narrows candidates, but cannot change key equality.
+        let mut collision = SegmentKeyLookup::default();
+        collision.insert(&keyed_row(1, "wanted", 1, 0));
+        assert!(segment
+            .find_key_candidate(&collision, "wanted", true, &mut |_| true)
+            .is_none());
+    }
+
+    #[test]
+    fn raw_mutation_does_not_disable_unrelated_key_candidates() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(
+                (1..=4096)
+                    .map(|id| keyed_row(id, &format!("key-{id}"), 1, 0))
+                    .collect(),
+            )
+            .expect("rows");
+        for _ in 0..3 {
+            *segment.get_mut(EntityId::new(1)).expect("mutable") = keyed_row(1, "renamed", 2, 0);
+        }
+        let index = segment.key_lookup.as_ref().expect("index retained");
+        assert_eq!(index.candidates("key-4096"), &[EntityId::new(4096)]);
+        assert_eq!(index.mutated_candidates().count(), 1);
+        assert!(index.candidates("key-1").is_empty());
+        assert_eq!(keyed_probe(&segment, "renamed"), Some(EntityId::new(1)));
+        assert_eq!(keyed_probe(&segment, "key-4096"), Some(EntityId::new(4096)));
+        segment.delete(EntityId::new(1)).expect("delete raw row");
+        assert_eq!(
+            segment
+                .key_lookup
+                .as_ref()
+                .unwrap()
+                .mutated_candidates()
+                .count(),
+            0
+        );
+        assert_eq!(keyed_probe(&segment, "renamed"), None);
+    }
+
+    #[test]
+    fn key_lookup_tracks_mutations_sealing_and_adoption() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![keyed_row(1, "flat", 1, 0)])
+            .expect("flat row");
+        segment
+            .insert(keyed_row(3, "hash", 1, 0))
+            .expect("hash fallback");
+        segment
+            .bulk_insert(vec![keyed_row(5, "gap", 1, 0)])
+            .expect("bulk gap");
+        assert!(segment.key_lookup.as_ref().expect("index").memory_bytes() > 0);
+        assert_eq!(keyed_probe(&segment, "gap"), Some(EntityId::new(5)));
+        segment
+            .update(keyed_row(3, "renamed", 2, 0))
+            .expect("rename key");
+        assert!(
+            segment.key_lookup.is_some(),
+            "key replacements maintain the index"
+        );
+        assert_eq!(keyed_probe(&segment, "hash"), None);
+        assert_eq!(keyed_probe(&segment, "renamed"), Some(EntityId::new(3)));
+
+        *segment.get_mut(EntityId::new(3)).expect("mutable row") = keyed_row(3, "raw", 3, 0);
+        assert!(
+            segment.key_lookup.is_some(),
+            "raw mutation preserves unaffected key candidates"
+        );
+        assert_eq!(keyed_probe(&segment, "renamed"), None);
+        assert_eq!(keyed_probe(&segment, "raw"), Some(EntityId::new(3)));
+        segment.seal().expect("seal");
+        segment
+            .force_update_with_metadata(&keyed_row(5, "sealed", 4, 0), &["key".into()], None)
+            .expect("sealed rename");
+        assert_eq!(keyed_probe(&segment, "gap"), None);
+        assert_eq!(keyed_probe(&segment, "sealed"), Some(EntityId::new(5)));
+        assert!(segment.force_delete(EntityId::new(1)));
+        assert!(segment.force_delete(EntityId::new(3)));
+        assert_eq!(keyed_probe(&segment, "flat"), None);
+        assert_eq!(keyed_probe(&segment, "raw"), None);
+
+        let mut adopted = GrowingSegment::new(2, "keys");
+        segment.for_each_fast(|entity| {
+            adopted.adopt_entity(entity.clone(), None);
+            true
+        });
+        assert_eq!(keyed_probe(&adopted, "sealed"), Some(EntityId::new(5)));
+        assert!(adopted.evict_entity(EntityId::new(5)));
+        assert_eq!(keyed_probe(&adopted, "sealed"), None);
+    }
+
+    #[test]
+    #[ignore = "diagnostic microbenchmark; no timing assertions"]
+    fn key_lookup_scaling_diagnostic() {
+        use std::{hint::black_box, time::Instant};
+        for count in [100, 10_000, 100_000] {
+            let mut segment = GrowingSegment::new(1, "keys");
+            segment
+                .bulk_insert(
+                    (1..=count)
+                        .map(|id| keyed_row(id, &format!("key-{id}"), 1, 0))
+                        .collect(),
+                )
+                .expect("rows");
+            let key = format!("key-{count}");
+            let started = Instant::now();
+            for _ in 0..1000 {
+                assert_eq!(
+                    keyed_probe(black_box(&segment), black_box(&key)),
+                    Some(EntityId::new(count))
+                );
+            }
+            let indexed = started.elapsed();
+            let started = Instant::now();
+            for _ in 0..1000 {
+                let mut found = None;
+                segment.for_each_fast(|entity| {
+                    if SegmentKeyLookup::key(entity) == Some(black_box(key.as_str())) {
+                        found = Some(entity.id);
+                        return false;
+                    }
+                    true
+                });
+                assert_eq!(black_box(found), Some(EntityId::new(count)));
+            }
+            eprintln!(
+                "rows={count} reads=1000 indexed={indexed:?} scan={:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    fn pruning_node(id: u64) -> UnifiedEntity {
+        UnifiedEntity::graph_node(EntityId::new(id), "mixed", "person", Default::default())
+    }
+
+    fn pruning_edge(id: u64) -> UnifiedEntity {
+        UnifiedEntity::graph_edge(
+            EntityId::new(id),
+            "mixed",
+            "a",
+            "b",
+            1.0,
+            Default::default(),
+        )
+    }
+
+    #[test]
+    fn graph_presence_covers_bulk_gaps_inserts_and_adoption() {
+        let mut segment = GrowingSegment::new(1, "mixed");
+        assert!(!segment.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(!segment.may_contain_graph_kind(GraphEntityKind::Edge));
+        segment
+            .bulk_insert(vec![
+                UnifiedEntity::vector(EntityId::new(1), "mixed", vec![]),
+                pruning_node(2),
+                pruning_edge(4),
+            ])
+            .expect("mixed bulk with gap");
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+        segment.seal().expect("seal");
+        assert!(segment.force_delete(EntityId::new(2)));
+        assert!(segment.force_delete(EntityId::new(4)));
+        // Deletion must not erase presence; reconstruction may safely tighten it.
+        assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+        let mut rebuilt = GrowingSegment::new(2, "mixed");
+        for item in segment.iter() {
+            rebuilt.adopt_entity(item.clone(), None);
+        }
+        assert!(!rebuilt.may_contain_graph_kind(GraphEntityKind::Node));
+        assert!(!rebuilt.may_contain_graph_kind(GraphEntityKind::Edge));
+        rebuilt.adopt_entity(pruning_node(5), None);
+        assert!(rebuilt.may_contain_graph_kind(GraphEntityKind::Node));
+        rebuilt.insert(pruning_edge(6)).expect("single edge");
+        assert!(rebuilt.may_contain_graph_kind(GraphEntityKind::Edge));
+    }
+
+    #[test]
+    fn graph_presence_covers_replacement_and_unrestricted_mutation() {
+        for flat in [false, true] {
+            for operation in 0..4 {
+                let mut segment = GrowingSegment::new(1, "mixed");
+                let vector = UnifiedEntity::vector(EntityId::new(1), "mixed", vec![]);
+                if flat {
+                    segment.bulk_insert(vec![vector]).expect("flat vector");
+                } else {
+                    segment.insert(vector).expect("hashmap vector");
+                }
+                match operation {
+                    0 => segment.update(pruning_node(1)).expect("replace with node"),
+                    1 => segment
+                        .update_hot(pruning_node(1), &[])
+                        .expect("hot replacement"),
+                    2 => {
+                        segment.seal().expect("seal vector");
+                        segment
+                            .force_update_with_metadata(&pruning_node(1), &[], None)
+                            .expect("sealed replacement");
+                    }
+                    _ => {
+                        *segment.get_mut(EntityId::new(1)).expect("mutable vector") =
+                            pruning_node(1)
+                    }
+                }
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+                assert!(matches!(
+                    segment.get(EntityId::new(1)).expect("node").kind,
+                    EntityKind::GraphNode(_)
+                ));
+                if operation == 3 {
+                    assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+                }
+                segment
+                    .force_update_with_metadata(&pruning_edge(1), &[], None)
+                    .expect("replace with edge");
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Edge));
+                assert!(segment.may_contain_graph_kind(GraphEntityKind::Node));
+            }
+        }
+    }
+
+    fn primary_key_row(id: u64, key: Value) -> UnifiedEntity {
+        UnifiedEntity::new(
+            EntityId::new(id),
+            EntityKind::TableRow {
+                table: "keys".into(),
+                row_id: id,
+            },
+            EntityData::Row(RowData::with_names(
+                vec![Value::text("payload"), key],
+                vec!["payload".into(), "primary".into()],
+            )),
+        )
+    }
+
+    fn primary_key_probe(
+        segment: &GrowingSegment,
+        key: Value,
+        exclude: Option<EntityId>,
+    ) -> Option<EntityId> {
+        segment.find_unique_key_conflict(
+            &[vec!["primary".into()]],
+            0,
+            &[format!("{key:?}")],
+            exclude,
+            &|_| true,
+        )
+    }
+
+    #[test]
+    fn unique_key_lookup_follows_segment_mutations_and_sealing() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![primary_key_row(1, Value::Integer(10))])
+            .expect("bulk row");
+        let payload_bytes = segment.memory_bytes();
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(10), None),
+            Some(EntityId::new(1))
+        );
+        assert!(segment.memory_bytes() > payload_bytes);
+        segment
+            .insert(primary_key_row(3, Value::Integer(30)))
+            .expect("hashmap fallback row");
+        segment
+            .bulk_insert(vec![primary_key_row(4, Value::Integer(40))])
+            .expect("bulk gap row");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(40), None),
+            Some(EntityId::new(4))
+        );
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(30), None),
+            Some(EntityId::new(3))
+        );
+        segment
+            .update_hot(primary_key_row(1, Value::Integer(11)), &["primary".into()])
+            .expect("replace flat key");
+        assert_eq!(segment.unique_key_lookup_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(primary_key_probe(&segment, Value::Integer(10), None), None);
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(11), None),
+            Some(EntityId::new(1))
+        );
+        segment
+            .delete_batch(&[EntityId::new(1), EntityId::new(3)])
+            .expect("delete flat and map");
+        assert_eq!(primary_key_probe(&segment, Value::Integer(11), None), None);
+        assert_eq!(primary_key_probe(&segment, Value::Integer(30), None), None);
+        segment.seal().expect("seal");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(40), None),
+            Some(EntityId::new(4))
+        );
+        segment
+            .force_update_with_metadata(
+                &primary_key_row(4, Value::Integer(41)),
+                &["primary".into()],
+                None,
+            )
+            .expect("sealed update");
+        assert_eq!(primary_key_probe(&segment, Value::Integer(40), None), None);
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(41), None),
+            Some(EntityId::new(4))
+        );
+        assert!(segment.force_delete(EntityId::new(4)));
+        assert_eq!(primary_key_probe(&segment, Value::Integer(41), None), None);
+    }
+
+    #[test]
+    fn unique_lookup_retains_all_current_definitions_and_rechecks_candidates() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .bulk_insert(vec![
+                primary_key_row(1, Value::Integer(10)),
+                primary_key_row(2, Value::Integer(20)),
+            ])
+            .expect("initial rows");
+        let definitions = vec![
+            vec!["primary".into()],
+            vec!["payload".into()],
+            vec!["primary".into(), "payload".into()],
+        ];
+        let payload = format!("{:?}", Value::text("payload"));
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                1,
+                &[payload.clone()],
+                None,
+                &|entity| entity.id != EntityId::new(1)
+            ),
+            Some(EntityId::new(2))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 3);
+        segment
+            .insert(primary_key_row(3, Value::Integer(30)))
+            .expect("append");
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                2,
+                &[format!("{:?}", Value::Integer(30)), payload.clone()],
+                None,
+                &|_| true
+            ),
+            Some(EntityId::new(3))
+        );
+        let bytes = segment.unique_key_lookup_bytes.load(Ordering::Relaxed);
+        assert_eq!(
+            segment.find_unique_key_conflict(
+                &definitions,
+                0,
+                &[format!("{:?}", Value::Integer(20))],
+                None,
+                &|_| true
+            ),
+            Some(EntityId::new(2))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 3);
+        assert_eq!(
+            segment.unique_key_lookup_bytes.load(Ordering::Relaxed),
+            bytes
+        );
+        let reduced = vec![vec!["payload".into()]];
+        assert_eq!(
+            segment.find_unique_key_conflict(&reduced, 0, &[payload], None, &|_| true),
+            Some(EntityId::new(1))
+        );
+        assert_eq!(segment.unique_key_lookup.read().len(), 1);
+        assert!(segment.unique_key_lookup_bytes.load(Ordering::Relaxed) < bytes);
+    }
+
+    #[test]
+    fn unique_key_lookup_preserves_signature_semantics_and_exclusion() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        let values = [
+            Value::Float(f64::NAN),
+            Value::Float(-0.0),
+            Value::Float(0.0),
+            Value::Integer(1),
+            Value::UnsignedInteger(1),
+            Value::text("1"),
+        ];
+        for (offset, value) in values.iter().enumerate() {
+            let id = offset as u64 + 1;
+            segment
+                .insert(primary_key_row(id, value.clone()))
+                .expect("distinct physical row");
+            assert_eq!(
+                primary_key_probe(&segment, value.clone(), None),
+                Some(EntityId::new(id))
+            );
+            assert_eq!(
+                primary_key_probe(&segment, value.clone(), Some(EntityId::new(id))),
+                None
+            );
+        }
+        segment
+            .insert(primary_key_row(20, Value::Integer(1)))
+            .expect("duplicate physical key");
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(1), Some(EntityId::new(4))),
+            Some(EntityId::new(20))
+        );
+        // Candidate fingerprints are not equality proof: simulate a stale or
+        // colliding entry by changing its row without the normal invalidation.
+        segment
+            .entities
+            .insert(EntityId::new(4), primary_key_row(4, Value::Integer(99)));
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(1), Some(EntityId::new(20))),
+            None
+        );
+        // Public mutable access must invalidate before handing out the row.
+        let entity = segment.get_mut(EntityId::new(4)).expect("mutable row");
+        *entity = primary_key_row(4, Value::Integer(100));
+        assert_eq!(
+            primary_key_probe(&segment, Value::Integer(100), None),
+            Some(EntityId::new(4))
+        );
+    }
+
+    #[test]
+    fn test_growing_segment_basic() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        let entity = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "users",
+            1,
+            vec![Value::text("Alice".to_string())],
+        );
+
+        let id = segment.insert(entity).unwrap();
+        assert_eq!(id, EntityId::new(1));
+        assert!(segment.contains(id));
+
+        let stats = segment.stats();
+        assert_eq!(stats.entity_count, 1);
+        assert_eq!(stats.row_count, 1);
+    }
+
+    #[test]
+    fn test_segment_metadata() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        let entity = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "users",
+            1,
+            vec![Value::text("Alice".to_string())],
+        );
+        segment.insert(entity).unwrap();
+
+        let mut meta = Metadata::new();
+        meta.set("role", MetadataValue::String("admin".to_string()));
+        meta.set("level", MetadataValue::Int(5));
+
+        segment.set_metadata(EntityId::new(1), meta).unwrap();
+
+        let retrieved = segment.get_metadata(EntityId::new(1)).unwrap();
+        assert_eq!(
+            retrieved.get("role"),
+            Some(&MetadataValue::String("admin".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_segment_seal() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        let entity = UnifiedEntity::vector(EntityId::new(1), "embeddings", vec![0.1, 0.2, 0.3]);
+        segment.insert(entity).unwrap();
+
+        // Can write before sealing
+        assert!(segment.state().is_writable());
+
+        // Seal the segment
+        segment.seal().unwrap();
+        assert_eq!(segment.state(), SegmentState::Sealed);
+
+        // Cannot write after sealing
+        let entity2 = UnifiedEntity::vector(EntityId::new(2), "embeddings", vec![0.4, 0.5, 0.6]);
+        assert!(segment.insert(entity2).is_err());
+    }
+
+    #[test]
+    fn test_should_seal() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        let config = SegmentConfig {
+            max_entities: 2,
+            ..Default::default()
+        };
+
+        assert!(!segment.should_seal(&config));
+
+        segment
+            .insert(UnifiedEntity::vector(EntityId::new(1), "v", vec![0.1]))
+            .unwrap();
+        assert!(!segment.should_seal(&config));
+
+        segment
+            .insert(UnifiedEntity::vector(EntityId::new(2), "v", vec![0.2]))
+            .unwrap();
+        assert!(segment.should_seal(&config));
+    }
+
+    #[test]
+    fn test_cross_references() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        let mut entity1 = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "hosts",
+            1,
+            vec![Value::text("192.168.1.1".to_string())],
+        );
+        entity1.add_cross_ref(CrossRef::new(
+            EntityId::new(1),
+            EntityId::new(2),
+            "nodes",
+            RefType::RowToNode,
+        ));
+        segment.insert(entity1).unwrap();
+
+        let refs_from = segment.get_references_from(EntityId::new(1));
+        assert_eq!(refs_from.len(), 1);
+        assert_eq!(refs_from[0], (EntityId::new(2), RefType::RowToNode));
+
+        let refs_to = segment.get_references_to(EntityId::new(2));
+        assert_eq!(refs_to.len(), 1);
+        assert_eq!(refs_to[0], (EntityId::new(1), RefType::RowToNode));
+    }
+
+    #[test]
+    fn test_zone_predicate_uses_canonical_fallback_for_email_values() {
+        let mut zone = ColZone::new(Value::Email("bravo@example.com".to_string()));
+        zone.update(&Value::Email("delta@example.com".to_string()));
+
+        let probe = Value::Email("alpha@example.com".to_string());
+        assert!(ZoneColPred::Eq(&probe).can_skip(&zone));
+
+        let in_range = Value::Email("charlie@example.com".to_string());
+        assert!(!ZoneColPred::Eq(&in_range).can_skip(&zone));
+    }
+
+    #[test]
+    fn test_sealed_multi_zone_prunes_numeric_gap_outlier() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        for (row_id, age) in [(1_u64, 1_i64), (2, 2), (3, 3), (4, 1000)] {
+            let entity = UnifiedEntity::new(
+                EntityId::new(row_id),
+                EntityKind::TableRow {
+                    table: "users".into(),
+                    row_id,
+                },
+                EntityData::Row(RowData::with_names(
+                    vec![Value::Integer(age)],
+                    vec!["age".to_string()],
+                )),
+            );
+            segment.insert(entity).unwrap();
+        }
+
+        segment.seal().unwrap();
+
+        let miss = Value::Integer(500);
+        assert!(segment.can_skip_zone_preds(&[("age", ZoneColPred::Eq(&miss))]));
+
+        let hit = Value::Integer(1000);
+        assert!(!segment.can_skip_zone_preds(&[("age", ZoneColPred::Eq(&hit))]));
+    }
+}

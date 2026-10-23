@@ -92,7 +92,7 @@ impl SegmentGraphIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::unified::segment::{GrowingSegment, UnifiedSegment};
+    use crate::storage::segment::{GrowingSegment, UnifiedSegment};
     use std::collections::HashMap;
 
     fn node(id: u64, logical: u64) -> UnifiedEntity {
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn graph_index_cursor_seeks_once_per_batch_and_stops_at_opened_upper_id() {
-        use crate::storage::unified::segment::SCAN_BATCH_SIZE;
+        use crate::storage::segment::SCAN_BATCH_SIZE;
         for maximum_id in [false, true] {
             let mut segment = GrowingSegment::new(1, "graph");
             segment
