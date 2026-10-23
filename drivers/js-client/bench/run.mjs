@@ -4,11 +4,16 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { resolve, extname, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { gzipSync } from 'node:zlib'
+import { cpus, platform, arch } from 'node:os'
 import { measureCodecs } from './codecs.js'
 
-const root = fileURLToPath(new URL('../../../', import.meta.url))
+const root = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
 const baselineRoot = resolve(process.env.REDDB_BENCH_BASELINE || root)
 const output = process.env.REDDB_BENCH_OUTPUT
+const options = {
+  rounds: Number(process.env.REDDB_BENCH_ROUNDS || 20),
+  sampleMs: Number(process.env.REDDB_BENCH_SAMPLE_MS || 20),
+}
 const load = async (directory) => ({
   ...await import(pathToFileURL(resolve(directory, 'drivers/js-client/src/redwire-core.js'))),
   ...await import(pathToFileURL(resolve(directory, 'drivers/js-client/src/core/serialization.js'))),
@@ -20,10 +25,12 @@ const wasm = await import('./wasm/client_codec.js')
 const instance = await wasm.default({ module_or_path: bytes })
 const initializationMs = performance.now() - start
 const report = {
+  capturedAt: new Date().toISOString(),
+  host: { platform: platform(), arch: arch(), cpu: cpus()[0]?.model },
   head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   baseline: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: baselineRoot, encoding: 'utf8' }).trim(),
   wasm: { bytes: bytes.length, gzipBytes: gzipSync(bytes).length },
-  node: { version: process.version, initializationMs, ...await measureCodecs(await load(baselineRoot), await load(root), wasm), linearMemoryBytes: instance.memory.buffer.byteLength },
+  node: { version: process.version, initializationMs, ...await measureCodecs(await load(baselineRoot), await load(root), wasm, options), linearMemoryBytes: instance.memory.buffer.byteLength },
 }
 const server = createServer(async (request, response) => {
   if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><title>Client codec benchmark</title>'); return }
@@ -46,7 +53,7 @@ try {
     try {
       const page = await browser.newPage()
       await page.goto(origin)
-      report[name] = await page.evaluate(async () => {
+      report[name] = await page.evaluate(async (options) => {
         const load = async (prefix) => ({
           ...await import(`/${prefix}/drivers/js-client/src/redwire-core.js`),
           ...await import(`/${prefix}/drivers/js-client/src/core/serialization.js`),
@@ -58,8 +65,8 @@ try {
         const wasm = await import('/current/drivers/js-client/bench/wasm/client_codec.js')
         const instance = await wasm.default()
         const initializationMs = performance.now() - start
-        return { userAgent: navigator.userAgent, initializationMs, ...await measureCodecs(baseline, candidate, wasm), linearMemoryBytes: instance.memory.buffer.byteLength }
-      })
+        return { userAgent: navigator.userAgent, initializationMs, ...await measureCodecs(baseline, candidate, wasm, options), linearMemoryBytes: instance.memory.buffer.byteLength }
+      }, options)
     } finally { await browser.close() }
   }
 } finally { await new Promise((resolve) => server.close(resolve)) }

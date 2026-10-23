@@ -1,0 +1,71 @@
+name: Client codec JS and WASM parity
+
+on:
+  pull_request:
+    paths:
+      - 'drivers/js-client/**'
+      - 'crates/reddb-wire/**'
+      - 'crates/reddb-types/**'
+      - 'Cargo.lock'
+      - '.github/workflows/client-codecs.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'drivers/js-client/**'
+      - 'crates/reddb-wire/**'
+      - 'crates/reddb-types/**'
+      - 'Cargo.lock'
+      - '.github/workflows/client-codecs.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-codecs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install pinned browser dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser
+          pnpm --filter @reddb-io/browser exec playwright install --with-deps chromium firefox webkit
+      - name: Install checksummed wasm-bindgen
+        env:
+          BINDGEN_SHA256: ceb6f0b9fea9d2868f258215a1d7f86a4c28330a0d64432cc7d53674618772d6
+        run: |
+          archive="$RUNNER_TEMP/wasm-bindgen.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.120/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl.tar.gz
+          printf '%s  %s\n' "$BINDGEN_SHA256" "$archive" | sha256sum --check -
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Verify client behavior and canonical WASM bindings
+        run: |
+          node --test drivers/js-client/test/*.test.mjs
+          cargo clippy --locked -p reddb-io-wire --lib --example client_codec --target wasm32-unknown-unknown --no-deps -- -D warnings
+          node drivers/js-client/bench/build-wasm.mjs
+      - name: Verify identical wire bytes in Node, Chromium, Firefox and WebKit
+        env:
+          REDDB_BENCH_BASELINE: ${{ github.workspace }}
+          REDDB_BENCH_ROUNDS: '3'
+          REDDB_BENCH_SAMPLE_MS: '5'
+          REDDB_BENCH_OUTPUT: ${{ runner.temp }}/client-codecs.json
+        # Timings are informational. Only execution and exact byte parity gate CI.
+        run: node drivers/js-client/bench/run.mjs
