@@ -102,6 +102,29 @@ checkpoint state. File codecs and versions are unchanged. These are pager
 operations, not database transactions: storage-backed execution, the runtime
 WAL implementation and MVCC still need extraction and browser integration.
 
+The canonical B-tree, cursor, leaf/interior helpers, large-value layout and
+compressed/overflow-chain algorithms now also live in `reddb-engine::storage`.
+`PageStore` supplies the existing page operations and an optional prefetch hint;
+the native pager and the portable owned pager implement it. Native public B-tree,
+cursor, overflow and value-error paths alias these exact implementations. The
+reentrant structural-writer lock and reclamation/reader pins retain their native
+semantics; the browser baseline still uses a single dedicated worker and requires
+no shared WASM memory. File codecs remain in `reddb-file`, and no persistent
+format or version changes are introduced.
+
+Shared native/WASM fixtures cover ordered scans and seeks, mixed-width splits,
+compressed values, multi-page overflow, point reads, batch updates, deletion,
+reclamation and cursor lifetime. A test-only native host creates an actual paged
+B-tree file; the browser imports it, verifies and mutates the tree with the host
+HTTP listener stopped, then restarts entirely offline and exports the file for
+native verification. A native-server integration additionally proves its public
+B-tree aliases produce and consume the same records through the portable pager.
+The test records are opaque B-tree values, not runtime entities. The production
+JS/TS API is unchanged: these lower-level reads/writes do not supply collection
+catalog semantics, RQL storage execution, MVCC, atomic application transactions,
+or recovery of partially executed B-tree operations. Those runtime/WAL layers
+still need extraction before the application SDK can be released.
+
 Encryption qualification also requires resolving a pre-existing native header
 layout collision: the encryption marker currently occupies the physical-format
 version field, and a database-header rewrite overwrites it. The canonical file
@@ -133,6 +156,15 @@ Protected writeback for 63 pages remains about 3 MiB of writes (63 × 16 KiB
 home bytes, the staged frame and the 1 MiB zone clear) and three barriers;
 no per-page IPC is introduced. Holding the native file mutex through those existing barriers
 serializes the protected batch; it is not a throughput claim.
+
+B-tree cost sketch: lookup retains one page read per tree level plus any overflow
+chain reads; a scan visits each leaf and value once. The test corpus uses 600
+mixed-width records plus a 100 KB compressed value and a 70 KB overflow value,
+then replaces the overflow value with 90 KB. The minimum sharded cache is 32
+pages (512 KiB), used by the fixture. Generic page
+access adds no per-page IPC or dynamic dispatch, and does not change compression,
+allocation, publication or locking policy. This is correctness coverage, not a
+browser throughput or memory-budget qualification.
 
 New sync contracts belong to `reddb-wire` (ADR 0046). They require consistent
 snapshot/cursor bootstrap, durable resumability, transactional/idempotent upload,

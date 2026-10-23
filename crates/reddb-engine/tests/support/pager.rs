@@ -11,6 +11,9 @@ mod restart;
 #[path = "pager_orchestration_restart.rs"]
 mod orchestration_restart;
 
+#[path = "btree.rs"]
+mod btree;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Write(u64, usize),
@@ -627,7 +630,19 @@ pub fn pager_orchestration_allocation_fence() {
     }
 }
 
-pub const CASES: [(&str, fn()); 10] = [
+pub const CASES: [(&str, fn()); 13] = [
+    (
+        "btree_persisted_round_trip",
+        btree::btree_persisted_round_trip,
+    ),
+    (
+        "btree_reclamation_and_cursor_lifetime",
+        btree::btree_reclamation_and_cursor_lifetime,
+    ),
+    (
+        "btree_bounds_and_corruption",
+        btree::btree_bounds_and_corruption,
+    ),
     ("pager_orchestration_restart", pager_orchestration_restart),
     (
         "pager_orchestration_allocation_fence",

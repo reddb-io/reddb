@@ -4,9 +4,12 @@
 //! implementations, including pager orchestration and allocation fences.
 //! WAL implementation, encryption and MVCC remain host/runtime policy.
 
+pub mod btree;
 pub mod crc32;
 pub mod freelist;
+pub mod overflow;
 pub mod page;
 pub mod page_cache;
+pub mod page_store;
 pub mod pager;
 pub mod pager_io;

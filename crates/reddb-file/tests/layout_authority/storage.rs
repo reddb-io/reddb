@@ -1052,7 +1052,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     let vector_value_codec =
         read(root.join("crates/reddb-server/src/storage/engine/vector_btree/value_codec.rs"));
     let btree_value_layout =
-        read(root.join("crates/reddb-server/src/storage/engine/btree/value_layout.rs"));
+        read(root.join("crates/reddb-engine/src/storage/btree/value_layout.rs"));
     let graph_store = read(root.join("crates/reddb-server/src/storage/engine/graph_store.rs"));
     let graph_store_impl =
         read(root.join("crates/reddb-server/src/storage/engine/graph_store/impl.rs"));
@@ -1114,7 +1114,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
             vector_value_codec.as_str(),
         ),
         (
-            "storage/engine/btree/value_layout.rs",
+            "reddb-engine/storage/btree/value_layout.rs",
             btree_value_layout.as_str(),
         ),
         ("physical.rs", physical.as_str()),

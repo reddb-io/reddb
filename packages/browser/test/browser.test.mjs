@@ -16,6 +16,7 @@ const browsers = (process.env.REDDB_BROWSER_BROWSERS || 'chromium,firefox,webkit
 let server
 let origin
 let fixtures
+let nativeTreeFixture
 let nativeFixture
 const networkRequests = []
 
@@ -36,11 +37,18 @@ function nativeArtifact(action, path) {
   execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-file', '--example', 'browser_artifact', '--', action, path], { cwd: root, stdio: 'inherit' })
 }
 
+function nativeTree(action, path) {
+  execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-engine', '--example', 'browser_btree', '--', action, path], { cwd: root, stdio: 'inherit' })
+}
+
 before(async () => {
   fixtures = await mkdtemp(resolve(tmpdir(), 'reddb-browser-interop-'))
   const path = resolve(fixtures, 'native.rdb')
   nativeArtifact('create', path)
   nativeFixture = [...await readFile(path)]
+  const treePath = resolve(fixtures, 'native-tree.rdb')
+  nativeTree('create', treePath)
+  nativeTreeFixture = [...await readFile(treePath)]
   server = createServer(async (request, response) => {
     networkRequests.push(request.url)
     try {
@@ -127,6 +135,7 @@ for (const browser of browsers) {
           'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
           'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
           'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
+          'btree_persisted_round_trip', 'btree_reclamation_and_cursor_lifetime', 'btree_bounds_and_corruption',
           'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
           'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
           'pager_barriers_and_restart', 'pager_failure_boundaries',
@@ -321,6 +330,48 @@ for (const browser of browsers) {
           scalar: { columns: ['answer'], rows: [[42]] },
         })
         assert.equal(networkRequests.length, requestsBefore, `offline boot and operations reached the HTTP host: ${networkRequests.slice(requestsBefore).join(', ')}`)
+        })
+      } finally {
+        await context.setOffline(false)
+      }
+    })
+
+    storageTest('native B-tree survives offline WASM writes and browser restart, then reopens natively', async () => {
+      async function fixture(phase) {
+        const current = await page()
+        try {
+          return await current.evaluate(async ({ phase, fixture }) => {
+            const worker = new Worker('/packages/browser/test/btree-worker.js', { type: 'module' })
+            try {
+              return await new Promise((resolve, reject) => {
+                worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+                worker.onerror = (event) => reject(new Error(event.message))
+                worker.postMessage({ phase, fixture: fixture ? Uint8Array.from(fixture) : undefined })
+              })
+            } finally { worker.terminate() }
+          }, { phase, fixture: phase === 0 ? nativeTreeFixture : undefined })
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          assert.equal((await fixture(0)).phase, 0)
+          assert.equal((await fixture(1)).phase, 1)
+          await context.close()
+          await launch({ offline: true })
+          const result = await fixture(2)
+          const bytes = result.bytes instanceof Uint8Array ? result.bytes : Uint8Array.from(Object.values(result.bytes))
+          const path = resolve(fixtures, `${browser}-tree.rdb`)
+          await writeFile(path, bytes)
+          nativeTree('verify', path)
+          assert.equal(networkRequests.length, requestsBefore, `offline B-tree operations reached the HTTP host: ${networkRequests.slice(requestsBefore).join(', ')}`)
         })
       } finally {
         await context.setOffline(false)

@@ -363,3 +363,44 @@ fn native_and_portable_pagers_share_allocation_and_checkpoint_state() {
         portable_id
     );
 }
+
+#[path = "../../reddb-engine/tests/support/btree_restart.rs"]
+mod btree_fixture;
+
+#[test]
+fn native_and_portable_btrees_share_records_splits_overflow_and_reclamation() {
+    use reddb_file::{OpenMode, StdVfs, Vfs};
+    use reddb_server::storage::engine::{BTree, Pager, PagerConfig};
+    use std::sync::Arc;
+
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("portable-tree.rdb");
+    {
+        let pager = Arc::new(
+            Pager::open(
+                &path,
+                PagerConfig {
+                    cache_size: 2,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("native pager"),
+        );
+        let tree = BTree::new(Arc::clone(&pager));
+        let _: &reddb_engine::storage::btree::BTree<Pager> = &tree;
+        btree_fixture::seed(&tree).expect("native tree with inline/compressed/overflow values");
+        btree_fixture::verify(&tree, false).expect("native records match fixture");
+        pager.sync().expect("persist children before root");
+        btree_fixture::publish_root(pager.as_ref(), tree.root_page_id()).expect("root");
+        pager.sync().expect("native publication");
+    }
+    let file = StdVfs
+        .open(&path, OpenMode::create_keep())
+        .expect("closed native file");
+    btree_fixture::run(file, 1).expect("portable tree updates native records");
+    let pager = Arc::new(Pager::open_default(&path).expect("native reopen"));
+    let root = btree_fixture::read_root(pager.as_ref()).expect("portable root");
+    let tree = BTree::with_root(pager, root);
+    btree_fixture::verify(&tree, true)
+        .expect("native cursor and point reads see portable mutations");
+}

@@ -1,7 +1,7 @@
 use super::*;
-use crate::storage::engine::overflow::OverflowChain;
+use crate::storage::overflow::OverflowChain;
 
-impl BTree {
+impl<P: PageStore> BTree<P> {
     /// If `stored` is a pointer cell (slice E layout), walk the overflow
     /// chain anchored at it and return every page to the free list.
     /// No-op for inline cells (raw or compressed) and for empty cells.
@@ -15,14 +15,14 @@ impl BTree {
     /// rollback-capable window.
     fn free_chain_if_pointer(&self, stored: &[u8]) -> BTreeResult<()> {
         if let Some(head) = value_layout::pointer_head(stored) {
-            OverflowChain::new(&self.pager)
+            OverflowChain::new(self.pager.as_ref())
                 .free(head)
                 .map_err(value_layout::ValueLayoutError::from)?;
         }
         Ok(())
     }
     /// Create a new B+ tree using the given pager
-    pub fn new(pager: Arc<Pager>) -> Self {
+    pub fn new(pager: Arc<P>) -> Self {
         Self {
             retirement_pin: Arc::new(()),
             pager,
@@ -33,7 +33,7 @@ impl BTree {
     }
 
     /// Create a B+ tree with an existing root
-    pub fn with_root(pager: Arc<Pager>, root_page_id: u32) -> Self {
+    pub fn with_root(pager: Arc<P>, root_page_id: u32) -> Self {
         Self {
             retirement_pin: Arc::new(()),
             pager,
@@ -82,7 +82,7 @@ impl BTree {
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
                     let (_, stored) = read_leaf_cell(&page, pos)?;
-                    let value = value_layout::decode(&self.pager, &stored)?;
+                    let value = value_layout::decode(self.pager.as_ref(), &stored)?;
                     return Ok(Some(value));
                 }
                 SearchResult::NotFound(_) => {
@@ -109,7 +109,7 @@ impl BTree {
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
                 let (_, stored) = read_leaf_cell(&page, pos)?;
-                let value = value_layout::decode(&self.pager, &stored)?;
+                let value = value_layout::decode(self.pager.as_ref(), &stored)?;
                 Ok(Some(value))
             }
             SearchResult::NotFound(_) => Ok(None),
@@ -121,14 +121,14 @@ impl BTree {
     /// Applies the value-layout spill ladder before touching the tree:
     /// the 256 MB ceiling rejects here without any allocation; values
     /// at or below `OVERFLOW_THRESHOLD` go inline raw; larger values may
-    /// inline compressed or spill into an [`crate::storage::engine::overflow::OverflowChain`].
+    /// inline compressed or spill into an [`crate::storage::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
         let _writer = self.writer.lock();
         if key.len() > MAX_KEY_SIZE {
             return Err(BTreeError::KeyTooLarge(key.len()));
         }
-        let stored = value_layout::encode(&self.pager, value)?;
+        let stored = value_layout::encode(self.pager.as_ref(), value)?;
         self.insert_encoded(key, &stored)
     }
 
@@ -273,7 +273,7 @@ impl BTree {
         // encoded lengths so the leaf cell stays in the on-disk format
         // documented in `value_layout`; without this the in-place write
         // would scribble raw bytes over a flag-prefixed cell.
-        let new_stored = value_layout::encode(&self.pager, value)?;
+        let new_stored = value_layout::encode(self.pager.as_ref(), value)?;
 
         let (leaf_id, _path) = self.find_leaf(root_id, key)?;
         let mut page = self.pager.read_page(leaf_id)?;
@@ -349,7 +349,7 @@ impl BTree {
                 let (_, page, dirty) = current_leaf.as_mut().expect("set above");
                 if let SearchResult::Found(pos) = search_leaf(page, key)? {
                     let (_, old_value) = read_leaf_cell(page, pos)?;
-                    match value_layout::encode(&self.pager, value) {
+                    match value_layout::encode(self.pager.as_ref(), value) {
                         Ok(new_stored) if new_stored.len() <= old_value.len() => {
                             // Shrinking overwrite: free the old chain
                             // before the pointer header is scribbled over
@@ -416,7 +416,7 @@ impl BTree {
         let mut encoded: Vec<(&[u8], Vec<u8>)> = Vec::with_capacity(items.len());
         let mut first_oversize: Option<usize> = None;
         for (key, value) in items {
-            match value_layout::encode(&self.pager, value) {
+            match value_layout::encode(self.pager.as_ref(), value) {
                 Ok(stored) => encoded.push((key.as_slice(), stored)),
                 Err(value_layout::ValueLayoutError::ValueTooLarge(n)) => {
                     if first_oversize.is_none() {
@@ -656,7 +656,7 @@ impl BTree {
     }
 
     /// Create a cursor starting at the first entry
-    pub fn cursor_first(&self) -> BTreeResult<BTreeCursor> {
+    pub fn cursor_first(&self) -> BTreeResult<BTreeCursor<P>> {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(BTreeCursor {
@@ -681,7 +681,7 @@ impl BTree {
     }
 
     /// Create a cursor starting at or after the given key
-    pub fn cursor_seek(&self, key: &[u8]) -> BTreeResult<BTreeCursor> {
+    pub fn cursor_seek(&self, key: &[u8]) -> BTreeResult<BTreeCursor<P>> {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(BTreeCursor {

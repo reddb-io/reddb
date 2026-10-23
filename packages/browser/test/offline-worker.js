@@ -8,6 +8,7 @@ const assets = [
   '../src/wasm/reddb_wasm.js',
   '../src/wasm/reddb_wasm_bg.wasm',
   './pager-worker.js',
+  './btree-worker.js',
   './wasm/pager.js',
   './wasm/pager_bg.wasm',
 ].map((path) => new URL(path, self.location.href).href)

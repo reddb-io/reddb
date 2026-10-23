@@ -2898,6 +2898,7 @@ name = "reddb-io-engine"
 version = "1.25.7"
 dependencies = [
  "crc32fast",
+ "parking_lot",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",

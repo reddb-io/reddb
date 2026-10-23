@@ -11,6 +11,7 @@ on:
       - 'crates/reddb-server/src/runtime/evaluator_differential.rs'
       - 'crates/reddb-server/tests/portable_query_engine.rs'
       - 'crates/reddb-server/tests/pager_*.rs'
+      - 'crates/reddb-server/tests/btree_*.rs'
       - 'crates/reddb-server/tests/paged_checkpoint_rebuild.rs'
       - 'crates/reddb-server/tests/dead_storage_modules.rs'
       - 'crates/reddb-wasm/**'
@@ -65,7 +66,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo test --locked -p reddb-io-server --lib storage::engine::pager
-          cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild
+          cargo test --locked -p reddb-io-server --lib storage::engine::btree
+          cargo test --locked -p reddb-io-server --lib storage::engine::overflow
+          cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test btree_delete_stack --test btree_mixed_width_split --test issue_704_btree_rebuild_spills_oversized
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
         run: cargo check --locked --workspace --all-targets

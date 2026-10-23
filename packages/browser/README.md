@@ -67,6 +67,15 @@ transactions, runtime WAL/MVCC and encryption qualification remain pending.
 Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 
+The shared core also owns the native B-tree/cursor, compressed value layout and
+overflow chains. Native APIs alias these implementations through a page-access
+contract; the browser executes them in test-only WASM fixtures. Conformance covers
+splits, scans, seeks, updates/deletes, large values and reclamation. An additional
+OPFS test mutates a native-created tree, restarts the browser with the HTTP host
+stopped, and reopens the exported file natively. These are opaque B-tree records,
+not runtime collections or atomic database transactions. No raw tree API is added
+to the production SDK.
+
 ## Current query contract
 
 ```js

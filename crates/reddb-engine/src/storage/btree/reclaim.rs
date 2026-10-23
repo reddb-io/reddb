@@ -1,14 +1,14 @@
 use super::*;
 
-impl BTree {
-    pub(crate) fn has_retirement_readers(&self) -> bool {
+impl<P: PageStore> BTree<P> {
+    pub fn has_retirement_readers(&self) -> bool {
         Arc::strong_count(&self.retirement_pin) != 1
     }
 
     /// Enumerate a retired generation before changing the allocator. Never
     /// follow leaf sibling links as additional ownership edges: interior
     /// children already own every leaf. Validate overflow chains as well.
-    pub(crate) fn retired_pages(&self) -> BTreeResult<Vec<u32>> {
+    pub fn retired_pages(&self) -> BTreeResult<Vec<u32>> {
         let mut pending = vec![self.root_page_id()];
         let mut seen = std::collections::HashSet::new();
         let mut pages = Vec::new();
@@ -40,7 +40,7 @@ impl BTree {
                     let content = page.content();
                     let next = u32::from_le_bytes(content[..4].try_into().expect("chain header"));
                     let len = u32::from_le_bytes(content[4..8].try_into().expect("chain length"));
-                    if len as usize > crate::storage::engine::overflow::OVERFLOW_PAYLOAD_PER_PAGE {
+                    if len as usize > crate::storage::overflow::OVERFLOW_PAYLOAD_PER_PAGE {
                         return Err(BTreeError::Corrupted(
                             "invalid retired overflow length".into(),
                         ));

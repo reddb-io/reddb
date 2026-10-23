@@ -154,6 +154,27 @@ impl std::ops::Deref for Pager {
     }
 }
 
+impl reddb_engine::storage::page_store::PageStore for Pager {
+    fn read_page(&self, id: u32) -> Result<Page, PagerError> {
+        self.core.read_page(id)
+    }
+    fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
+        self.core.write_page(id, page)
+    }
+    fn allocate_page(&self, kind: super::page::PageType) -> Result<Page, PagerError> {
+        self.core.allocate_page(kind)
+    }
+    fn free_page(&self, id: u32) -> Result<(), PagerError> {
+        self.core.free_page(id)
+    }
+    fn page_count(&self) -> Result<u32, PagerError> {
+        self.core.page_count()
+    }
+    fn prefetch_hint(&self, id: u32) {
+        self.prefetch_hint(id)
+    }
+}
+
 #[path = "pager/impl.rs"]
 mod pager_impl;
 impl Drop for Pager {
