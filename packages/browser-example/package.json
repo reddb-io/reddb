@@ -5,15 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && node scripts/build.mjs",
+    "build": "node scripts/verify-ds.mjs && svelte-check --config ../../svelte.config.js --tsconfig ./tsconfig.json --fail-on-warnings && node scripts/build.mjs",
     "test": "node --test test/browser.test.mjs"
   },
   "dependencies": {
-    "@reddb-io/browser": "0.1.0-alpha.0"
+    "@reddb-io/browser": "0.1.0-alpha.0",
+    "@reddb-io/design-system": "workspace:*",
+    "svelte": "5.57.1"
   },
   "devDependencies": {
     "playwright": "1.61.1",
-    "typescript": "7.0.2",
-    "vite": "8.3.5"
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "svelte-check": "4.7.6",
+    "@axe-core/playwright": "4.11.1"
   }
 }

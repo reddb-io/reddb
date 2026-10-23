@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - 'packages/browser-example/**'
+      - 'vendor/ds/**'
+      - 'design-system.manifest.json'
+      - 'svelte.config.js'
+      - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - '.github/workflows/browser-example.yml'
       - '.github/workflows/docs.yml'
@@ -31,7 +35,7 @@ jobs:
           node-version: '22'
       - name: Install the published browser package and test tools
         run: |
-          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example...
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           fi
