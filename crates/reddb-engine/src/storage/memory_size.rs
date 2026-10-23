@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn nested_arrays_charge_slots_and_variable_payloads_per_owner() {
         let shared = Value::text("shared payload");
-        let value = Value::Array(vec![shared.clone(), Value::Array(vec![shared].into())].into());
+        let value = Value::Array(vec![shared.clone(), Value::Array(vec![shared])]);
         assert_eq!(
             value_heap_bytes(&value),
             3 * std::mem::size_of::<Value>() + 2 * "shared payload".len()
@@ -190,7 +190,7 @@ mod tests {
     fn excessively_nested_api_values_fail_closed() {
         let mut value = Value::Null;
         for _ in 0..reddb_rql::limits::JSON_LITERAL_MAX_DEPTH + 2 {
-            value = Value::Array(vec![value].into());
+            value = Value::Array(vec![value]);
         }
         assert_eq!(value_heap_bytes(&value), usize::MAX);
         assert_eq!(zone_growth_bytes(&value), usize::MAX);

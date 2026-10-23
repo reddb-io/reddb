@@ -1409,7 +1409,6 @@ impl GrowingSegment {
 
     /// The owning segment read lock keeps candidates stable. Callers must not
     /// re-enter storage in `visit`; collect IDs and evaluate RLS after unlocking.
-
     #[cfg(test)]
     pub fn visit_graph_index_candidates(
         &self,
@@ -3044,7 +3043,7 @@ mod tests {
             segment.find_unique_key_conflict(
                 &definitions,
                 1,
-                &[payload.clone()],
+                std::slice::from_ref(&payload),
                 None,
                 &|entity| entity.id != EntityId::new(1)
             ),
