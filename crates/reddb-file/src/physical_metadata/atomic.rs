@@ -30,14 +30,16 @@ pub(super) fn write_physical_metadata_bytes_atomically(
     let temp_path = path.with_file_name(name);
     // Only clean up a sibling this call successfully created. A stale sibling
     // (for example after PID reuse) belongs to an earlier publication.
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&temp_path)?;
     let result = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
+        {
+            let mut file = file;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
         fs::rename(&temp_path, path)?;
         #[cfg(unix)]
         {

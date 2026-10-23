@@ -39,11 +39,13 @@ pub mod local_backend;
 pub mod logical_wal;
 pub mod native_index_artifact;
 pub mod native_store;
+pub mod native_value;
 pub mod operational_manifest;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
 pub mod profile;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod salvage;
 pub mod scrub;
 pub mod serverless;
@@ -132,9 +134,11 @@ pub use control_store::{
     TERM_TEMP_EXTENSION,
 };
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
+#[cfg(not(target_arch = "wasm32"))]
+pub use embedded::EmbeddedRdbWriterLock;
 pub use embedded::{
-    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
-    EmbeddedRdbWriterLock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
+    EmbeddedRdbArtifact, EmbeddedRdbFile, EmbeddedRdbManifest, EmbeddedRdbOpen,
+    EmbeddedRdbSuperblock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
     EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
     EMBEDDED_RDB_MANIFEST_SLOT_SIZE, EMBEDDED_RDB_MANIFEST_ZONE_END,
     EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
@@ -334,7 +338,7 @@ pub use vector_ivf_index::{
     decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
     IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
 };
-pub use vfs::{OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
+pub use vfs::{BorrowedStdFile, OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
@@ -349,6 +353,7 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
+#[cfg(not(target_arch = "wasm32"))]
 pub use salvage::{
     salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
     StorageSalvageSkippedRegion,

@@ -19,7 +19,6 @@ path = "src/lib.rs"
 reddb-types = { workspace = true }
 blake3 = "1"
 crc32fast = "1.5"
-fs2 = "0.4"
 hex = "0.4"
 lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +32,9 @@ tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2 = "0.4"
 
 [lints]
 workspace = true

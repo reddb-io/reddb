@@ -1,0 +1,140 @@
+name: RedDB Browser Foundation
+
+on:
+  pull_request:
+    paths:
+      - 'crates/reddb-file/**'
+      - 'crates/reddb-engine/**'
+      - 'crates/reddb-server/src/storage/query/**'
+      - 'crates/reddb-server/src/storage/engine/**'
+      - 'crates/reddb-server/src/storage/transaction/**'
+      - 'crates/reddb-server/src/storage/unified/entity.rs'
+      - 'crates/reddb-server/src/storage/unified/store.rs'
+      - 'crates/reddb-server/src/storage/unified/store/**'
+      - 'crates/reddb-server/src/runtime/transaction_state.rs'
+      - 'crates/reddb-server/src/runtime/execution_context.rs'
+      - 'crates/reddb-server/src/runtime/table_row_mvcc_resolver.rs'
+      - 'crates/reddb-server/src/runtime/record_search.rs'
+      - 'crates/reddb-server/src/runtime/query_exec/json_writers.rs'
+      - 'tests/grouped_mvcc_transactions.rs'
+      - 'tests/grouped/mvcc_transactions/**'
+      - 'crates/reddb-server/src/runtime/join_filter/**'
+      - 'crates/reddb-server/src/runtime/evaluator_differential.rs'
+      - 'crates/reddb-server/tests/portable_query_engine.rs'
+      - 'crates/reddb-server/tests/pager_*.rs'
+      - 'crates/reddb-server/tests/vault_transactions.rs'
+      - 'crates/reddb-server/tests/vault_import_corruption.rs'
+      - 'crates/reddb-server/tests/vacuum_snapshot_horizon.rs'
+      - 'crates/reddb-server/tests/checkpoint_open_transaction.rs'
+      - 'crates/reddb-server/tests/checkpoint_concurrent_transaction.rs'
+      - 'crates/reddb-server/tests/btree_*.rs'
+      - 'crates/reddb-server/tests/paged_checkpoint_rebuild.rs'
+      - 'crates/reddb-server/tests/dead_storage_modules.rs'
+      - 'crates/reddb-wasm/**'
+      - 'crates/reddb-rql/**'
+      - 'crates/reddb-types/**'
+      - 'packages/browser/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/browser.yml'
+      - '.github/workflows/browser-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  native-artifact:
+    name: Native formats and query core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          components: clippy
+      - name: Verify native formats, locking, crash recovery and portable interoperability
+        run: cargo test --locked -p reddb-io-file -p reddb-io-engine
+      - name: Lint the shared query and storage core
+        run: cargo clippy --locked -p reddb-io-engine --all-targets --no-deps -- -D warnings
+      - name: Preserve type and concept authorities across the engine extraction
+        run: cargo test --locked -p reddb-io-types --test type_authority
+      - uses: ./.github/actions/install-protoc
+        if: runner.os == 'Linux'
+        with:
+          version: '28.3'
+      - name: Compare portable execution with the native runtime and query regressions
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p reddb-io-server --test portable_query_engine --test runtime_query_behavior --test dead_storage_modules --test vault_import_corruption
+      - name: Verify the native adapter and shared allocation/checkpoint orchestration
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked -p reddb-io-server --lib storage::query::unified
+          cargo test --locked -p reddb-io-server --lib storage::engine::pager
+          cargo test --locked -p reddb-io-server --lib storage::engine::btree
+          cargo test --locked -p reddb-io-server --lib storage::engine::overflow
+          cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test btree_delete_stack --test btree_mixed_width_split --test issue_704_btree_rebuild_spills_oversized
+      - name: Verify shared MVCC through the native runtime, WAL and checkpoint paths
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked -p reddb-io-server --lib runtime::transaction_state
+          cargo test --locked -p reddb-io-server --lib runtime::table_row_mvcc_resolver
+          cargo test --locked -p reddb-io --test grouped_mvcc_transactions
+          cargo test --locked -p reddb-io-server --test vault_transactions --test vacuum_snapshot_horizon --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update
+      - name: Check every workspace target, including evaluator inventory tests
+        if: runner.os == 'Linux'
+        run: cargo check --locked --workspace --all-targets
+
+  browser-artifact:
+    name: WASM and OPFS (Chromium, Firefox, WebKit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install pinned browser dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser
+          # The Azure mirror can throttle these browser packages for minutes.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          pnpm --filter @reddb-io/browser exec playwright install --with-deps chromium firefox webkit
+      - name: Install checksummed wasm-bindgen 0.2.120
+        env:
+          BINDGEN_SHA256: ceb6f0b9fea9d2868f258215a1d7f86a4c28330a0d64432cc7d53674618772d6
+        run: |
+          archive="$RUNNER_TEMP/wasm-bindgen.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.120/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl.tar.gz
+          printf '%s  %s\n' "$BINDGEN_SHA256" "$archive" | sha256sum --check -
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Check browser Rust bindings
+        run: cargo clippy --locked -p reddb-io-wasm -p reddb-io-engine --lib --example browser_conformance --example pager_conformance --target wasm32-unknown-unknown --no-deps -- -D warnings
+      - name: Build the real WASM artifact
+        run: pnpm --filter @reddb-io/browser build
+      - name: Verify native OPFS where available and explicit unsupported behavior
+        run: pnpm --filter @reddb-io/browser test
+      - name: Verify installable package, TypeScript and offline bundled consumers
+        run: pnpm --filter @reddb-io/browser test:distribution

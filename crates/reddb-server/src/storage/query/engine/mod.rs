@@ -30,12 +30,10 @@
 //! - **QueryEngine**: Compiles, optimizes, and executes queries
 
 pub mod aggregates_extra;
-pub mod binding;
-pub mod cancel;
-pub mod iterator;
-pub mod op;
 pub mod registry;
-pub mod transform;
+
+// Native public paths alias the same portable modules and types (ADR 0077).
+pub use reddb_engine::query::engine::{binding, cancel, iterator, op, transform};
 
 pub use binding::{Binding, BindingBuilder, Var};
 pub use cancel::CancelToken;

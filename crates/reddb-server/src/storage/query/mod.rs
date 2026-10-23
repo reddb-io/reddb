@@ -46,15 +46,10 @@ pub mod analyze_cmd;
 pub mod batch;
 pub mod binary;
 pub mod engine;
-pub mod evaluator;
-pub mod executor;
 pub mod executors;
-pub mod filter;
-pub mod filter_compiled;
 pub mod planner;
 pub mod rag;
 pub mod similarity;
-pub mod sort;
 pub mod step;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -63,6 +58,9 @@ pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types
+// Native public paths alias the same portable modules and types (ADR 0077).
+pub use reddb_engine::query::{evaluator, executor, filter, filter_compiled, sort};
+
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,
     OpFilter, OpGroup, OpJoin, OpLeftJoin, OpMinus, OpNull, OpOrder, OpProject, OpReduced,

@@ -17,6 +17,7 @@ name = "reddb_server"
 path = "src/lib.rs"
 
 [dependencies]
+reddb-engine = { workspace = true }
 # Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
 reddb-types = { workspace = true }
