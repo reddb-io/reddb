@@ -7,6 +7,9 @@ on:
       - 'crates/reddb-wire/**'
       - 'crates/reddb-types/**'
       - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - 'packages/browser/package.json'
       - '.github/workflows/client-codecs.yml'
   push:
     branches: [main]
@@ -15,6 +18,9 @@ on:
       - 'crates/reddb-wire/**'
       - 'crates/reddb-types/**'
       - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - 'packages/browser/package.json'
       - '.github/workflows/client-codecs.yml'
 
 permissions:
