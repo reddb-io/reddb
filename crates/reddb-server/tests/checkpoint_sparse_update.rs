@@ -3,6 +3,15 @@ use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
 fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
+    qualify_wal_cache_pressure_order(true);
+}
+
+#[test]
+fn later_unrelated_wal_pressure_preserves_earlier_sparse_updates() {
+    qualify_wal_cache_pressure_order(false);
+}
+
+fn qualify_wal_cache_pressure_order(pressure_before_payload: bool) {
     let directory = tempfile::tempdir().expect("temporary database");
     let path = directory.path().join("pressure.rdb");
     let options = || {
@@ -62,12 +71,16 @@ fn unrelated_wal_cache_pressure_does_not_disable_later_sparse_updates() {
         panic!("payload tree missing from published catalog");
     };
     let root_before = payload_root();
-    runtime
-        .execute_query("UPDATE pressure_noise SET n=1")
-        .expect("exceed retained WAL row capacity");
-    runtime
-        .execute_query("UPDATE pressure_payload SET n=1256 WHERE id=2")
-        .expect("acknowledged update after cache saturation");
+    let noise_update = "UPDATE pressure_noise SET n=1";
+    let payload_update = "UPDATE pressure_payload SET n=1256 WHERE id=2";
+    let ordered_updates = if pressure_before_payload {
+        [noise_update, payload_update]
+    } else {
+        [payload_update, noise_update]
+    };
+    for query in ordered_updates {
+        runtime.execute_query(query).expect("ordered WAL pressure");
+    }
     let pager = runtime.db().store().pager().expect("pager").clone();
     let before = pager.cache_stats();
     runtime.checkpoint().expect("checkpoint under pressure");
