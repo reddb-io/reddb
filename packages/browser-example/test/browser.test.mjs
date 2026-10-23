@@ -16,6 +16,7 @@ let temporary
 let server
 let origin = process.env.REDDB_BROWSER_EXAMPLE_URL
 let requests = 0
+let updateRevision = false
 
 before(async () => {
   temporary = await mkdtemp(resolve(tmpdir(), 'reddb-browser-example-'))
@@ -28,7 +29,10 @@ before(async () => {
     const path = resolve(output, relative)
     if (!path.startsWith(`${output}${sep}`)) { response.writeHead(403).end(); return }
     try {
-      const body = await readFile(path)
+      let body = await readFile(path)
+      if (relative === 'service-worker.js' && updateRevision) {
+        body = Buffer.from(body.toString().replace(/(const current = prefix \+ '[^']*)'/, "$1-update-test'"))
+      }
       const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' }[extname(path)] || 'application/octet-stream'
       response.writeHead(200, { 'Content-Type': type }).end(body)
     } catch { response.writeHead(404).end() }
@@ -47,6 +51,7 @@ async function ready(page) {
   await page.goto(origin)
   await page.waitForFunction(() => document.querySelector('#engine-state').textContent.includes('WASM ativo'))
   await page.waitForFunction(() => !document.querySelector('#reload').disabled)
+  await page.getByRole('tab', { name: 'JSON', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('42'))
   assert.deepEqual(JSON.parse(await page.locator('#query-result code').textContent()), { columns: ['resposta'], rows: [[42]] })
 }
@@ -162,7 +167,7 @@ test('official DS marks/fonts remain byte-identical and light/dark layouts pass 
 })
 
 
-test('workspace keeps query/result peers aligned, adapts to its container and supports keyboard navigation', async () => {
+test('query workspace follows the DS reference with a code editor, real result grid and keyboard execution', async () => {
   const browser = await chromium.launch({ headless: true })
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
@@ -170,37 +175,96 @@ test('workspace keeps query/result peers aligned, adapts to its container and su
     await ready(page)
     assert.equal(await page.locator('main').count(), 1)
     assert.equal(await page.getByRole('heading', { level: 1 }).count(), 1)
-    await page.keyboard.press('Tab')
+    assert.equal(await page.locator('html').getAttribute('data-density'), 'compact')
+    // ready() has focused the result tab; check the bypass explicitly.
+    await page.locator('a[href="#main-content"]').focus()
     await page.keyboard.press('Enter')
     assert.equal(await page.evaluate(() => document.activeElement.id), 'main-content')
-    const editor = () => page.locator('#sql').boundingBox()
-    const result = () => page.locator('#query-result').boundingBox()
-    const content = () => page.locator('[data-sidebar-layout-region="main"]').boundingBox()
-    const sidebar = () => page.locator('[data-sidebar-layout-region="sidebar"]').boundingBox()
-    let [e, r, c, s] = await Promise.all([editor(), result(), content(), sidebar()])
-    assert.ok(e.y < 400, 'the editor must be visible in the first desktop viewport')
-    assert.ok(Math.abs(e.y - r.y) <= 2, 'editor and result share their top boundary')
-    assert.ok(r.x >= e.x + e.width, 'query/result share the desktop workspace horizontally')
-    assert.ok(s.x >= c.x + c.width, 'artifact controls sit beside the workspace')
-    const switchControl = page.getByRole('switch', { name: 'Tema escuro' })
-    await switchControl.focus()
-    await page.keyboard.press('Space')
-    assert.equal(await page.locator('html').getAttribute('data-color-scheme'), 'dark')
+    await page.getByRole('tab', { name: 'Resultado', exact: true }).click()
+    assert.equal(await page.getByRole('columnheader', { name: 'resposta', exact: true }).isVisible(), true)
+    assert.equal(await page.getByRole('gridcell', { name: '42', exact: true }).isVisible(), true)
+    assert.equal(await page.locator('[data-code-field]').count(), 1)
+    assert.ok(await page.locator('[data-code-field] [data-token-kind="keyword"]').count() > 0)
+    const editor = await page.locator('#sql').boundingBox()
+    const results = await page.locator('#query-result').boundingBox()
+    const file = await page.getByRole('complementary').boundingBox()
+    assert.ok(editor.y < 160, 'query editing starts near the top of the application')
+    assert.ok(results.y >= editor.y + editor.height, 'the result is directly below the editor')
+    assert.ok(file.x + file.width <= editor.x, 'the local artifact panel sits on the leading side')
+    const status = await page.locator('#engine-state').boundingBox()
+    assert.ok(status.y + status.height <= 1000, 'the runtime status stays within the desktop viewport')
+    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta")
+    await page.keyboard.press('Control+Enter')
+    await page.getByRole('gridcell', { name: 'sem rede', exact: true }).waitFor()
+    assert.equal(await page.getByRole('columnheader', { name: 'modo', exact: true }).isVisible(), true)
+    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill('x'.repeat(10001))
+    assert.equal(await page.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
+    await page.keyboard.press('Control+Enter')
+    await page.waitForFunction(() => document.querySelector('#error').textContent.includes('10.000'))
+    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta")
+    await page.keyboard.press('Control+Enter')
+    await page.getByRole('gridcell', { name: 'sem rede', exact: true }).waitFor()
+    await page.getByRole('switch', { name: 'Tema escuro' }).click()
+    assert.equal(await page.locator('html').getAttribute('data-color-scheme'), 'light')
     await page.setViewportSize({ width: 390, height: 844 })
-    ;[e, r, c, s] = await Promise.all([editor(), result(), content(), sidebar()])
-    assert.ok(r.y >= e.y + e.height, 'mobile result follows the editor')
-    assert.ok(s.y >= c.y + c.height, 'mobile file controls follow the query workspace')
+    const mobileEditor = await page.locator('#sql').boundingBox()
+    const mobileResults = await page.locator('#query-result').boundingBox()
+    const mobileFile = await page.getByRole('complementary').boundingBox()
+    assert.ok(mobileResults.y >= mobileEditor.y + mobileEditor.height)
+    assert.ok(mobileFile.y >= mobileResults.y + mobileResults.height, 'local file controls follow the query on phones')
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true)
     await page.getByRole('button', { name: 'Menu', exact: true }).click()
-    assert.equal(await page.getByRole('switch', { name: 'Tema escuro' }).isChecked(), true)
+    assert.equal(await page.getByRole('switch', { name: 'Tema escuro' }).isChecked(), false)
     assert.equal(await page.getByRole('link', { name: 'Guia JS/TS', exact: true }).isVisible(), true)
     await page.keyboard.press('Escape')
     assert.equal(await page.getByRole('button', { name: 'Menu', exact: true }).getAttribute('aria-expanded'), 'false')
     await page.getByRole('button', { name: 'Como testar offline', exact: true }).click()
     assert.equal(await page.getByText('Desligue a rede do navegador.', { exact: true }).isVisible(), true)
     await page.setViewportSize({ width: 1440, height: 1000 })
-    await page.locator('.playground-workspace').evaluate(element => { element.style.width = '640px' })
-    ;[e, r, c, s] = await Promise.all([editor(), result(), content(), sidebar()])
-    assert.ok(r.y >= e.y + e.height, 'a narrow container stacks the editor on a wide viewport')
-    assert.ok(s.y >= c.y + c.height, 'a narrow container stacks the sidebar on a wide viewport')
+    await page.locator('[data-application-shell-region="main"]').evaluate(element => { element.style.width = '640px' })
+    const containedResults = await page.locator('#query-result').boundingBox()
+    const containedFile = await page.getByRole('complementary').boundingBox()
+    assert.ok(containedFile.y >= containedResults.y + containedResults.height, 'the layout follows its own container on a wide viewport')
   } finally { await browser.close() }
+})
+
+
+test('an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline', { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await ready(page)
+    await page.getByRole('button', { name: 'Gravar marcador' }).click()
+    await page.waitForFunction(() => document.querySelector('#record-count').textContent === '1')
+    updateRevision = true
+    await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update())
+    await page.locator('#app-update').waitFor({ state: 'visible' })
+    assert.equal(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).waiting?.state), 'installed')
+    assert.equal(await page.getByRole('button', { name: 'Recarregar página' }).isDisabled(), true)
+    await Promise.all([
+      page.waitForEvent('load'),
+      page.getByRole('button', { name: 'Atualizar aplicação' }).click(),
+    ])
+    await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+    await page.waitForFunction(() => !document.querySelector('#reload').disabled)
+    assert.equal(await page.locator('#record-count').textContent(), '1')
+    assert.equal(await page.locator('#app-update').isHidden(), true)
+    const port = server.address().port
+    await new Promise(resolve => server.close(resolve))
+    const before = requests
+    try {
+      await context.setOffline(true)
+      await page.goto(`${origin}?v=update-test`)
+      await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+      await page.waitForFunction(() => !document.querySelector('#reload').disabled)
+      assert.equal(await page.locator('#record-count').textContent(), '1')
+      await page.getByRole('button', { name: 'Gravar marcador' }).click()
+      await page.waitForFunction(() => document.querySelector('#record-count').textContent === '2')
+      assert.equal(requests, before, 'the versioned navigation must use the offline cache')
+    } finally {
+      server.listen(port, '127.0.0.1')
+      await once(server, 'listening')
+    }
+  } finally { updateRevision = false; await browser.close() }
 })

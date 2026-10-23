@@ -25,26 +25,74 @@
       "types": "./kits/base/src/recipes.ts",
       "default": "./kits/base/src/recipes.ts"
     },
+    "./data/*": {
+      "svelte": "./kits/data/src/*.svelte",
+      "default": "./kits/data/src/*.svelte"
+    },
+    "./data/recipes": {
+      "types": "./kits/data/src/recipes.ts",
+      "default": "./kits/data/src/recipes.ts"
+    },
+    "./data/static": {
+      "types": "./kits/data/src/static.server.ts",
+      "default": "./kits/data/src/static.server.ts"
+    },
     "./styles.css": "./styles/all.css",
     "./styles/all.css": "./styles/all.css",
     "./styles/application.css": "./styles/application.css",
     "./styles/base.css": "./styles/base.css"
   },
   "sideEffects": [
+    "./kits/data/**/*.css",
     "./styles/**/*.css"
   ],
   "dependencies": {
     "@internationalized/date": "^3.12.4",
+    "@types/d3-hierarchy": "^3.1.7",
+    "@types/d3-sankey": "0.12.5",
+    "@types/d3-shape": "^3.2.0",
     "bits-ui": "^2.19.5",
     "libphonenumber-js": "1.13.15",
     "tailwind-variants": "^3.1.1"
   },
   "peerDependencies": {
+    "@aflsolutions/graphology-communities-leiden": "^1.1.1",
     "@lucide/svelte": "^1.0.1",
+    "d3-hierarchy": "^3.1.2",
+    "d3-sankey": "^0.12.3",
+    "d3-shape": "^3.2.0",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
+    "layerchart": "^2.5.1",
+    "sigma": "^3.0.3",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
+    "@aflsolutions/graphology-communities-leiden": {
+      "optional": true
+    },
     "@lucide/svelte": {
+      "optional": true
+    },
+    "d3-hierarchy": {
+      "optional": true
+    },
+    "d3-sankey": {
+      "optional": true
+    },
+    "d3-shape": {
+      "optional": true
+    },
+    "graphology": {
+      "optional": true
+    },
+    "graphology-layout-forceatlas2": {
+      "optional": true
+    },
+    "layerchart": {
+      "optional": true
+    },
+    "sigma": {
       "optional": true
     }
   }

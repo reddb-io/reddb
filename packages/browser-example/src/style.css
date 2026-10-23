@@ -9,22 +9,45 @@ body {
   font-family: var(--reddb-font-family-sans);
 }
 
-.playground-workspace {
-  padding-block: var(--reddb-spatial-layout-gap-lg);
-}
+.browser-regions { display: grid; }
 
-.playground-runtime {
-  padding-block: var(--reddb-spatial-inset-sm);
+.browser-editor { border-bottom: 1px solid var(--reddb-color-muted); }
+
+.browser-toolbar {
+  padding: var(--reddb-spatial-inset-sm) var(--reddb-spatial-inset-md);
   border-bottom: 1px solid var(--reddb-color-muted);
 }
 
-.playground-query {
-  display: grid;
-  gap: var(--reddb-spatial-layout-gap-md);
+.browser-code-field { padding: var(--reddb-spatial-inset-sm); }
+
+.browser-editor-note {
+  padding: 0 var(--reddb-spatial-inset-md) var(--reddb-spatial-inset-sm);
 }
 
-.playground-query > * { min-width: 0; }
-
-.playground-sidebar-content {
-  padding-inline: var(--reddb-spatial-inset-sm);
+.browser-results,
+.browser-results > * {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
+
+.browser-result-tabs { padding-inline: var(--reddb-spatial-inset-sm); }
+
+.browser-result-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-block: 0;
+}
+
+.browser-result-summary {
+  padding: var(--reddb-spatial-inset-sm) var(--reddb-spatial-inset-md);
+  border-bottom: 1px solid var(--reddb-color-muted);
+}
+
+.browser-json { padding: var(--reddb-spatial-inset-md); }
+
+.browser-file-content { padding-inline: var(--reddb-spatial-inset-sm); }
+
+.browser-statusbar { padding-inline: var(--reddb-spatial-inset-sm); }

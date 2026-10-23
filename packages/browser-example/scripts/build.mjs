@@ -25,12 +25,15 @@ const prefix = 'reddb-browser-example:' + self.registration.scope + ':'
 const current = prefix + '${revision}'
 const assets = ${JSON.stringify(['./', ...assets])}
 self.addEventListener('install', event => event.waitUntil(caches.open(current).then(cache => cache.addAll(assets))))
+self.addEventListener('message', event => {
+  if (event.data?.type === 'ACTIVATE_UPDATE') event.waitUntil(self.skipWaiting())
+})
 self.addEventListener('activate', event => event.waitUntil((async () => {
   for (const name of await caches.keys()) if (name.startsWith(prefix) && name !== current) await caches.delete(name)
   await self.clients.claim()
 })()))
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || !event.request.url.startsWith(self.registration.scope)) return
-  event.respondWith(caches.open(current).then(async cache => await cache.match(event.request) || fetch(event.request)))
+  event.respondWith(caches.open(current).then(async cache => await cache.match(event.request, { ignoreSearch: event.request.mode === 'navigate' }) || fetch(event.request)))
 })
 `)
