@@ -4,3 +4,4 @@ packages:
   - "drivers/js-client"
   - "drivers/bun"
   - "packages/*"
+  - "vendor/ds"

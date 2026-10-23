@@ -1,0 +1,20 @@
+// Menu capabilities through the Base subpath a Product Application consumes.
+export {
+  DROPDOWN_MENU_SIZES,
+  DropdownMenu,
+  NavigationMenu,
+  dropdownMenu,
+  dropdownMenuGroups,
+  isDropdownMenuGroup,
+  isNavigationMenuSection,
+  navigationMenu,
+  type DropdownMenuEntry,
+  type DropdownMenuGroup,
+  type DropdownMenuItem,
+  type DropdownMenuSize,
+  type NavigationMenuEntry,
+  type NavigationMenuLink,
+  type NavigationMenuOrientation,
+  type NavigationMenuSection,
+  type NavigationMenuSize,
+} from "@reddb-io/design-system/base";

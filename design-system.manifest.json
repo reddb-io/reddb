@@ -1,0 +1,10 @@
+{
+  "source": "reddb-io/design-system",
+  "version": "v2026.10.30",
+  "framework": "svelte",
+  "consumer": "reddb-browser-playground",
+  "kits": ["base"],
+  "styles": ["application"],
+  "distribution": { "format": "source" },
+  "dest": "vendor/ds"
+}

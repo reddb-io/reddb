@@ -6,7 +6,7 @@ import { build } from 'vite'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const output = resolve(root, 'dist')
-await build({ root, configFile: false, base: './', build: { outDir: output, emptyOutDir: true } })
+await build({ root, base: './', build: { outDir: output, emptyOutDir: true } })
 async function files(directory, prefix = './') {
   const names = []
   for (const entry of await readdir(directory, { withFileTypes: true })) {

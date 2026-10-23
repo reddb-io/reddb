@@ -1,0 +1,106 @@
+{
+  "$comment": "kit-lint rule 8 (wave 6A): interactive elements that draw their own states instead of the quietControl() contract, each with the reason it is not a quiet control. An entry that matches nothing fails as stale.",
+  "allow": [
+    {
+      "file": "src/Link.svelte",
+      "element": "a",
+      "reason": "The Link primitive itself. A link is not a quiet control: its affordance is ink with a persistent underline that thickens on hover (DESIGN.md, Links), never a fill behind running text."
+    },
+    {
+      "file": "src/LinkPreview.svelte",
+      "element": "a",
+      "reason": "The trigger is an inline link wearing link(): the underline is its affordance and its hover, as for Link."
+    },
+    {
+      "file": "src/SkipLink.svelte",
+      "element": "a",
+      "reason": "Off-screen until it takes keyboard focus, then a fixed opaque chip; it is never hovered at rest, and its only state is focus, which draws the ink outline."
+    },
+    {
+      "file": "src/DropdownMenu.svelte",
+      "element": "a",
+      "reason": "A menu option: Bits moves data-highlighted with the pointer and the keyboard, so the listbox highlight (bg-foreground/10) is its hover and its focus at once (DESIGN.md, options in a listbox). A separate :hover fill would show two highlighted rows."
+    },
+    {
+      "file": "src/Combobox.svelte",
+      "element": "Bits.Item",
+      "reason": "A listbox option with virtual focus: data-highlighted follows the pointer and the arrow keys, so the listbox highlight is its hover and its focus (DESIGN.md, options in a listbox)."
+    },
+    {
+      "file": "src/NavigationMenu.svelte",
+      "element": "a",
+      "match": "<a href={link.href} aria-current=",
+      "reason": "The closed section's crawl list sits inside a hidden <ul>: it is never rendered, hovered or focused, and exists only so crawlers and no-script readers find every destination (wave 5B)."
+    },
+    {
+      "file": "src/Steps.svelte",
+      "element": "Link",
+      "reason": "A step title is an inline link beside its marker: ink with the persistent underline is its affordance (DESIGN.md, Links); the class only lays out the marker and the label."
+    },
+    {
+      "file": "src/Timeline.svelte",
+      "element": "Link",
+      "reason": "An event title is an inline link in the timeline's text: ink with the persistent underline is its affordance; the class only sets the title's weight."
+    },
+    {
+      "file": "src/Logo.svelte",
+      "element": "svelte:element",
+      "reason": "The Logo places a Brand Mark inside its clear space. The DS draws nothing behind or over a Mark (ADR 0004), so a linked Logo answers the pointer with the cursor and the ink focus outline, never a fill."
+    },
+    {
+      "file": "src/SearchSelect.svelte",
+      "element": "Bits.Item",
+      "reason": "A listbox option with virtual focus: Bits UI owns pointer and keyboard highlight through data-highlighted, which supplies both hover and focus."
+    },
+    {
+      "file": "react/src/SkipLink.tsx",
+      "element": "a",
+      "reason": "Native React adapter of SkipLink: off-screen until keyboard focus reveals the canonical opaque chip and ink outline; shares skipLink() with Svelte."
+    },
+    {
+      "file": "react/src/Logo.tsx",
+      "element": "a",
+      "reason": "Native React Logo places an unaltered Brand Mark inside mandatory clearspace. Only cursor and the shared ink focus outline may answer interaction; a fill would draw over the Mark (ADR 0004)."
+    },
+    {
+      "file": "react/src/Link.tsx",
+      "element": "a",
+      "reason": "Native React Link uses the same persistent ink underline as Svelte Link, rather than quiet-control fills behind running text."
+    },
+    {
+      "file": "src/Breadcrumbs.svelte",
+      "element": "Link",
+      "reason": "Breadcrumb destinations retain the canonical persistent underline. The slot only softens ink and sets Density-owned underline offset; Link still owns hover and focus, rather than quiet-control fills behind text."
+    },
+    {
+      "file": "react/src/Combobox.tsx",
+      "element": "Bits.Item",
+      "reason": "A listbox option with virtual focus: Base UI owns data-highlighted for keyboard and pointer interaction; the canonical option recipe supplies hover and focus together."
+    },
+    {
+      "file": "react/src/DropdownMenu.tsx",
+      "element": "Bits.Item",
+      "reason": "A menu option: Base UI supplies pointer and keyboard highlight through data-highlighted, matching the canonical menu recipe rather than showing a second hover row."
+    },
+    {
+      "file": "react/src/DropdownMenu.tsx",
+      "element": "a",
+      "reason": "A native destination rendered by the managed menu option. The menu highlight owns pointer and keyboard feedback, matching the canonical Svelte menu link contract."
+    },
+    {
+      "file": "react/src/LinkPreview.tsx",
+      "element": "Bits.Trigger",
+      "reason": "A native link using the canonical persistent ink underline; preview behavior does not turn running text into a quiet-control button."
+    },
+    {
+      "file": "react/src/SearchSelect.tsx",
+      "element": "Bits.Item",
+      "reason": "Virtual-focus listbox option: Base UI data-highlighted supplies keyboard and pointer feedback through the shared option recipe."
+    },
+    {
+      "file": "react/src/NavigationMenu.tsx",
+      "element": "a",
+      "reason": "Closed-section crawlable destinations are hidden and have no interactive state until the managed navigation surface opens."
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import AxeBuilder from '@axe-core/playwright'
 import { once } from 'node:events'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -46,8 +47,8 @@ async function ready(page) {
   await page.goto(origin)
   await page.waitForFunction(() => document.querySelector('#engine-state').textContent.includes('WASM ativo'))
   await page.waitForFunction(() => !document.querySelector('#reload').disabled)
-  await page.waitForFunction(() => document.querySelector('#query-result').textContent.includes('42'))
-  assert.deepEqual(JSON.parse(await page.locator('#query-result').textContent()), { columns: ['resposta'], rows: [[42]] })
+  await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('42'))
+  assert.deepEqual(JSON.parse(await page.locator('#query-result code').textContent()), { columns: ['resposta'], rows: [[42]] })
 }
 
 for (const [name, browser] of Object.entries({ chromium, firefox })) {
@@ -60,15 +61,15 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
       assert.equal(await page.locator('#record-count').textContent(), '0')
       await page.getByRole('button', { name: 'Texto', exact: true }).click()
       await page.getByRole('button', { name: 'Executar consulta' }).click()
-      await page.waitForFunction(() => document.querySelector('#query-result').textContent.includes('sem rede'))
-      assert.deepEqual(JSON.parse(await page.locator('#query-result').textContent()), { columns: ['modo', 'resposta'], rows: [['sem rede', 42]] })
+      await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('sem rede'))
+      assert.deepEqual(JSON.parse(await page.locator('#query-result code').textContent()), { columns: ['modo', 'resposta'], rows: [['sem rede', 42]] })
       await page.getByRole('button', { name: 'Limite atual' }).click()
       await page.getByRole('button', { name: 'Executar consulta' }).click()
       await page.waitForFunction(() => !document.querySelector('#error').hidden)
       assert.match(await page.locator('#error').textContent(), /QUERY_UNSUPPORTED/)
       await page.getByRole('button', { name: 'Cálculo', exact: true }).click()
       await page.getByRole('button', { name: 'Executar consulta' }).click()
-      await page.waitForFunction(() => document.querySelector('#query-result').textContent.includes('42'))
+      await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('42'))
       assert.equal(await page.locator('#error').isHidden(), true)
       await page.getByRole('button', { name: 'Gravar marcador' }).click()
       await page.waitForFunction(() => document.querySelector('#record-count').textContent === '1')
@@ -116,5 +117,46 @@ test('unsupported storage remains explicit and does not enable write controls', 
     assert.match(await page.locator('#error').textContent(), /STORAGE_UNSUPPORTED/)
     assert.equal(await page.getByRole('button', { name: 'Gravar marcador' }).isDisabled(), true)
     assert.equal(await page.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
+  } finally { await browser.close() }
+})
+
+
+test('official DS marks/fonts remain byte-identical and light/dark layouts pass WCAG AA', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
+    const page = await context.newPage()
+    await ready(page)
+    const backgrounds = []
+    for (const scheme of ['light', 'dark']) {
+      await page.evaluate(value => { document.documentElement.dataset.colorScheme = value }, scheme)
+      await page.waitForFunction(value => document.querySelector('[data-logo-on]').dataset.logoOn === value, scheme)
+      await page.evaluate(() => document.fonts.ready)
+      const logo = page.locator('[data-logo-mark]')
+      const file = await logo.getAttribute('data-logo-mark')
+      const image = await page.request.get(await logo.locator('img').getAttribute('src'))
+      assert.equal(image.ok(), true)
+      assert.deepEqual(await image.body(), await readFile(resolve(root, '../../vendor/ds/kits/base/src/marks', file)))
+      backgrounds.push(await page.evaluate(() => getComputedStyle(document.body).backgroundColor))
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: 1000 })
+        const audit = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze()
+        assert.deepEqual(audit.violations.map(({ id, nodes }) => ({ id, nodes: nodes.map(({ target }) => target) })), [], `${scheme} / ${width}px`)
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true)
+      }
+    }
+    assert.notEqual(backgrounds[0], backgrounds[1], 'both DS color schemes must be active')
+    const fonts = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.endsWith('.woff2')))
+    for (const family of ['space-grotesk-variable', 'jetbrains-mono-variable']) {
+      const url = fonts.find(name => name.includes(family))
+      assert.ok(url, `${family} must be served with the application`)
+      const response = await page.request.get(url)
+      assert.equal(response.ok(), true)
+      assert.deepEqual(await response.body(), await readFile(resolve(root, '../../vendor/ds/assets/fonts', `${family}.woff2`)))
+    }
+    for (const density of ['tiny', 'spacious']) {
+      await page.evaluate(value => { document.documentElement.dataset.density = value }, density)
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true)
+    }
   } finally { await browser.close() }
 })

@@ -2,7 +2,7 @@
 
 [Open the deployed example](https://reddb-io.github.io/reddb/browser/).
 
-This is a real TypeScript/Vite application using the **published**
+This is a real Svelte 5/TypeScript/Vite application using the **published**
 `@reddb-io/browser@0.1.0-alpha.0` package, including its Worker and WASM.
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
@@ -17,7 +17,7 @@ SQL command or application transaction. Full stored-data execution remains pendi
 From the repository root:
 
 ```sh
-pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example
+pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example...
 pnpm --filter @reddb-io/browser-example dev
 ```
 
@@ -59,3 +59,29 @@ these sources into `docs/browser/` for the upload; generated output is not commi
 The example's versioned offline cache is restricted to its own path and never clears
 other applications' caches. Service worker updates use the normal browser lifecycle,
 so a new build takes over after existing tabs close.
+
+## Vendored Design System
+
+The UI consumes the official Svelte Base Kit through canonical
+`@reddb-io/design-system/base` imports. The root `design-system.manifest.json`
+pins `v2026.10.30`, selecting Base and Application styles. Official Sync lands
+the package in `vendor/ds` with `design-system.receipt.json`; do not hand-edit
+those files. App CSS owns page arrangement only, using DS spatial/color/font roles.
+
+The page declares Application, light and comfortable as its appearance axes.
+Both schemes and all densities remain available through the DS. The Logo places
+the original Brand mark; Space Grotesk and JetBrains Mono are emitted as local
+assets and included in the offline cache. No external font service is used.
+
+To repeat or update Sync, use the producer from the pinned release of the
+sibling `../design-system` checkout, with its producer dependencies installed,
+and run from the RedDB repository root:
+
+```sh
+pnpm dlx tsx ../design-system/scripts/producer/src/cli.ts
+```
+
+Review and commit the manifest, generated package and receipt together. The
+consumer build verifies every receipt hash before typechecking. The browser suite
+compares served marks and fonts to the vendored bytes and audits WCAG AA in light
+and dark at desktop/mobile widths, alongside the existing offline tests.

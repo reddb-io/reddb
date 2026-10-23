@@ -6,6 +6,10 @@ on:
     paths:
       - 'docs/**'
       - 'packages/browser-example/**'
+      - 'vendor/ds/**'
+      - 'design-system.manifest.json'
+      - 'svelte.config.js'
+      - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -40,7 +44,7 @@ jobs:
 
       - name: Build the self-contained browser example
         run: |
-          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example...
           pnpm --filter @reddb-io/browser-example build
           cp -R packages/browser-example/dist docs/browser
 
