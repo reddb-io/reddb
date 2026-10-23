@@ -33,6 +33,22 @@ importers:
         specifier: 8.3.5
         version: 8.3.5
 
+  packages/browser-example:
+    dependencies:
+      '@reddb-io/browser':
+        specifier: 0.1.0-alpha.0
+        version: 0.1.0-alpha.0
+    devDependencies:
+      playwright:
+        specifier: 1.61.1
+        version: 1.61.1
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vite:
+        specifier: 8.3.5
+        version: 8.3.5
+
   packages/internal-asset-fetcher: {}
 
   packages/internal-bin-resolver: {}
@@ -135,6 +151,9 @@ packages:
 
   '@oxc-project/types@0.155.0':
     resolution: {integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==}
+
+  '@reddb-io/browser@0.1.0-alpha.0':
+    resolution: {integrity: sha512-a2dSzA3VasV4B5ilHly1bIJjNBWSJdNdH6PoMAzJBPcP1LDHo6kSUOoXvlpQ1TCVBmga91085qPXBfKI1hmC0g==}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -1032,6 +1051,8 @@ snapshots:
       fastq: 1.20.1
 
   '@oxc-project/types@0.155.0': {}
+
+  '@reddb-io/browser@0.1.0-alpha.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     optional: true

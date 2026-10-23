@@ -1,0 +1,42 @@
+name: RedDB Browser Example
+
+on:
+  pull_request:
+    paths:
+      - 'packages/browser-example/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/browser-example.yml'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-example-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  example:
+    name: Browser example (Chromium and Firefox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install the published browser package and test tools
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser-example
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          pnpm --filter @reddb-io/browser-example exec playwright install --with-deps chromium firefox
+      - name: Typecheck and build the application with bundled Worker and WASM
+        run: pnpm --filter @reddb-io/browser-example build
+      - name: Verify UI, unsupported queries, ownership and complete offline restarts
+        run: pnpm --filter @reddb-io/browser-example test

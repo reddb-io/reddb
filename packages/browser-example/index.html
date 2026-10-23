@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#b82a35">
+    <meta name="description" content="Teste a distribuição experimental do RedDB Browser: Rust/WASM local, arquivo OPFS e reabertura offline.">
+    <title>RedDB Browser | Playground</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#consulta">Ir para a consulta</a>
+    <header>
+      <a class="wordmark" href="../#/clients/browser">RedDB<span> / Browser</span></a>
+      <a href="https://github.com/reddb-io/reddb/tree/main/packages/browser-example">Ver código TS</a>
+    </header>
+    <main>
+      <div class="intro">
+        <p class="eyebrow">Playground · 0.1.0-alpha.0</p>
+        <h1>O engine roda aqui.</h1>
+        <p>Execute uma consulta em Rust/WASM, grave bytes no arquivo local e reabra sem rede. Sem servidor de banco ou conta.</p>
+        <p class="boundary">Esta alpha executa SELECTs escalares e persiste artefatos. Consultas sobre coleções salvas e transações ainda estão em desenvolvimento.</p>
+      </div>
+      <div class="runtime" aria-live="polite">
+        <span id="engine-state">Abrindo o arquivo local…</span>
+        <span id="network-state"></span>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+      <section id="consulta" aria-labelledby="query-heading">
+        <div class="section-heading"><span class="step">01</span><h2 id="query-heading">Execute no WASM</h2></div>
+        <p>O mesmo parser e avaliador escalar do RedDB nativo, dentro de um Worker.</p>
+        <div class="examples" aria-label="Exemplos de consulta">
+          <button type="button" data-example="calculation">Cálculo</button>
+          <button type="button" data-example="text">Texto</button>
+          <button type="button" data-example="unsupported">Limite atual</button>
+        </div>
+        <div class="query-layout">
+          <form id="query-form">
+            <label for="sql">Consulta RQL</label>
+            <textarea id="sql" rows="6" maxlength="10000" spellcheck="false">SELECT 6 * 7 AS resposta</textarea>
+            <button id="execute" class="primary" type="submit" disabled>Executar consulta</button>
+          </form>
+          <div class="result">
+            <h3>Resultado</h3>
+            <pre id="query-result" aria-live="polite">Aguardando o engine…</pre>
+          </div>
+        </div>
+      </section>
+      <section aria-labelledby="storage-heading">
+        <div class="section-heading"><span class="step">02</span><h2 id="storage-heading">Persista e reabra</h2></div>
+        <p>O marcador é um payload binário opaco de teste no artefato <code>.rdb</code>. Demonstra a persistência do arquivo, sem representar uma linha, documento ou transação.</p>
+        <dl class="file-details">
+          <div><dt>Arquivo de teste</dt><dd><code>reddb-browser-playground-v1</code></dd></div>
+          <div><dt>Marcadores persistidos</dt><dd id="record-count">…</dd></div>
+          <div><dt>Geração do artefato</dt><dd id="generation">…</dd></div>
+        </dl>
+        <div class="actions">
+          <button id="append" class="primary" type="button" disabled>Gravar marcador</button>
+          <button id="reopen" type="button" disabled>Reabrir arquivo</button>
+        </div>
+        <p id="storage-status" class="status" role="status">Os bytes ficam no OPFS deste navegador e desta origem.</p>
+      </section>
+      <section aria-labelledby="offline-heading">
+        <div class="section-heading"><span class="step">03</span><h2 id="offline-heading">Desligue a rede</h2></div>
+        <p id="offline-state" class="status" role="status">Preparando o cache da aplicação…</p>
+        <ol>
+          <li>Grave um marcador e aguarde o cache ficar pronto.</li>
+          <li>Desligue a rede ou selecione <strong>Offline</strong> no painel Network do navegador.</li>
+          <li>Recarregue esta página. O contador deve continuar igual e as consultas devem funcionar.</li>
+        </ol>
+        <button id="reload" type="button" disabled>Recarregar página</button>
+        <p class="footnote">O cache inclui a página, o Worker e o WASM. Limpar os dados do site remove o arquivo e o cache; as políticas de quota do navegador se aplicam.</p>
+      </section>
+      <footer><a href="../#/clients/browser">Guia de integração JS/TS</a><span>Chromium e Firefox verificados. Safari/iOS ainda sem qualificação.</span></footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

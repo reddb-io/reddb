@@ -70,3 +70,6 @@ crates/*/tmp/
 # Lease artifacts left behind by failover crash-injection tests, which write
 # relative to the crate dir rather than a temp dir.
 crates/reddb-server/leases/
+
+# Built browser playground assets are published by the docs workflow.
+/docs/browser/

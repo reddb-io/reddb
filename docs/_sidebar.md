@@ -81,6 +81,7 @@
   - [PostgreSQL Wire](/api/postgres-wire.md)
   - [MCP (AI Agents)](/api/mcp.md)
   - [RedDB Browser (JS/TS, experimental)](/clients/browser.md)
+  - [Browser Playground](https://reddb-io.github.io/reddb/browser/)
   - [Embedded (Rust)](/api/embedded.md)
   - [CLI Reference](/api/cli.md)
 
