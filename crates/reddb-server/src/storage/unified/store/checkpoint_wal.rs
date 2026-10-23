@@ -156,7 +156,10 @@ mod tests {
 
     fn action() -> (StoreWalAction, Vec<u8>) {
         let mut entity = UnifiedEntity::table_row(EntityId::new(7), "rows", 0, vec![]);
-        entity.data = EntityData::Row(RowData::with_names(vec![Value::Integer(19)], vec!["n".into()]));
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::Integer(19)],
+            vec!["n".into()],
+        ));
         let record = UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
         (
             StoreWalAction::UpsertEntityRecord {
