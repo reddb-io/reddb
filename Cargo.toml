@@ -177,7 +177,7 @@ reddb-rql = { workspace = true }
 # subcommand needs explicit Builder configuration with custom
 # stack size). All other reddb modules pull tokio transitively
 # via reddb-server, so this is for the bin only.
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "time"] }
 
 [features]
 default = []
@@ -225,7 +225,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Several integration tests (e2e_isolation_levels, integration_*)
 # spin up an async runtime via the macro form.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread"] }
 # tonic for gRPC-side smoke tests.
 tonic = { version = "0.14", features = ["transport"] }
 # Streaming-RPC client tests (e.g. gRPC BatchInsert / #586) build
