@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.26.1
+
+### Patch Changes
+
+- [#2456](https://github.com/reddb-io/reddb/pull/2456) [`a143dd6`](https://github.com/reddb-io/reddb/commit/a143dd614e19723c0c3db81a2fd405b3ea3f5fc3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share the native query/storage/MVCC/entity/record core with WebAssembly and preserve native aliases and file bytes. RedDB Browser is distributed separately as an experimental JS/TS package with bundled Worker/WASM assets; stored-data browser queries and application transactions remain in development.
+
+  Update ctutils to 0.4.4 in all Rust lockfiles to address RUSTSEC-2026-0385.
+
+- [#2456](https://github.com/reddb-io/reddb/pull/2456) [`a143dd6`](https://github.com/reddb-io/reddb/commit/a143dd614e19723c0c3db81a2fd405b3ea3f5fc3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share native pager byte I/O, superblock publication and double-write recovery with the WebAssembly core. Keep the native file mutex through protected writeback batches and propagate superblock metadata I/O errors. Persistent formats, WAL-first fences and allocation semantics remain unchanged. The Browser package remains private while storage-backed execution and transactions are completed.
+
 ## 1.26.0
 
 ### Minor Changes
