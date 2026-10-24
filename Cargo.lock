@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "jsonwebtoken",
  "proptest",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "async-trait",
  "csv",
@@ -2668,14 +2668,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "reddb-io-grpc-proto",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "aes-gcm",
  "reddb-io-types",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "crc32fast",
  "parking_lot",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2808,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "criterion",
  "proptest",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.26.6"
+version = "1.26.7"
 dependencies = [
  "hmac",
  "insta",
