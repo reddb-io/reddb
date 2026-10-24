@@ -39,6 +39,12 @@ versions; this does not introduce logical MVCC filtering or a transaction snapsh
 
 ## Checkpoint reuse
 
+Double-write page batches synchronize each frame's staging image before its
+home writes and synchronize those homes before replacing the staging image.
+The recovery zone is cleared and synchronized once after the final frame.
+An interrupted replacement may replay the already durable preceding frame or
+discard incomplete staging; it cannot lose the preceding durable home pages.
+
 Checkpoints exclude row creators whose transactions are active or aborted and
 clear their delete stamps on committed preimages. Live transaction state stays
 unchanged. Transaction visibility revisions invalidate reuse after begin, commit
