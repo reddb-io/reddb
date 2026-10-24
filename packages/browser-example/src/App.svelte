@@ -10,6 +10,7 @@
   import { sqlGrammar } from './sql-grammar'
   import { BrowserError, openArtifact, type Artifact } from '@reddb-io/browser'
   import RedDBWorker from '@reddb-io/browser/worker?worker'
+  import { version as browserVersion } from '@reddb-io/browser/package.json'
 
   let darkScheme = $state(true)
   let sql = $state('SELECT\n  6 * 7 AS resposta')
@@ -210,7 +211,7 @@
         </Stack>
       {/snippet}
       {#snippet actions()}
-        <Badge>0.1.0-alpha.0</Badge>
+        <Badge>{browserVersion}</Badge>
         <Switch label="Tema escuro" bind:checked={darkScheme} oncheckedchange={(checked) => { document.documentElement.dataset.colorScheme = checked ? 'dark' : 'light' }} />
       {/snippet}
     </Navbar>

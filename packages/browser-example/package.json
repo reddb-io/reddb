@@ -9,7 +9,7 @@
     "test": "node --test test/browser.test.mjs"
   },
   "dependencies": {
-    "@reddb-io/browser": "0.1.0-alpha.0",
+    "@reddb-io/browser": "0.1.0",
     "@reddb-io/design-system": "workspace:*",
     "svelte": "5.57.1"
   },
