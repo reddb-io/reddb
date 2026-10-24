@@ -52,9 +52,9 @@ hex = "0.4"
 # JWT and the refresh JWT with this vetted library (RedDB is both issuer
 # and verifier, so the symmetric HS256 path is sufficient — the
 # asymmetric RS256/JWKS machinery of `auth::oauth` exists to trust a
-# *foreign* IdP). `rust_crypto` keeps the backend pure-Rust, matching the
-# dev-dependency the OAuth e2e test already pins.
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# *foreign* IdP). AWS-LC avoids RustCrypto's affected crypto-bigint
+# dependency (RUSTSEC-2026-0387); OAuth tests use the same backend.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 # Ed25519 signature verification for Signed Writes (issue #520 / #522).
 # Used by `storage::signed_writes` to validate that an INSERT's
 # `signature` column was produced by a key in the collection's
