@@ -721,7 +721,7 @@ pub fn pager_orchestration_allocation_fence() {
     }
 }
 
-pub const CASES: [(&str, fn()); 13] = [
+pub const CASES: [(&str, fn()); 14] = [
     (
         "btree_persisted_round_trip",
         btree::btree_persisted_round_trip,
@@ -753,6 +753,10 @@ pub const CASES: [(&str, fn()); 13] = [
     ),
     ("pager_barriers_and_restart", pager_barriers_and_restart),
     ("pager_failure_boundaries", pager_failure_boundaries),
+    (
+        "pager_multiframe_checkpoint_io_and_crash_recovery",
+        pager_multiframe_checkpoint_io_and_crash_recovery,
+    ),
     (
         "pager_frame_bounds_and_read_errors",
         pager_frame_bounds_and_read_errors,
