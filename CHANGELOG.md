@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.26.7
+
+### Patch Changes
+
+- [#2483](https://github.com/reddb-io/reddb/pull/2483) [`ca8c6c8`](https://github.com/reddb-io/reddb/commit/ca8c6c8435877cd5b83cbb996b1593e036783eae) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reduce checkpoint write amplification by clearing the double-write recovery zone once after all frames in a protected batch. Every frame retains its staging and home-page durability barriers; interrupted frame replacement remains recoverable without changing the file format.
+
 ## 1.26.6
 
 ### Patch Changes
