@@ -150,8 +150,9 @@ pub fn dwb_zone_is_clear(buffer: &[u8]) -> bool {
 }
 
 /// The caller must make the batch's WAL durable before entering this function.
-/// With DWB enabled: stage+sync, home pages+sync, clear+sync, for each bounded
-/// frame. With DWB disabled, the caller's proven atomic-write policy applies.
+/// With DWB enabled: stage+sync and home pages+sync for each bounded frame,
+/// then clear+sync once. With DWB disabled, the caller's proven atomic-write
+/// policy applies.
 pub fn write_pages<F: VfsFile>(
     file: &mut F,
     pages: &[(u32, Page)],
@@ -178,6 +179,12 @@ pub fn write_pages<F: VfsFile>(
             write_page(file, *page_id, page)?;
         }
         file.sync_all()?;
+    }
+    // Each frame's home pages are durable before the next frame replaces its
+    // staging image. An interrupted replacement can replay the old frame or
+    // discard an incomplete new one: neither can lose those durable homes.
+    // Only the final frame needs clearing before returning to the owner.
+    if !pages.is_empty() {
         clear_dwb_zone(file)?;
     }
     Ok(())

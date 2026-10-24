@@ -27,6 +27,7 @@ struct MemoryFile {
     position: u64,
     operations: Rc<RefCell<Vec<Operation>>>,
     fail_at: Option<usize>,
+    fail_prefix: Option<usize>,
     fail_len: Cell<bool>,
 }
 
@@ -79,7 +80,7 @@ impl VfsFile for MemoryFile {
 
     fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
         if let Err(error) = self.operation(Operation::Write(self.position, buffer.len())) {
-            self.write_prefix(&buffer[..buffer.len() / 2]);
+            self.write_prefix(&buffer[..self.fail_prefix.unwrap_or(buffer.len() / 2)]);
             return Err(error);
         }
         self.write_prefix(buffer);
@@ -204,7 +205,7 @@ pub fn pager_frame_bounds_and_read_errors() {
             .iter()
             .filter(|op| **op == Operation::Sync)
             .count(),
-        6
+        5
     );
     for operation in file.operations.borrow().iter() {
         if let Operation::Write(offset, len) = operation {
@@ -231,6 +232,96 @@ pub fn pager_frame_bounds_and_read_errors() {
         "metadata failure is not an empty file"
     );
     assert!(pager_io::recover_from_dwb(&mut file).is_err());
+}
+
+pub fn pager_multiframe_checkpoint_io_and_crash_recovery() {
+    let count = pager_io::DWB_MAX_PAGES_PER_FRAME + 2;
+    let pages = |value: &[u8]| -> Vec<_> {
+        (0..count)
+            .map(|index| {
+                let id = restart::PAGE_ID + u32::try_from(index).expect("bounded fixture ID");
+                let mut page = Page::new(PageType::BTreeLeaf, id);
+                page.insert_cell(b"key", value).expect("fixture cell fits");
+                page.update_checksum();
+                (id, page)
+            })
+            .collect()
+    };
+    let mut initial = MemoryFile::default();
+    restart::create(&mut initial).expect("create paged fixture");
+    pager_io::write_pages(&mut initial, &pages(b"before"), true).expect("seed both frames");
+    let baseline = initial.durable.into_inner();
+    let updated = pages(b"after");
+    let mut successful = MemoryFile::from_bytes(baseline.clone());
+    pager_io::write_pages(&mut successful, &updated, true).expect("update both frames");
+    let operations = successful.operations.borrow();
+    let bytes: usize = operations
+        .iter()
+        .map(|operation| match operation {
+            Operation::Write(_, len) => *len,
+            Operation::Sync => 0,
+        })
+        .sum();
+    let frames = count.div_ceil(pager_io::DWB_MAX_PAGES_PER_FRAME);
+    let expected_bytes = count * (2 * PAGE_SIZE + 4)
+        + frames * reddb_file::PAGED_DWB_HEADER_SIZE
+        + pager_io::DWB_ZONE_BYTES;
+    assert_eq!(
+        bytes, expected_bytes,
+        "clear the recovery zone once per batch"
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| **op == Operation::Sync)
+            .count(),
+        2 * frames + 1
+    );
+    let operations = operations.clone();
+    for (index, operation) in operations.iter().enumerate() {
+        let fail_at = index + 1;
+        let prefixes = match operation {
+            Operation::Write(offset, len)
+                if *offset == pager_io::dwb_zone_offset() && *len > PAGE_SIZE =>
+            {
+                vec![None, Some(0), Some(4), Some(12), Some(len - 1)]
+            }
+            _ => vec![None],
+        };
+        for prefix in prefixes {
+            for retain_pending in [false, true] {
+                let mut interrupted = MemoryFile::from_bytes(baseline.clone());
+                interrupted.fail_at = Some(fail_at);
+                interrupted.fail_prefix = prefix;
+                assert!(pager_io::write_pages(&mut interrupted, &updated, true).is_err());
+                assert_eq!(interrupted.operations.borrow().len(), fail_at);
+                let bytes = if retain_pending {
+                    interrupted.bytes.into_inner()
+                } else {
+                    interrupted.durable.into_inner()
+                };
+                let mut reopened = MemoryFile::from_bytes(bytes);
+                pager_io::recover_from_dwb(&mut reopened).expect("recover interrupted frames");
+                for (index, (id, _)) in updated.iter().enumerate() {
+                    let page =
+                        pager_io::read_page(&mut reopened, *id, true).expect("no torn home page");
+                    let value = page.read_cell(0).expect("fixture row survives").1;
+                    assert!(value == b"before" || value == b"after");
+                    let staged = if index < pager_io::DWB_MAX_PAGES_PER_FRAME {
+                        fail_at > 2
+                    } else {
+                        fail_at > pager_io::DWB_MAX_PAGES_PER_FRAME + 5
+                    };
+                    if staged {
+                        assert_eq!(value, b"after", "both staged frames crossed their barriers");
+                    }
+                }
+                let recovered = reopened.bytes.borrow().clone();
+                pager_io::recover_from_dwb(&mut reopened).expect("repeated recovery");
+                assert_eq!(*reopened.bytes.borrow(), recovered);
+            }
+        }
+    }
 }
 
 pub fn pager_recovery_failure_boundaries() {

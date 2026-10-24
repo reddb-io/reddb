@@ -34,6 +34,11 @@ fn portable_pager_io_conformance() {
     }
 }
 
+#[test]
+fn pager_multiframe_checkpoint_io_and_crash_recovery() {
+    pager::pager_multiframe_checkpoint_io_and_crash_recovery();
+}
+
 #[path = "support/transaction.rs"]
 mod transaction;
 
