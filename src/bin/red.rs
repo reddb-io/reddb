@@ -2104,6 +2104,11 @@ fn main() {
                             eprintln!("dump error: {error}");
                             std::process::exit(1);
                         });
+                    // A newly opened database declares an empty red.vault even
+                    // when no vault pager exists. There is no secret to seal.
+                    if records.is_empty() {
+                        continue;
+                    }
                     total_rows += records.len();
                     let exported = (|| -> Result<String, String> {
                         let pager = store

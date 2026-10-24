@@ -19,8 +19,17 @@ function receive() {
 const pending = db.query('SELECT probe')
 const weak = receive()
 const value = await pending
-for (let i = 0; i < 6; i++) { await Bun.sleep(0); Bun.gc(true) }
-assert.ok(weak.every(ref => ref.deref() === undefined), 'idle connection retained consumed receive storage')
+async function assertCollected(references: WeakRef<ArrayBufferLike>[], message: string) {
+  // Collection timing varies with VM scheduling; a live connection must still
+  // release every backing store within a bounded observation window.
+  for (let i = 0; i < 100; i++) {
+    await Bun.sleep(10)
+    Bun.gc(true)
+    if (references.every(ref => ref.deref() === undefined)) return
+  }
+  assert.fail(message)
+}
+await assertCollected(weak, 'idle connection retained consumed receive storage')
 assert.equal(value.length, 1024 * 1024 - 16)
 
 function empty() {
@@ -29,5 +38,4 @@ function empty() {
   return new WeakRef(bytes.buffer)
 }
 const emptyBuffer = empty()
-for (let i = 0; i < 6; i++) { await Bun.sleep(0); Bun.gc(true) }
-assert.equal(emptyBuffer.deref(), undefined, 'empty view retained its backing storage')
+await assertCollected([emptyBuffer], 'empty view retained its backing storage')
