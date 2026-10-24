@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.26.6
+
+### Patch Changes
+
+- [#2480](https://github.com/reddb-io/reddb/pull/2480) [`9ad8c3b`](https://github.com/reddb-io/reddb/commit/9ad8c3b8d5cdca1975058033e5248dcdb166cd41) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep checkpoints incremental after repeated updates and garbage collection of a bounded set of row versions. Retain the latest mutation revision per physical ID, account for bounded tracking memory, and preserve full validation when an evicted ID makes an older checkpoint proof incomplete.
+
+- [#2482](https://github.com/reddb-io/reddb/pull/2482) [`0e1e842`](https://github.com/reddb-io/reddb/commit/0e1e8422303954c471c88d8239571b8016ec5cd3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use the AWS-LC backend for JWT signing and validation, removing the crypto-bigint dependency affected by RUSTSEC-2026-0387 while preserving the existing token API and validation policy.
+
+- [#2482](https://github.com/reddb-io/reddb/pull/2482) [`0e1e842`](https://github.com/reddb-io/reddb/commit/0e1e8422303954c471c88d8239571b8016ec5cd3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow logical dumps of ordinary databases whose automatically declared Vault collection is empty. Continue requiring encrypted export and persistent Vault storage for populated Vault collections.
+
 ## 1.26.5
 
 ### Patch Changes
