@@ -1,10 +1,26 @@
-import init, { BrowserArtifact, validateQuery, executeScalar } from './wasm/reddb_wasm.js'
+import init, * as wasm from './wasm/reddb_wasm.js'
+import { RUNTIME_ABI_VERSION, VALUE_ENCODING } from './protocol.js'
 
 let artifact
 let access
 let release
 let ownership
 let queue = Promise.resolve()
+let initialized
+
+function initialize() {
+  return initialized ??= (async () => {
+    await init()
+    if (typeof wasm.runtimeInfo !== 'function') throw error('VERSION_MISMATCH', 'WASM runtime metadata is missing')
+    let info
+    try { info = wasm.runtimeInfo() }
+    catch { throw error('VERSION_MISMATCH', 'WASM binary does not expose the expected runtime ABI') }
+    if (info.abiVersion !== RUNTIME_ABI_VERSION || info.valueEncoding !== VALUE_ENCODING) {
+      throw error('VERSION_MISMATCH', 'WASM runtime ABI does not match this worker')
+    }
+    return info
+  })()
+}
 
 function error(code, message) {
   return Object.assign(new Error(message), { code })
@@ -19,7 +35,7 @@ function synchronous(value) {
 }
 
 async function open(name) {
-  await init()
+  await initialize()
   await new Promise((resolve, reject) => {
     ownership = navigator.locks.request(`reddb-browser:${name}`, { ifAvailable: true }, async (lock) => {
       if (!lock) throw error('FILE_BUSY', 'This artifact is already open in another worker or tab')
@@ -39,8 +55,8 @@ async function open(name) {
           flush: () => synchronous(access.flush()),
         }
         artifact = fileIo.getSize() === 0
-          ? BrowserArtifact.create(fileIo, name, Date.now())
-          : BrowserArtifact.open(fileIo, name)
+          ? wasm.BrowserArtifact.create(fileIo, name, Date.now())
+          : wasm.BrowserArtifact.open(fileIo, name)
         const lifetime = new Promise((resolveRelease) => { release = resolveRelease })
         resolve()
         await lifetime
@@ -65,15 +81,15 @@ function bytes(value) {
 }
 
 async function execute(method, params) {
+  if (method === 'initialize' || method === 'info') return initialize()
   if (method === 'open') return open(params.name)
+  if (method === 'validateQuery' || method === 'executeScalar') {
+    await initialize()
+    if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
+    return method === 'validateQuery' ? wasm.validateQuery(params.sql) : wasm.executeScalar(params.sql)
+  }
   if (!artifact) throw error('CLOSED', 'The artifact is not open')
   switch (method) {
-    case 'validateQuery':
-      if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
-      return validateQuery(params.sql)
-    case 'executeScalar':
-      if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
-      return executeScalar(params.sql)
     case 'generation': return artifact.generation()
     case 'readWal': return artifact.readWal()
     case 'readSnapshot': return artifact.readSnapshot()
@@ -93,14 +109,19 @@ async function execute(method, params) {
   }
 }
 
-self.onmessage = ({ data: { id, method, params } }) => {
+self.onmessage = ({ data }) => {
+  const { id, method, params = {} } = data ?? {}
+  if (data?.abiVersion !== RUNTIME_ABI_VERSION) {
+    self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, error: { code: 'VERSION_MISMATCH', message: 'SDK runtime ABI does not match this worker' } })
+    return
+  }
   // Opening is asynchronous; all following operations wait for ownership.
   queue = queue.then(async () => {
     try {
       const result = await execute(method, params)
-      self.postMessage({ id, result })
+      self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, result })
     } catch (failure) {
-      self.postMessage({ id, error: { code: failure.code || 'ARTIFACT_ERROR', message: failure.message || String(failure) } })
+      self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, error: { code: failure.code || 'ARTIFACT_ERROR', message: failure.message || String(failure) } })
     }
   })
 }

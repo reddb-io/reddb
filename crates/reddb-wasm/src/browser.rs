@@ -6,6 +6,23 @@ use wasm_bindgen::prelude::*;
 
 const MAX_EXACT_OFFSET: u64 = (1u64 << 53) - 1;
 
+/// Contract shared by the JS worker and foreign-language browser adapters.
+#[wasm_bindgen(js_name = runtimeInfo)]
+pub fn runtime_info() -> Result<JsValue, JsValue> {
+    let info = reddb_engine::json!({
+        "abiVersion": 1,
+        "valueEncoding": "reddb-json-v1",
+        "capabilities": {
+            "queryValidation": true,
+            "scalarQueries": true,
+            "storedQueries": false,
+            "transactions": false,
+            "sync": false,
+        }
+    });
+    js_sys::JSON::parse(&info.to_string_compact())
+}
+
 #[wasm_bindgen]
 extern "C" {
     pub type SyncFile;

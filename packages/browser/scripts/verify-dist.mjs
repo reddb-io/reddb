@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const directory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-for (const path of ['src/index.js', 'src/index.d.ts', 'src/worker.js', 'src/wasm/reddb_wasm.js', 'LICENSE']) {
+for (const path of ['src/index.js', 'src/index.d.ts', 'src/protocol.js', 'src/worker.js', 'src/wasm/reddb_wasm.js', 'LICENSE']) {
   if (!readFileSync(resolve(directory, path)).length) throw new Error(`Missing browser distribution file: ${path}`)
 }
 const wasm = readFileSync(resolve(directory, 'src/wasm/reddb_wasm_bg.wasm'))
