@@ -1,7 +1,6 @@
-# RedDB Browser — experimental persistence and query engine
+# RedDB Browser — persistence and query engine
 
-This experimental package is the first distribution of RedDB Browser. It runs the
-canonical Rust `.rdb` artifact publication/recovery code, RQL parser and shared
+The `@reddb-io/browser` package runs the canonical Rust `.rdb` artifact publication/recovery code, RQL parser and shared
 scalar evaluator in a dedicated WebAssembly worker, persisting through a real
 OPFS sync access handle.
 Artifact storage requires a secure context, module workers, OPFS and Web Locks.
@@ -15,7 +14,7 @@ application cache. Sync is optional and must never gate local reads or writes.
 
 **It is not a database SDK yet.** It executes storage-free scalar SELECTs;
 queries over stored data, five-model local transactions, synchronization,
-conflict resolution and forwarding between tabs remain pending. It is published on the `experimental` npm channel and does not replace the remote `@reddb-io/client`.
+conflict resolution and forwarding between tabs remain pending. It is published on the `latest` npm channel and does not replace the remote `@reddb-io/client`.
 
 ## Use from JS/TS
 
@@ -23,7 +22,7 @@ See the [application guide](https://github.com/reddb-io/reddb/blob/main/docs/cli
 Vite/React/Vue/Svelte, plain JavaScript, Worker ownership and offline assets.
 
 ```sh
-npm add @reddb-io/browser@experimental
+npm add @reddb-io/browser
 ```
 
 ```ts

@@ -1,10 +1,10 @@
-# Dart and Flutter Web: experimental local WASM runtime
+# Dart and Flutter Web: local WASM runtime
 
 Import `package:reddb/reddb_browser.dart` for browser use. The ordinary
 `reddb.dart` entrypoint imports native TCP/process code and is not a web entrypoint.
 This adapter is available in the repository source; it has not been released to pub.dev.
 
-Install `@reddb-io/browser@experimental` in your web asset build and copy its
+Install `@reddb-io/browser` in your web asset build and copy its
 complete `src/` directory to your app's static assets, preserving the layout:
 
 ```sh

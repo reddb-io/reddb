@@ -5,7 +5,7 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-The `0.1.0-alpha.1` distribution is **experimental**. It exposes artifact
+The canonical `0.1.0` distribution exposes artifact
 persistence/recovery, RQL validation and storage-free scalar SELECT execution.
 Queries over stored collections, application transactions, observation and
 optional synchronization are still being integrated. `append` and `checkpoint`
@@ -42,12 +42,12 @@ artifact I/O evidence, not a collection record or application transaction.
 ## Install
 
 ```sh
-npm add @reddb-io/browser@experimental
+npm add @reddb-io/browser
 ```
 
 The package contains JS, TypeScript declarations, the Worker and `.wasm`; there
 are no install scripts or native executables. Browser releases use independent
-`browser-v…` tags and the `experimental` npm channel.
+`browser-v…` tags and the `latest` npm channel.
 
 ## Vite, including React, Vue and Svelte applications
 
@@ -126,11 +126,11 @@ and eviction policies apply. Applications can request persistent storage with
 
 | Package | Execution and storage |
 | --- | --- |
-| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; current experimental artifact/scalar surface |
+| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; artifact/scalar surface |
 | `@reddb-io/client` | Remote RedDB connection, including its browser transport |
 | `@reddb-io/sdk` | Node.js/TS SDK with native embedded/runtime support |
 
 In `labs-crimson-bytes`, the future RedDB adapter belongs behind `SaveBackend`.
 In `labs-trickster`, it belongs behind `GameStorage` through Dart/JS interop.
 Existing saves and IndexedDB implementations need migration and transactional
-parity before replacement. This experimental release does not migrate either game.
+parity before replacement. This release does not migrate either game.

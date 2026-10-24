@@ -1,4 +1,4 @@
-/** Shared Rust/WASM runtime and experimental artifact storage. */
+/** Shared Rust/WASM runtime and artifact storage. */
 import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING } from './protocol.js'
 export { BrowserError } from './protocol.js'
 

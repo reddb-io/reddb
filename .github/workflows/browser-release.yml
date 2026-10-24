@@ -18,7 +18,7 @@ env:
 
 jobs:
   publish:
-    name: Build, verify and publish experimental Browser package
+    name: Build, verify and publish Browser package
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -38,8 +38,8 @@ jobs:
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs'
           const pkg = JSON.parse(readFileSync('packages/browser/package.json'))
-          if (process.env.GITHUB_REF_NAME !== `browser-v${pkg.version}` || !pkg.version.includes('-') || pkg.publishConfig.tag !== 'experimental' || pkg.private) {
-            throw new Error('Browser releases require a matching experimental package version and browser-v tag')
+          if (process.env.GITHUB_REF_NAME !== `browser-v${pkg.version}` || !/^\d+\.\d+\.\d+$/.test(pkg.version) || pkg.publishConfig.tag !== 'latest' || pkg.private) {
+            throw new Error('Browser releases require a matching stable package version, latest channel and browser-v tag')
           }
           JS
       - name: Install test tools
@@ -69,12 +69,12 @@ jobs:
           npm pack --pack-destination "$RUNNER_TEMP/browser-dist"
           cd "$RUNNER_TEMP/browser-dist"
           sha256sum *.tgz > SHA256SUMS
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/browser-dist/"* --prerelease --title "RedDB Browser ${GITHUB_REF_NAME#browser-v}" --notes-file packages/browser/RELEASE.md --verify-tag
-      - name: Publish npm experimental channel
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/browser-dist/"* --latest=false --title "RedDB Browser ${GITHUB_REF_NAME#browser-v}" --notes-file packages/browser/RELEASE.md --verify-tag
+      - name: Publish npm latest channel
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -82,7 +82,7 @@ jobs:
             echo '::error::NPM_TOKEN is required to publish @reddb-io/browser'
             exit 1
           fi
-          npm publish "$RUNNER_TEMP/browser-dist/"*.tgz --tag experimental --access public --provenance
+          npm publish "$RUNNER_TEMP/browser-dist/"*.tgz --tag latest --access public --provenance
       - name: Verify registry visibility
         run: |
           version=$(node -p "JSON.parse(require('node:fs').readFileSync('packages/browser/package.json')).version")

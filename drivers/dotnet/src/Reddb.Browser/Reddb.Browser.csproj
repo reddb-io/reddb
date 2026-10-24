@@ -6,7 +6,7 @@
     <PackageId>Reddb.Browser</PackageId>
     <Version>0.1.0</Version>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <Description>Experimental shared RedDB Rust/WASM scalar runtime for Blazor.</Description>
+    <Description>Shared RedDB Rust/WASM scalar runtime for Blazor.</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.JSInterop" Version="8.0.32" />
