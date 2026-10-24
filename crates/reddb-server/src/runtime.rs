@@ -1463,6 +1463,7 @@ fn is_select_query_text(query: &str) -> bool {
 }
 
 pub mod ai;
+mod allocator_pressure;
 pub mod analytics_schema_registry;
 pub(crate) mod analytics_source_catalog;
 pub mod ask_pipeline;
