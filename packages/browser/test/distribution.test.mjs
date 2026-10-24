@@ -32,17 +32,29 @@ before(async () => {
   const source = process.env.REDDB_BROWSER_PACKAGE
   const packed = JSON.parse(execFileSync('npm', ['pack', ...(source ? [source] : []), '--json', '--pack-destination', temporary], { cwd: packageRoot, encoding: 'utf8' }))[0]
   const included = packed.files.map(({ path }) => path)
-  for (const file of ['src/index.js', 'src/index.d.ts', 'src/worker.js', 'src/wasm/reddb_wasm.js', 'src/wasm/reddb_wasm_bg.wasm', 'LICENSE']) assert.ok(included.includes(file), `package is missing ${file}`)
+  for (const file of ['src/index.js', 'src/index.d.ts', 'src/protocol.js', 'src/worker.js', 'src/wasm/reddb_wasm.js', 'src/wasm/reddb_wasm_bg.wasm', 'LICENSE']) assert.ok(included.includes(file), `package is missing ${file}`)
   assert.ok(!included.some((path) => path.startsWith('test/') || path.includes('conformance')), 'test-only engine artifacts must not ship')
   await writeFile(resolve(temporary, 'package.json'), JSON.stringify({ name: 'browser-consumer', private: true, type: 'module' }))
   execFileSync('npm', ['install', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', resolve(temporary, packed.filename)], { cwd: temporary, stdio: 'pipe' })
   await writeFile(resolve(temporary, 'index.html'), '<!doctype html><meta charset="utf-8"><title>RedDB package consumer</title><script type="module" src="/main.ts"></script>')
   await writeFile(resolve(temporary, 'worker.d.ts'), "declare module '*?worker' { const Constructor: { new(): Worker }; export default Constructor }")
   await writeFile(resolve(temporary, 'main.ts'), `
-import { openArtifact } from '@reddb-io/browser'
+import { createRuntime, createInteropRuntime, openArtifact } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 declare global { interface Window { result: Promise<unknown> } }
 window.result = (async () => {
+  const runtime = await createRuntime({ worker: new RedDBWorker() })
+  try {
+    const info = await runtime.info()
+    if (info.abiVersion !== 1 || info.capabilities.storedQueries) throw new Error('Incorrect runtime capabilities')
+    const result = await runtime.executeScalar('SELECT 6 * 7 AS answer')
+    if (result.rows[0][0] !== 42) throw new Error('Incorrect scalar result')
+  } finally { await runtime.close() }
+  const bridge = createInteropRuntime({ worker: new RedDBWorker() })
+  try {
+    const result = await bridge.invoke('executeScalar', { sql: 'SELECT * FROM people' })
+    if (result.ok || result.error.code !== 'QUERY_UNSUPPORTED') throw new Error('Incorrect interop error')
+  } finally { bridge.close() }
   const artifact = await openArtifact({ name: 'packed-consumer', worker: new RedDBWorker() })
   try {
     const before = (await artifact.readWal()).map((bytes) => [...bytes])

@@ -12,13 +12,13 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
     let info = reddb_engine::json!({
         "abiVersion": 1,
         "valueEncoding": "reddb-json-v1",
-        "capabilities": {
+        "capabilities": reddb_engine::json!({
             "queryValidation": true,
             "scalarQueries": true,
             "storedQueries": false,
             "transactions": false,
             "sync": false,
-        }
+        })
     });
     js_sys::JSON::parse(&info.to_string_compact())
 }

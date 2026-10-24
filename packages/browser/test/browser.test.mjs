@@ -170,6 +170,63 @@ for (const browser of browsers) {
       } finally { await browserPage.close() }
     })
 
+    test('production runtime executes without storage, preserving canonical values and errors', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          // An accidental storage dependency must fail, even on OPFS-capable ports.
+          Object.defineProperty(navigator, 'storage', { value: undefined, configurable: true })
+          Object.defineProperty(navigator, 'locks', { value: undefined, configurable: true })
+          const runtime = await RedDBBrowser.createRuntime()
+          try {
+            const info = await runtime.info()
+            const cases = await (await fetch('/crates/reddb-engine/tests/scalar-cases.json')).json()
+            const actual = []
+            for (const { sql } of cases) actual.push(await runtime.executeScalar(sql))
+            await runtime.validateQuery('SELECT 1 FROM people')
+            const errors = []
+            for (const sql of ['SELECT 1 FROM people', 'SELECT 1 / 0', 'SELECT FROM WHERE', 1]) {
+              try { await runtime.executeScalar(sql) } catch (error) { errors.push(error.code) }
+            }
+            return { info, actual, expected: cases.map(({ expected }) => expected), errors }
+          } finally { await runtime.close() }
+        })
+        assert.deepEqual(result.info, {
+          abiVersion: 1, valueEncoding: 'reddb-json-v1',
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: false, transactions: false, sync: false },
+        })
+        assert.deepEqual(result.actual, result.expected)
+        assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
+      } finally { await current.close() }
+    })
+
+    test('worker rejects an old SDK ABI before creating an artifact', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/src/worker.js', { type: 'module' })
+          try {
+            const reply = await new Promise((resolve, reject) => {
+              worker.onmessage = ({ data }) => resolve(data)
+              worker.onerror = event => reject(new Error(event.message))
+              worker.postMessage({ abiVersion: 0, id: 1, method: 'open', params: { name: 'abi-mismatch' } })
+            })
+            let created = false
+            if (navigator.storage?.getDirectory) {
+              const root = await navigator.storage.getDirectory()
+              try {
+                const directory = await root.getDirectoryHandle('reddb-browser')
+                await directory.getFileHandle('abi-mismatch.rdb')
+                created = true
+              } catch (error) { if (error.name !== 'NotFoundError') throw error }
+            }
+            return { code: reply.error.code, created }
+          } finally { worker.terminate() }
+        })
+        assert.deepEqual(result, { code: 'VERSION_MISMATCH', created: false })
+      } finally { await current.close() }
+    })
+
     storageTest('worker executes scalar RQL and preserves exact integers and artifact state', async () => {
       const browserPage = await page()
       try {

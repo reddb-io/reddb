@@ -1,5 +1,8 @@
 # Reddb (.NET driver)
 
+For experimental local Rust/WASM execution in a browser, see the [Blazor WebAssembly runtime](src/Reddb.Browser/README.md).
+That separate adapter currently supports validation and scalar SELECTs only.
+
 Official .NET driver for [RedDB](https://github.com/reddb/reddb). Speaks
 the **RedWire** binary protocol (TCP + TLS) and the JSON HTTP API.
 
