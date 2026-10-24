@@ -649,7 +649,7 @@ jobs:
           extensions: curl, hash, json, openssl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.15.2'
+          version: '0.16.0'
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
