@@ -3,7 +3,7 @@
 [Open the deployed example](https://reddb-io.github.io/reddb/browser/).
 
 This is a real Svelte 5/TypeScript/Vite application using the **published**
-`@reddb-io/browser@0.1.0-alpha.0` package, including its Worker and WASM.
+`@reddb-io/browser@0.1.0` package, including its Worker and WASM.
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
 
