@@ -51,6 +51,23 @@ test('engine error frames reject only their own request', async () => {
   assert.equal(await again, 'still open')
 })
 
+test('owned payloads preserve empty responses and JSON/binary bulk counts', async () => {
+  const { db } = connection()
+  const empty = db.query('empty')
+  const emptyFrame = frame('')
+  for (let offset = 0; offset < emptyFrame.length; offset++) db._onData(emptyFrame.subarray(offset, offset + 1))
+  assert.equal(await empty, '')
+  const binary = Buffer.alloc(8)
+  binary.writeBigUInt64LE(7n)
+  for (const [payload, expected] of [[Buffer.from('{"affected":2}'), 2], [binary, 7]] as const) {
+    const pending = db.bulkInsert('rows', ['{"n":1}'])
+    const bytes = frame(payload, 0x05)
+    db._onData(bytes)
+    bytes.fill(0)
+    assert.equal(await pending, expected)
+  }
+})
+
 test('invalid lengths reject all requests and future writes', async () => {
   for (const length of [0, 15, 16 * 1024 * 1024 + 1, 0xffffffff]) {
     const { db, socket } = connection()
