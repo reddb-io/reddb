@@ -463,7 +463,7 @@ impl GraphEntityKind {
 /// Maximum physical positions examined under one segment read guard.
 pub const SCAN_BATCH_SIZE: usize = 256;
 
-/// Bounded ID provenance shared by segment journals and checkpoint projection.
+/// Maximum distinct dirty physical IDs tracked per segment and checkpoint projection.
 pub const CHECKPOINT_MUTATIONS_MAX: usize = 8192;
 
 /// Stable append-only positions, bounded when a scan opens the segment.
@@ -561,6 +561,10 @@ pub struct GrowingSegment {
     /// Volatile checkpoint invalidation; never part of the storage format.
     checkpoint_revision: u64,
     checkpoint_mutations: std::collections::VecDeque<(u64, EntityId)>,
+    // Latest revisions retain complete coverage across repeated edits of the
+    // same bounded set of physical IDs, including versions removed by GC.
+    checkpoint_latest_mutations: HashMap<EntityId, u64>,
+    checkpoint_mutation_floor: u64,
     /// Approximate payload bytes of the entities physically resident in this
     /// segment. Resident means "still occupying memory", which includes
     /// tombstoned entities in flat mode (their slot must stay so positional
@@ -733,6 +737,8 @@ impl GrowingSegment {
             sequence: AtomicU64::new(0),
             checkpoint_revision: 0,
             checkpoint_mutations: std::collections::VecDeque::new(),
+            checkpoint_latest_mutations: HashMap::new(),
+            checkpoint_mutation_floor: 0,
             memory_bytes: AtomicU64::new(0),
             dead_entity_bytes: 0,
             dead_resident_count: 0,
@@ -754,8 +760,27 @@ impl GrowingSegment {
             .checkpoint_revision
             .checked_add(1)
             .expect("segment mutation counter must not overflow");
-        if self.checkpoint_mutations.len() == CHECKPOINT_MUTATIONS_MAX {
-            self.checkpoint_mutations.pop_front();
+        if !self.checkpoint_latest_mutations.contains_key(&id)
+            && self.checkpoint_latest_mutations.len() == CHECKPOINT_MUTATIONS_MAX
+        {
+            // Evict the least recently changed ID. A baseline before its last
+            // change no longer has complete coverage and must fail closed.
+            while let Some((revision, previous)) = self.checkpoint_mutations.pop_front() {
+                if self.checkpoint_latest_mutations.get(&previous) == Some(&revision) {
+                    self.checkpoint_latest_mutations.remove(&previous);
+                    self.checkpoint_mutation_floor = self.checkpoint_mutation_floor.max(revision);
+                    break;
+                }
+            }
+        }
+        self.checkpoint_latest_mutations
+            .insert(id, self.checkpoint_revision);
+        if self.checkpoint_mutations.len() == 2 * CHECKPOINT_MUTATIONS_MAX {
+            // Stale duplicate entries do not spend the distinct-ID budget.
+            // Compact at most once per bound's worth of further mutations.
+            self.checkpoint_mutations.retain(|(revision, previous)| {
+                self.checkpoint_latest_mutations.get(previous) == Some(revision)
+            });
         }
         self.checkpoint_mutations
             .push_back((self.checkpoint_revision, id));
@@ -765,23 +790,23 @@ impl GrowingSegment {
         if revision == self.checkpoint_revision {
             return Some(Vec::new());
         }
-        let mut expected = revision.checked_add(1)?;
+        if revision < self.checkpoint_mutation_floor || revision > self.checkpoint_revision {
+            return None;
+        }
         let mut ids = Vec::new();
         for &(sequence, id) in &self.checkpoint_mutations {
-            if sequence <= revision {
-                continue;
+            if sequence > revision && self.checkpoint_latest_mutations.get(&id) == Some(&sequence) {
+                ids.push(id);
             }
-            if sequence != expected {
-                return None;
-            }
-            ids.push(id);
-            expected = expected.checked_add(1)?;
         }
-        (expected == self.checkpoint_revision.checked_add(1)?).then_some(ids)
+        Some(ids)
     }
 
     pub fn checkpoint_tracking_bytes(&self) -> usize {
         self.checkpoint_mutations.capacity() * std::mem::size_of::<(u64, EntityId)>()
+            // Include conservative hash-table allocation/accounting overhead.
+            + self.checkpoint_latest_mutations.capacity()
+                * (std::mem::size_of::<(EntityId, u64)>() + 16)
     }
 
     fn has_live_entity(&self, id: EntityId) -> bool {
@@ -2647,6 +2672,117 @@ mod tests {
         ));
         assert_eq!(segment.checkpoint_revision(), revision);
         assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![]));
+    }
+
+    #[test]
+    fn checkpoint_journal_retains_bounded_row_versions_through_repeated_updates_and_gc() {
+        const ROWS: u64 = 1700;
+        let mut segment = GrowingSegment::new(1, "keys");
+        for id in 1..=ROWS {
+            segment
+                .insert(keyed_row(id, "export", 1, 0))
+                .expect("seed export");
+        }
+        let baseline = segment.checkpoint_revision();
+        // An export is inserted, updated after delivery, then acknowledged.
+        // GC removes its superseded physical versions. These are 5,100
+        // distinct IDs, even though their mutation count exceeds the bound.
+        for id in 1..=ROWS {
+            segment
+                .update(keyed_row(id, "export", 1, 2))
+                .expect("supersede");
+            let delivered = ROWS + id;
+            segment
+                .insert(keyed_row(delivered, "export", 2, 0))
+                .expect("delivered");
+            segment
+                .update(keyed_row(delivered, "export", 2, 3))
+                .expect("acknowledge");
+            segment
+                .insert(keyed_row(2 * ROWS + id, "export", 3, 0))
+                .expect("final version");
+            assert_eq!(
+                segment
+                    .delete_batch(&[EntityId::new(id), EntityId::new(delivered)])
+                    .expect("GC")
+                    .len(),
+                2
+            );
+        }
+        let changed = segment
+            .checkpoint_mutations_since(baseline)
+            .expect("all changed IDs still fit the bounded checkpoint journal");
+        let actual: std::collections::BTreeSet<_> = changed.into_iter().collect();
+        let expected: std::collections::BTreeSet<_> = (1..=3 * ROWS).map(EntityId::new).collect();
+        assert_eq!(actual, expected, "deleted versions must remain tracked too");
+    }
+
+    #[test]
+    fn checkpoint_journal_preserves_cold_changes_during_hot_row_churn() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        segment
+            .insert(keyed_row(1, "cold", 1, 0))
+            .expect("cold row");
+        segment.insert(keyed_row(2, "hot", 1, 0)).expect("hot row");
+        for xid in 2..=(5 * CHECKPOINT_MUTATIONS_MAX) as u64 {
+            segment
+                .update(keyed_row(2, "hot", xid, 0))
+                .expect("hot edit");
+        }
+        let changed: std::collections::BTreeSet<_> = segment
+            .checkpoint_mutations_since(0)
+            .expect("two physical IDs never exhaust the distinct-ID bound")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            changed,
+            [EntityId::new(1), EntityId::new(2)].into_iter().collect()
+        );
+        assert!(
+            segment.checkpoint_tracking_bytes() <= 1024 * 1024,
+            "retained proof memory must stay bounded under unlimited repeated edits"
+        );
+    }
+
+    #[test]
+    fn checkpoint_journal_complete_suffix_matches_uncompressed_mutation_history() {
+        let mut segment = GrowingSegment::new(1, "keys");
+        let mut history = Vec::new();
+        let mut seed = 0x7b3d_5961_a902_4c85_u64;
+        for n in 0..3 * CHECKPOINT_MUTATIONS_MAX {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let raw = if n < CHECKPOINT_MUTATIONS_MAX + 17 {
+                n as u64 + 1
+            } else {
+                seed % (CHECKPOINT_MUTATIONS_MAX as u64 + 17) + 1
+            };
+            let id = EntityId::new(raw);
+            segment.mark_checkpoint_entity_dirty(id);
+            history.push(id);
+        }
+        let now = segment.checkpoint_revision();
+        assert!(
+            segment.checkpoint_mutations_since(0).is_none(),
+            "an evicted ID must still invalidate an older baseline"
+        );
+        let mut complete = 0;
+        for baseline in [0, 1, now / 3, now / 2, now - 2048, now - 128, now] {
+            if let Some(ids) = segment.checkpoint_mutations_since(baseline) {
+                let actual: std::collections::BTreeSet<_> = ids.into_iter().collect();
+                let expected: std::collections::BTreeSet<_> =
+                    history[baseline as usize..].iter().copied().collect();
+                assert_eq!(actual, expected, "baseline {baseline}");
+                complete += 1;
+            }
+        }
+        assert!(
+            complete >= 3,
+            "recent baselines must retain a complete proof"
+        );
+        assert!(segment.checkpoint_mutations_since(now + 1).is_none());
+        assert!(segment.checkpoint_tracking_bytes() <= 1024 * 1024);
     }
 
     #[test]
