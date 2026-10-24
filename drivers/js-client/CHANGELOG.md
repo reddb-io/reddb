@@ -1,5 +1,13 @@
 # @reddb-io/client
 
+## 1.26.5
+
+### Patch Changes
+
+- [#2476](https://github.com/reddb-io/reddb/pull/2476) [`8fff87a`](https://github.com/reddb-io/reddb/commit/8fff87aeea7c313773e67178b1c4c877c3e697b6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Accumulate fragmented RedWire frames without repeatedly copying incomplete payloads,
+  release consumed receive buffers, and reject pending reads when a connection ends
+  mid-frame or framing fails. Wire bytes and public APIs remain unchanged.
+
 ## 1.26.4
 
 ### Patch Changes
