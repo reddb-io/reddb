@@ -178,10 +178,11 @@ export class RedDBConnection {
   private _send(msgType: number, payload: Buffer): Promise<{ type: number; payload: Buffer }> {
     if (this.failure) return Promise.reject(this.failure)
     return new Promise((resolve, reject) => {
-      this.pending.push({ resolve, reject })
       const corr = this.nextCorr
       this.nextCorr += 1n
-      try { this.socket.write(encodeFrame(msgType, corr, payload)) }
+      const request = encodeFrame(msgType, corr, payload)
+      this.pending.push({ resolve, reject })
+      try { this.socket.write(request) }
       catch (error) { this._fail(error as Error) }
     })
   }

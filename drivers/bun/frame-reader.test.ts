@@ -104,6 +104,19 @@ test('synchronous write failure terminates all queued requests', async () => {
   await assert.rejects(db.query('later'), failure)
 })
 
+test('local frame-size rejection preserves other pending requests and connection usability', async () => {
+  const { db, socket } = connection()
+  const first = db.query('first')
+  await assert.rejects(db.query('x'.repeat(16 * 1024 * 1024)), { code: 'FRAME_TOO_LARGE' })
+  assert.equal(socket.ended, 0)
+  assert.equal(socket.writes.length, 1)
+  db._onData(frame('first result'))
+  assert.equal(await first, 'first result')
+  const second = db.query('second')
+  db._onData(frame('second result'))
+  assert.equal(await second, 'second result')
+})
+
 test('consumed buffers and empty views can be collected while the connection stays alive', () => {
   const result = Bun.spawnSync([process.execPath, `${import.meta.dir}/test/receive-gc.ts`], { stdout: 'pipe', stderr: 'pipe' })
   assert.equal(result.exitCode, 0, result.stderr.toString())
