@@ -4,7 +4,8 @@ This experimental package is the first distribution of RedDB Browser. It runs th
 canonical Rust `.rdb` artifact publication/recovery code, RQL parser and shared
 scalar evaluator in a dedicated WebAssembly worker, persisting through a real
 OPFS sync access handle.
-It requires a secure context, module workers, OPFS and Web Locks.
+Artifact storage requires a secure context, module workers, OPFS and Web Locks.
+The storage-independent runtime only needs module workers and WebAssembly.
 
 The target is a fully offline local database with a JavaScript/TypeScript API.
 The Rust/WASM engine ships with the package; local operation must not require a
@@ -39,6 +40,45 @@ try {
 
 Consumers receive built JS/Worker/WASM assets and TypeScript declarations; they
 need no Rust toolchain. The commands below are for engine/package contributors.
+
+## Shared runtime and language interop
+
+`createRuntime({ worker? })` opens no file and requires neither OPFS nor Web
+Locks. It exposes `info`, `validateQuery`, `executeScalar` and `close`:
+
+```ts
+import { createRuntime } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+const runtime = await createRuntime({ worker: new RedDBWorker() })
+try {
+  console.log(await runtime.info())
+  console.log(await runtime.executeScalar('SELECT 6 * 7 AS answer'))
+} finally { await runtime.close() }
+```
+
+The versioned Worker/WASM contract reports `abiVersion: 1`,
+`valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
+and `scalarQueries` are true; `storedQueries`, `transactions` and `sync` are
+false. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
+opening storage. Cache the JS, Worker and WASM as one versioned unit.
+
+`createInteropRuntime({ worker? })` returns a synchronous bridge object with
+`invoke(method, params?)` and `close()`. `invoke` accepts `info`, `validateQuery`
+and `executeScalar` (queries take `{ sql }`) and resolves JSON-safe envelopes:
+`{ ok: true, result }` or `{ ok: false, error: { code, message } }`.
+A void result is `null`; exact integer/decimal tags are unchanged. `close()` is
+idempotent and cancels pending initialization/operations. Calls after close
+return `CLOSED`. Each bridge owns a dedicated Worker.
+
+Source adapters use this same bridge for
+[Dart/Flutter Web](https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md) and
+[C#/Blazor](https://github.com/reddb-io/reddb/blob/main/drivers/dotnet/src/Reddb.Browser/README.md). They are not yet
+published on pub.dev/NuGet. Their real compiled browser probes exercise scalar
+execution, exact values, errors and disposal online and offline. Full offline
+browser restarts are verified on Chromium/Firefox; Playwright WPE persistent
+profiles lack working CacheStorage, so Safari/iOS qualification remains pending. Run `pnpm --filter @reddb-io/browser build:interop` followed by
+`pnpm --filter @reddb-io/browser test:interop` with Dart 3.13.7 and .NET 8.0.426.
+These adapters do not expose artifact storage or qualify complete offline apps.
 
 ## Build and verify
 
@@ -145,7 +185,7 @@ these primitives do not promise that a browser will grant it or sync after closi
 ## Offline asset loading
 
 The SDK does not register a service worker or control application updates. A
-PWA should include `index.js`, `worker.js`, `wasm/reddb_wasm.js` and
+PWA should include `index.js`, `protocol.js`, `worker.js`, `wasm/reddb_wasm.js` and
 `wasm/reddb_wasm_bg.wasm` from `src/` in its own versioned application cache,
 along with its application shell. Those assets must remain available together
 after installation. A locally packaged host can serve the same assets locally.

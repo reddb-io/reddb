@@ -34,6 +34,8 @@ on:
       - 'crates/reddb-rql/**'
       - 'crates/reddb-types/**'
       - 'packages/browser/**'
+      - 'drivers/dart/**'
+      - 'drivers/dotnet/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'pnpm-lock.yaml'
@@ -102,7 +104,7 @@ jobs:
   browser-artifact:
     name: WASM and OPFS (Chromium, Firefox, WebKit)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
@@ -139,3 +141,19 @@ jobs:
         run: pnpm --filter @reddb-io/browser test
       - name: Verify installable package, TypeScript and offline bundled consumers
         run: pnpm --filter @reddb-io/browser test:distribution
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: '3.13.7'
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: '8.0.426'
+      - name: Analyze the Dart browser entrypoint
+        working-directory: drivers/dart
+        run: |
+          dart pub get
+          dart format --output=none --set-exit-if-changed lib/reddb_browser.dart lib/src/browser test/browser_runtime_probe.dart
+          dart analyze lib/reddb_browser.dart lib/src/browser test/browser_runtime_probe.dart
+      - name: Compile real Dart and Blazor consumers
+        run: pnpm --filter @reddb-io/browser build:interop
+      - name: Verify Dart and Blazor online and after an offline browser restart
+        run: pnpm --filter @reddb-io/browser test:interop

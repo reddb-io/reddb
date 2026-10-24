@@ -4,6 +4,7 @@ const cacheName = 'reddb-browser-offline-test-v1'
 const assets = [
   './harness.html',
   '../src/index.js',
+  '../src/protocol.js',
   '../src/worker.js',
   '../src/wasm/reddb_wasm.js',
   '../src/wasm/reddb_wasm_bg.wasm',

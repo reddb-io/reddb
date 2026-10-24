@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/browser",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "private": false,
   "type": "module",
   "description": "Experimental RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
@@ -14,9 +14,11 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build-test.mjs && node --test test/browser.test.mjs",
+    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs",
     "prepack": "node scripts/verify-dist.mjs",
-    "test:distribution": "node --test test/distribution.test.mjs"
+    "test:distribution": "node --test test/distribution.test.mjs",
+    "build:interop": "node scripts/build-interop.mjs",
+    "test:interop": "node --test test/interop.test.mjs"
   },
   "devDependencies": {
     "playwright": "1.61.1",

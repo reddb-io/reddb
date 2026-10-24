@@ -74,3 +74,10 @@ crates/reddb-server/leases/
 # Built browser playground assets are published by the docs workflow.
 /docs/browser/
 /drivers/js-client/bench/wasm/
+
+# Compiled Dart/Blazor browser conformance applications.
+/packages/browser/test/interop-build/
+/drivers/dotnet/src/Reddb.Browser/bin/
+/drivers/dotnet/src/Reddb.Browser/obj/
+/drivers/dotnet/tests/BrowserHarness/bin/
+/drivers/dotnet/tests/BrowserHarness/obj/

@@ -5,12 +5,29 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-The first distribution, `0.1.0-alpha.0`, is **experimental**. It exposes artifact
+The `0.1.0-alpha.1` distribution is **experimental**. It exposes artifact
 persistence/recovery, RQL validation and storage-free scalar SELECT execution.
 Queries over stored collections, application transactions, observation and
 optional synchronization are still being integrated. `append` and `checkpoint`
 accept native binary WAL/snapshot payloads; they do not execute SQL or provide a
 save-game/CRUD API.
+
+## Storage-independent runtime and other languages
+
+For validation and scalar SELECTs without opening an OPFS file, use
+`createRuntime({ worker? })` instead of `openArtifact`. Both expose `info()`,
+`validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
+Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
+`info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
+queries, transactions and sync currently report false.
+
+The JSON-safe `createInteropRuntime` bridge is also used by source adapters for
+[Dart/Flutter Web](https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md)
+and [C#/Blazor](https://github.com/reddb-io/reddb/blob/main/drivers/dotnet/src/Reddb.Browser/README.md).
+They run the same Rust/WASM scalar evaluator, preserving exact integer/decimal
+tags. They are not published to pub.dev/NuGet and do not expose storage-backed
+queries. See the [runtime contract](https://github.com/reddb-io/reddb/tree/main/packages/browser#shared-runtime-and-language-interop)
+for the version check, structured error envelopes and offline asset requirements.
 
 ## Try the browser example
 
