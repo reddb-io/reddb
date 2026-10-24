@@ -71,12 +71,12 @@ idempotent and cancels pending initialization/operations. Calls after close
 return `CLOSED`. Each bridge owns a dedicated Worker.
 
 Source adapters use this same bridge for
-[Dart/Flutter Web](../../drivers/dart/BROWSER.md) and
-[C#/Blazor](../../drivers/dotnet/src/Reddb.Browser/README.md). They are not yet
+[Dart/Flutter Web](https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md) and
+[C#/Blazor](https://github.com/reddb-io/reddb/blob/main/drivers/dotnet/src/Reddb.Browser/README.md). They are not yet
 published on pub.dev/NuGet. Their real compiled browser probes exercise scalar
 execution, exact values, errors and disposal online and offline. Full offline
-browser restarts are verified on Chromium/Firefox; Playwright WPE loses its
-CacheStorage across process restarts, so Safari/iOS qualification remains pending. Run `pnpm --filter @reddb-io/browser build:interop` followed by
+browser restarts are verified on Chromium/Firefox; Playwright WPE persistent
+profiles lack working CacheStorage, so Safari/iOS qualification remains pending. Run `pnpm --filter @reddb-io/browser build:interop` followed by
 `pnpm --filter @reddb-io/browser test:interop` with Dart 3.13.7 and .NET 8.0.426.
 These adapters do not expose artifact storage or qualify complete offline apps.
 

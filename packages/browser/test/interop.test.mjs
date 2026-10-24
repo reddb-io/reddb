@@ -85,7 +85,12 @@ after(async () => {
 for (const name of browsers) {
   test(`${name}: compiled Dart and Blazor use the shared WASM`, { timeout: 180_000 }, async testContext => {
     const profile = resolve(temporary, name)
-    let context = await browserTypes[name].launchPersistentContext(profile, { headless: true })
+    // WPE's persistent-profile runner returns empty CacheStorage even after a
+    // successful put. Its ephemeral context supports real cache/offline reloads.
+    const ephemeralBrowser = name === 'webkit' ? await webkit.launch({ headless: true }) : undefined
+    let context = ephemeralBrowser
+      ? await ephemeralBrowser.newContext()
+      : await browserTypes[name].launchPersistentContext(profile, { headless: true })
     async function probe(language) {
       const page = await context.newPage()
       const diagnostics = []
@@ -124,19 +129,20 @@ for (const name of browsers) {
         async function offlineProbes() {
           for (const language of ['dart', 'blazor']) {
             const page = await probe(language)
-            assert.equal(await page.evaluate(() => navigator.onLine), false)
+            if (name !== 'webkit') assert.equal(await page.evaluate(() => navigator.onLine), false)
             await page.close()
           }
           assert.equal(requests, before, 'offline adapters must not contact the HTTP host')
         }
-        await testContext.test('fresh Workers execute with the host stopped and network disabled', async () => {
-          await context.setOffline(true)
+        await testContext.test('fresh Workers execute with the HTTP host stopped', async () => {
+          // WPE's simulated offline flag fails navigation before its SW can
+          // respond. Its cache is exercised with the HTTP listener stopped.
+          if (name !== 'webkit') await context.setOffline(true)
           await offlineProbes()
         })
         await testContext.test('complete browser restart works offline', {
-          // WPE retains the SW registration but loses its CacheStorage entries
-          // across process restart. An isolated cache-only probe reproduces it.
-          skip: name === 'webkit' ? 'Playwright WPE does not retain CacheStorage across browser restarts; real Safari/iOS qualification remains pending' : false,
+          // WPE persistent profiles do not store CacheStorage entries.
+          skip: name === 'webkit' ? 'Playwright WPE persistent profiles lack working CacheStorage; real Safari/iOS qualification remains pending' : false,
         }, async () => {
           await context.close()
           context = await browserTypes[name].launchPersistentContext(profile, { headless: true, offline: true })
@@ -146,6 +152,6 @@ for (const name of browsers) {
         server.listen(port, '127.0.0.1')
         await once(server, 'listening')
       }
-    } finally { await context.close() }
+    } finally { await context.close(); await ephemeralBrowser?.close() }
   })
 }

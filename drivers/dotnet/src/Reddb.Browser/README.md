@@ -40,9 +40,9 @@ Worker and releases JS references; repeated disposal is safe.
 Include your Blazor framework, application assemblies, and all JS/Worker/WASM
 assets in your application's versioned offline cache. The SDK registers no
 service worker and loads no CDN dependency. The real Blazor test app runs on
-Chromium, Firefox and Playwright WebKit with the network disabled and the HTTP
-host stopped. Complete offline browser restarts are verified on Chromium/Firefox.
-Playwright WPE loses CacheStorage on process restart; real Safari/iOS offline
+Chromium/Firefox with the network disabled and the HTTP host stopped. WebKit
+executes from its cache with the HTTP host stopped. Complete offline browser restarts are verified on Chromium/Firefox.
+Playwright WPE persistent profiles lack working CacheStorage; real Safari/iOS offline
 restart qualification remains pending. This checks scalar execution,
 not OPFS persistence or full database transactions.
 

@@ -64,7 +64,7 @@ and the compiled Dart/Flutter application in your application's versioned cache.
 The SDK does not install a service worker. There is no CDN fallback.
 The Dart-to-JS adapter is tested in Chromium, Firefox and Playwright WebKit,
 including offline reloads. Complete offline browser restarts are verified on
-Chromium/Firefox; Playwright WPE loses CacheStorage on process restart, so real
+Chromium/Firefox; Playwright WPE persistent profiles lack working CacheStorage, so real
 Safari/iOS qualification remains pending. Flutter widget integration and
 Flutter's separate `--wasm` build mode are not qualified by that test.
 
