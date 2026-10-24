@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.26.5
+
+### Patch Changes
+
+- [#2479](https://github.com/reddb-io/reddb/pull/2479) [`9047baa`](https://github.com/reddb-io/reddb/commit/9047baa6337ed3301a9c874c01cf29b170b36b83) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Return unused GNU allocator pages under Linux cgroup memory pressure during paced
+  background maintenance. Freed native recovery and query buffers no longer need
+  to remain resident until the container reaches its hard limit. Memory admission,
+  live allocations, persistent formats and transaction durability stay unchanged.
+
 ## 1.26.4
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @reddb-io/client-bun
 
+## 1.26.5
+
+### Patch Changes
+
+- [#2478](https://github.com/reddb-io/reddb/pull/2478) [`5d41cee`](https://github.com/reddb-io/reddb/commit/5d41cee8f0d73e40e2620ef62c075b13073fd056) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Accumulate fragmented RedWire input without repeated buffer concatenation and
+  copy completed payloads directly into owned result buffers. Release consumed
+  receive storage and reject pending/future queries on terminal framing, socket or
+  connection-close failures, while preserving per-query engine error recovery.
+
 ## 1.26.4
 
 ## 1.26.3
