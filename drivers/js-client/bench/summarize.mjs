@@ -27,7 +27,7 @@ columns.push('JS speedup [95% CI]')
 if (report.wasm) columns.push('WASM speedup [95% CI]')
 console.log(`| ${columns.join(' | ')} |`)
 console.log(`| ${columns.map((_, index) => index < 2 ? '---' : '---:').join(' | ')} |`)
-for (const runtime of ['node', 'chromium', 'firefox', 'webkit']) {
+for (const runtime of ['node', 'bun', 'chromium', 'firefox', 'webkit']) {
   const result = report[runtime]
   if (!result) continue
   for (const { name, samples } of result.results) {
