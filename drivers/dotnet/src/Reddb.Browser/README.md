@@ -1,4 +1,4 @@
-# Reddb.Browser: experimental Blazor WebAssembly adapter
+# Reddb.Browser: Blazor WebAssembly adapter
 
 This separate project uses `Microsoft.JSInterop` to run the shared RedDB
 Rust/WASM Worker locally in Blazor WebAssembly. It does not depend on the native
@@ -6,7 +6,7 @@ Rust/WASM Worker locally in Blazor WebAssembly. It does not depend on the native
 no `Reddb.Browser` package has been published to NuGet.
 
 Reference `Reddb.Browser.csproj` from your Blazor project. Install
-`@reddb-io/browser@experimental` in your web asset build and copy its complete
+`@reddb-io/browser` in your web asset build and copy its complete
 `src/` directory to `wwwroot/vendor/reddb-browser/`, preserving the layout.
 
 Use the runtime once JS interop is available, such as in `OnAfterRenderAsync`:

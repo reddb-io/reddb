@@ -1,12 +1,12 @@
-RedDB Browser 0.1.0-alpha.1 adds a versioned shared Rust/WASM runtime for JavaScript/TypeScript and language interop.
+RedDB Browser 0.1.0 is the canonical browser distribution, published on npm’s `latest` channel. It provides the versioned shared Rust/WASM runtime for JavaScript/TypeScript and language interop.
 
 ```sh
-npm add @reddb-io/browser@experimental
+npm add @reddb-io/browser
 ```
 
 The package bundles the JavaScript API, TypeScript declarations, dedicated worker and Rust/WASM engine. Consumers need no Rust toolchain or RedDB server. Vite applications can import `@reddb-io/browser/worker?worker` and pass a fresh Worker to `openArtifact`.
 
-New in this version:
+Included in this release:
 
 - `createRuntime()` validates RQL and executes storage-free scalar SELECTs without OPFS or Web Locks.
 - `info()` reports ABI version, exact-value encoding and supported capabilities. SDK/Worker/WASM mismatches fail before opening storage.
@@ -20,4 +20,4 @@ Offline loading uses the embedding application's cache or locally packaged asset
 Usage guide: https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md
 API and engine details: https://github.com/reddb-io/reddb/tree/main/packages/browser
 
-The `.tgz` below is also directly installable with npm/pnpm, and `SHA256SUMS` records its checksum. The Browser version/tag is independent of native RedDB releases; the npm channel is `experimental`.
+The `.tgz` below is also directly installable with npm/pnpm, and `SHA256SUMS` records its checksum. The Browser version/tag is independent of native RedDB releases; the npm channel is `latest`.

@@ -1,4 +1,4 @@
-/** Experimental persistence and scalar execution; stored-data queries and sync remain pending. */
+/** Persistence and scalar execution; stored-data queries and sync remain pending. */
 export class BrowserError extends Error {
   readonly code: string
   constructor(code: string, message: string)

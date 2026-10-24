@@ -1,9 +1,9 @@
 {
   "name": "@reddb-io/browser",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "Experimental RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
+  "description": "RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
   "exports": {
     ".": {
       "types": "./src/index.d.ts",
@@ -41,6 +41,6 @@
   ],
   "publishConfig": {
     "access": "public",
-    "tag": "experimental"
+    "tag": "latest"
   }
 }

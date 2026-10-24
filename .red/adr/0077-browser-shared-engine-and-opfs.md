@@ -229,14 +229,14 @@ separately verifies exact opaque crypto envelopes, authenticated reads after
 reopen and rejection of tampered ciphertext. This milestone makes no encryption
 format migration or full encrypted-pager qualification claim.
 
-The experimental `executeScalar` entrypoint executes storage-free SELECT
+The `executeScalar` entrypoint executes storage-free SELECT
 expressions in the worker with the same evaluator and exact JSON integer/decimal
 tags. It rejects unsupported clauses explicitly and never reads or writes the
 artifact. Operator fixtures run identically as native Rust tests and a separate
 test-only WASM artifact inside browser workers. Native runtime differential tests
 compare the scalar corpus against actual `RedDBRuntime` results. Query timing
 uses the host's monotonic clock (`Instant` natively, `performance.now` in WASM).
-The package is released independently as `@reddb-io/browser@experimental` with
+The package is released independently as `@reddb-io/browser` on the `latest` channel with
 JS, TypeScript declarations, Worker and WASM assets. This artifact/scalar release
 is not yet a complete database SDK: storage-backed five-model execution, local
 transactions and sync remain pending. See `docs/clients/browser.md` for installation
