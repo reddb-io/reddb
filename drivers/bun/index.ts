@@ -64,7 +64,13 @@ export class RedDBError extends Error {
 export class RedDBConnection {
   private socket: ReturnType<typeof Bun.connect> extends Promise<infer T> ? T : never
   private pending: PendingRequest[] = []
-  private buffer = Buffer.alloc(0)
+  private chunks: (Buffer | null)[] = []
+  private chunkIndex = 0
+  private chunkOffset = 0
+  private bufferedBytes = 0
+  private frameLength = 0
+  private frameType = 0
+  private failure: Error | null = null
   private nextCorr = 1n
   private serverFeatures = 0
 
@@ -73,39 +79,110 @@ export class RedDBConnection {
   }
 
   _onData(chunk: Buffer) {
-    this.buffer = Buffer.concat([this.buffer, chunk])
+    if (this.failure || chunk.length === 0) return
+    this.chunks.push(chunk)
+    this.bufferedBytes += chunk.length
     this._tryResolve()
   }
 
+  _onClose() {
+    this._fail(new RedDBError('CONNECTION_CLOSED', 'redwire: connection closed'))
+  }
+
+  _onError(error: Error) {
+    this._fail(error)
+  }
+
   private _tryResolve() {
-    while (this.buffer.length >= FRAME_HEADER_SIZE && this.pending.length > 0) {
-      const totalLen = this.buffer.readUInt32LE(0)
-      if (totalLen < FRAME_HEADER_SIZE || totalLen > MAX_FRAME_SIZE) {
-        const { reject } = this.pending.shift()!
-        reject(new RedDBError('FRAME_INVALID_LENGTH', `length=${totalLen}`))
+    while (this.bufferedBytes >= FRAME_HEADER_SIZE && this.pending.length > 0) {
+      let payload: Buffer
+      let msgType: number
+      try {
+        if (this.frameLength === 0) this._readHeader()
+        if (this.bufferedBytes < this.frameLength) break
+        msgType = this.frameType
+        this._consume(FRAME_HEADER_SIZE)
+        payload = Buffer.allocUnsafe(this.frameLength - FRAME_HEADER_SIZE)
+        this._consume(payload.length, payload)
+        this.frameLength = 0
+      } catch (error) {
+        this._fail(error as Error)
         return
       }
-      if (this.buffer.length < totalLen) break
-
-      const msgType = this.buffer[4]
-      const payload = this.buffer.subarray(FRAME_HEADER_SIZE, totalLen)
-      this.buffer = this.buffer.subarray(totalLen)
-
       const { resolve, reject } = this.pending.shift()!
       if (msgType === MSG_ERROR || msgType === MSG_AUTH_FAIL) {
         reject(new RedDBError('ENGINE', payload.toString('utf8')))
       } else {
-        resolve({ type: msgType, payload: Buffer.from(payload) })
+        resolve({ type: msgType, payload })
       }
     }
   }
 
+  private _readHeader() {
+    const first = this.chunks[this.chunkIndex]!
+    let header = first
+    let offset = this.chunkOffset
+    if (first.length - offset < 5) {
+      // Only length and kind are needed; the rest of the 16-byte header is discarded later.
+      header = Buffer.allocUnsafe(5)
+      let written = 0
+      for (let index = this.chunkIndex; written < header.length; index++) {
+        const chunk = this.chunks[index]!
+        const start = index === this.chunkIndex ? this.chunkOffset : 0
+        const count = Math.min(header.length - written, chunk.length - start)
+        written += chunk.copy(header, written, start, start + count)
+      }
+      offset = 0
+    }
+    const length = header.readUInt32LE(offset)
+    if (length < FRAME_HEADER_SIZE || length > MAX_FRAME_SIZE) {
+      throw new RedDBError('FRAME_INVALID_LENGTH', `length=${length}`)
+    }
+    this.frameLength = length
+    this.frameType = header[offset + 4]
+  }
+
+  private _consume(length: number, output?: Buffer) {
+    if (length === 0) return
+    let written = 0
+    while (written < length) {
+      const chunk = this.chunks[this.chunkIndex]!
+      const count = Math.min(length - written, chunk.length - this.chunkOffset)
+      if (output) chunk.copy(output, written, this.chunkOffset, this.chunkOffset + count)
+      written += count
+      this.chunkOffset += count
+      if (this.chunkOffset === chunk.length) {
+        this.chunks[this.chunkIndex++] = null
+        this.chunkOffset = 0
+      }
+    }
+    this.bufferedBytes -= length
+    if (this.chunkIndex * 2 >= this.chunks.length) {
+      this.chunks = this.chunks.slice(this.chunkIndex)
+      this.chunkIndex = 0
+    }
+  }
+
+  private _fail(error: Error) {
+    if (this.failure) return
+    this.failure = error
+    this.chunks = []
+    this.chunkIndex = 0
+    this.chunkOffset = 0
+    this.bufferedBytes = 0
+    this.frameLength = 0
+    while (this.pending.length > 0) this.pending.shift()!.reject(error)
+    try { this.socket.end() } catch { /* The peer may already have closed the socket. */ }
+  }
+
   private _send(msgType: number, payload: Buffer): Promise<{ type: number; payload: Buffer }> {
+    if (this.failure) return Promise.reject(this.failure)
     return new Promise((resolve, reject) => {
       this.pending.push({ resolve, reject })
       const corr = this.nextCorr
       this.nextCorr += 1n
-      this.socket.write(encodeFrame(msgType, corr, payload))
+      try { this.socket.write(encodeFrame(msgType, corr, payload)) }
+      catch (error) { this._fail(error as Error) }
     })
   }
 
@@ -200,11 +277,12 @@ export class RedDBConnection {
   }
 
   close() {
+    if (this.failure) return
     try {
       this.socket.write(encodeFrame(MSG_BYE, this.nextCorr, Buffer.alloc(0)))
       this.nextCorr += 1n
     } finally {
-      this.socket.end()
+      this._onClose()
     }
   }
 }
@@ -232,6 +310,12 @@ async function connectWithOptions(addr: string, tls?: { ca?: string; rejectUnaut
   const [host, portStr] = addr.split(':')
   const port = parseInt(portStr, 10)
   let connRef: RedDBConnection | null = null
+  let earlyFailure: Error | null = null
+  const fail = (error: Error) => {
+    if (connRef) connRef._onError(error)
+    else earlyFailure ??= error
+  }
+  const closed = () => fail(new RedDBError('CONNECTION_CLOSED', 'redwire: connection closed'))
 
   const socket = await Bun.connect({
     hostname: host,
@@ -242,15 +326,18 @@ async function connectWithOptions(addr: string, tls?: { ca?: string; rejectUnaut
         connRef?._onData(Buffer.from(data))
       },
       error(_socket, error) {
-        console.error('RedDB wire error:', error)
+        fail(error)
       },
-      close() {},
+      close: closed,
+      end: closed,
       open() {},
     },
   })
 
   connRef = new RedDBConnection(socket)
-  await connRef._handshake()
+  if (earlyFailure) connRef._onError(earlyFailure)
+  try { await connRef._handshake() }
+  catch (error) { connRef._onError(error as Error); throw error }
   return connRef
 }
 
