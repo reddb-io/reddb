@@ -917,6 +917,8 @@ impl RedDBRuntime {
                         let mut last_work = std::time::Instant::now();
                         let mut mvcc_maintenance =
                             super::mvcc_maintenance::MvccMaintenance::default();
+                        let mut allocator_pressure =
+                            super::allocator_pressure::AllocatorPressure::default();
                         loop {
                             std::thread::park_timeout(tick);
                             if stopped.load(AtomicOrdering::Acquire) {
@@ -936,6 +938,7 @@ impl RedDBRuntime {
                                 inner,
                             };
                             rt.reclaim_history_tick(&mut mvcc_maintenance);
+                            allocator_pressure.tick();
                         }
                     },
                 );
