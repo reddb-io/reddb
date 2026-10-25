@@ -89,9 +89,6 @@ pub(crate) fn sort_or_top_k_records_with_db(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) {
-    if order_by.is_empty() {
-        return;
-    }
     let host = RuntimeOrderingHost {
         db,
         table_name,
@@ -101,7 +98,6 @@ pub(crate) fn sort_or_top_k_records_with_db(
         &host,
         records,
         order_by,
-        topk_disabled(),
         offset,
         limit,
         table_name,
@@ -170,5 +166,8 @@ impl reddb_engine::query::runtime::ordering::OrderingHost for RuntimeOrderingHos
     }
     fn record_identity_key(&self, record: &UnifiedRecord) -> String {
         runtime_record_identity_key(record)
+    }
+    fn topk_disabled(&self) -> bool {
+        topk_disabled()
     }
 }

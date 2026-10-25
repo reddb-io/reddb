@@ -44,6 +44,7 @@ struct Host<'a> {
     contract: Option<&'a CollectionContract>,
     evaluations: Cell<usize>,
     identities: Cell<usize>,
+    topk_disabled: bool,
 }
 
 impl<'a> Host<'a> {
@@ -53,6 +54,7 @@ impl<'a> Host<'a> {
             contract,
             evaluations: Cell::new(0),
             identities: Cell::new(0),
+            topk_disabled: false,
         }
     }
 }
@@ -91,12 +93,15 @@ impl OrderingHost for Host<'_> {
             .expect("fixture identity")
             .display_string()
     }
+    fn topk_disabled(&self) -> bool {
+        self.topk_disabled
+    }
 }
 
 fn row(id: u64, value: Value) -> UnifiedRecord {
     let mut row = UnifiedRecord::new();
     row.set("rid", Value::UnsignedInteger(id));
-    row.set("key", value);
+    row.set("quantity", value);
     row
 }
 
@@ -121,7 +126,10 @@ pub fn ordered_records(
     contract: Option<&CollectionContract>,
     disable_topk: bool,
 ) -> Vec<UnifiedRecord> {
-    let host = Host::new(query, contract);
+    let host = Host {
+        topk_disabled: disable_topk,
+        ..Host::new(query, contract)
+    };
     let mut records: Vec<_> = records
         .iter()
         .filter(|record| {
@@ -133,7 +141,6 @@ pub fn ordered_records(
         &host,
         &mut records,
         &query.order_by,
-        disable_topk,
         query.offset,
         query.limit,
         Some(&query.table),
@@ -155,7 +162,7 @@ fn exact_integer_keys() {
     assert_eq!(
         ids(&ordered_records(
             &rows,
-            &query("ORDER BY o.key ASC"),
+            &query("ORDER BY o.quantity ASC"),
             None,
             false
         )),
@@ -164,7 +171,7 @@ fn exact_integer_keys() {
     assert_eq!(
         ids(&ordered_records(
             &rows,
-            &query("ORDER BY o.key DESC LIMIT 2"),
+            &query("ORDER BY o.quantity DESC LIMIT 2"),
             None,
             false
         )),
@@ -191,7 +198,7 @@ fn nullable_keys() {
         assert_eq!(
             ids(&ordered_records(
                 &rows,
-                &query(&format!("ORDER BY o.key {suffix}")),
+                &query(&format!("ORDER BY o.quantity {suffix}")),
                 None,
                 false
             )),
@@ -226,14 +233,14 @@ fn text_prefixes_and_stable_ties() {
     assert_eq!(
         ids(&ordered_records(
             &rows,
-            &query("ORDER BY key ASC"),
+            &query("ORDER BY quantity ASC"),
             None,
             false
         )),
         [4, 6, 2, 3, 0, 5, 1]
     );
     let mut selected = rows.clone();
-    let query = query("ORDER BY key ASC");
+    let query = query("ORDER BY quantity ASC");
     let host = Host::new(&query, None);
     top_k_records_by_order_by_with_host(
         &host,
@@ -256,7 +263,7 @@ fn expression_keys_once() {
         .rev()
         .map(|id| row(id, Value::Integer(id as i64)))
         .collect::<Vec<_>>();
-    let query = query("ORDER BY o.key * 2 DESC, o.key ASC");
+    let query = query("ORDER BY o.quantity * 2 DESC, o.quantity ASC");
     let host = Host::new(&query, None);
     let mut sorted = rows.clone();
     sort_records_by_order_by_with_host(
@@ -298,7 +305,7 @@ fn topk_matches_stable_sort() {
             row(id, Value::Integer((state % 11) as i64))
         })
         .collect::<Vec<_>>();
-    for suffix in ["ORDER BY key ASC", "ORDER BY key DESC, rid ASC"] {
+    for suffix in ["ORDER BY quantity ASC", "ORDER BY quantity DESC, rid ASC"] {
         let query = query(suffix);
         let host = Host::new(&query, None);
         let mut sorted = rows.clone();
@@ -326,13 +333,13 @@ fn topk_matches_stable_sort() {
         assert_eq!(
             ids(&ordered_records(
                 &rows,
-                &query("ORDER BY key ASC, rid ASC LIMIT 3 OFFSET 2"),
+                &query("ORDER BY quantity ASC, rid ASC LIMIT 3 OFFSET 2"),
                 None,
                 disabled
             )),
             {
                 let sorted =
-                    ordered_records(&rows, &query("ORDER BY key ASC, rid ASC"), None, true);
+                    ordered_records(&rows, &query("ORDER BY quantity ASC, rid ASC"), None, true);
                 ids(&sorted[2..5])
             }
         );
@@ -344,7 +351,7 @@ fn limit_offset_width() {
         .rev()
         .map(|id| row(id, Value::UnsignedInteger(id)))
         .collect::<Vec<_>>();
-    let query = query("ORDER BY key ASC");
+    let query = query("ORDER BY quantity ASC");
     let host = Host::new(&query, None);
     for (offset, limit) in [
         (None, None),
@@ -357,7 +364,6 @@ fn limit_offset_width() {
             &host,
             &mut sorted,
             &query.order_by,
-            false,
             offset,
             limit,
             Some("orders"),
@@ -369,10 +375,16 @@ fn limit_offset_width() {
             "wide bounds must not truncate to a small top-K on wasm32"
         );
     }
-    assert!(ordered_records(&rows, &self::query("ORDER BY key LIMIT 0"), None, false).is_empty());
     assert!(ordered_records(
         &rows,
-        &self::query("ORDER BY key LIMIT 1 OFFSET 4294967296"),
+        &self::query("ORDER BY quantity LIMIT 0"),
+        None,
+        false
+    )
+    .is_empty());
+    assert!(ordered_records(
+        &rows,
+        &self::query("ORDER BY quantity LIMIT 1 OFFSET 4294967296"),
         None,
         false
     )
@@ -380,12 +392,12 @@ fn limit_offset_width() {
 }
 
 fn identity_and_secret_callbacks() {
-    let query = query("ORDER BY key ASC");
+    let query = query("ORDER BY quantity ASC");
     let host = Host::new(&query, None);
     let rows = [row(2, Value::Integer(1)), row(1, Value::Integer(1))];
     let clause = OrderByClause::asc(FieldRef::TableColumn {
         table: String::new(),
-        column: "key".into(),
+        column: "quantity".into(),
     });
     assert_eq!(
         compare_runtime_order_with_host(
@@ -428,7 +440,7 @@ fn unordered_and_nan_edges() {
         row(1, Value::Float(1.0)),
         row(2, Value::Float(2.0)),
     ];
-    let query = query("ORDER BY key");
+    let query = query("ORDER BY quantity");
     let host = Host::new(&query, None);
     let mut selected = rows.clone();
     top_k_records_by_order_by_with_host(&host, &mut selected, &[], 2, None, None);

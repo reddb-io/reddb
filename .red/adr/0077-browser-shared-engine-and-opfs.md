@@ -623,8 +623,8 @@ entry points delegate to these same algorithms. The host supplies expression
 evaluation, secret input admission and identity-key construction; native
 expression misses retain their absent-key behavior. The environment-controlled
 top-K kill-switch stays in the native adapter and becomes an explicit boolean
-at the shared boundary. Record admission, visibility and validation remain host
-responsibilities.
+returned by a host callback at the shared boundary. Record admission, visibility
+and validation remain host responsibilities.
 
 Existing optional-key/NULL and direction semantics, abbreviated text keys,
 exact integer comparison and record cloning remain unchanged. Pairwise

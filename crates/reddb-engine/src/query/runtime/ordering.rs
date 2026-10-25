@@ -15,6 +15,7 @@ pub trait OrderingHost {
     fn evaluate_expression(&self, expression: &Expr, record: &UnifiedRecord) -> Option<Value>;
     fn secret_query_input(&self, value: Value) -> Option<Value>;
     fn record_identity_key(&self, record: &UnifiedRecord) -> String;
+    fn topk_disabled(&self) -> bool;
 }
 
 pub fn compare_runtime_order_with_host<H: OrderingHost>(
@@ -167,7 +168,6 @@ pub fn sort_or_top_k_records_with_host<H: OrderingHost>(
     host: &H,
     records: &mut Vec<UnifiedRecord>,
     order_by: &[OrderByClause],
-    topk_disabled: bool,
     offset: Option<u64>,
     limit: Option<u64>,
     table_name: Option<&str>,
@@ -182,7 +182,7 @@ pub fn sort_or_top_k_records_with_host<H: OrderingHost>(
             Some(usize::try_from(off.unwrap_or(0).saturating_add(lim)).unwrap_or(usize::MAX))
         }
     };
-    if !topk_disabled {
+    if !host.topk_disabled() {
         if let Some(k) = effective_k {
             // Only take the top-k path when it actually saves work:
             // n > 2k means quickselect + sort-of-k beats full sort.
