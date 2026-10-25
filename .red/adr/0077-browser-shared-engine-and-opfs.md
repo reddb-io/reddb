@@ -651,3 +651,42 @@ and key storage, O(N log N) full-sort comparisons or average O(N) selection plus
 O(L log L) prefix sorting for L = offset + limit, and the existing output
 record clones. The move adds no scan, file write, network traffic or IPC; no
 measured speedup is claimed.
+
+## Shared runtime projection and sensitivity traversal
+
+`reddb-engine::query::runtime::projection` owns the native SELECT projection
+traversal, output-label and visible-column handling, legacy identity aliases,
+document/entity projection gates, materialized window reads and conservative
+secret-sensitivity walks. Native entry points call these same functions. Graph,
+path and vector bindings retain their existing clone/passthrough behavior.
+SELECT * keeps secret wrappers intact for downstream native output policy;
+explicit sensitive projections still pass through the host's output check.
+
+The host supplies typed evaluation, legacy function/filter fallback, legacy
+literal decoding, error conversion/redaction and secret output policy. Unknown
+function/column errors retain the existing projection fallbacks, while genuine
+typed-evaluator data errors propagate. This deliberately retains the native
+distinction between typed expression evaluation and legacy projection scalars,
+including arithmetic lowered to legacy function names. Those native scalar
+dispatchers and crypto/session policy are not reimplemented by this extraction.
+Sensitivity still includes untaken CASE branches and window expressions.
+Visibility, authorization, tenancy/RLS and final serialization remain host
+responsibilities.
+
+Shared native/WASM cases cover field/identity aliases, host literal delegation,
+columnar and overflow layouts, star visibility, duplicate output labels, binary
+document paths, graph/vector bindings, materialized windows, typed scalar and
+boolean results, fallback categories, data-error propagation, CASE sensitivity,
+output rejection and secret-error redaction. The existing offline OPFS fixture
+now also checks projected rows and output columns after filtering, ordering and
+pagination across WAL recovery, an admitted update, checkpoint and full browser
+restarts with the HTTP listener stopped. Its test host uses canonical typed
+evaluation for supported fixture expressions; it is not a complete browser
+scalar host or public stored-query dispatcher. Public stored-query and
+application-transaction capabilities remain false.
+
+Cost sketch: N rows with P projections retain O(N * P) projection visits plus
+existing expression/path work and output-value/binding clones. Visible-column
+collection retains native schema sampling and heterogeneous-layout fallback;
+sensitivity keeps its existing AST traversal. The move adds no storage scan,
+file write, network traffic or IPC, and claims no measured speedup.

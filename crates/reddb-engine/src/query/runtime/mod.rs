@@ -2,6 +2,7 @@
 pub mod field_resolution;
 pub mod filter;
 pub mod ordering;
+pub mod projection;
 pub mod values;
 
 pub fn is_universal_entity_source(table: &str) -> bool {
