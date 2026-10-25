@@ -107,6 +107,10 @@ async function sharedConformance(browserPage) {
     'record_fields_graph_bindings', 'record_filter_nullable_column_lookup',
     'record_filter_exact_values_and_metadata', 'record_filter_predicates_and_errors',
     'record_filter_short_circuit_and_host_errors', 'record_filter_secret_admission',
+    'record_order_exact_integer_keys', 'record_order_nullable_keys',
+    'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
+    'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
+    'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
   ])
 }
 
@@ -694,7 +698,7 @@ for (const browser of browsers) {
       } finally { await context.setOffline(false) }
     })
 
-    storageTest('canonical WHERE filters recovered rows after offline WAL and checkpoint restarts', async () => {
+    storageTest('canonical WHERE and ORDER BY recover rows after offline WAL and checkpoint restarts', async () => {
       async function fixture(phase) {
         const current = await page()
         try {

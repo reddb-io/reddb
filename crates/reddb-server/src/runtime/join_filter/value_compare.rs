@@ -5,7 +5,7 @@ pub(in crate::runtime::join_filter) use reddb_engine::query::runtime::values::{
 };
 pub(in crate::runtime) use reddb_engine::query::runtime::values::{
     runtime_value_number, runtime_value_text, runtime_value_text_cow, runtime_value_text_str,
-    runtime_values_equal, table_column_name, text_abbrev_key,
+    runtime_values_equal, table_column_name,
 };
 
 pub(in crate::runtime) fn compare_runtime_values(
