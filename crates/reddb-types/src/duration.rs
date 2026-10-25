@@ -63,7 +63,7 @@ pub fn parse_duration_ns(s: &str) -> Option<u64> {
         _ => return None,
     };
 
-    Some(num * multiplier)
+    num.checked_mul(multiplier)
 }
 
 /// Long-form duration unit (e.g. `"day"`, `"hours"`, `"minutes"`) →
@@ -83,6 +83,16 @@ fn long_form_multiplier(unit: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_and_long_duration_overflow_is_rejected() {
+        assert_eq!(parse_duration_ns("18446744073709551615s"), None);
+        assert_eq!(parse_duration_ns("18446744073709551615 seconds"), None);
+        assert_eq!(
+            parse_duration_ns("18446744073s"),
+            Some(18_446_744_073_000_000_000)
+        );
+    }
 
     #[test]
     fn test_parse_duration() {

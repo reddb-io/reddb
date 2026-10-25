@@ -254,3 +254,14 @@ fn portable_text_scalar_conformance() {
         run();
     }
 }
+
+#[path = "support/temporal_scalars.rs"]
+mod temporal_scalars;
+
+#[test]
+fn portable_temporal_scalar_conformance() {
+    for (name, run) in temporal_scalars::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

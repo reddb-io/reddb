@@ -30,6 +30,10 @@ mod record_ordering;
 mod record_projection;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/temporal_scalars.rs"]
+mod temporal_scalars;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/text_scalars.rs"]
 mod text_scalars;
 
@@ -135,7 +139,8 @@ pub fn run_conformance() -> String {
         .chain(record_ordering::CASES.iter())
         .chain(record_projection::CASES.iter())
         .chain(numeric_scalars::CASES.iter())
-        .chain(text_scalars::CASES.iter());
+        .chain(text_scalars::CASES.iter())
+        .chain(temporal_scalars::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }
@@ -222,4 +227,11 @@ pub fn entity_timestamps() -> Vec<u64> {
         entity.embeddings()[0].generated_at,
         entity.cross_refs()[0].created_at,
     ]
+}
+
+/// Test-only probe: the scalar dispatcher must read Date.now in a real Worker.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = runtimeClockValues)]
+pub fn runtime_clock_values() -> Vec<i64> {
+    record_projection::runtime_clock_values()
 }
