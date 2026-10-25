@@ -176,6 +176,7 @@ impl BootedNode {
         let (runtime, auth_store, telemetry_guard) =
             build_runtime_and_auth_store(&config, db_options.clone())?;
         let backup_tasks = spawn_backup_tasks_if_configured(&db_options, &runtime);
+        runtime.start_local_checkpoint_maintenance();
 
         // `RED_ADMIN_BIND` / `RED_METRICS_BIND` serve an HTTP surface, so only
         // the shapes that already owned one honoured them.

@@ -429,6 +429,16 @@ impl StoreCommitCoordinator {
         self.queue.queued_bytes() + crate::storage::wal::WAL_BUFFER_BYTES as u64
     }
 
+    /// Logical WAL length on disk, excluding the empty header. Memory buffer
+    /// occupancy cannot detect an idle WAL that still needs a checkpoint.
+    pub(crate) fn disk_bytes(&self) -> io::Result<u64> {
+        std::fs::metadata(&self.wal_path).map(|metadata| {
+            metadata
+                .len()
+                .saturating_sub(reddb_file::WAL_FILE_HEADER_BYTES as u64)
+        })
+    }
+
     pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
         self.append_actions_impl(actions, false).map(|_| ())
     }

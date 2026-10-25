@@ -1556,6 +1556,7 @@ pub mod lease_lifecycle;
 pub mod lease_loop;
 pub mod lease_timer_wheel;
 pub mod lifecycle;
+mod local_checkpoint_maintenance;
 pub mod lock_manager;
 pub mod locking;
 pub(crate) mod materialization_limit;

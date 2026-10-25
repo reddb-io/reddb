@@ -742,6 +742,13 @@ impl UnifiedStore {
             .map_or(0, |commit| commit.buffered_bytes())
     }
 
+    /// Uncheckpointed on-disk WAL payload; distinct from resident WAL buffers.
+    pub(crate) fn wal_disk_bytes(&self) -> std::io::Result<u64> {
+        self.commit
+            .as_ref()
+            .map_or(Ok(0), |commit| commit.disk_bytes())
+    }
+
     /// Approximate resident bytes across every collection's segment arena
     /// (ADR 0073 §2). Same number `stats().total_memory_bytes` reports, without
     /// building the per-collection stats map a sampler would throw away.
