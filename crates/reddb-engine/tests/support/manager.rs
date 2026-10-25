@@ -27,6 +27,10 @@ pub const CASES: &[(&str, fn())] = &[
         bounded_scan_and_consolidation,
     ),
     ("manager_ordered_graph_candidates", ordered_graph_candidates),
+    (
+        "manager_restored_identity_keeps_cursor_boundary",
+        restored_identity_keeps_cursor_boundary,
+    ),
 ];
 
 fn row(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
@@ -314,5 +318,113 @@ fn ordered_graph_candidates() {
             |_| panic!("denied delivery"),
         ),
         Err("budget")
+    );
+}
+
+fn restored_identity_keeps_cursor_boundary() {
+    for flat in [false, true] {
+        let manager = SegmentManager::new("keys");
+        let entities: Vec<_> = (1..=600)
+            .map(|id| row(id, &format!("old-{id}"), 0, 0))
+            .collect();
+        if flat {
+            manager.bulk_insert(entities).expect("flat source");
+        } else {
+            manager.insert_batch(entities).expect("hash source");
+        }
+        manager
+            .delete(EntityId::new(600))
+            .expect("delete before cursor capture");
+        let mut changed = false;
+        let mut seen = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                seen.extend(batch.iter().map(|entity| entity.id.raw()));
+                if !changed {
+                    changed = true;
+                    let mut restored = row(600, "restored", 0, 0);
+                    restored.sequence_id = 9000;
+                    manager
+                        .restore_snapshot_entity(restored)
+                        .expect("restore deleted identity");
+                }
+                true
+            }
+        ));
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (1..600).collect::<Vec<_>>(),
+            "restoration does not extend a captured cursor"
+        );
+        for sequence in 9001..9005 {
+            assert_eq!(manager.count(), 600);
+            assert!(manager
+                .delete(EntityId::new(600))
+                .expect("delete restored identity"));
+            let mut restored = row(600, "restored", 0, 0);
+            restored.sequence_id = sequence;
+            manager
+                .restore_snapshot_entity(restored)
+                .expect("repeat restoration");
+            assert_eq!(
+                manager
+                    .get(EntityId::new(600))
+                    .expect("visible restoration")
+                    .sequence_id,
+                sequence
+            );
+        }
+        let mut current = Vec::new();
+        assert!(manager.scan_batches(
+            None,
+            || true,
+            |batch| {
+                current.extend(batch.iter().map(|entity| entity.id.raw()));
+                true
+            }
+        ));
+        current.sort_unstable();
+        assert_eq!(
+            current,
+            (1..=600).collect::<Vec<_>>(),
+            "one physical position per live entity"
+        );
+        assert_eq!(
+            manager.project_key_entity("restored", None, true, |entity| entity.id.raw()),
+            Some(600)
+        );
+        assert!(manager
+            .project_key_entity("old-600", None, true, |_| ())
+            .is_none());
+    }
+    // An older sealed copy can be authoritative while the growing copy has
+    // already been deleted. Its rewrite needs the same restoration boundary.
+    let manager = SegmentManager::new("keys");
+    manager.insert(row(1, "sealed", 0, 0)).expect("original");
+    manager.force_seal().expect("seal original");
+    manager
+        .insert(row(1, "growing", 0, 0))
+        .expect("growing copy");
+    manager
+        .delete(EntityId::new(1))
+        .expect("delete growing copy");
+    let mut updated = row(1, "updated", 0, 0);
+    updated.sequence_id = 100;
+    manager.update(updated).expect("rewrite sealed copy");
+    assert_eq!(manager.count(), 1);
+    assert_eq!(manager.query_all(|_| true).len(), 1);
+    assert_eq!(
+        manager
+            .get(EntityId::new(1))
+            .expect("rewritten identity")
+            .sequence_id,
+        100
+    );
+    assert_eq!(
+        manager.project_key_entity("updated", None, true, |entity| entity.id.raw()),
+        Some(1)
     );
 }

@@ -1644,6 +1644,68 @@ mod tests {
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
 
+    #[test]
+    fn logical_wal_replay_restores_a_deleted_physical_identity() {
+        for flat in [false, true] {
+            let store = UnifiedStore::new();
+            store.create_collection("replay").expect("collection");
+            let id = EntityId::new(42);
+            let entity = UnifiedEntity::table_row(id, "replay", 42, vec![Value::Integer(1)]);
+            if flat {
+                store
+                    .bulk_insert("replay", vec![entity])
+                    .expect("flat seed");
+            } else {
+                store.insert_auto("replay", entity).expect("hash seed");
+            }
+            let metadata = Metadata::with_fields(HashMap::from([(
+                "source".into(),
+                MetadataValue::String("wal".into()),
+            )]));
+            for sequence in 100..104 {
+                let delete = StoreWalAction::DeleteEntityRecord {
+                    collection: "replay".into(),
+                    entity_id: id.raw(),
+                };
+                store
+                    .apply_encoded_store_wal_action(&delete.encode())
+                    .expect("replay delete");
+                let mut restored =
+                    UnifiedEntity::table_row(id, "replay", 42, vec![Value::Integer(2)]);
+                restored.ensure_table_logical_id();
+                restored.sequence_id = sequence;
+                let upsert = StoreWalAction::upsert_entity(
+                    "replay",
+                    &restored,
+                    Some(&metadata),
+                    store.format_version(),
+                );
+                store
+                    .apply_encoded_store_wal_action(&upsert.encode())
+                    .expect("replay upsert");
+                let manager = store.get_collection("replay").expect("restored collection");
+                let stored = manager.get(id).expect("restored entity is readable");
+                assert_eq!(store.entity_cache_stats().entries, 0);
+                assert_eq!(manager.count(), 1);
+                assert_eq!(manager.query_all(|_| true).len(), 1);
+                assert_eq!(stored.sequence_id, sequence);
+                assert_eq!(
+                    UnifiedStore::serialize_entity_record(
+                        &stored,
+                        manager.get_metadata(id).as_ref(),
+                        store.format_version()
+                    ),
+                    UnifiedStore::serialize_entity_record(
+                        &restored,
+                        Some(&metadata),
+                        store.format_version()
+                    )
+                );
+                assert!(store.get_any(id).is_some());
+            }
+        }
+    }
+
     fn embedded_fixture(
         mode: DurabilityMode,
         background_bytes: usize,

@@ -1114,6 +1114,10 @@ impl GrowingSegment {
             .saturating_sub(self.dead_resident_count)
     }
 
+    pub(crate) fn is_tombstoned(&self, id: EntityId) -> bool {
+        self.deleted.contains_key(&id)
+    }
+
     /// Tombstones this segment carries — including the ones whose entity body
     /// was already freed. The set itself is what leaks without consolidation.
     pub fn tombstone_count(&self) -> usize {
