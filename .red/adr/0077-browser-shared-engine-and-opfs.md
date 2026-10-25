@@ -550,3 +550,33 @@ Cost sketch: decoding C contracts with K total columns retains O(C + K) codec
 work, plus the existing dependency-order scan for generated columns. Updating
 an immutable cache with live readers copies O(C) Arc entries; relocating it
 adds no second catalog, file operation or IPC. No measured speedup is claimed.
+
+## Shared contract write admission
+
+`reddb-engine::catalog::enforcement` owns the native pure collection-contract
+evaluator, row-update descriptors, value coercion, final generated/CHECK
+evaluation, batch/candidate uniqueness rules and default-TTL key handling.
+Native entry points delegate to these same functions and retain their query
+versus invalid-operation error categories and messages. The host supplies the
+clock; native time capture remains at its existing call sites.
+
+This is admission over supplied values and candidates. Native locks, indexed
+conflict discovery, MVCC key reservation, implicit catalog publication, hooks,
+tenant/RLS policy and durable transaction publication remain at their original
+boundaries. A caller must retain those protections through publication. No file
+codec, format version, isolation level or public browser capability changes.
+
+Shared native/WASM cases exercise schema modes, defaults, coercion, nullability,
+generated dependencies and recomputation, CHECK verdicts/evaluation errors,
+managed timestamps, unique/primary/null keys, conflict targets, vector dimensions
+and TTL overrides. A test-only OPFS fixture recovers admitted generated fields
+from WAL after an offline browser restart, rejects invalid updates/conflicts
+without appending WAL, publishes a valid update, checkpoints, and restarts
+offline again. It materializes and evaluates the recovered values using the
+canonical query helpers; it does not provide a public SQL execution facade.
+
+Cost sketch: normalizing C declared columns and F supplied fields retains the
+existing O(C + F) temporary values plus coercion/dependency work. The supplied
+candidate uniqueness checker retains O(U * E * K) comparisons for U rules,
+E candidates and K key columns; the native indexed discovery path is unchanged.
+Relocation adds no extra scan, file write or IPC and claims no measured speedup.

@@ -1,6 +1,30 @@
 //! Test-only OPFS fixture; never linked into the application WASM artifact.
 
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/catalog.rs"]
+mod catalog;
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/enforcement.rs"]
+mod enforcement;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../../reddb-engine/tests/support/enforcement_restart.rs"]
+mod enforcement_restart;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = runContractWriteFixture)]
+pub fn run_contract_write_fixture(
+    handle: browser::SyncFile,
+    phase: u32,
+) -> Result<u32, wasm_bindgen::JsValue> {
+    enforcement_restart::run(browser::BrowserFile::new(handle), phase)
+        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+}
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../../reddb-engine/tests/support/codec_corpus.rs"]
 mod codec_corpus;
 

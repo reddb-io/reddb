@@ -4,4 +4,5 @@ mod types;
 pub use types::*;
 pub mod cache;
 pub mod codec;
+pub mod enforcement;
 pub mod schema;

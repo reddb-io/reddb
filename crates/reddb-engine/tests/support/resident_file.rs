@@ -11,6 +11,10 @@ use reddb_types::Value;
 use std::collections::HashMap;
 
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "contract_write_durable_publication",
+        contract_write_restart_fixture,
+    ),
     ("resident_file_models_and_checkpoint", models_and_checkpoint),
     ("resident_file_owned_restart_fixture", owned_restart_fixture),
     (
@@ -30,6 +34,18 @@ pub const CASES: &[(&str, fn())] = &[
         wal_capacity,
     ),
 ];
+
+fn contract_write_restart_fixture() {
+    let mut file = MemoryFile::default();
+    for (phase, expected) in [(0, 15), (1, 20), (2, 20)] {
+        assert_eq!(
+            crate::enforcement_restart::run(crate::pager::BorrowedMemoryFile(&mut file), phase)
+                .expect("canonical admission and durable publication"),
+            expected
+        );
+        file = MemoryFile::from_bytes(file.durable.into_inner());
+    }
+}
 
 fn create() -> EmbeddedResidentStore<MemoryFile> {
     EmbeddedResidentStore::create(

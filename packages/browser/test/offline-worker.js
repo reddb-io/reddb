@@ -13,6 +13,7 @@ const assets = [
   './catalog-worker.js',
   './store-wal-worker.js',
   './resident-file-worker.js',
+  './contract-write-worker.js',
   './wasm/conformance.js',
   './wasm/conformance_bg.wasm',
   './pager-worker.js',
