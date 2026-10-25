@@ -1518,129 +1518,23 @@ impl UnifiedStore {
         entity: &UnifiedEntity,
         collection: &str,
     ) -> Result<(), StoreError> {
-        let mut registry_dirty = false;
-        for cross_ref in entity.cross_refs() {
-            if cross_ref.target_collection.is_empty() {
-                continue;
-            }
-            {
-                let mut forward = self.resident.cross_refs.write();
-                let refs = forward.entry(cross_ref.source).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.target
-                        && *kind == cross_ref.ref_type
-                        && coll == &cross_ref.target_collection
-                });
-                if inserted {
-                    refs.push((
-                        cross_ref.target,
-                        cross_ref.ref_type,
-                        cross_ref.target_collection.clone(),
-                    ));
-                    registry_dirty = true;
-                }
-            }
-
-            {
-                let mut reverse = self.resident.reverse_refs.write();
-                let refs = reverse.entry(cross_ref.target).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
-                });
-                if inserted {
-                    refs.push((cross_ref.source, cross_ref.ref_type, collection.to_string()));
-                    registry_dirty = true;
-                }
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-        }
-
-        Ok(())
+        self.resident.index_cross_refs(entity, collection)
     }
 
     /// Remove cross-references for an entity
     pub(crate) fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
-        // Remove forward refs
-        self.resident.cross_refs.write().remove(&id);
-
-        // Remove from reverse refs (scan all)
-        let mut reverse = self.resident.reverse_refs.write();
-        for refs in reverse.values_mut() {
-            refs.retain(|(source, _, _)| *source != id);
-        }
-        reverse.remove(&id);
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs(id)
     }
 
     pub(crate) fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_set: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
-
-        // Read-only probe: under steady-state delete workloads most rows have
-        // no cross-refs at all, so both maps are entirely cold for the batch.
-        // Acquiring the write lock to scan `reverse_refs.values_mut()` over an
-        // unrelated dictionary was the dominant cost in #85's `delete_sequential`
-        // profile. The read-lock probe below is O(|ids|) hashmap lookups against
-        // each map, vs. O(|reverse_refs|) for the write-path scan it replaces.
-        //
-        // Decision: skip the write path iff
-        //   - no deleted id is a key in `cross_refs`  (no outbound refs to drop,
-        //     and so no `(deleted_id, _, _)` source entry exists anywhere in
-        //     `reverse_refs.values()` either — the two maps are kept in sync by
-        //     `add_cross_ref`), AND
-        //   - no deleted id is a key in `reverse_refs` (no inbound refs to drop).
-        let needs_forward_cleanup = {
-            let forward = self.resident.cross_refs.read();
-            id_set.iter().any(|id| forward.contains_key(id))
-        };
-        let needs_reverse_cleanup = {
-            let reverse = self.resident.reverse_refs.read();
-            id_set.iter().any(|id| reverse.contains_key(id))
-        };
-
-        if !needs_forward_cleanup && !needs_reverse_cleanup {
-            self.unindex_cross_refs_fast_path
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-
-        if needs_forward_cleanup {
-            let mut forward = self.resident.cross_refs.write();
-            for id in &id_set {
-                forward.remove(id);
-            }
-        }
-
-        if needs_reverse_cleanup || needs_forward_cleanup {
-            // The inner `values_mut()` scan is only needed when at least one
-            // deleted id was a *source* somewhere — which, by the invariant
-            // above, can only happen when it had outbound forward refs.
-            let mut reverse = self.resident.reverse_refs.write();
-            if needs_forward_cleanup {
-                for refs in reverse.values_mut() {
-                    refs.retain(|(source, _, _)| !id_set.contains(source));
-                }
-            }
-            reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
-        }
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs_batch(ids)
     }
 
     /// Test/observability hook: number of times `unindex_cross_refs_batch`
     /// took the read-only fast path. Used to pin the early-exit in tests
     /// and as a cheap signal in delete-heavy benchmarks.
     pub fn unindex_cross_refs_fast_path_hits(&self) -> u64 {
-        self.unindex_cross_refs_fast_path.load(Ordering::Relaxed)
+        self.resident.unindex_cross_refs_fast_path_hits()
     }
 
     /// Query across all collections with a filter

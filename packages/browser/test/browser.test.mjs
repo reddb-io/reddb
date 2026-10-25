@@ -89,6 +89,9 @@ async function sharedConformance(browserPage) {
     'resident_entity_cache_invalidation',
     'resident_store_global_identity', 'resident_store_cross_collection_snapshot',
     'resident_store_models_and_cache', 'resident_store_graph_metadata_and_references',
+    'store_wal_canonical_action_frames', 'store_wal_impossible_counts_and_truncation',
+    'store_wal_entity_record_replay', 'store_wal_host_index_boundaries', 'store_wal_atomic_resident_refresh',
+    'store_wal_recovery_fixture',
   ])
 }
 
@@ -507,6 +510,51 @@ for (const browser of browsers) {
           await launch({ offline: true })
           assert.deepEqual(await recover(), { entities: 8, snapshot: nativeSnapshot })
           assert.equal(networkRequests.length, requestsBefore, 'offline snapshot recovery reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('logical store WAL restores models and metadata after an offline OPFS restart', async () => {
+      async function recover(seed) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (seed) => {
+            const worker = new Worker('/packages/browser/test/store-wal-worker.js', { type: 'module' })
+            const call = (payloads) => new Promise((resolve, reject) => {
+              worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+              worker.onerror = (event) => reject(new Error(event.message))
+              worker.postMessage(payloads)
+            })
+            const file = await RedDBBrowser.openArtifact({ name: 'logical-store-recovery' })
+            try {
+              if (seed) await file.append((await call(null)).actions)
+              const payloads = await file.readWal()
+              const { entities } = await call(payloads)
+              return { entities, actions: payloads.length }
+            } finally {
+              await file.close()
+              worker.terminate()
+            }
+          }, seed)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          const seeded = await recover(true)
+          assert.ok(seeded.entities >= 8, 'canonical multimodel corpus')
+          assert.equal(seeded.actions, 1 + seeded.entities * 3, 'create, delete and restore actions')
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await recover(false), seeded)
+          assert.equal(networkRequests.length, requestsBefore, 'offline logical WAL recovery reached the HTTP host')
         })
       } finally { await context.setOffline(false) }
     })

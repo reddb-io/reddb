@@ -834,47 +834,7 @@ impl SchemaManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorageIntegrityError {
-    pub zone: String,
-    pub id: String,
-    pub collection: Option<String>,
-    pub detail: String,
-}
-
-impl StorageIntegrityError {
-    pub fn new(
-        zone: impl Into<String>,
-        id: impl Into<String>,
-        collection: Option<String>,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self {
-            zone: zone.into(),
-            id: id.into(),
-            collection,
-            detail: detail.into(),
-        }
-    }
-}
-
-impl fmt::Display for StorageIntegrityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "storage integrity failure: zone={} id={}",
-            self.zone, self.id
-        )?;
-        if let Some(collection) = &self.collection {
-            write!(f, " collection={collection}")?;
-        }
-        write!(
-            f,
-            ": {}. RedDB refused to serve unverified bytes; run the `SCRUB` statement to classify the fault, or `red salvage` to recover trusted rows.",
-            self.detail
-        )
-    }
-}
+pub use reddb_engine::storage::error::StorageIntegrityError;
 
 #[derive(Debug)]
 pub enum RedDBError {
