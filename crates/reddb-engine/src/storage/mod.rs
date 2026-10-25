@@ -44,3 +44,5 @@ pub mod resident_store;
 pub mod error;
 #[doc(hidden)]
 pub mod store_wal;
+
+mod resident_snapshot;
