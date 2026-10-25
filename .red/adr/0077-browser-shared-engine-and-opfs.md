@@ -414,3 +414,19 @@ Arc/name snapshot plus O(candidate count) work; relocation adds no second map,
 cache or entity copy. Allocation keeps the same atomic per-ID/block operations.
 No file bytes, format versions, WAL record ordering or measured speed claim
 change with this extraction.
+
+## Restoring tombstoned physical identities
+
+Logical WAL replay can delete and restore the same physical entity ID. A growing
+segment keeps tombstone ordinals for the lifetime of captured scan cursors, so
+restoration must retain those tombstones. The shared manager seals a conflicting
+growing segment and restores the entity into its successor. Rewrites from sealed
+copies use the same rule. Sequence identity and metadata remain unchanged;
+existing cursors keep their original membership and subsequent scans see one
+restored entity. Shared native/WASM fixtures cover hash/flat segments, repeated
+restoration and captured cursors; the native fixture uses encoded WAL actions.
+
+Cost sketch: a conflicting restoration pays one existing segment seal over its
+resident entities; fresh identities retain the current insertion path. No
+per-row generation metadata, file-format change or extra network operation is
+introduced. These recovery tests do not enable browser stored-data queries.

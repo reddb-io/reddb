@@ -531,6 +531,28 @@ impl SegmentManager {
         Ok(entity_id)
     }
 
+    // A tombstone belongs to its segment for the lifetime of captured cursors.
+    // Restoring that physical ID must use a successor segment, retaining both
+    // the original tombstone ordinal and the existing scan-position boundary.
+    fn with_restoration_segment<T>(
+        &self,
+        id: EntityId,
+        restore: impl FnOnce(&mut GrowingSegment) -> Result<T, SegmentError>,
+    ) -> Result<T, SegmentError> {
+        loop {
+            let segment = self.get_or_create_growing();
+            let mut growing = segment.write();
+            if !growing.state().is_writable() {
+                continue;
+            }
+            if !growing.is_tombstoned(id) {
+                return restore(&mut growing);
+            }
+            drop(growing);
+            self.force_seal()?;
+        }
+    }
+
     /// Restore a snapshot image without allocating a new sequence identity.
     #[doc(hidden)]
     pub fn restore_snapshot_entity(&self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
@@ -538,16 +560,15 @@ impl SegmentManager {
         if self.get(entity.id).is_some() {
             return Err(SegmentError::AlreadyExists(entity.id));
         }
-        let segment_arc = self.get_or_create_growing();
-        let mut segment = segment_arc.write();
         let entity_id = entity.id;
-        let segment_id = segment.id();
-        // Adoption rebuilds derived indexes and advances the allocator past
-        // the stored sequence, including gaps and the legitimate value zero.
-        segment.adopt_entity(entity, None);
-        self.total_entities_atomic.fetch_add(1, Ordering::Relaxed);
-        self.emit(LifecycleEvent::EntityInserted(entity_id, segment_id));
-        Ok(entity_id)
+        self.with_restoration_segment(entity_id, |segment| {
+            let segment_id = segment.id();
+            // Adoption retains sequence identity and advances its allocator.
+            segment.adopt_entity(entity, None);
+            self.total_entities_atomic.fetch_add(1, Ordering::Relaxed);
+            self.emit(LifecycleEvent::EntityInserted(entity_id, segment_id));
+            Ok(entity_id)
+        })
     }
 
     /// Insert multiple entities (batch) — sequential, one lock per item.
@@ -950,15 +971,13 @@ impl SegmentManager {
             metadata.cloned().or(existing_metadata)
         };
 
-        let growing_arc = self.get_or_create_growing();
-        let growing_id = {
-            let mut growing = growing_arc.write();
+        let growing_id = self.with_restoration_segment(entity_id, |growing| {
             growing.insert_preserving_sequence(entity)?;
             if let Some(metadata) = metadata_to_apply {
                 growing.set_metadata(entity_id, metadata)?;
             }
-            growing.id()
-        };
+            Ok(growing.id())
+        })?;
 
         self.entity_segment.write().insert(entity_id, growing_id);
         Ok(())
