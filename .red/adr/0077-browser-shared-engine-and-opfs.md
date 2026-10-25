@@ -721,3 +721,37 @@ Cost sketch: each arithmetic/CAST call retains its existing constant-size
 operand work plus O(B) parsing/coercion when a B-byte text value is supplied.
 The move adds no record copy, storage scan, file write, network traffic or IPC,
 and claims no measured speedup.
+
+
+## Shared native scalar argument resolution
+
+`reddb-engine::query::runtime::projection_value` owns the native optional scalar
+argument traversal and legacy `LIT:` / `@RL:` decoding. The native adapter
+supplies typed evaluation without database/table/alias context, legacy
+function/filter effects and ambient secret input admission. Database-aware
+scalar dispatch remains in the native host. Optional arguments retain fallback
+on any typed evaluation error; top-level projection still propagates typed data
+errors and falls back only for unknown functions/columns. These intentionally
+different native policies must not be conflated.
+
+Direct literals retain their early return before input admission. Aliases still
+admit the resolved inner value and then the outer value; denied inner values
+skip the outer check. Fields and materialized window outputs retain their native
+lookup semantics. The composite decoder retains its legacy text fallback and
+quoted-comma/bracket quirks, rather than substituting JSON semantics. Incomplete composites are rejected instead of recursively retrying the same
+payload. Nesting beyond the canonical RQL JSON depth cap (root depth zero) is
+also rejected; both follow the existing undecodable-composite text fallback.
+
+Native/WASM cases cover nested arithmetic arguments, literals, malformed
+composites, the depth boundary, field/alias/window resolution, data-error fallback
+and input admission ordering. The test-only offline OPFS fixture now executes
+nested `(quantity + 1) * 2` through these same argument and arithmetic functions
+over recovered rows, before/after update and checkpoint with the HTTP listener
+stopped. Its remaining scalar effects are explicit test sentinels, not a complete
+browser scalar host. Public stored-query and application-transaction capability
+flags remain false.
+
+Cost sketch: P argument AST nodes retain O(P) traversal plus typed evaluation,
+existing value clones and B-byte literal parsing; nested legacy arrays retain
+repeated substring scans bounded by depth 128. The extraction adds no storage
+scan/write, network traffic or IPC and claims no measured speedup.

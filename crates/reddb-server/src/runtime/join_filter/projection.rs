@@ -83,8 +83,8 @@ impl reddb_engine::query::runtime::projection::ProjectionHost for RuntimeProject
     ) -> Option<Value> {
         evaluate_scalar_function_with_db(self.db, name, arguments, source)
     }
-    fn evaluate_literal(&self, column: &str, source: &UnifiedRecord) -> Option<Value> {
-        eval_projection_value(&Projection::Column(column.to_string()), source)
+    fn evaluate_literal(&self, column: &str, _source: &UnifiedRecord) -> Option<Value> {
+        reddb_engine::query::runtime::projection_value::decode_projection_literal(column)
     }
     fn evaluation_error(
         &self,

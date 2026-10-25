@@ -111,6 +111,8 @@ async function sharedConformance(browserPage) {
     'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
     'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
     'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
+    'projection_value_legacy_literals', 'projection_value_resolution_and_fallback',
+    'projection_value_secret_input_order',
     'record_projection_fields_aliases_and_literals', 'record_projection_star_and_column_layout',
     'record_projection_document_paths', 'record_projection_bindings_and_window_output',
     'record_projection_typed_values_and_labels', 'record_projection_fallback_and_data_errors',

@@ -4,6 +4,7 @@ pub mod filter;
 pub mod numeric;
 pub mod ordering;
 pub mod projection;
+pub mod projection_value;
 pub mod values;
 
 pub fn is_universal_entity_source(table: &str) -> bool {
