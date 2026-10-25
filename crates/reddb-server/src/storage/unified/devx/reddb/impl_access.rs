@@ -156,11 +156,12 @@ impl RedDB {
             let Some(manager) = self.store.get_collection(&collection) else {
                 continue;
             };
-            let version = NativeArtifactVersion {
+            let mut version = NativeArtifactVersion {
                 manager: Arc::downgrade(&manager),
                 segments: manager.checkpoint_revisions(),
                 summaries: Vec::new(),
                 pages: Vec::new(),
+                fulltext_document_ids_complete: false,
             };
             if let Some(previous) = previous.get(&collection).filter(|previous| {
                 previous.manager.ptr_eq(&version.manager)
@@ -178,12 +179,36 @@ impl RedDB {
                     .extend(previous.summaries.iter().cloned());
                 publication.versions.insert(collection, previous.clone());
             } else {
-                changed.push(collection.clone());
+                let delta = previous.get(&collection).and_then(|previous| {
+                    self.prepare_native_fulltext_delta(
+                        &collection,
+                        &manager,
+                        previous,
+                        &version,
+                        existing,
+                    )
+                });
+                if let Some((summary, bytes, complete)) = delta {
+                    publication.records.push((summary, bytes));
+                    version.fulltext_document_ids_complete = complete;
+                } else {
+                    changed.push(collection.clone());
+                }
                 publication.versions.insert(collection, version);
             }
         }
         drop(previous);
-        publication.records = self.native_vector_artifact_records(&changed);
+        let mut coverage = HashMap::new();
+        publication
+            .records
+            .extend(self.native_artifact_records_with_coverage(&changed, &mut coverage));
+        for (collection, complete) in coverage {
+            publication
+                .versions
+                .get_mut(&collection)
+                .expect("derived source collection")
+                .fulltext_document_ids_complete = complete;
+        }
         for (summary, _) in &publication.records {
             publication.summaries.push(summary.clone());
             publication
@@ -196,9 +221,18 @@ impl RedDB {
         publication
     }
 
-    fn native_vector_artifact_records(
+    #[cfg(test)]
+    pub(super) fn native_vector_artifact_records(
         &self,
         collections: &[String],
+    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+        self.native_artifact_records_with_coverage(collections, &mut HashMap::new())
+    }
+
+    fn native_artifact_records_with_coverage(
+        &self,
+        collections: &[String],
+        coverage: &mut HashMap<String, bool>,
     ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
         let mut artifacts = Vec::new();
         for collection in collections {
@@ -208,6 +242,7 @@ impl RedDB {
             let mut vectors = Vec::new();
             let mut graph_edges = Vec::new();
             let mut fulltext_doc_count = 0;
+            let mut fulltext_indexed_doc_count = 0;
             let mut fulltext_postings = BTreeMap::new();
             let mut document_records = Vec::new();
             // Derivation reads raw values, not the owned read's restored schema.
@@ -234,11 +269,13 @@ impl RedDB {
                         let text = Self::native_fulltext_text_for_entity(data);
                         if !text.trim().is_empty() {
                             fulltext_doc_count += 1;
-                            Self::native_fulltext_add_document(
+                            if Self::native_fulltext_add_document(
                                 &mut fulltext_postings,
                                 entity.id,
                                 &text,
-                            );
+                            ) {
+                                fulltext_indexed_doc_count += 1;
+                            }
                         }
                         if let Some(document) =
                             Self::native_document_pathvalue_for_entity(entity.id, data)
@@ -326,6 +363,10 @@ impl RedDB {
             }
 
             if fulltext_doc_count != 0 {
+                coverage.insert(
+                    collection.clone(),
+                    fulltext_doc_count == fulltext_indexed_doc_count,
+                );
                 let (bytes, (doc_count, term_count, posting_count)) =
                     Self::serialize_native_fulltext_artifact(
                         collection,
@@ -405,17 +446,19 @@ impl RedDB {
         postings: &mut BTreeMap<String, Vec<(u64, u32)>>,
         entity_id: EntityId,
         text: &str,
-    ) {
+    ) -> bool {
         let mut frequencies: BTreeMap<String, u32> = BTreeMap::new();
         for token in Self::native_fulltext_tokenize(text) {
             *frequencies.entry(token).or_insert(0) += 1;
         }
+        let indexed = !frequencies.is_empty();
         for (token, count) in frequencies {
             postings
                 .entry(token)
                 .or_default()
                 .push((entity_id.raw(), count));
         }
+        indexed
     }
 
     fn serialize_native_fulltext_artifact(
@@ -427,17 +470,20 @@ impl RedDB {
         let posting_count = postings.values().map(|items| items.len() as u64).sum();
         let terms = postings
             .into_iter()
-            .map(|(term, postings)| reddb_file::NativeFulltextTerm {
-                term,
-                postings: postings
-                    .into_iter()
-                    .map(
-                        |(entity_id, term_count)| reddb_file::NativeFulltextPosting {
-                            entity_id,
-                            term_count,
-                        },
-                    )
-                    .collect(),
+            .map(|(term, mut postings)| {
+                postings.sort_unstable_by_key(|(entity_id, _)| *entity_id);
+                reddb_file::NativeFulltextTerm {
+                    term,
+                    postings: postings
+                        .into_iter()
+                        .map(
+                            |(entity_id, term_count)| reddb_file::NativeFulltextPosting {
+                                entity_id,
+                                term_count,
+                            },
+                        )
+                        .collect(),
+                }
             })
             .collect();
         let bytes = reddb_file::encode_native_fulltext_frame(&reddb_file::NativeFulltextFrame {
@@ -615,7 +661,7 @@ impl RedDB {
         }
     }
 
-    fn native_fulltext_text_for_entity(data: &EntityData) -> String {
+    pub(super) fn native_fulltext_text_for_entity(data: &EntityData) -> String {
         match data {
             EntityData::Row(row) => {
                 let mut parts = Vec::new();
@@ -748,11 +794,7 @@ impl RedDB {
     }
 
     fn native_fulltext_tokenize(text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| s.len() >= 2)
-            .map(|s| s.to_string())
-            .collect()
+        super::native_fulltext_delta::tokenize(text)
     }
 
     pub(crate) fn native_recovery_summary_from_metadata(
@@ -1543,6 +1585,87 @@ mod native_snapshot_tests {
     use super::*;
 
     #[test]
+    fn native_fulltext_delta_matches_full_rebuild_after_sealing_and_row_edits() {
+        let directory = tempfile::tempdir().expect("temporary native store");
+        let options = RedDBOptions::persistent(directory.path().join("delta.rdb"))
+            .with_storage_profile(crate::storage::StorageDeployPreset::Serverless.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE incremental_rows (id INT,payload TEXT)")
+            .expect("table");
+        for id in 0..128 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO incremental_rows (id,payload) VALUES ({id},'alpha café 東京')"
+                ))
+                .expect("seed row");
+        }
+        let db = runtime.db();
+        db.store
+            .get_collection("incremental_rows")
+            .expect("manager")
+            .force_seal()
+            .expect("seal old rows");
+        runtime.checkpoint().expect("publish sealed baseline");
+        super::super::impl_fulltext_delta::APPLIED_ROWS.with(|counts| counts.borrow_mut().clear());
+        runtime
+            .execute_query("UPDATE incremental_rows SET payload='changed 東京 東京' WHERE id=3")
+            .expect("edit");
+        runtime
+            .execute_query("INSERT INTO incremental_rows (id,payload) VALUES (200,'new café')")
+            .expect("append");
+        runtime
+            .execute_query("DELETE FROM incremental_rows WHERE id=4")
+            .expect("delete sealed row");
+        let header = db.store.physical_file_header().expect("header");
+        let existing = db
+            .store
+            .read_native_vector_artifact_store(header.vector_artifact_page)
+            .expect("published references");
+        let publication = db.prepare_native_artifact_publication(&existing);
+        super::super::impl_fulltext_delta::APPLIED_ROWS.with(|counts| {
+            let changed = counts
+                .borrow()
+                .get("incremental_rows")
+                .copied()
+                .unwrap_or(0);
+            assert!(
+                (1..16).contains(&changed),
+                "only journaled rows are retokenized"
+            );
+        });
+        let actual = publication
+            .records
+            .iter()
+            .find(|(s, _)| s.collection == "incremental_rows")
+            .expect("incremental frame")
+            .1
+            .clone();
+        let reference = db.native_vector_artifact_records(&["incremental_rows".to_owned()]);
+        assert_eq!(
+            actual,
+            reference
+                .into_iter()
+                .find(|(s, _)| s.artifact_kind == "text.fulltext")
+                .expect("independent full rebuild")
+                .1
+        );
+        runtime.checkpoint().expect("durable delta publication");
+        let header = db.store.physical_file_header().expect("updated header");
+        let (_, persisted) = db
+            .store
+            .read_native_vector_artifact_blob(
+                header.vector_artifact_page,
+                "incremental_rows",
+                Some("text.fulltext"),
+            )
+            .expect("read persisted delta")
+            .expect("persisted frame");
+        assert_eq!(persisted, actual);
+    }
+
+    #[test]
     fn native_artifacts_reuse_only_unchanged_published_collections() {
         let directory = tempfile::tempdir().expect("temporary native store");
         let path = directory.path().join("reuse.rdb");
@@ -1682,7 +1805,7 @@ mod native_snapshot_tests {
                 .iter()
                 .map(|posting| (posting.entity_id, posting.term_count))
                 .collect::<Vec<_>>(),
-            vec![(3, 1), (1, 1)]
+            vec![(1, 1), (3, 1)]
         );
         let expected = reddb_file::NativeFulltextFrame {
             collection: "rows".to_string(),
@@ -1699,11 +1822,11 @@ mod native_snapshot_tests {
                     term: "beta".to_string(),
                     postings: vec![
                         reddb_file::NativeFulltextPosting {
-                            entity_id: 3,
+                            entity_id: 1,
                             term_count: 1,
                         },
                         reddb_file::NativeFulltextPosting {
-                            entity_id: 1,
+                            entity_id: 3,
                             term_count: 1,
                         },
                     ],

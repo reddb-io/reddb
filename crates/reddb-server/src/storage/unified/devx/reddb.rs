@@ -375,6 +375,7 @@ struct NativeArtifactVersion {
     segments: Vec<(u64, u64)>,
     summaries: Vec<NativeVectorArtifactSummary>,
     pages: Vec<NativeVectorArtifactPageSummary>,
+    fulltext_document_ids_complete: bool,
 }
 
 struct NativeArtifactPublication {
@@ -389,8 +390,10 @@ mod impl_access;
 mod impl_core_a;
 mod impl_core_b;
 mod impl_ec;
+mod impl_fulltext_delta;
 mod impl_metadata;
 mod impl_registry;
+mod native_fulltext_delta;
 
 impl Default for RedDB {
     fn default() -> Self {

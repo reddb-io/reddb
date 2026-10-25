@@ -227,3 +227,33 @@ stay exactly 650,526,720; all-file allocation stays 668,467,200. Every payload i
 independently checked, an uncheckpointed ACK survives SIGKILL and a second cold
 open, and graceful shutdown exits zero without OOM. These are local tmpfs
 measurements, not acceptance of the original OCI Platform copy.
+
+## Bounded full-text updates
+
+Signed candidate `1.26.8-rc.369`, source `4072816ca`, passes all 33 full-CI
+jobs and the 60,000-row / 512 MiB constrained image check, with crash recovery,
+two cold opens, exact payloads and exit-zero shutdown. Main-file allocation
+remains 131,211,264 bytes across five checkpoints. Its fresh historical Auth
+restore nevertheless fails the strict gate: maximum writer latency is
+10.570 seconds and automatic checkpoints take 10.735 and 8.049 seconds.
+All 37 collections and concurrent reads remain correct, without OOM. The
+failed fixture is preserved and is not reused for subsequent mutations.
+
+A native profile finds 166,872 records in `red.control_events`, six more than
+the original restore. Its full-text frame is 42,995,659 bytes. The changed
+collection still requires complete full-text derivation even for these six
+events. The proposed journal-based path removes changed IDs from published
+postings and tokenizes only their current rows. Both paths sort postings by
+entity ID, preserving the existing frame format. This still decodes and
+encodes the entire bounded index; it is not an in-place index-page update or
+a hard per-checkpoint time limit.
+
+Admission requires the same manager, complete mutation journals, exact published
+references and a volatile proof that all counted documents had postings.
+Nonempty documents with no tokens require full derivation on the next change.
+JSON/blob additions, other models/artifacts and oversized inputs also fall back.
+The encoded source is capped at one eighth of the engine budget or 64 MiB,
+whichever is smaller; changed text is capped at one eighth of that limit or
+8 MiB. Source-row estimates are checked before payload copies. Cache proofs
+still advance only after durable publication; the first cold publication is
+conservative. Native Auth and Platform acceptance remain open.
