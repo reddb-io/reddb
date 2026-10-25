@@ -46,6 +46,13 @@ The image env supplies `REDDB_DATA_PATH=/data/red/database.rdb`,
 `REDDB_GRPC_BIND_ADDR=0.0.0.0:55055`,
 `REDDB_HTTP_BIND_ADDR=0.0.0.0:5000`, and `REDDB_VAULT=false`.
 
+The glibc-based images also set `MALLOC_ARENA_MAX=1`. HTTP, maintenance and
+shutdown threads share reusable allocator storage instead of retaining separate
+large checkpoint/index workspaces under a small container limit. This does not
+replace `REDDB_MEMORY_BUDGET` or impose a hard process memory cap. Operators can
+override the arena count with `docker run -e MALLOC_ARENA_MAX=...`; qualify both
+throughput and peak memory when tuning larger concurrent workloads.
+
 ## Persistent data path and upgrades
 
 Mount the persistent volume at `/data`. New containers use

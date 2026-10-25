@@ -158,3 +158,31 @@ complete an explicit checkpoint without OOM. Optimized checkpoint time is
 1.889 s. The optimized binary still exhausts memory while rebuilding native
 artifacts during graceful shutdown; debug completes without an OOM. This is a
 remaining acceptance failure. No stable publication or live rollout is admitted.
+
+## Allocator arena isolation and constrained acceptance
+
+A small extracted-routine diagnostic repeats the same 60,000-row fulltext
+publication from two retained worker threads and the main thread, reserving a
+modeled 280 MiB resident baseline. Default glibc arenas fail with an OOM kill.
+Changing only `MALLOC_ARENA_MAX=1` passes all three publications. This diagnostic
+uses a modeled baseline and is not an engine acceptance test. Singleton-posting
+and compact-buffer experiments did not pass the modeled test and are not part
+of this patch.
+
+The actual optimized server then repeats the original workload under the same
+512 MiB cgroup, 256 MiB engine budget and one CPU. Its only runtime difference
+is `MALLOC_ARENA_MAX=1`: all 60,000 rows are acknowledged, unrelated DDL and an
+explicit checkpoint pass, and graceful shutdown exits zero without OOM.
+After cold reopen, every original row payload is checked. Five further
+checkpoints take 1.786, 1.438, 1.495, 1.324 and 1.363 seconds; the initial explicit
+checkpoint takes 1.448 seconds. Allocated main-file bytes remain 131,293,184 in
+all five observations. An acknowledged uncheckpointed write survives SIGKILL
+and a second cold reopen, followed by another exit-zero graceful shutdown.
+
+The image defaults now bound glibc arenas to one; operators can override that
+allocator setting. This permits cross-thread reuse of freed workspaces and is
+not a universal process memory cap. The constrained acceptance uses the frozen
+optimized binary from the storage-memory patch, before integration of the
+subsequent upstream query-sharing commits. The integrated signed RC still needs
+its own artifact and native-store acceptance. No stable publication or fleet
+rollout has occurred on the strength of these local tests.
