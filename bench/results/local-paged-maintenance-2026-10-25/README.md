@@ -218,3 +218,12 @@ links and cleared tails. Identical pages do not re-enter the WAL or dirty-page
 queue. A regression first reproduced three unnecessarily dirty pages; with the
 fix an unchanged three-page blob leaves zero dirty pages and changing one byte
 dirties exactly one page, preserving the changed payload after cold reopen.
+
+On storage source `5ad97818e`, all 21 targeted server unit tests and `cargo check`
+pass. The optimized clone of the same 300,000-row fixture takes 9.080 seconds
+for the first cold checkpoint, then 33.612, 37.482, 34.730, 35.464 and 33.662 ms
+for five further checkpoints. Unrelated DDL takes 40.823 ms. Main allocated bytes
+stay exactly 650,526,720; all-file allocation stays 668,467,200. Every payload is
+independently checked, an uncheckpointed ACK survives SIGKILL and a second cold
+open, and graceful shutdown exits zero without OOM. These are local tmpfs
+measurements, not acceptance of the original OCI Platform copy.

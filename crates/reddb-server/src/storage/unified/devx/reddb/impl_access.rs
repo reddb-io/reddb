@@ -328,7 +328,7 @@ impl RedDB {
             if fulltext_doc_count != 0 {
                 let (bytes, (doc_count, term_count, posting_count)) =
                     Self::serialize_native_fulltext_artifact(
-                        &collection,
+                        collection,
                         fulltext_doc_count,
                         fulltext_postings,
                     );
@@ -347,7 +347,7 @@ impl RedDB {
             if !document_records.is_empty() {
                 let (bytes, (doc_count, path_count, value_count)) =
                     Self::serialize_native_document_pathvalue_artifact(
-                        &collection,
+                        collection,
                         document_records,
                     );
                 let summary = NativeVectorArtifactSummary {
