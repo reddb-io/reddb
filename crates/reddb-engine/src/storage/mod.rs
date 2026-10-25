@@ -33,3 +33,7 @@ pub mod snapshot;
 pub mod manager;
 pub mod visibility;
 pub mod visibility_map;
+
+pub mod context_index;
+pub mod entity_cache;
+pub mod tokenization;

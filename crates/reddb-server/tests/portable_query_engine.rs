@@ -740,3 +740,38 @@ fn shared_records_materialize_native_persisted_query_rows() {
         }
     }
 }
+
+#[test]
+fn native_store_read_indexes_keep_the_shared_types() {
+    use reddb_engine::storage::{
+        context_index::ContextIndex,
+        entity::{EntityData, EntityId, RowData, UnifiedEntity},
+        entity_cache::EntityCacheStats,
+    };
+    let store = reddb_server::storage::UnifiedStore::new();
+    store
+        .create_collection("documents")
+        .expect("native collection");
+    let index: &ContextIndex = store.context_index();
+    index.set_collection_enabled("documents", true);
+    let mut bytes = Vec::new();
+    reddb_types::document_body_codec::encode(&[("name", &Value::text("Alice"))], &mut bytes)
+        .expect("binary document body");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1024), "documents", 1, vec![]);
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![Value::Json(bytes)],
+        vec!["body".into()],
+    ));
+    store
+        .insert_auto("documents", entity)
+        .expect("native insertion indexes body");
+    assert_eq!(index.search("alice", 10, None)[0].entity_id.raw(), 1024);
+    assert!(store.get_any(EntityId::new(1024)).is_some());
+    let cached: EntityCacheStats = store.entity_cache_stats();
+    assert_eq!(cached.entries, 1);
+    store
+        .drop_collection("documents")
+        .expect("native collection drop");
+    assert!(index.search("alice", 10, None).is_empty());
+    assert_eq!(store.entity_cache_stats().entries, 0);
+}
