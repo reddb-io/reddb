@@ -1406,11 +1406,12 @@ impl UnifiedStore {
         update_btrees: bool,
     ) {
         {
-            let mut collections = self.collections.write();
+            let mut collections = self.resident.collections.write();
             collections.insert(name.to_string(), new_manager);
         }
 
-        self.entity_cache
+        self.resident
+            .entity_cache
             .retain(|_, (collection, _)| collection != name);
         self.remove_from_graph_label_index_batch(
             name,
@@ -1496,7 +1497,7 @@ impl UnifiedStore {
     }
 
     pub(crate) fn create_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
-        let mut collections = self.collections.write();
+        let mut collections = self.resident.collections.write();
         if collections.contains_key(name) {
             return Ok(());
         }
@@ -1508,7 +1509,7 @@ impl UnifiedStore {
 
     fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
         let manager = {
-            let mut collections = self.collections.write();
+            let mut collections = self.resident.collections.write();
             match collections.remove(name) {
                 Some(manager) => manager,
                 None => return Ok(()),
@@ -1518,15 +1519,17 @@ impl UnifiedStore {
         let entities = manager.query_all(|_| true);
         let entity_ids: Vec<EntityId> = entities.iter().map(|entity| entity.id).collect();
         for entity_id in &entity_ids {
-            self.context_index.remove_entity(*entity_id);
+            self.resident.context_index.remove_entity(*entity_id);
             let _ = self.unindex_cross_refs(*entity_id);
         }
         if let Some(tree) = self.btree_indices.write().remove(name) {
             self.retire_btree(tree);
         }
-        self.entity_cache.retain(|entity_id, (collection, _)| {
-            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-        });
+        self.resident
+            .entity_cache
+            .retain(|entity_id, (collection, _)| {
+                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+            });
         self.remove_from_graph_label_index_batch(name, &entity_ids);
         self.mark_paged_registry_dirty();
         Ok(())
@@ -1549,7 +1552,7 @@ impl UnifiedStore {
             manager.register_row_id(*row_id);
         }
 
-        self.context_index.remove_entity(entity.id);
+        self.resident.context_index.remove_entity(entity.id);
         let _ = self.unindex_cross_refs(entity.id);
         self.remove_from_graph_label_index(collection, entity.id);
 
@@ -1564,7 +1567,9 @@ impl UnifiedStore {
             }
         }
 
-        self.context_index.index_entity(collection, &entity);
+        self.resident
+            .context_index
+            .index_entity(collection, &entity);
         if let EntityKind::GraphNode(node) = &entity.kind {
             self.update_graph_label_index(collection, &node.label, entity.id);
         }
@@ -1603,7 +1608,7 @@ impl UnifiedStore {
         id: EntityId,
         update_btrees: bool,
     ) -> Result<(), StoreError> {
-        self.entity_cache.remove(id.raw());
+        self.resident.entity_cache.remove(id.raw());
         if let Some(manager) = self.get_collection(collection) {
             let deleted = manager.delete(id)?;
             if !deleted {
@@ -1627,7 +1632,7 @@ impl UnifiedStore {
 
         let _ = self.unindex_cross_refs(id);
         self.remove_from_graph_label_index(collection, id);
-        self.context_index.remove_entity(id);
+        self.resident.context_index.remove_entity(id);
         Ok(())
     }
 }
@@ -1727,7 +1732,10 @@ mod tests {
                     .apply_encoded_store_wal_action(&payload)
                     .expect("replay");
             }
-            assert_eq!(recovered.aux_metadata.read().len(), 2 * 1024 * 1024);
+            assert_eq!(
+                recovered.resident.aux_metadata.read().len(),
+                2 * 1024 * 1024
+            );
             assert!(recovered.get_collection("keys").is_some());
         }
     }

@@ -37,3 +37,6 @@ pub mod visibility_map;
 pub mod context_index;
 pub mod entity_cache;
 pub mod tokenization;
+
+#[doc(hidden)]
+pub mod resident_store;

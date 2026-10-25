@@ -32,7 +32,6 @@ use super::entity::{
     CrossRef, EmbeddingSlot, EntityData, EntityId, EntityKind, RefType, RowData,
     TimeSeriesPointKind, UnifiedEntity,
 };
-use super::entity_cache::EntityCache;
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
 use super::segment::SegmentError;
@@ -350,18 +349,12 @@ impl CheckpointVersion {
 /// let found = store.get("hosts", id);
 /// ```
 pub struct UnifiedStore {
+    /// Canonical resident state; native fields below retain durability policy.
+    resident: reddb_engine::storage::resident_store::ResidentStore,
     /// Store configuration
     config: UnifiedStoreConfig,
     /// File format version for serialization
     format_version: AtomicU32,
-    /// Global entity ID counter
-    next_entity_id: AtomicU64,
-    /// Collections by name
-    collections: RwLock<HashMap<String, Arc<SegmentManager>>>,
-    /// Forward cross-references: source_id → [(target_id, ref_type, target_collection)]
-    cross_refs: RwLock<HashMap<EntityId, Vec<(EntityId, RefType, String)>>>,
-    /// Reverse cross-references: target_id → [(source_id, ref_type, source_collection)]
-    reverse_refs: RwLock<HashMap<EntityId, Vec<(EntityId, RefType, String)>>>,
     /// Optional page-based storage via Pager
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
@@ -379,15 +372,6 @@ pub struct UnifiedStore {
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
-    /// Cross-structure context index for unified search
-    context_index: ContextIndex,
-    /// Hot entity cache — sharded bounded LRU for `get_any` lookups.
-    /// See `entity_cache.rs` for the rationale; this replaced a single
-    /// `RwLock<HashMap>` that serialised every `delete_batch` invalidation.
-    entity_cache: EntityCache,
-    /// Graph node label index: (collection, label) → Vec<EntityId>.
-    /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
-    graph_label_index: RwLock<HashMap<(String, String), Vec<EntityId>>>,
     /// Whether the paged registry on page 1 must be rewritten before the next flush.
     paged_registry_dirty: AtomicBool,
     /// Logical store WAL / grouped durability coordinator for paged mode.
@@ -409,12 +393,6 @@ pub struct UnifiedStore {
     /// probabilistic snapshot from store state.
     pub(crate) replayed_probabilistic_deltas:
         parking_lot::Mutex<Vec<(u8, u8, String, Vec<Vec<u8>>)>>,
-    /// Opaque store-level auxiliary metadata persisted inside the binary dump
-    /// (store format V10+). RedDB uses this to carry collection contracts
-    /// through the single-file artifact so a collection's `declared_model`
-    /// (e.g. `kv`) survives a restart instead of being re-inferred as a table.
-    /// The store treats the bytes as opaque; only RedDB interprets them.
-    pub(crate) aux_metadata: RwLock<Vec<u8>>,
     /// Serialize vault publication with snapshot capture and WAL truncation.
     /// Physical metadata and native header publication take it too (#2376).
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
@@ -454,3 +432,48 @@ pub use self::builder::EntityBuilder;
 pub(crate) use self::commit::DeferredStoreWalActions;
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
+
+#[cfg(test)]
+mod shared_state_tests {
+    use super::*;
+
+    #[test]
+    fn native_mutations_and_shared_reads_use_one_resident_state() {
+        let store = UnifiedStore::new();
+        let resident: &reddb_engine::storage::resident_store::ResidentStore = &store.resident;
+        store.create_collection("nodes").expect("collection");
+        let native = store.get_collection("nodes").expect("native manager");
+        let shared = resident.get_collection("nodes").expect("shared manager");
+        assert!(
+            Arc::ptr_eq(&native, &shared),
+            "one canonical collection owner"
+        );
+        let id = store
+            .insert_auto(
+                "nodes",
+                UnifiedEntity::graph_node(EntityId::new(0), "nodes", "Person", HashMap::new()),
+            )
+            .expect("native mutation");
+        assert_eq!(id.raw(), 1);
+        assert_eq!(
+            resident.get_any(id).expect("shared read").1.kind,
+            store.get("nodes", id).expect("native read").kind
+        );
+        assert_eq!(
+            resident.lookup_graph_nodes_by_label_in("nodes", "Person"),
+            [id]
+        );
+        assert_eq!(resident.entity_cache_stats().entries, 1);
+        assert!(store.delete("nodes", id).expect("native delete"));
+        assert!(resident.get_any(id).is_none());
+        assert!(resident.lookup_graph_nodes_by_label("Person").is_empty());
+        assert_eq!(resident.entity_cache_stats().entries, 0);
+        store.set_aux_metadata(b"catalog".to_vec());
+        assert_eq!(resident.aux_metadata(), b"catalog");
+        assert_eq!(
+            store.next_entity_id().raw(),
+            2,
+            "native allocator is the shared allocator"
+        );
+    }
+}

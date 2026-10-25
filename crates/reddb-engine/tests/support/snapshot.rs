@@ -36,27 +36,28 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         .cross_refs
         .iter()
         .any(|cross_ref| cross_ref.source_id == 1024 && cross_ref.target_id == 1026));
+    let resident = recovered_resident_fixture(&restored);
+    assert_eq!(resident.list_collections().len(), 9);
+    assert_eq!(
+        resident
+            .get_collection("empty")
+            .expect("empty collection")
+            .count(),
+        0
+    );
+    assert_eq!(resident.aux_metadata(), b"opaque catalog");
     for expected in super::codec_corpus::entities() {
         let collection = &restored.collections[&format!("codec_{}", expected.id.raw())];
         assert_eq!(collection.len(), 1);
         let (entity, metadata) = &collection[0];
         assert_eq!(entity.id, expected.id);
         assert_eq!(entity.kind, expected.kind);
-        // The actual OPFS restart fixture must rebuild the canonical live
-        // collection too, rather than only decode a vector of records.
-        let manager = reddb_engine::storage::manager::SegmentManager::new(format!(
-            "codec_{}",
-            expected.id.raw()
-        ));
-        manager
-            .restore_snapshot_entity(entity.clone())
-            .expect("restore live entity");
-        if let Some(metadata) = metadata.clone() {
-            manager
-                .set_metadata(entity.id, metadata)
-                .expect("restore live metadata");
-        }
-        manager.force_seal().expect("seal recovered collection");
+        let manager = resident
+            .get_collection(&format!("codec_{}", expected.id.raw()))
+            .expect("recovered resident collection");
+        let (owner, cached) = resident.get_any(entity.id).expect("recovered store lookup");
+        assert_eq!(owner, format!("codec_{}", expected.id.raw()));
+        assert_eq!(cached.kind, entity.kind);
         let managed = manager
             .get(entity.id)
             .expect("recovered entity remains discoverable");
@@ -91,6 +92,33 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         );
     }
     8
+}
+
+// Test-only host reconstruction: production catalog/WAL policy remains native.
+fn recovered_resident_fixture(
+    restored: &Restored,
+) -> reddb_engine::storage::resident_store::ResidentStore {
+    use reddb_engine::storage::{manager::SegmentManager, resident_store::ResidentStore};
+    use std::sync::Arc;
+    let resident = ResidentStore::new();
+    for (name, records) in &restored.collections {
+        let manager = Arc::new(SegmentManager::new(name));
+        for (entity, metadata) in records {
+            resident.register_entity_id(entity.id);
+            manager
+                .restore_snapshot_entity(entity.clone())
+                .expect("restore live entity");
+            if let Some(metadata) = metadata {
+                manager
+                    .set_metadata(entity.id, metadata.clone())
+                    .expect("restore live metadata");
+            }
+        }
+        manager.force_seal().expect("seal recovered collection");
+        resident.collections.write().insert(name.clone(), manager);
+    }
+    resident.set_aux_metadata(restored.auxiliary.clone());
+    resident
 }
 
 #[derive(Default)]

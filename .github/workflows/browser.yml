@@ -100,6 +100,7 @@ jobs:
         run: |
           cargo test --locked -p reddb-io-server --lib storage::query::unified
           cargo test --locked -p reddb-io-server --lib storage::unified::manager
+          cargo test --locked -p reddb-io-server --lib storage::unified::store::shared_state_tests
           cargo test --locked -p reddb-io-server --lib storage::engine::pager
           cargo test --locked -p reddb-io-server --lib storage::engine::btree
           cargo test --locked -p reddb-io-server --lib storage::engine::overflow

@@ -1,5 +1,4 @@
 use super::*;
-use crate::storage::unified::entity_cache::EntityCache;
 use parking_lot::RwLock;
 
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
@@ -675,7 +674,7 @@ impl UnifiedStore {
         let format_version = STORE_VERSION_V11;
         self.set_format_version(format_version);
 
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         let btree_indices = self.btree_indices.read();
         let mut collection_roots = Vec::with_capacity(collections.len());
         for (name, _) in collections.iter() {
@@ -699,7 +698,7 @@ impl UnifiedStore {
             reddb_file::encode_native_paged_collection_root(&mut meta_data, name, *root_page);
         }
 
-        let cross_refs = self.cross_refs.read();
+        let cross_refs = self.resident.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
@@ -745,8 +744,13 @@ impl UnifiedStore {
     /// (ADR 0073 §2). Same number `stats().total_memory_bytes` reports, without
     /// building the per-collection stats map a sampler would throw away.
     pub fn segment_memory_bytes(&self) -> u64 {
-        let managers: Vec<Arc<SegmentManager>> =
-            self.collections.read().values().map(Arc::clone).collect();
+        let managers: Vec<Arc<SegmentManager>> = self
+            .resident
+            .collections
+            .read()
+            .values()
+            .map(Arc::clone)
+            .collect();
 
         managers
             .iter()
@@ -764,26 +768,19 @@ impl UnifiedStore {
     pub fn with_config(config: UnifiedStoreConfig) -> Self {
         Self {
             config,
+            resident: reddb_engine::storage::resident_store::ResidentStore::new(),
             format_version: AtomicU32::new(STORE_VERSION_V11),
-            next_entity_id: AtomicU64::new(1),
-            collections: RwLock::new(HashMap::new()),
-            cross_refs: RwLock::new(HashMap::new()),
-            reverse_refs: RwLock::new(HashMap::new()),
             pager: None,
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
-            context_index: ContextIndex::new(),
-            entity_cache: EntityCache::new(),
-            graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit: None,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
-            aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
@@ -853,26 +850,19 @@ impl UnifiedStore {
 
         let store = Self {
             config,
+            resident: reddb_engine::storage::resident_store::ResidentStore::new(),
             format_version: AtomicU32::new(STORE_VERSION_V11),
-            next_entity_id: AtomicU64::new(1),
-            collections: RwLock::new(HashMap::new()),
-            cross_refs: RwLock::new(HashMap::new()),
-            reverse_refs: RwLock::new(HashMap::new()),
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
-            context_index: ContextIndex::new(),
-            entity_cache: EntityCache::new(),
-            graph_label_index: RwLock::new(HashMap::new()),
             paged_registry_dirty: AtomicBool::new(false),
             commit,
             unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
-            aux_metadata: RwLock::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
@@ -896,7 +886,7 @@ impl UnifiedStore {
         let Some(pager) = &self.pager else {
             return Ok(());
         };
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         let mut indices = self.btree_indices.write();
         for (name, manager) in collections.iter() {
             let tree =
@@ -924,7 +914,7 @@ impl UnifiedStore {
         // Opening has no concurrent writers. Replay has now durably reconciled
         // these raw trees; do not immediately rebuild them at the first flush.
         if self.snapshot_manager.get().is_none() && self.pending_vault_versions.read().is_empty() {
-            let collections = self.collections.read();
+            let collections = self.resident.collections.read();
             let mut versions = self.checkpoint_versions.write();
             for (name, manager) in collections.iter() {
                 versions.insert(
@@ -1089,7 +1079,7 @@ impl UnifiedStore {
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
                                     m.register_row_id(*row_id);
                                 }
-                                self.context_index.index_entity(&name, &entity);
+                                self.resident.context_index.index_entity(&name, &entity);
                                 m.restore_snapshot_entity(entity.clone())?;
                                 if let Some(metadata) = metadata {
                                     let _ = m.set_metadata(id, metadata);
@@ -1146,11 +1136,12 @@ impl UnifiedStore {
                         let ref_type = RefType::from_byte(cross_ref.ref_type);
                         let target_collection = cross_ref.target_collection;
 
-                        self.cross_refs.write().entry(source_id).or_default().push((
-                            target_id,
-                            ref_type,
-                            target_collection.clone(),
-                        ));
+                        self.resident
+                            .cross_refs
+                            .write()
+                            .entry(source_id)
+                            .or_default()
+                            .push((target_id, ref_type, target_collection.clone()));
 
                         if let Some((collection, mut entity)) = self.get_any(source_id) {
                             let exists = entity.cross_refs().iter().any(|xref| {
@@ -1298,7 +1289,7 @@ impl UnifiedStore {
             commit.force_sync().map_err(StoreError::Io)?;
         }
 
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         let mut btree_indices = self.btree_indices.write();
 
         // Collect collection names and their B-tree root pages
@@ -1415,7 +1406,7 @@ impl UnifiedStore {
         }
 
         // Write cross-reference metadata
-        let cross_refs = self.cross_refs.read();
+        let cross_refs = self.resident.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {

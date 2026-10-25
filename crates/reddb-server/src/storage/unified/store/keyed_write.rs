@@ -50,7 +50,7 @@ impl UnifiedStore {
             }
             if let Some(previous) = previous {
                 self.delete(collection, previous)?;
-                self.context_index.remove_entity(previous);
+                self.resident.context_index.remove_entity(previous);
             }
             Ok(())
         })();

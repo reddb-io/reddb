@@ -383,3 +383,34 @@ Cost sketch: one indexed entity emits at most the existing token/pair bounds;
 cache lookup retains the existing per-shard LRU touch of O(C/16) for capacity C.
 Relocation adds no second cache or index and no storage/IPC operation. No
 measured browser speed or memory-budget claim follows from these tests.
+
+## Shared resident store state and reads
+
+`ResidentStore` owns the canonical live collection map, global entity allocator,
+entity/context caches, graph-label and cross-reference maps, and opaque auxiliary
+catalog bytes. `UnifiedStore` embeds this state and delegates resident reads and
+allocation to it. Native mutation, replay, checkpoint and collection-publication
+adapters address the same moved fields under their existing guards; durable
+write/publication ordering and paged-read fallback remain in the host.
+
+The host-only fields are internal Rust integration surfaces, hidden from public
+API documentation. They expose no new JS/TS capability. Cross-collection raw
+maintenance scans still admit every physical version; explicit snapshot scans
+retain MVCC and persisted moderation admission through the shared managers.
+Neither path supplies authorization or tenancy policy.
+
+Identical native/WASM fixtures cover global identity floors above JavaScript's
+exact-number range, captured snapshots across multiple collections/segments,
+physical logical-version candidates, all existing entity shapes, cache reads,
+graph labels, metadata and reference maps. The real offline OPFS snapshot
+fixture reconstructs one resident store and checks collection ownership, empty
+collections, cached physical reads and opaque catalog bytes. A native adapter
+test verifies manager Arc identity plus allocation, cache and graph-label
+invalidation through native mutations. Catalog dispatch, durable mutation
+publication and stored-data RQL through the public Browser SDK remain pending.
+
+Cost sketch: a multi-collection scan retains the existing O(collection count)
+Arc/name snapshot plus O(candidate count) work; relocation adds no second map,
+cache or entity copy. Allocation keeps the same atomic per-ID/block operations.
+No file bytes, format versions, WAL record ordering or measured speed claim
+change with this extraction.
