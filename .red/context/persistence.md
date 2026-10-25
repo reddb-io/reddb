@@ -80,6 +80,8 @@ and do not change the stored file format.
 When embedded options open an existing paged file, collection definitions remain
 in physical metadata. The binary dump's auxiliary contract blob is only used for
 an actual embedded artifact; paged checkpoints do not serialize that blob.
+Actual paged mode also retains native metadata and index-artifact publication
+when the selected options still carry the default embedded single-file profile.
 Catalog model snapshots reuse one physical metadata observation for their
 declared and operational resource lists; index reconciliation retains its native
 artifact checks and fallback when persisted index declarations are empty.
@@ -155,6 +157,14 @@ Legacy catalogs without the extension remain readable; older writers ignore it
 and therefore cannot preserve automatic retirement across a downgrade. Failed
 unpublished allocations remain conservative recovery garbage; this mechanism
 does not claim a general orphan-page vacuum of pre-upgrade files.
+
+Native index blob replacement terminates the chain at the new payload boundary.
+Shrunk tails, empty blobs and removed artifacts remain outside the allocator
+until the native summary and physical header have been synced. They then enter
+the existing `RDF1` quarantine and become reusable after a later durable catalog
+publication. Native blob reads share the publication fence with replacement.
+A crash before quarantine admission can leave conservative garbage; this is
+not a general reclaim of previously unreachable native artifact pages.
 
 Free-list trunks consume already-free pages instead of extending the file.
 Before a consumed trunk can be overwritten, its old allocator role is removed
