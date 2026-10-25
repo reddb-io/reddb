@@ -1731,7 +1731,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         }
         "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(current_unix_ms())),
         "CURRENT_DATE" => Some(Value::Date((current_unix_ms() / 86_400_000) as i32)),
-        "CURRENT_TIME" => Some(Value::Time(current_time_ms_since_midnight())),
+        "CURRENT_TIME" => Some(Value::Time(time_ms_since_midnight(current_unix_ms()))),
         // Phase 2.5.3 multi-tenancy: reads the thread-local session
         // tenant installed by `SET TENANT 'id'` or transport
         // middleware. Returns NULL when no tenant is bound so RLS
@@ -1758,11 +1758,10 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "TIME_BUCKET" => {
             let bucket_ns = time_bucket_duration(args.first()?)?;
             let timestamp_ns = args.get(1).and_then(value_to_bucket_timestamp_ns)?;
-            let bucket_start = timestamp_ns
-                .checked_div(bucket_ns)
-                .map(|bucket| bucket * bucket_ns)
-                .unwrap_or(timestamp_ns);
-            Some(Value::UnsignedInteger(bucket_start))
+            Some(Value::UnsignedInteger(bucket_start_ns(
+                bucket_ns,
+                timestamp_ns,
+            )))
         }
         "GEO_DISTANCE" | "HAVERSINE" => {
             let (lat1, lon1, lat2, lon2) = geo_args(args)?;
@@ -2245,38 +2244,10 @@ fn money_arg_text(value: &Value) -> Option<String> {
     }
 }
 
-fn current_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn current_time_ms_since_midnight() -> u32 {
-    current_unix_ms().rem_euclid(86_400_000) as u32
-}
-
-fn time_bucket_duration(value: &Value) -> Option<u64> {
-    match value {
-        Value::Text(text) => crate::storage::timeseries::retention::parse_duration_ns(text),
-        Value::UnsignedInteger(value) => Some(*value),
-        Value::Integer(value) if *value >= 0 => Some(*value as u64),
-        Value::BigInt(value) if *value >= 0 => Some(*value as u64),
-        _ => None,
-    }
-}
-
-fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
-    match value {
-        Value::UnsignedInteger(v) => Some(*v),
-        Value::Integer(v) if *v >= 0 => Some(*v as u64),
-        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
-        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
-        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
-        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
-        _ => None,
-    }
-}
+use reddb_engine::query::runtime::temporal::{
+    bucket_start_ns, current_unix_ms, time_bucket_duration, time_ms_since_midnight,
+    value_to_bucket_timestamp_ns,
+};
 
 fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
     match args {
@@ -2358,6 +2329,31 @@ use reddb_engine::query::runtime::text::{
 mod tests {
     use super::dispatch_builtin_function;
     use reddb_types::Value;
+
+    #[test]
+    fn test_shared_time_bucket_conversion_and_overflow() {
+        for (args, expected) in [
+            (
+                vec![Value::text("5ms"), Value::TimestampMs(17)],
+                Some(Value::UnsignedInteger(15_000_000)),
+            ),
+            (
+                vec![Value::Integer(5), Value::Integer(17)],
+                Some(Value::UnsignedInteger(15)),
+            ),
+            (
+                vec![Value::text("raw"), Value::Integer(17)],
+                Some(Value::UnsignedInteger(17)),
+            ),
+            (vec![Value::text("5ms"), Value::TimestampMs(i64::MAX)], None),
+            (
+                vec![Value::text("18446744073709551615s"), Value::Integer(17)],
+                None,
+            ),
+        ] {
+            assert_eq!(dispatch_builtin_function("TIME_BUCKET", &args), expected);
+        }
+    }
 
     #[test]
     fn test_shared_text_bounds_and_regex() {

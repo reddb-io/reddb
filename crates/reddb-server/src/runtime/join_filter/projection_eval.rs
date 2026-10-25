@@ -299,55 +299,6 @@ pub(in crate::runtime::join_filter) fn projection_default_value_with_db(
     }
 }
 
-pub(in crate::runtime::join_filter) fn resolve_time_bucket_duration(
-    args: &[Projection],
-    index: usize,
-) -> Option<u64> {
-    let Projection::Column(column) = args.get(index)? else {
-        return None;
-    };
-    let literal = column.strip_prefix("LIT:")?;
-    crate::storage::timeseries::retention::parse_duration_ns(literal)
-}
-
-pub(in crate::runtime::join_filter) fn resolve_time_bucket_timestamp(
-    args: &[Projection],
-    source: &UnifiedRecord,
-) -> Option<u64> {
-    if let Some(value) = args
-        .get(1)
-        .and_then(|_| resolve_scalar_arg(args, 1, source))
-    {
-        return value_to_bucket_timestamp_ns(&value);
-    }
-
-    source
-        .get("timestamp_ns")
-        .and_then(value_to_bucket_timestamp_ns)
-        .or_else(|| {
-            source
-                .get("timestamp_ms")
-                .and_then(value_to_bucket_timestamp_ns)
-        })
-        .or_else(|| {
-            source
-                .get("timestamp")
-                .and_then(value_to_bucket_timestamp_ns)
-        })
-}
-
-pub(in crate::runtime::join_filter) fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
-    match value {
-        Value::UnsignedInteger(v) => Some(*v),
-        Value::Integer(v) if *v >= 0 => Some(*v as u64),
-        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
-        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
-        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
-        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
-        _ => None,
-    }
-}
-
 /// Resolve two geographic points from function arguments.
 /// Supports: (column, POINT(lat, lon)) or (col1, col2)
 pub(in crate::runtime::join_filter) fn resolve_two_geo_points(

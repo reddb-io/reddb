@@ -826,3 +826,41 @@ substring/slice character buffers; regex calls retain per-call compilation
 bounded by the existing parser/program limits. Sharing removes duplicate helper
 bodies without adding a scan, storage write, network call or IPC. No measured
 speedup or production WASM size reduction is claimed.
+
+
+## Shared temporal scalars and host wall clock
+
+`reddb-engine::query::runtime::temporal` owns native time-bucket conversion,
+bucket rounding and UTC time helpers. The common scalar dispatcher now owns
+TIME_BUCKET, NOW/CURRENT_TIMESTAMP, CURRENT_DATE and CURRENT_TIME. Its host
+supplies Unix milliseconds; the native adapter uses SystemTime with the same
+error/pre-epoch zero fallback, while the shared WASM clock uses the browser's
+existing Date.now import. Native typed evaluation delegates to the same helpers.
+Clock calls retain one fresh read each, ignored extra arguments and existing
+UTC date truncation/time remainder behavior; no query-wide clock freeze is added.
+
+Typed duration arguments retain numeric nanoseconds or canonical duration text.
+Legacy projection duration arguments still require a LIT sentinel and do not
+consume input admission. Legacy timestamp resolution retains its distinct
+behavior: a missing/unresolved/denied explicit argument falls back to raw
+admitted-source timestamp_ns/timestamp_ms/timestamp fields; a resolved NULL or
+invalid value does not. Field names do not infer units. Zero-width/raw buckets
+still return the original timestamp. Session/secret policy is not moved here.
+
+Two integer-overflow paths now reject out-of-range input instead of panicking
+in debug or wrapping in release: compact duration multiplication (now checked,
+like long-form durations) and seconds/milliseconds converted to nanoseconds.
+Valid native conversions and existing float coercion are unchanged.
+
+Native/WASM conformance covers duration units, wide integer buckets, conversion
+bounds, missing versus NULL arguments, fallback order, deterministic clock values
+and ignored arguments. A real Worker compares shared clock scalar results with
+Date.now before/after the WASM call. The offline OPFS fixture projects time buckets
+and fixed-clock date/time results after WAL recovery, update and checkpoint with
+full browser restarts and the HTTP listener stopped. Public stored queries and
+application transactions remain pending and their capability flags remain false.
+
+Cost sketch: each temporal scalar retains constant-size conversion/arithmetic,
+O(B) parsing for a B-byte duration and at most three raw fallback field probes;
+clock scalars perform one host clock read. No scan, storage write, network call
+or new dependency is added, and no measured speedup is claimed.

@@ -51,3 +51,20 @@ extern "C" {
 pub(crate) fn current_unix_secs() -> u64 {
     (date_now() / 1000.0) as u64
 }
+
+/// Native query clock: retain the server's pre-epoch/error fallback to zero.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::cast_possible_truncation)] // Preserve the native millisecond representation.
+pub fn current_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Browser wall clock uses the same millisecond unit as native query scalars.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::cast_possible_truncation)] // Date.now supplies integral Unix milliseconds.
+pub fn current_unix_ms() -> i64 {
+    date_now().max(0.0) as i64
+}

@@ -111,6 +111,7 @@ async function sharedConformance(browserPage) {
     'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
     'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
     'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
+    'scalar_dispatch_clock_values', 'scalar_dispatch_time_bucket_inputs',
     'scalar_dispatch_substrings_and_patterns', 'scalar_dispatch_trim_slice_and_quote',
     'scalar_dispatch_arithmetic_and_cast', 'scalar_dispatch_case_and_coalesce_lazy',
     'scalar_dispatch_text_and_lengths', 'scalar_dispatch_money',
@@ -127,6 +128,8 @@ async function sharedConformance(browserPage) {
     'numeric_scalar_cast_validation',
     'text_scalar_unicode_and_wide_bounds', 'text_scalar_regex_capture_and_limits',
     'text_scalar_trim_position_and_quote',
+    'temporal_duration_units_and_overflow', 'temporal_timestamp_conversion_and_bounds',
+    'temporal_bucket_zero_and_wide_values',
   ])
 }
 
