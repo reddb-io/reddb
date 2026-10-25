@@ -2,6 +2,25 @@
 
 #[cfg(target_arch = "wasm32")]
 #[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/record_filters.rs"]
+mod record_filters;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../../reddb-engine/tests/support/record_filters_restart.rs"]
+mod record_filters_restart;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = runRecordFilterFixture)]
+pub fn run_record_filter_fixture(
+    handle: browser::SyncFile,
+    phase: u32,
+) -> Result<Vec<u32>, wasm_bindgen::JsValue> {
+    record_filters_restart::run(browser::BrowserFile::new(handle), phase)
+        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 #[path = "../../reddb-engine/tests/support/catalog.rs"]
 mod catalog;
 

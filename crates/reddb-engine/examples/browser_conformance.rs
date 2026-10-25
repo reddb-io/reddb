@@ -14,6 +14,14 @@ mod enforcement;
 mod enforcement_restart;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/record_filters.rs"]
+mod record_filters;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/record_filters_restart.rs"]
+mod record_filters_restart;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/codec_corpus.rs"]
 mod codec_corpus;
 
@@ -106,7 +114,8 @@ pub fn run_conformance() -> String {
         .chain(store_wal::CASES.iter())
         .chain(resident_file::CASES.iter())
         .chain(catalog::CASES.iter())
-        .chain(enforcement::CASES.iter());
+        .chain(enforcement::CASES.iter())
+        .chain(record_filters::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

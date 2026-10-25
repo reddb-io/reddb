@@ -580,3 +580,37 @@ existing O(C + F) temporary values plus coercion/dependency work. The supplied
 candidate uniqueness checker retains O(U * E * K) comparisons for U rules,
 E candidates and K key columns; the native indexed discovery path is unchanged.
 Relocation adds no extra scan, file write or IPC and claims no measured speedup.
+
+## Shared record resolution and WHERE traversal
+
+`reddb-engine::query::runtime` owns the native field/alias/graph binding and
+document-path resolution, runtime value comparisons, metadata predicates,
+byte-oriented LIKE matching and WHERE traversal. Native entry points delegate
+to these same functions. Exact signed/unsigned integer comparison, legacy
+identity aliases, binary JSON paths and existing resolution order are retained.
+The typed row adapter performs nullable-column catalog lookup only after a
+field miss, preserving document and foreign-alias handling.
+
+The host supplies two statically dispatched callbacks: expression evaluation
+and secret input admission. The native adapter retains typed evaluation,
+fallback only for unknown functions, query-error categories and secret-error
+redaction. Visibility, authorization, tenancy/RLS and secret disclosure policy
+remain host responsibilities; records must be admitted before filtering.
+Existing bool-only entry points retain their error-to-false behavior, while
+result-returning paths propagate evaluator errors.
+
+Shared native/WASM cases cover aliases, document paths, graph bindings, lazy
+nullable lookup, exact integer comparison, metadata/LIKE predicates, boolean
+short-circuiting, expression errors and secret admission. A test-only OPFS
+fixture applies parsed RQL WHERE predicates to supplied/recovered records,
+restarts the entire browser offline with its HTTP listener stopped, updates
+through canonical admission/publication, checkpoints and restarts offline
+again. It verifies large integer identities, generated fields, nullable columns,
+JSON text/binary paths and arithmetic errors. This fixture is not a public SQL
+dispatcher; stored-data queries and application transactions remain disabled
+in the public browser capability flags.
+
+Cost sketch: N admitted records retain their existing per-record predicate,
+comparison and path-resolution work, with statically dispatched callbacks and
+nullable catalog lookup only after a miss. Relocation adds no scans, files,
+network traffic or IPC, and claims no measured performance gain.
