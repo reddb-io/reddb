@@ -20,6 +20,14 @@ use std::{
 
 pub const CASES: &[(&str, fn())] = &[
     (
+        "scalar_dispatch_substrings_and_patterns",
+        scalar_substrings_and_patterns,
+    ),
+    (
+        "scalar_dispatch_trim_slice_and_quote",
+        scalar_trim_slice_and_quote,
+    ),
+    (
         "scalar_dispatch_arithmetic_and_cast",
         scalar_arithmetic_and_cast,
     ),
@@ -254,6 +262,249 @@ fn scalar_values(name: &str, values: Vec<Value>) -> Option<Value> {
         })
         .collect::<Vec<_>>();
     evaluate_scalar_function_with_host(&Host::new(None), name, &arguments, &source)
+}
+
+fn scalar_substrings_and_patterns() {
+    for (name, values, expected) in [
+        (
+            "SUBSTRING",
+            vec![Value::text("aé🦀z"), Value::Integer(2), Value::Integer(2)],
+            Some(Value::text("é🦀")),
+        ),
+        (
+            "SUBSTR:label",
+            vec![Value::text("aé🦀z"), Value::Integer(2)],
+            Some(Value::text("é🦀z")),
+        ),
+        (
+            "SUBSTRING",
+            vec![
+                Value::text("aé🦀z"),
+                Value::Integer(2),
+                Value::Integer(4_294_967_296),
+            ],
+            Some(Value::text("é🦀z")),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("aé"), Value::Integer(i64::MAX)],
+            Some(Value::text("")),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("aé"), Value::Integer(2), Value::Null],
+            Some(Value::text("é")),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("aé"), Value::Integer(2), Value::text("invalid")],
+            Some(Value::text("é")),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("é42z"), Value::text("é([0-9]+)z")],
+            Some(Value::text("42")),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("abc"), Value::text("[")],
+            Some(Value::Null),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("b"), Value::text("(a)?b")],
+            Some(Value::Null),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("abc"), Value::text("z")],
+            Some(Value::Null),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::Null, Value::Integer(1)],
+            Some(Value::Null),
+        ),
+        (
+            "SUBSTRING",
+            vec![Value::text("abc"), Value::Integer(1), Value::Integer(-1)],
+            None,
+        ),
+        ("SUBSTR", vec![Value::text("abc"), Value::text("a")], None),
+        (
+            "SUBSTRING",
+            vec![Value::text("abc"), Value::text("a"), Value::Integer(1)],
+            None,
+        ),
+    ] {
+        assert_eq!(scalar_values(name, values), expected, "{name}");
+    }
+    let host = Host::new(None);
+    let source = source();
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "SUBSTRING",
+            &[
+                Projection::Column("nickname".into()),
+                Projection::Column("LIT:2".into()),
+                Projection::Column("missing".into()),
+            ],
+            &source
+        ),
+        Some(Value::text("ee")),
+        "absent optional count retains unbounded-tail behavior"
+    );
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "SUBSTRING",
+            &[
+                Projection::Column("missing".into()),
+                Projection::Column("unreachable".into()),
+            ],
+            &source
+        ),
+        None
+    );
+}
+
+fn scalar_trim_slice_and_quote() {
+    for (name, values, expected) in [
+        (
+            "POSITION",
+            vec![Value::text("🦀"), Value::text("aé🦀z")],
+            Some(Value::Integer(3)),
+        ),
+        (
+            "POSITION",
+            vec![Value::text(""), Value::text("é")],
+            Some(Value::Integer(1)),
+        ),
+        (
+            "POSITION",
+            vec![Value::Null, Value::text("é")],
+            Some(Value::Null),
+        ),
+        (
+            "TRIM",
+            vec![Value::text("\u{2003}é ")],
+            Some(Value::text("é")),
+        ),
+        (
+            "BTRIM",
+            vec![Value::text("xyéyx"), Value::text("xy")],
+            Some(Value::text("é")),
+        ),
+        (
+            "LTRIM",
+            vec![Value::text("xyéyx"), Value::text("xy")],
+            Some(Value::text("éyx")),
+        ),
+        (
+            "RTRIM",
+            vec![Value::text("xyéyx"), Value::text("xy")],
+            Some(Value::text("xyé")),
+        ),
+        (
+            "TRIM",
+            vec![Value::text(" é "), Value::Null],
+            Some(Value::Null),
+        ),
+        (
+            "TRIM",
+            vec![Value::text(" é "), Value::Integer(1)],
+            Some(Value::Null),
+        ),
+        (
+            "LEFT",
+            vec![Value::text("aé🦀z"), Value::Integer(-1)],
+            Some(Value::text("aé🦀")),
+        ),
+        (
+            "RIGHT",
+            vec![Value::text("aé🦀z"), Value::Integer(-1)],
+            Some(Value::text("é🦀z")),
+        ),
+        (
+            "LEFT",
+            vec![Value::text("aé🦀z"), Value::Integer(-4_294_967_296)],
+            Some(Value::text("")),
+        ),
+        (
+            "RIGHT",
+            vec![Value::text("aé🦀z"), Value::Integer(i64::MIN)],
+            Some(Value::text("")),
+        ),
+        (
+            "LEFT",
+            vec![Value::Null, Value::Integer(1)],
+            Some(Value::Null),
+        ),
+        ("RIGHT", vec![Value::text("aé"), Value::Null], None),
+        (
+            "QUOTE_LITERAL",
+            vec![Value::text("a'b")],
+            Some(Value::text("'a''b'")),
+        ),
+        (
+            "QUOTE_LITERAL",
+            vec![Value::Integer(42)],
+            Some(Value::text("'42'")),
+        ),
+        ("QUOTE_LITERAL", vec![Value::Null], Some(Value::Null)),
+    ] {
+        assert_eq!(scalar_values(name, values), expected, "{name}");
+    }
+    let source = source();
+    let host = Host::new(None);
+    for name in [
+        "SUBSTRING",
+        "SUBSTR",
+        "POSITION",
+        "TRIM",
+        "BTRIM",
+        "LTRIM",
+        "RTRIM",
+        "LEFT",
+        "RIGHT",
+        "QUOTE_LITERAL",
+    ] {
+        assert_eq!(
+            evaluate_scalar_function_with_host(&host, name, &[], &source),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TRIM",
+            &[
+                Projection::Column("LIT: é ".into()),
+                Projection::Column("missing".into()),
+            ],
+            &source
+        ),
+        Some(Value::text("é")),
+        "missing optional trim characters retain whitespace trimming"
+    );
+    let host = Host {
+        deny_input: true,
+        ..Host::new(None)
+    };
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "LEFT",
+            &[
+                Projection::Column("nickname".into()),
+                Projection::Column("LIT:1".into()),
+            ],
+            &source
+        ),
+        None
+    );
 }
 
 fn scalar_arithmetic_and_cast() {
@@ -1209,6 +1460,23 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         assert_eq!(
             projected.get("caption"),
             Some(&Value::text(captions[index]))
+        );
+    }
+    let columns = projections("SELECT SUBSTRING(COALESCE(nickname, 'none'), 1, 4294967296) AS wide_name, RIGHT(CONCAT(COALESCE(nickname, 'none'), ':', CAST(quantity AS TEXT)), 2) AS suffix, SUBSTRING(CONCAT(COALESCE(nickname, 'none'), '42'), '([0-9]+)') AS digits, QUOTE_LITERAL(COALESCE(nickname, 'none')) AS quoted FROM orders");
+    for (index, source) in selected.iter().enumerate() {
+        let projected = project(&host, source, &columns).expect("recovered shared text scalars");
+        let names = if updated {
+            ["none", "Bee"]
+        } else {
+            ["Bee", "Other"]
+        };
+        let suffixes = if updated { [":4", ":3"] } else { [":3", ":2"] };
+        assert_eq!(projected.get("wide_name"), Some(&Value::text(names[index])));
+        assert_eq!(projected.get("suffix"), Some(&Value::text(suffixes[index])));
+        assert_eq!(projected.get("digits"), Some(&Value::text("42")));
+        assert_eq!(
+            projected.get("quoted"),
+            Some(&Value::text(format!("'{}'", names[index])))
         );
     }
 }

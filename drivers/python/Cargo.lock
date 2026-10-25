@@ -2151,6 +2151,7 @@ dependencies = [
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
+ "regex",
  "wasm-bindgen",
 ]
 

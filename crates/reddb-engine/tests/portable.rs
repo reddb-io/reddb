@@ -243,3 +243,14 @@ fn portable_resident_file_conformance() {
         run();
     }
 }
+
+#[path = "support/text_scalars.rs"]
+mod text_scalars;
+
+#[test]
+fn portable_text_scalar_conformance() {
+    for (name, run) in text_scalars::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
