@@ -7,6 +7,35 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+struct NativeReplayTarget<'a> {
+    store: &'a UnifiedStore,
+    update_btrees: bool,
+}
+
+impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<'_> {
+    fn has_collection(&self, name: &str) -> bool {
+        self.store.get_collection(name).is_some()
+    }
+    fn create_collection(&self, name: &str) -> Result<(), StoreError> {
+        self.store.create_collection_in_memory(name)
+    }
+    fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        self.store.drop_collection_in_memory(name)
+    }
+    fn upsert(&self, collection: &str, record: &[u8]) -> Result<(), StoreError> {
+        self.store
+            .apply_replayed_upsert(collection, record, self.update_btrees)
+    }
+    fn delete(&self, collection: &str, id: EntityId) -> Result<(), StoreError> {
+        self.store
+            .apply_replayed_delete(collection, id, self.update_btrees)
+    }
+    fn refresh(&self, collection: &str, records: &[Vec<u8>]) -> Result<(), StoreError> {
+        self.store
+            .apply_replayed_refresh_collection(collection, records, self.update_btrees)
+    }
+}
+
 /// Adaptive group-commit window applied when the configured
 /// `GroupCommitOptions::window_ms` is 0 (the historical default).
 ///
@@ -49,42 +78,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_STORE_TX_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone)]
-pub(crate) enum StoreWalAction {
-    CreateCollection {
-        name: String,
-    },
-    DropCollection {
-        name: String,
-    },
-    UpsertEntityRecord {
-        collection: String,
-        record: Vec<u8>,
-    },
-    DeleteEntityRecord {
-        collection: String,
-        entity_id: u64,
-    },
-    /// Batched upsert — one WAL action carrying N serialized entity
-    /// records for the same collection. Saves the per-row Begin/
-    /// PageWrite/Commit framing overhead on the bulk insert hot path.
-    /// Replay applies every contained record in order.
-    BulkUpsertEntityRecords {
-        collection: String,
-        records: Vec<Vec<u8>>,
-    },
-    /// Atomic full-collection replace — issue #595 slice 9c.
-    /// Replay drops the in-memory collection state and rebuilds it
-    /// from the contained records. Used by REFRESH MATERIALIZED VIEW
-    /// so a concurrent reader sees either the prior contents or the
-    /// new contents, never a partial state, and a crash mid-refresh
-    /// leaves the prior contents intact on recovery (the action is
-    /// only durable once the WAL commit lands).
-    RefreshCollection {
-        collection: String,
-        records: Vec<Vec<u8>>,
-    },
-}
+pub(crate) use reddb_engine::storage::store_wal::StoreWalAction;
 
 #[derive(Debug, Default)]
 pub(crate) struct DeferredStoreWalActions {
@@ -172,98 +166,6 @@ fn take_deferred_store_wal_capture() -> DeferredStoreWalActions {
     DEFERRED_STORE_WAL_ACTIONS.with(|cell| DeferredStoreWalActions {
         actions: cell.borrow_mut().take().unwrap_or_default(),
     })
-}
-
-impl StoreWalAction {
-    pub(crate) fn upsert_entity(
-        collection: &str,
-        entity: &UnifiedEntity,
-        metadata: Option<&Metadata>,
-        format_version: u32,
-    ) -> Self {
-        Self::UpsertEntityRecord {
-            collection: collection.to_string(),
-            record: UnifiedStore::serialize_entity_record(entity, metadata, format_version),
-        }
-    }
-
-    fn encode(&self) -> Vec<u8> {
-        reddb_file::encode_store_wal_action_frame(&self.to_frame())
-            .expect("encode store wal action frame")
-    }
-
-    fn to_frame(&self) -> reddb_file::StoreWalActionFrame {
-        match self {
-            Self::CreateCollection { name } => {
-                reddb_file::StoreWalActionFrame::CreateCollection { name: name.clone() }
-            }
-            Self::DropCollection { name } => {
-                reddb_file::StoreWalActionFrame::DropCollection { name: name.clone() }
-            }
-            Self::UpsertEntityRecord { collection, record } => {
-                reddb_file::StoreWalActionFrame::UpsertEntityRecord {
-                    collection: collection.clone(),
-                    record: record.clone(),
-                }
-            }
-            Self::DeleteEntityRecord {
-                collection,
-                entity_id,
-            } => reddb_file::StoreWalActionFrame::DeleteEntityRecord {
-                collection: collection.clone(),
-                entity_id: *entity_id,
-            },
-            Self::BulkUpsertEntityRecords {
-                collection,
-                records,
-            } => reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
-                collection: collection.clone(),
-                records: records.clone(),
-            },
-            Self::RefreshCollection {
-                collection,
-                records,
-            } => reddb_file::StoreWalActionFrame::RefreshCollection {
-                collection: collection.clone(),
-                records: records.clone(),
-            },
-        }
-    }
-
-    fn decode(bytes: &[u8]) -> io::Result<Self> {
-        match reddb_file::decode_store_wal_action_frame(bytes)? {
-            reddb_file::StoreWalActionFrame::CreateCollection { name } => {
-                Ok(Self::CreateCollection { name })
-            }
-            reddb_file::StoreWalActionFrame::DropCollection { name } => {
-                Ok(Self::DropCollection { name })
-            }
-            reddb_file::StoreWalActionFrame::UpsertEntityRecord { collection, record } => {
-                Ok(Self::UpsertEntityRecord { collection, record })
-            }
-            reddb_file::StoreWalActionFrame::DeleteEntityRecord {
-                collection,
-                entity_id,
-            } => Ok(Self::DeleteEntityRecord {
-                collection,
-                entity_id,
-            }),
-            reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
-                collection,
-                records,
-            } => Ok(Self::BulkUpsertEntityRecords {
-                collection,
-                records,
-            }),
-            reddb_file::StoreWalActionFrame::RefreshCollection {
-                collection,
-                records,
-            } => Ok(Self::RefreshCollection {
-                collection,
-                records,
-            }),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1293,35 +1195,13 @@ impl UnifiedStore {
         action: &StoreWalAction,
         update_btrees: bool,
     ) -> Result<(), StoreError> {
-        match action {
-            StoreWalAction::CreateCollection { name } => {
-                if self.get_collection(name).is_none() {
-                    let _ = self.create_collection_in_memory(name);
-                }
-                Ok(())
-            }
-            StoreWalAction::DropCollection { name } => self.drop_collection_in_memory(name),
-            StoreWalAction::UpsertEntityRecord { collection, record } => {
-                self.apply_replayed_upsert(collection, record, update_btrees)
-            }
-            StoreWalAction::DeleteEntityRecord {
-                collection,
-                entity_id,
-            } => self.apply_replayed_delete(collection, EntityId::new(*entity_id), update_btrees),
-            StoreWalAction::BulkUpsertEntityRecords {
-                collection,
-                records,
-            } => {
-                for record in records {
-                    self.apply_replayed_upsert(collection, record, update_btrees)?;
-                }
-                Ok(())
-            }
-            StoreWalAction::RefreshCollection {
-                collection,
-                records,
-            } => self.apply_replayed_refresh_collection(collection, records, update_btrees),
-        }
+        reddb_engine::storage::store_wal::apply_replayed_action(
+            &NativeReplayTarget {
+                store: self,
+                update_btrees,
+            },
+            action,
+        )
     }
 
     /// Atomic full-collection replace — issue #595 slice 9c.
@@ -1405,18 +1285,8 @@ impl UnifiedStore {
         serialized: &[Vec<u8>],
         update_btrees: bool,
     ) {
-        {
-            let mut collections = self.resident.collections.write();
-            collections.insert(name.to_string(), new_manager);
-        }
-
         self.resident
-            .entity_cache
-            .retain(|_, (collection, _)| collection != name);
-        self.remove_from_graph_label_index_batch(
-            name,
-            &prepared.iter().map(|e| e.id).collect::<Vec<_>>(),
-        );
+            .swap_collection_state(name, new_manager, prepared);
 
         if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
@@ -1442,30 +1312,12 @@ impl UnifiedStore {
         records: &[Vec<u8>],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
-        let new_manager = Arc::new(SegmentManager::with_config(
+        let (new_manager, prepared) = self.resident.prepare_replayed_refresh_collection(
             collection,
-            self.config.manager_config.clone(),
-        ));
-
-        let mut prepared: Vec<UnifiedEntity> = Vec::with_capacity(records.len());
-        for record in records {
-            let (entity, _metadata) =
-                Self::deserialize_entity_record(record, self.format_version())?;
-            self.register_entity_id(entity.id);
-            if let EntityKind::TableRow { row_id, .. } = &entity.kind {
-                new_manager.register_row_id(*row_id);
-            }
-            prepared.push(entity);
-        }
-
-        if !prepared.is_empty() {
-            new_manager.bulk_insert(prepared.clone()).map_err(|e| {
-                StoreError::Io(std::io::Error::other(format!(
-                    "replay refresh_collection: bulk_insert failed: {e}"
-                )))
-            })?;
-        }
-
+            records,
+            self.format_version(),
+            &self.config.manager_config,
+        )?;
         self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees);
         Ok(())
     }
@@ -1497,42 +1349,16 @@ impl UnifiedStore {
     }
 
     pub(crate) fn create_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
-        let mut collections = self.resident.collections.write();
-        if collections.contains_key(name) {
-            return Ok(());
-        }
-        let manager = SegmentManager::with_config(name, self.config.manager_config.clone());
-        collections.insert(name.to_string(), Arc::new(manager));
-        self.mark_paged_registry_dirty();
-        Ok(())
+        self.resident
+            .create_collection_in_memory(name, &self.config.manager_config)
     }
 
     fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
-        let manager = {
-            let mut collections = self.resident.collections.write();
-            match collections.remove(name) {
-                Some(manager) => manager,
-                None => return Ok(()),
+        self.resident.drop_collection_in_memory(name, || {
+            if let Some(tree) = self.btree_indices.write().remove(name) {
+                self.retire_btree(tree);
             }
-        };
-
-        let entities = manager.query_all(|_| true);
-        let entity_ids: Vec<EntityId> = entities.iter().map(|entity| entity.id).collect();
-        for entity_id in &entity_ids {
-            self.resident.context_index.remove_entity(*entity_id);
-            let _ = self.unindex_cross_refs(*entity_id);
-        }
-        if let Some(tree) = self.btree_indices.write().remove(name) {
-            self.retire_btree(tree);
-        }
-        self.resident
-            .entity_cache
-            .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-            });
-        self.remove_from_graph_label_index_batch(name, &entity_ids);
-        self.mark_paged_registry_dirty();
-        Ok(())
+        })
     }
 
     fn apply_replayed_upsert(
@@ -1541,39 +1367,12 @@ impl UnifiedStore {
         record: &[u8],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
-        self.create_collection_in_memory(collection)?;
-        let (entity, metadata) = Self::deserialize_entity_record(record, self.format_version())?;
-        let manager = self
-            .get_collection(collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-
-        self.register_entity_id(entity.id);
-        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
-            manager.register_row_id(*row_id);
-        }
-
-        self.resident.context_index.remove_entity(entity.id);
-        let _ = self.unindex_cross_refs(entity.id);
-        self.remove_from_graph_label_index(collection, entity.id);
-
-        if manager.get(entity.id).is_some() {
-            manager
-                .update_with_metadata(entity.clone(), metadata.as_ref())
-                .map_err(StoreError::from)?;
-        } else {
-            manager.restore_snapshot_entity(entity.clone())?;
-            if let Some(metadata) = metadata.as_ref() {
-                manager.set_metadata(entity.id, metadata.clone())?;
-            }
-        }
-
-        self.resident
-            .context_index
-            .index_entity(collection, &entity);
-        if let EntityKind::GraphNode(node) = &entity.kind {
-            self.update_graph_label_index(collection, &node.label, entity.id);
-        }
-        self.index_cross_refs(&entity, collection)?;
+        let id = self.resident.apply_replayed_upsert(
+            collection,
+            record,
+            self.format_version(),
+            &self.config.manager_config,
+        )?;
 
         if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
             let mut btree_indices = self.btree_indices.write();
@@ -1581,7 +1380,7 @@ impl UnifiedStore {
                 .entry(collection.to_string())
                 .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
             let root_before = btree.root_page_id();
-            let key = entity.id.raw().to_be_bytes();
+            let key = id.raw().to_be_bytes();
             match btree.insert(&key, record) {
                 Ok(_) => {}
                 Err(BTreeError::DuplicateKey) => {
@@ -1608,32 +1407,19 @@ impl UnifiedStore {
         id: EntityId,
         update_btrees: bool,
     ) -> Result<(), StoreError> {
-        self.resident.entity_cache.remove(id.raw());
-        if let Some(manager) = self.get_collection(collection) {
-            let deleted = manager.delete(id)?;
-            if !deleted {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        }
-
-        if self.pager.is_some() && update_btrees {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let root_before = btree.root_page_id();
-                let key = id.raw().to_be_bytes();
-                let _ = btree.delete(&key);
-                if root_before != btree.root_page_id() {
-                    self.mark_paged_registry_dirty();
+        self.resident.apply_replayed_delete(collection, id, || {
+            if self.pager.is_some() && update_btrees {
+                let btree_indices = self.btree_indices.read();
+                if let Some(btree) = btree_indices.get(collection) {
+                    let root_before = btree.root_page_id();
+                    let key = id.raw().to_be_bytes();
+                    let _ = btree.delete(&key);
+                    if root_before != btree.root_page_id() {
+                        self.mark_paged_registry_dirty();
+                    }
                 }
             }
-        }
-
-        let _ = self.unindex_cross_refs(id);
-        self.remove_from_graph_label_index(collection, id);
-        self.resident.context_index.remove_entity(id);
-        Ok(())
+        })
     }
 }
 

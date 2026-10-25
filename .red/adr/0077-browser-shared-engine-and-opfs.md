@@ -430,3 +430,31 @@ Cost sketch: a conflicting restoration pays one existing segment seal over its
 resident entities; fresh identities retain the current insertion path. No
 per-row generation metadata, file-format change or extra network operation is
 introduced. These recovery tests do not enable browser stored-data queries.
+
+## Shared logical store WAL replay
+
+Typed logical store actions and the storage error types now live in
+`reddb-engine`; native paths retain aliases to the same types. The existing
+`reddb-file` codec remains the only byte-format authority. Record-list counts
+are checked against the remaining length-prefix bytes before allocation, so a
+corrupt count cannot request an impossible allocation in WASM. Valid frames
+and format versions are unchanged.
+
+The native adapter and resident recovery target use a shared action dispatcher
+and resident mutation bodies. Pager/B-tree callbacks retain their original
+positions relative to resident deletion, cache invalidation and derived-index
+cleanup. Native WAL admission, durable flush, transaction publication and
+checkpoint coordination stay in the host. Recovery targets remain private
+until successful replay; a failed batch is not a public transaction boundary.
+
+Shared native/WASM fixtures verify frame bytes, truncated actions, bounded
+counts, record/metadata restoration, allocator floors, index callback boundaries
+and collection replacement with retained old readers. A browser-only fixture
+persists encoded actions in a real OPFS artifact, closes the entire browser,
+and replays them offline into a fresh resident store. This qualifies logical
+recovery primitives, not the pending public storage-backed RQL/transaction API.
+
+Cost sketch: replay of N records retains O(N) decode/index work; collection
+replacement temporarily retains its previous and replacement manager while
+old readers exist. Moving the code adds no second WAL or IPC per record and
+changes no flush ordering. No measured performance gain is claimed.

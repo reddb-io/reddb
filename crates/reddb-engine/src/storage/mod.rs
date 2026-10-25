@@ -40,3 +40,7 @@ pub mod tokenization;
 
 #[doc(hidden)]
 pub mod resident_store;
+
+pub mod error;
+#[doc(hidden)]
+pub mod store_wal;

@@ -10,6 +10,7 @@ const assets = [
   '../src/wasm/reddb_wasm_bg.wasm',
   './query-worker.js',
   './snapshot-worker.js',
+  './store-wal-worker.js',
   './wasm/conformance.js',
   './wasm/conformance_bg.wasm',
   './pager-worker.js',
