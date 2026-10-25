@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.26.8
+
+### Patch Changes
+
+- [#2494](https://github.com/reddb-io/reddb/pull/2494) [`dc34e1c`](https://github.com/reddb-io/reddb/commit/dc34e1c6b9390863ec2d9e9a3567398235bf6c42) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Terminate shrinking native index blob chains at their new boundary and reclaim detached or removed artifact pages through the durable delayed-free ledger. Continue native metadata publication when an existing paged database reopens under default embedded options. Preserve exact artifact bytes across checkpoints and restart, reuse reclaimed pages during repeated index churn, and avoid counting free IDs twice when consuming allocator trunks.
+
 ## 1.26.7
 
 ### Patch Changes
