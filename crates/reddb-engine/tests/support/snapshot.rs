@@ -215,8 +215,11 @@ fn native_versions() {
             assert_eq!(managed.xmin, entity.xmin);
             assert_eq!(managed.xmax, entity.xmax);
             assert_eq!(
-                manager.get_metadata(entity.id).map(|value| value.fields),
-                metadata.as_ref().map(|value| value.fields.clone())
+                manager
+                    .get_metadata(entity.id)
+                    .expect("live legacy records expose default metadata")
+                    .fields,
+                metadata.clone().unwrap_or_default().fields
             );
             assert_eq!(entity.xmin, if version >= 9 { 17 } else { 0 });
             assert_eq!(entity.xmax, if version >= 9 { 23 } else { 0 });
