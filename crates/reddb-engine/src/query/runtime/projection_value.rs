@@ -106,6 +106,11 @@ fn parse_rl_literal(payload: &str, depth: u32) -> Option<Value> {
         }
         return Some(Value::Array(out));
     }
+    // An incomplete composite must not bounce between literal/atom parsing
+    // without consuming input or increasing depth.
+    if trimmed.starts_with('[') || trimmed.starts_with("V[") {
+        return None;
+    }
     parse_rl_atom(trimmed, depth)
 }
 

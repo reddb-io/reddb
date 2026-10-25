@@ -738,9 +738,9 @@ Direct literals retain their early return before input admission. Aliases still
 admit the resolved inner value and then the outer value; denied inner values
 skip the outer check. Fields and materialized window outputs retain their native
 lookup semantics. The composite decoder retains its legacy text fallback and
-quoted-comma/bracket quirks, rather than substituting JSON semantics. Its only
-new rejection is nesting beyond the canonical RQL JSON depth cap (root depth
-zero), which follows the existing undecodable-composite text fallback.
+quoted-comma/bracket quirks, rather than substituting JSON semantics. Incomplete composites are rejected instead of recursively retrying the same
+payload. Nesting beyond the canonical RQL JSON depth cap (root depth zero) is
+also rejected; both follow the existing undecodable-composite text fallback.
 
 Native/WASM cases cover nested arithmetic arguments, literals, malformed
 composites, the depth boundary, field/alias/window resolution, data-error fallback

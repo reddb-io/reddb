@@ -205,6 +205,9 @@ fn legacy_literals() {
             ]),
         ),
         ("LIT:@RL:V[bad]", Value::text("@RL:V[bad]")),
+        ("LIT:@RL:[", Value::text("@RL:[")),
+        ("LIT:@RL:V[", Value::text("@RL:V[")),
+        ("LIT:@RL:[[0]", Value::text("@RL:[[0]")),
         ("LIT:@RL:[1,]", Value::text("@RL:[1,]")),
         // Preserve the legacy splitter's quoted-comma behavior.
         ("LIT:@RL:[\"a,b\"]", Value::text("@RL:[\"a,b\"]")),
