@@ -221,14 +221,6 @@ impl RedDB {
         publication
     }
 
-    #[cfg(test)]
-    pub(super) fn native_vector_artifact_records(
-        &self,
-        collections: &[String],
-    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
-        self.native_artifact_records_with_coverage(collections, &mut HashMap::new())
-    }
-
     fn native_artifact_records_with_coverage(
         &self,
         collections: &[String],
@@ -1577,6 +1569,14 @@ impl RedDB {
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_vector_artifact_records(
+        &self,
+        collections: &[String],
+    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+        self.native_artifact_records_with_coverage(collections, &mut HashMap::new())
     }
 }
 
