@@ -4,8 +4,8 @@ use crate::storage::unified::MetadataValue;
 use crate::{RedDBError, RedDBResult};
 
 pub(crate) use reddb_engine::catalog::enforcement::{
-    has_internal_ttl_metadata, INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_METADATA_KEYS,
-    INTERNAL_TTL_MILLIS_KEY, INTERNAL_TTL_SECONDS_KEY,
+    has_internal_ttl_metadata, INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY,
+    INTERNAL_TTL_SECONDS_KEY,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

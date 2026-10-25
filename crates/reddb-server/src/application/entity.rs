@@ -6,7 +6,7 @@ use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
 use crate::storage::{EntityId, UnifiedEntity};
 use crate::{RedDBError, RedDBResult};
-use reddb_types::{DataType, Value};
+use reddb_types::Value;
 
 #[derive(Debug, Clone)]
 pub struct CreateEntityOutput {
