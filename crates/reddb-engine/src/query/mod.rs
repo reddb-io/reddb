@@ -9,5 +9,7 @@ pub mod sort;
 pub(crate) use reddb_types::value_compare;
 pub mod labels;
 pub mod records;
+#[doc(hidden)]
+pub mod runtime;
 pub mod scalar;
 pub mod unified;

@@ -92,7 +92,7 @@ async function sharedConformance(browserPage) {
     'store_wal_canonical_action_frames', 'store_wal_impossible_counts_and_truncation',
     'store_wal_entity_record_replay', 'store_wal_host_index_boundaries', 'store_wal_atomic_resident_refresh',
     'store_wal_recovery_fixture',
-    'contract_write_durable_publication',
+    'record_filter_durable_restart', 'contract_write_durable_publication',
     'resident_file_models_and_checkpoint', 'resident_file_owned_restart_fixture',
     'resident_file_rejected_batch_restores_committed_state', 'resident_file_publication_failure_boundaries',
     'resident_file_checkpoint_failure_boundaries', 'resident_file_wal_capacity_preserves_committed_state',
@@ -103,6 +103,27 @@ async function sharedConformance(browserPage) {
     'contract_write_generated_and_checks', 'contract_write_update_plan_and_timestamps',
     'contract_write_unique_keys_and_targets', 'contract_write_models_and_vector_dimensions',
     'contract_write_ttl_overrides_and_bounds',
+    'record_fields_aliases_and_identity', 'record_fields_json_and_binary_paths',
+    'record_fields_graph_bindings', 'record_filter_nullable_column_lookup',
+    'record_filter_exact_values_and_metadata', 'record_filter_predicates_and_errors',
+    'record_filter_short_circuit_and_host_errors', 'record_filter_secret_admission',
+    'record_order_exact_integer_keys', 'record_order_nullable_keys',
+    'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
+    'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
+    'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
+    'scalar_dispatch_arithmetic_and_cast', 'scalar_dispatch_case_and_coalesce_lazy',
+    'scalar_dispatch_text_and_lengths', 'scalar_dispatch_money',
+    'scalar_dispatch_missing_and_host_fallback',
+    'projection_value_legacy_literals', 'projection_value_resolution_and_fallback',
+    'projection_value_secret_input_order',
+    'record_projection_fields_aliases_and_literals', 'record_projection_star_and_column_layout',
+    'record_projection_document_paths', 'record_projection_bindings_and_window_output',
+    'record_projection_typed_values_and_labels', 'record_projection_fallback_and_data_errors',
+    'record_projection_secret_sensitivity', 'record_projection_output_policy_and_redaction',
+    'numeric_scalar_operand_coercion', 'numeric_scalar_arithmetic_types',
+    'numeric_scalar_null_and_zero', 'numeric_scalar_timestamp_ms',
+    'numeric_scalar_legacy_precision', 'numeric_scalar_cast_fast_paths',
+    'numeric_scalar_cast_validation',
   ])
 }
 
@@ -686,6 +707,44 @@ for (const browser of browsers) {
           await launch({ offline: true })
           assert.deepEqual(await fixture(2), { phase: 2, total: 20 })
           assert.equal(networkRequests.length, requestsBefore, 'offline contract admission reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('canonical projection, WHERE and ORDER BY recover rows after offline WAL and checkpoint restarts', async () => {
+      async function fixture(phase) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (phase) => {
+            const worker = new Worker('/packages/browser/test/record-filter-worker.js', { type: 'module' })
+            try {
+              return await new Promise((resolve, reject) => {
+                worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+                worker.onerror = (event) => reject(new Error(event.message))
+                worker.postMessage({ phase })
+              })
+            } finally { worker.terminate() }
+          }, phase)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          assert.deepEqual(await fixture(0), { phase: 0, counts: [1, 1, 1, 4, 4, 2, 2] })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await fixture(1), { phase: 1, counts: [1, 2, 0, 4, 3, 2, 2] })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await fixture(2), { phase: 2, counts: [1, 2, 0, 4, 3, 2, 2] })
+          assert.equal(networkRequests.length, requestsBefore, 'offline record filtering reached the HTTP host')
         })
       } finally { await context.setOffline(false) }
     })

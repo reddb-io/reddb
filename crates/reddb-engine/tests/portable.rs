@@ -13,6 +13,53 @@ mod enforcement;
 #[path = "support/enforcement_restart.rs"]
 mod enforcement_restart;
 
+#[path = "support/record_filters.rs"]
+mod record_filters;
+
+#[path = "support/record_filters_restart.rs"]
+mod record_filters_restart;
+
+#[path = "support/record_ordering.rs"]
+mod record_ordering;
+
+#[path = "support/record_projection.rs"]
+mod record_projection;
+
+#[path = "support/numeric_scalars.rs"]
+mod numeric_scalars;
+
+#[test]
+fn portable_numeric_scalar_conformance() {
+    for (name, run) in numeric_scalars::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[test]
+fn portable_record_projection_conformance() {
+    for (name, run) in record_projection::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[test]
+fn portable_record_ordering_conformance() {
+    for (name, run) in record_ordering::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[test]
+fn portable_record_filter_conformance() {
+    for (name, run) in record_filters::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_contract_enforcement_conformance() {
     for (name, run) in enforcement::CASES {

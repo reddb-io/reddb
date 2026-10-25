@@ -580,3 +580,211 @@ existing O(C + F) temporary values plus coercion/dependency work. The supplied
 candidate uniqueness checker retains O(U * E * K) comparisons for U rules,
 E candidates and K key columns; the native indexed discovery path is unchanged.
 Relocation adds no extra scan, file write or IPC and claims no measured speedup.
+
+## Shared record resolution and WHERE traversal
+
+`reddb-engine::query::runtime` owns the native field/alias/graph binding and
+document-path resolution, runtime value comparisons, metadata predicates,
+byte-oriented LIKE matching and WHERE traversal. Native entry points delegate
+to these same functions. Exact signed/unsigned integer comparison, legacy
+identity aliases, binary JSON paths and existing resolution order are retained.
+The typed row adapter performs nullable-column catalog lookup only after a
+field miss, preserving document and foreign-alias handling.
+
+The host supplies two statically dispatched callbacks: expression evaluation
+and secret input admission. The native adapter retains typed evaluation,
+fallback only for unknown functions, query-error categories and secret-error
+redaction. Visibility, authorization, tenancy/RLS and secret disclosure policy
+remain host responsibilities; records must be admitted before filtering.
+Existing bool-only entry points retain their error-to-false behavior, while
+result-returning paths propagate evaluator errors.
+
+Shared native/WASM cases cover aliases, document paths, graph bindings, lazy
+nullable lookup, exact integer comparison, metadata/LIKE predicates, boolean
+short-circuiting, expression errors and secret admission. A test-only OPFS
+fixture applies parsed RQL WHERE predicates to supplied/recovered records,
+restarts the entire browser offline with its HTTP listener stopped, updates
+through canonical admission/publication, checkpoints and restarts offline
+again. It verifies large integer identities, generated fields, nullable columns,
+JSON text/binary paths and arithmetic errors. This fixture is not a public SQL
+dispatcher; stored-data queries and application transactions remain disabled
+in the public browser capability flags.
+
+Cost sketch: N admitted records retain their existing per-record predicate,
+comparison and path-resolution work, with statically dispatched callbacks and
+nullable catalog lookup only after a miss. Relocation adds no scans, files,
+network traffic or IPC, and claims no measured performance gain.
+
+## Shared runtime ordering and top-K
+
+`reddb-engine::query::runtime::ordering` owns the native ORDER BY comparison,
+flat-buffer sort-key extraction, stable full sort and quickselect top-K. Native
+entry points delegate to these same algorithms. The host supplies expression
+evaluation, secret input admission and identity-key construction; native
+expression misses retain their absent-key behavior. The environment-controlled
+top-K kill-switch stays in the native adapter and becomes an explicit boolean
+returned by a host callback at the shared boundary. Record admission, visibility
+and validation remain host responsibilities.
+
+Existing optional-key/NULL and direction semantics, abbreviated text keys,
+exact integer comparison and record cloning remain unchanged. Pairwise
+comparison retains its identity-key fallback; full sort and top-K retain stable
+input-order ties. These are distinct native behaviors, not a new unified tie
+policy. Top-K still selects only the `offset + limit` prefix when worthwhile;
+the caller applies the actual OFFSET/LIMIT. Bounds that exceed `usize::MAX`
+saturate instead of wrapping on wasm32, preventing a wide SQL bound from
+silently selecting a small prefix.
+
+Shared native/WASM cases cover signed/unsigned integers beyond JavaScript's
+exact range, missing/NULL keys, mixed directions, text-prefix collisions,
+expression evaluation once per row/key, stable top-K parity, disabled top-K,
+wide bounds, identity/secret callbacks and NaN edge behavior. The existing
+test-only OPFS recovery fixture now also evaluates parsed WHERE/ORDER BY queries
+with LIMIT/OFFSET over recovered generated fields, nullable columns and JSON
+paths, before/after an update and checkpoint, with full offline browser
+restarts and the HTTP host stopped. This composition over supplied records is
+not a public stored-query dispatcher; browser stored-query and application
+transaction capability flags remain false.
+
+Cost sketch: N records and K ordering clauses retain O(N * K) key extraction
+and key storage, O(N log N) full-sort comparisons or average O(N) selection plus
+O(L log L) prefix sorting for L = offset + limit, and the existing output
+record clones. The move adds no scan, file write, network traffic or IPC; no
+measured speedup is claimed.
+
+## Shared runtime projection and sensitivity traversal
+
+`reddb-engine::query::runtime::projection` owns the native SELECT projection
+traversal, output-label and visible-column handling, legacy identity aliases,
+document/entity projection gates, materialized window reads and conservative
+secret-sensitivity walks. Native entry points call these same functions. Graph,
+path and vector bindings retain their existing clone/passthrough behavior.
+SELECT * keeps secret wrappers intact for downstream native output policy;
+explicit sensitive projections still pass through the host's output check.
+
+The host supplies typed evaluation, legacy function/filter fallback, legacy
+literal decoding, error conversion/redaction and secret output policy. Unknown
+function/column errors retain the existing projection fallbacks, while genuine
+typed-evaluator data errors propagate. This deliberately retains the native
+distinction between typed expression evaluation and legacy projection scalars,
+including arithmetic lowered to legacy function names. Those native scalar
+dispatchers and crypto/session policy are not reimplemented by this extraction.
+Sensitivity still includes untaken CASE branches and window expressions.
+Visibility, authorization, tenancy/RLS and final serialization remain host
+responsibilities.
+
+Shared native/WASM cases cover field/identity aliases, host literal delegation,
+columnar and overflow layouts, star visibility, duplicate output labels, binary
+document paths, graph/vector bindings, materialized windows, typed scalar and
+boolean results, fallback categories, data-error propagation, CASE sensitivity,
+output rejection and secret-error redaction. The existing offline OPFS fixture
+now also checks projected rows and output columns after filtering, ordering and
+pagination across WAL recovery, an admitted update, checkpoint and full browser
+restarts with the HTTP listener stopped. Its test host uses canonical typed
+evaluation for supported fixture expressions; it is not a complete browser
+scalar host or public stored-query dispatcher. Public stored-query and
+application-transaction capabilities remain false.
+
+Cost sketch: N rows with P projections retain O(N * P) projection visits plus
+existing expression/path work and output-value/binding clones. Visible-column
+collection retains native schema sampling and heterogeneous-layout fallback;
+sensitivity keeps its existing AST traversal. The move adds no storage scan,
+file write, network traffic or IPC, and claims no measured speedup.
+
+## Shared native projection numeric scalars
+
+`reddb-engine::query::runtime::numeric` owns the native projection dispatcher’s
+numeric-operand representation/coercion, arithmetic operations, millisecond
+timestamp arithmetic and CAST helper. Native entry points alias these exact
+functions/types. Argument resolution, legacy literal decoding, session/secret
+policy and the remaining scalar dispatcher stay in their existing native host.
+
+This preserves the existing distinction from typed expression evaluation:
+legacy projection division/modulo by zero returns NULL, numeric division
+returns Float, numeric text/decimal coercion follows the native dispatcher,
+and millisecond timestamp operations retain checked arithmetic. Existing
+f64 intermediate arithmetic, unsigned-to-signed coercion and saturating casts
+are characterized rather than silently changed during extraction; this is not
+a new exact-integer arithmetic guarantee. Typed evaluator/comparison semantics
+are unchanged.
+
+Shared native/WASM cases cover operand coercion, result types, NULL/zero and
+invalid inputs, timestamp bounds, existing precision behavior, CAST fast paths
+and validator fallback. The offline OPFS fixture additionally projects actual
+MUL/DIV fallback results over recovered rows after WHERE, ORDER BY and pagination,
+including NULL for a zero divisor, before/after an admitted update and checkpoint.
+Its test host resolves supported simple arguments through canonical expressions;
+it is not a complete legacy scalar host or public stored-query dispatcher.
+Stored-query and application-transaction capability flags remain false.
+
+Cost sketch: each arithmetic/CAST call retains its existing constant-size
+operand work plus O(B) parsing/coercion when a B-byte text value is supplied.
+The move adds no record copy, storage scan, file write, network traffic or IPC,
+and claims no measured speedup.
+
+
+## Shared native scalar argument resolution
+
+`reddb-engine::query::runtime::projection_value` owns the native optional scalar
+argument traversal and legacy `LIT:` / `@RL:` decoding. The native adapter
+supplies typed evaluation without database/table/alias context, legacy
+function/filter effects and ambient secret input admission. Database-aware
+scalar dispatch remains in the native host. Optional arguments retain fallback
+on any typed evaluation error; top-level projection still propagates typed data
+errors and falls back only for unknown functions/columns. These intentionally
+different native policies must not be conflated.
+
+Direct literals retain their early return before input admission. Aliases still
+admit the resolved inner value and then the outer value; denied inner values
+skip the outer check. Fields and materialized window outputs retain their native
+lookup semantics. The composite decoder retains its legacy text fallback and
+quoted-comma/bracket quirks, rather than substituting JSON semantics. Incomplete composites are rejected instead of recursively retrying the same
+payload. Nesting beyond the canonical RQL JSON depth cap (root depth zero) is
+also rejected; both follow the existing undecodable-composite text fallback.
+
+Native/WASM cases cover nested arithmetic arguments, literals, malformed
+composites, the depth boundary, field/alias/window resolution, data-error fallback
+and input admission ordering. The test-only offline OPFS fixture now executes
+nested `(quantity + 1) * 2` through these same argument and arithmetic functions
+over recovered rows, before/after update and checkpoint with the HTTP listener
+stopped. Its remaining scalar effects are explicit test sentinels, not a complete
+browser scalar host. Public stored-query and application-transaction capability
+flags remain false.
+
+Cost sketch: P argument AST nodes retain O(P) traversal plus typed evaluation,
+existing value clones and B-byte literal parsing; nested legacy arrays retain
+repeated substring scans bounded by depth 128. The extraction adds no storage
+scan/write, network traffic or IPC and claims no measured speedup.
+
+
+## Shared native common scalar dispatcher
+
+`reddb-engine::query::runtime::scalar_functions` owns the legacy projection
+arms for arithmetic, CASE, CAST, COALESCE, concatenation, case conversion,
+character/byte/bit lengths, reversal, ABS/ROUND and MONEY construction/accessors.
+The server delegates to those same arms. The host supplies optional argument
+resolution with input admission, database-free CASE conditions and the remaining
+specialized/effectful fallback. Native database-aware dispatch still runs before
+this shared layer. No new dependency or alternative JavaScript evaluator is added.
+
+Legacy names stay case-sensitive after stripping an output alias suffix.
+Missing arguments retain None independently of SQL NULL. CASE and COALESCE
+retain branch/argument short-circuiting; CONCAT variants retain their distinct
+NULL handling and plain-text/display-string conversions. MONEY retains its
+one-versus-two-argument error behavior and reversed retry/admission order.
+Native numeric, typed-evaluator and output-secret policies are unchanged.
+Clock/session/crypto/geo, regex and remaining text functions stay in the host.
+
+Shared native/WASM cases exercise results, Unicode lengths, malformed/missing
+arguments, fallback without eager resolution, branch short-circuiting, money
+retry order and input denial. The offline OPFS fixture now projects CASE over
+recovered quantities and concatenates nullable names with CAST values across
+WAL recovery, an update and checkpoint, with full browser restarts and the HTTP
+listener stopped. This test-only host remains partial. Public stored-query and
+application-transaction capability flags remain false.
+
+Cost sketch: N rows retain their existing per-call argument/condition visits;
+CASE/COALESCE skip unselected arguments, text operations scan their existing B
+bytes/characters and allocate their existing output strings, and MONEY performs
+at most two coercions. The move adds no storage scan/write, network call or IPC
+and claims no measured speedup.

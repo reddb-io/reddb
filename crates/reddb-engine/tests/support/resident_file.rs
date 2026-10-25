@@ -12,6 +12,10 @@ use std::collections::HashMap;
 
 pub const CASES: &[(&str, fn())] = &[
     (
+        "record_filter_durable_restart",
+        record_filter_restart_fixture,
+    ),
+    (
         "contract_write_durable_publication",
         contract_write_restart_fixture,
     ),
@@ -34,6 +38,15 @@ pub const CASES: &[(&str, fn())] = &[
         wal_capacity,
     ),
 ];
+
+fn record_filter_restart_fixture() {
+    let mut file = MemoryFile::default();
+    for phase in 0..=2 {
+        crate::record_filters_restart::run(crate::pager::BorrowedMemoryFile(&mut file), phase)
+            .expect("canonical WHERE over WAL/checkpoint recovery");
+        file = MemoryFile::from_bytes(file.durable.into_inner());
+    }
+}
 
 fn contract_write_restart_fixture() {
     let mut file = MemoryFile::default();

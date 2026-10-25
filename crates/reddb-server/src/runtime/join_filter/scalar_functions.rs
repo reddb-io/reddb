@@ -213,70 +213,43 @@ fn evaluate_scalar_function_legacy(
     args: &[Projection],
     source: &UnifiedRecord,
 ) -> Option<Value> {
+    reddb_engine::query::runtime::scalar_functions::evaluate_scalar_function_with_host(
+        &RuntimeScalarFunctionHost,
+        name,
+        args,
+        source,
+    )
+}
+
+struct RuntimeScalarFunctionHost;
+impl reddb_engine::query::runtime::scalar_functions::ScalarFunctionHost
+    for RuntimeScalarFunctionHost
+{
+    fn resolve_argument(&self, argument: &Projection, source: &UnifiedRecord) -> Option<Value> {
+        eval_projection_value(argument, source)
+    }
+    fn evaluate_condition(&self, filter: &Filter, source: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter(source, filter, None, None)
+    }
+    fn fallback_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        evaluate_native_scalar_function(name, arguments, source)
+    }
+}
+
+fn evaluate_native_scalar_function(
+    name: &str,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
     // Strip alias suffix if present (e.g. "GEO_DISTANCE:dist_km" → "GEO_DISTANCE")
     let func_name = name.split(':').next().unwrap_or(name);
 
     match func_name {
-        "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
-            let a = resolve_scalar_arg(args, 0, source)?;
-            let b = resolve_scalar_arg(args, 1, source)?;
-            Some(arith_binop(func_name, a, b))
-        }
-        "CONCAT" => {
-            let mut out = String::new();
-            for idx in 0..args.len() {
-                let value = resolve_scalar_arg(args, idx, source)?;
-                if matches!(value, Value::Null) {
-                    continue;
-                }
-                out.push_str(&value.plain_text());
-            }
-            Some(Value::text(out))
-        }
-        "CASE" => {
-            // CASE WHEN cond THEN val ... ELSE val END is encoded as
-            //   Function("CASE", [Expression(cond1), val1,
-            //                      Expression(cond2), val2,
-            //                      ..., else_val?])
-            // Even-length args => no ELSE; odd-length => last arg is ELSE.
-            // Walk WHEN/THEN pairs left-to-right, short-circuit on first
-            // matching predicate. Fall through to ELSE (or Null) when no
-            // branch matches.
-            let mut i = 0;
-            while i + 1 < args.len() {
-                if let Projection::Expression(filter, _) = &args[i] {
-                    let matched = evaluate_runtime_filter(source, filter, None, None);
-                    if matched {
-                        return resolve_scalar_arg(args, i + 1, source).or(Some(Value::Null));
-                    }
-                    i += 2;
-                } else {
-                    break;
-                }
-            }
-            if args.len() % 2 == 1 {
-                return resolve_scalar_arg(args, args.len() - 1, source).or(Some(Value::Null));
-            }
-            Some(Value::Null)
-        }
-        "CAST" => {
-            // CAST(expr AS type) is parsed into Function("CAST", [inner, Column("TYPE:<name>")]).
-            // Resolve the source value, look up the target type by SQL name,
-            // and reuse the existing string→Value coerce path. On any
-            // failure (unknown type, coerce error) we emit Null so queries
-            // keep running — CAST is advisory, not a hard assertion.
-            let src = resolve_scalar_arg(args, 0, source)?;
-            let Some(Projection::Column(col)) = args.get(1) else {
-                return Some(Value::Null);
-            };
-            let Some(type_name) = col.strip_prefix("TYPE:") else {
-                return Some(Value::Null);
-            };
-            let Some(target) = reddb_types::DataType::from_sql_name(type_name) else {
-                return Some(Value::Null);
-            };
-            Some(cast_value_to(&src, target))
-        }
         "GEO_DISTANCE" | "HAVERSINE" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
             Some(Value::Float(crate::geo::haversine_km(
@@ -364,45 +337,6 @@ fn evaluate_scalar_function_legacy(
                 crate::geo::deg_to_micro(lon),
             ))
         }
-        "UPPER" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Text(s) => Some(Value::text(s.to_uppercase())),
-                _ => Some(val),
-            }
-        }
-        "LOWER" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Text(s) => Some(Value::text(s.to_lowercase())),
-                _ => Some(val),
-            }
-        }
-        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Text(s) => Some(Value::Integer(s.chars().count() as i64)),
-                Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
-                Value::Array(a) => Some(Value::Integer(a.len() as i64)),
-                _ => Some(Value::Null),
-            }
-        }
-        "OCTET_LENGTH" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Text(s) => Some(Value::Integer(s.len() as i64)),
-                Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
-                _ => Some(Value::Null),
-            }
-        }
-        "BIT_LENGTH" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Text(s) => Some(Value::Integer((s.len() * 8) as i64)),
-                Value::Blob(b) => Some(Value::Integer((b.len() * 8) as i64)),
-                _ => Some(Value::Null),
-            }
-        }
         "SUBSTRING" | "SUBSTR" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
@@ -480,29 +414,6 @@ fn evaluate_scalar_function_legacy(
             };
             Some(Value::text(trim_text(&text, chars.as_deref(), false, true)))
         }
-        "CONCAT_WS" => {
-            let separator: String = match resolve_scalar_arg(args, 0, source)? {
-                Value::Null => return Some(Value::Null),
-                Value::Text(text) => text.to_string(),
-                other => other.display_string(),
-            };
-            let mut parts = Vec::new();
-            for idx in 1..args.len() {
-                let value = resolve_scalar_arg(args, idx, source)?;
-                if matches!(value, Value::Null) {
-                    continue;
-                }
-                parts.push(value.display_string());
-            }
-            Some(Value::text(parts.join(&separator)))
-        }
-        "REVERSE" => {
-            let text = match resolve_scalar_arg(args, 0, source)? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            Some(Value::text(text.chars().rev().collect::<String>()))
-        }
         "LEFT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
@@ -526,31 +437,6 @@ fn evaluate_scalar_function_legacy(
             Value::Text(text) => Some(Value::text(quote_literal_text(&text))),
             other => Some(Value::text(quote_literal_text(&other.display_string()))),
         },
-        "ABS" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Float(f) => Some(Value::Float(f.abs())),
-                Value::Integer(n) => Some(Value::Integer(n.abs())),
-                _ => Some(Value::Null),
-            }
-        }
-        "ROUND" => {
-            let val = resolve_scalar_arg(args, 0, source)?;
-            match val {
-                Value::Float(f) => Some(Value::Float(f.round())),
-                other => Some(other),
-            }
-        }
-        "COALESCE" => {
-            for (i, _) in args.iter().enumerate() {
-                if let Some(val) = resolve_scalar_arg(args, i, source) {
-                    if val != Value::Null {
-                        return Some(val);
-                    }
-                }
-            }
-            Some(Value::Null)
-        }
         "VERIFY_PASSWORD" => {
             // VERIFY_PASSWORD(column, 'candidate') — compares a
             // plaintext candidate against the argon2id hash stored in
@@ -570,19 +456,6 @@ fn evaluate_scalar_function_legacy(
                 &plain, &hash,
             )))
         }
-        "MONEY" => money_from_scalar_args(args, source),
-        "MONEY_ASSET" => match resolve_scalar_arg(args, 0, source)? {
-            Value::Money { asset_code, .. } => Some(Value::AssetCode(asset_code)),
-            _ => Some(Value::Null),
-        },
-        "MONEY_MINOR" => match resolve_scalar_arg(args, 0, source)? {
-            Value::Money { minor_units, .. } => Some(Value::BigInt(minor_units)),
-            _ => Some(Value::Null),
-        },
-        "MONEY_SCALE" => match resolve_scalar_arg(args, 0, source)? {
-            Value::Money { scale, .. } => Some(Value::Integer(i64::from(scale))),
-            _ => Some(Value::Null),
-        },
         // Session-context scalars — match the `expr_eval` filter-side
         // dispatcher so `SELECT CURRENT_TENANT(), CURRENT_USER, …`
         // (no FROM, scalar projection path) returns the same values
@@ -654,201 +527,7 @@ fn evaluate_scalar_function_legacy(
     }
 }
 
-fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option<Value> {
-    let input = match args {
-        [single] => money_arg_text(resolve_scalar_arg(std::slice::from_ref(single), 0, source)?)?,
-        [left, right] => {
-            let lhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
-            let rhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
-            format!("{} {}", lhs, rhs)
-        }
-        _ => return Some(Value::Null),
-    };
-    match reddb_types::coerce::coerce(&input, reddb_types::DataType::Money, None) {
-        Ok(value) => Some(value),
-        Err(_) if args.len() == 2 => {
-            let lhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
-            let rhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
-            reddb_types::coerce::coerce(
-                &format!("{} {}", lhs, rhs),
-                reddb_types::DataType::Money,
-                None,
-            )
-            .ok()
-        }
-        Err(_) => Some(Value::Null),
-    }
-}
-
-fn money_arg_text(value: Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Text(text) => Some(text.to_string()),
-        Value::AssetCode(code) => Some(code),
-        Value::Currency(code) => Some(String::from_utf8_lossy(&code).to_string()),
-        other => Some(other.display_string()),
-    }
-}
-
-/// Resolve a single scalar argument from a function's arg list.
-/// Evaluate an arithmetic binary operator on two values. Promotes
-/// heterogeneous numeric operands to Float when either side is Float;
-/// preserves Integer when both sides are Integer. Non-numeric operands
-/// and zero divisors collapse to `Value::Null` so queries keep running
-/// — SQL-style "erroring on bad arithmetic" is the job of the type
-/// system v2 (Fase 3), not Fase 1.3.
-fn arith_binop(op: &str, a: Value, b: Value) -> Value {
-    if let Some(value) = timestamp_ms_arith(op, &a, &b) {
-        return value;
-    }
-
-    let (lhs, rhs) = match (value_as_number(&a), value_as_number(&b)) {
-        (Some(l), Some(r)) => (l, r),
-        _ => return Value::Null,
-    };
-    // Integer fast path when both operands are integers and the op
-    // doesn't force a float (division always floats for predictability
-    // — avoids surprising truncation).
-    let force_float = matches!(op, "DIV") || lhs.is_float || rhs.is_float;
-    let out = match op {
-        "ADD" => lhs.as_f64() + rhs.as_f64(),
-        "SUB" => lhs.as_f64() - rhs.as_f64(),
-        "MUL" => lhs.as_f64() * rhs.as_f64(),
-        "DIV" => {
-            if rhs.as_f64() == 0.0 {
-                return Value::Null;
-            }
-            lhs.as_f64() / rhs.as_f64()
-        }
-        "MOD" => {
-            if rhs.as_f64() == 0.0 {
-                return Value::Null;
-            }
-            lhs.as_f64() % rhs.as_f64()
-        }
-        _ => return Value::Null,
-    };
-    if force_float {
-        Value::Float(out)
-    } else {
-        Value::Integer(out as i64)
-    }
-}
-
-fn timestamp_ms_arith(op: &str, a: &Value, b: &Value) -> Option<Value> {
-    match (op, a, b) {
-        ("ADD", Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
-            ts.checked_add(duration_ms_operand(rhs)?)?,
-        )),
-        ("ADD", lhs, Value::TimestampMs(ts)) => Some(Value::TimestampMs(
-            ts.checked_add(duration_ms_operand(lhs)?)?,
-        )),
-        ("SUB", Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
-            ts.checked_sub(duration_ms_operand(rhs)?)?,
-        )),
-        _ => None,
-    }
-}
-
-fn duration_ms_operand(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(value) | Value::BigInt(value) | Value::Duration(value) => Some(*value),
-        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct NumOperand {
-    pub(super) int_val: i64,
-    pub(super) float_val: f64,
-    pub(super) is_float: bool,
-}
-
-impl NumOperand {
-    pub(super) fn as_f64(self) -> f64 {
-        if self.is_float {
-            self.float_val
-        } else {
-            self.int_val as f64
-        }
-    }
-}
-
-pub(super) fn value_as_number(v: &Value) -> Option<NumOperand> {
-    match v {
-        Value::Integer(n) | Value::BigInt(n) => Some(NumOperand {
-            int_val: *n,
-            float_val: *n as f64,
-            is_float: false,
-        }),
-        Value::UnsignedInteger(n) => Some(NumOperand {
-            int_val: *n as i64,
-            float_val: *n as f64,
-            is_float: false,
-        }),
-        Value::Float(f) => Some(NumOperand {
-            int_val: *f as i64,
-            float_val: *f,
-            is_float: true,
-        }),
-        Value::Decimal(d) => Some(NumOperand {
-            int_val: (*d / 10_000),
-            float_val: *d as f64 / 10_000.0,
-            is_float: true,
-        }),
-        Value::Text(s) => {
-            if let Ok(n) = s.parse::<i64>() {
-                Some(NumOperand {
-                    int_val: n,
-                    float_val: n as f64,
-                    is_float: false,
-                })
-            } else if let Ok(f) = s.parse::<f64>() {
-                Some(NumOperand {
-                    int_val: f as i64,
-                    float_val: f,
-                    is_float: true,
-                })
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Convert a `Value` to a new `Value` of the requested `DataType`. Used
-/// by the CAST scalar function. Covers the common numeric/text/boolean
-/// paths directly (so `CAST(123 AS TEXT)` doesn't round-trip through the
-/// schema coercion layer) and falls back to `schema::coerce::coerce`
-/// on the value's `display_string()` for everything else — that reuses
-/// the battle-tested input validators we already have for INSERT.
-fn cast_value_to(src: &Value, target: reddb_types::DataType) -> Value {
-    use reddb_types::types::DataType as DT;
-    match (src, target) {
-        (v, DT::Text) => Value::text(v.display_string()),
-        (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
-        (Value::Integer(n), DT::BigInt) => Value::BigInt(*n),
-        (Value::Integer(n), DT::UnsignedInteger) if *n >= 0 => Value::UnsignedInteger(*n as u64),
-        (Value::UnsignedInteger(n), DT::Integer) if *n <= i64::MAX as u64 => {
-            Value::Integer(*n as i64)
-        }
-        (Value::UnsignedInteger(n), DT::Float) => Value::Float(*n as f64),
-        (Value::Float(f), DT::Integer) => Value::Integer(*f as i64),
-        (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
-        (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
-        (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), target) => match reddb_types::coerce::coerce(s, target, None) {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        },
-        (v, target) => match reddb_types::coerce::coerce(&v.display_string(), target, None) {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        },
-    }
-}
+pub(super) use reddb_engine::query::runtime::numeric::{value_as_number, NumOperand};
 
 pub(super) fn resolve_scalar_arg(
     args: &[Projection],
@@ -857,80 +536,4 @@ pub(super) fn resolve_scalar_arg(
 ) -> Option<Value> {
     let arg = args.get(index)?;
     eval_projection_value(arg, source)
-}
-
-/// Parse the `@RL:` sentinel payload written by
-/// `sql_lowering::serialize_value_json`. Handles arrays `[...]`, vectors
-/// `V[...]`, and scalar fallbacks. Not a full JSON parser — only
-/// covers the shapes the serializer emits.
-pub(super) fn parse_rl_literal(payload: &str) -> Option<Value> {
-    let trimmed = payload.trim();
-    if let Some(inner) = trimmed.strip_prefix("V[").and_then(|s| s.strip_suffix(']')) {
-        let mut out = Vec::new();
-        if !inner.trim().is_empty() {
-            for part in inner.split(',') {
-                out.push(part.trim().parse::<f32>().ok()?);
-            }
-        }
-        return Some(Value::Vector(out));
-    }
-    if let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        let mut out = Vec::new();
-        if !inner.trim().is_empty() {
-            for part in split_top_level(inner) {
-                out.push(parse_rl_atom(part.trim())?);
-            }
-        }
-        return Some(Value::Array(out));
-    }
-    parse_rl_atom(trimmed)
-}
-
-fn parse_rl_atom(s: &str) -> Option<Value> {
-    if s == "null" {
-        return Some(Value::Null);
-    }
-    if s == "true" {
-        return Some(Value::Boolean(true));
-    }
-    if s == "false" {
-        return Some(Value::Boolean(false));
-    }
-    if let Some(inner) = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
-        return Some(Value::text(
-            inner.replace("\\\"", "\"").replace("\\\\", "\\"),
-        ));
-    }
-    if s.starts_with('[') || s.starts_with("V[") {
-        return parse_rl_literal(s);
-    }
-    if let Ok(n) = s.parse::<i64>() {
-        return Some(Value::Integer(n));
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Some(Value::Float(f));
-    }
-    None
-}
-
-fn split_top_level(s: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0usize;
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => depth -= 1,
-            b',' if depth == 0 => {
-                out.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if start <= s.len() {
-        out.push(&s[start..]);
-    }
-    out
 }
