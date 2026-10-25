@@ -356,3 +356,30 @@ copies at most the configured entities per tick (4,096 by default). A cursor
 retains its original source until completion/cancellation, so an in-flight
 consolidation can temporarily retain both source and destination payloads. This
 extraction adds no IPC or file-format change and makes no measured speed claim.
+
+
+## Shared resident read indexes
+
+The native context index, bounded token generation and sharded entity lookup
+cache live in `reddb-engine::storage`; native module paths re-export the same
+implementations. Native binary document decoding delegates directly to the
+canonical `reddb-types` codec. Large unsigned integers retain their existing
+canonical tagged JSON representation when generating document tokens.
+
+These indexes return physical candidates. Snapshot visibility, authorization,
+tenant scope and moderation admission remain at the runtime read boundary.
+Collection enablement controls new context-index writes; disabling it does not
+by itself invalidate previously indexed physical candidates. Store mutations
+retain their existing index/cache invalidation paths.
+
+Shared native/WASM cases cover binary/tagged-JSON document token equivalence,
+token count bounds, collection filters, BM25 ordering, replacement/removal and
+cache eviction/batch invalidation. Native integration additionally checks a
+binary document inserted and its collection dropped through `UnifiedStore` against the shared
+index/cache types. Public browser stored-data queries and durable application
+transaction publication still require the remaining store/runtime integration.
+
+Cost sketch: one indexed entity emits at most the existing token/pair bounds;
+cache lookup retains the existing per-shard LRU touch of O(C/16) for capacity C.
+Relocation adds no second cache or index and no storage/IPC operation. No
+measured browser speed or memory-budget claim follows from these tests.

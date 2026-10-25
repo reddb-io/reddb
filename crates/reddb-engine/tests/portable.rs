@@ -125,3 +125,14 @@ fn portable_collection_lifecycle_conformance() {
         run();
     }
 }
+
+#[path = "support/read_indexes.rs"]
+mod read_indexes;
+
+#[test]
+fn portable_resident_read_index_conformance() {
+    for (name, run) in read_indexes::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

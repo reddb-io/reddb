@@ -56,6 +56,10 @@ mod snapshot;
 mod manager;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/read_indexes.rs"]
+mod read_indexes;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -69,7 +73,8 @@ pub fn run_conformance() -> String {
         .chain(segments::CASES.iter())
         .chain(metadata_codec::CASES.iter())
         .chain(snapshot::CASES.iter())
-        .chain(manager::CASES.iter());
+        .chain(manager::CASES.iter())
+        .chain(read_indexes::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

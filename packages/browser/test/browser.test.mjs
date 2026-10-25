@@ -84,6 +84,8 @@ async function sharedConformance(browserPage) {
     'manager_models_and_constraint_lock', 'manager_snapshot_key_versions',
     'manager_moderation_and_serializable_reads', 'manager_bounded_scan_and_consolidation',
     'manager_ordered_graph_candidates',
+    'resident_index_document_tokens', 'resident_index_replacement_and_scope',
+    'resident_entity_cache_invalidation',
   ])
 }
 
