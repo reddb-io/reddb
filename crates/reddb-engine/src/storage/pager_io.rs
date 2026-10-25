@@ -120,7 +120,12 @@ pub fn dwb_zone_offset() -> u64 {
 
 /// Clear the in-file DWB zone with valid reserved pages and sync it.
 pub fn clear_dwb_zone<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
-    for page_id in DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE {
+    clear_dwb_prefix(file, DWB_ZONE_PAGES)
+}
+
+fn clear_dwb_prefix<F: VfsFile>(file: &mut F, pages: u32) -> Result<(), PagerIoError> {
+    assert!(pages <= DWB_ZONE_PAGES, "clear stays inside the DWB zone");
+    for page_id in DWB_ZONE_START_PAGE..DWB_ZONE_START_PAGE + pages {
         let mut page = Page::new(PageType::Header, page_id);
         page.update_checksum();
         write_page(file, page_id, &page)?;
@@ -158,6 +163,9 @@ pub fn write_pages<F: VfsFile>(
     pages: &[(u32, Page)],
     double_write: bool,
 ) -> Result<(), PagerIoError> {
+    if pages.is_empty() {
+        return Ok(());
+    }
     if !double_write {
         for (page_id, page) in pages {
             write_page(file, *page_id, page)?;
@@ -165,6 +173,15 @@ pub fn write_pages<F: VfsFile>(
         return Ok(());
     }
 
+    // An opened pager has recovered/cleared this zone. Preserve untouched
+    // reserved pages rather than rewriting 1 MiB after each small eviction.
+    // Raw byte-I/O callers may start with an empty file: initialize the full
+    // zone in that case, retaining the existing on-disk shape.
+    let mut clear_pages = if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+        DWB_ZONE_PAGES
+    } else {
+        0
+    };
     for chunk in pages.chunks(DWB_MAX_PAGES_PER_FRAME.max(1)) {
         let buffer = reddb_file::encode_paged_dwb_frame(
             chunk
@@ -172,6 +189,10 @@ pub fn write_pages<F: VfsFile>(
                 .map(|(page_id, page)| (*page_id, page.as_bytes())),
         );
         assert!(buffer.len() <= DWB_ZONE_BYTES, "DWB frame fits its zone");
+        clear_pages = clear_pages.max(
+            u32::try_from(buffer.len().div_ceil(PAGE_SIZE))
+                .expect("frame page count is bounded by the DWB zone"),
+        );
         file.seek(SeekFrom::Start(dwb_zone_offset()))?;
         file.write_all(&buffer)?;
         file.sync_all()?;
@@ -183,11 +204,11 @@ pub fn write_pages<F: VfsFile>(
     // Each frame's home pages are durable before the next frame replaces its
     // staging image. An interrupted replacement can replay the old frame or
     // discard an incomplete new one: neither can lose those durable homes.
-    // Only the final frame needs clearing before returning to the owner.
-    if !pages.is_empty() {
-        clear_dwb_zone(file)?;
-    }
-    Ok(())
+    // Clear the largest overwritten prefix, including earlier larger frames.
+    // Every touched page is restored to the same checksummed reserved image;
+    // the untouched suffix was already clear. Recovery still clears the full
+    // zone after an interrupted write, when the old high-water mark is unknown.
+    clear_dwb_prefix(file, clear_pages)
 }
 
 /// Replay a complete staged DWB frame before allowing page access. Incomplete

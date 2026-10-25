@@ -59,7 +59,7 @@ async function sharedConformance(browserPage) {
     'btree_persisted_round_trip', 'btree_reclamation_and_cursor_lifetime', 'btree_bounds_and_corruption',
     'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
     'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
-    'pager_barriers_and_restart', 'pager_failure_boundaries',
+    'pager_barriers_and_restart', 'pager_small_frames_and_fresh_files', 'pager_failure_boundaries',
     'pager_multiframe_checkpoint_io_and_crash_recovery',
     'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
     'pager_recovery_failure_boundaries',

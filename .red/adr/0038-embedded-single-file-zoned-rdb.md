@@ -90,6 +90,17 @@ writer latency and the larger Platform copy still require qualification before
 fleet activation. The smaller local reproduction is the before/after regression
 workload. Incremental publication remains required to remove this exception.
 
+2026-10-25 amendment — successful double-write publication restores only the
+largest page-aligned prefix overwritten by that call's frames. Untouched reserved
+pages retain their existing checksums. Raw byte-I/O on a new short file still
+initializes the complete zone. Interrupted-write recovery clears the full zone,
+because the prior frame high-water mark is unknown. Staging sync, home-page sync
+and final clear sync remain in the same order; the disk format does not change.
+Cost sketch: one protected 16 KiB page previously wrote 1,081,360 bytes including
+the 1 MiB clear; restoring its two touched reserved pages writes 65,552 bytes,
+about 16.5 times less I/O with the same three sync barriers. This bounds clearing
+work by the touched prefix, not the complete checkpoint or writer latency.
+
 ### 4. Phases with exit criteria (the honesty mechanism)
 
 Each sidecar family retires only when its phase's exit criteria hold. A phase

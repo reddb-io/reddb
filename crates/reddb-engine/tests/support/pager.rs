@@ -137,10 +137,56 @@ pub fn pager_barriers_and_restart() {
         ]
     );
     assert_eq!(operations.last(), Some(&Operation::Sync));
-    assert_eq!(operations.len(), 5 + pager_io::DWB_ZONE_PAGES as usize);
+    let written_bytes: usize = operations
+        .iter()
+        .map(|operation| match operation {
+            Operation::Write(_, len) => *len,
+            Operation::Sync => 0,
+        })
+        .sum();
+    assert!(
+        written_bytes <= 5 * PAGE_SIZE,
+        "one protected page must not rewrite the entire recovery zone: {written_bytes} bytes"
+    );
+    eprintln!("protected_page_written_bytes={written_bytes}");
     drop(operations);
+    let start = usize::try_from(pager_io::dwb_zone_offset()).expect("bounded zone offset");
+    assert!(pager_io::dwb_zone_is_clear(
+        &file.bytes.borrow()[start..start + pager_io::DWB_ZONE_BYTES]
+    ));
     let mut reopened = MemoryFile::from_bytes(file.durable.into_inner());
     restart::recover(&mut reopened).expect("restart and repeated recovery preserve pages");
+}
+
+pub fn pager_small_frames_and_fresh_files() {
+    let mut file = MemoryFile::default();
+    let start = usize::try_from(pager_io::dwb_zone_offset()).expect("bounded zone offset");
+    // Exercise the raw byte-I/O API before a pager has initialized its zone,
+    // then a smaller write after a larger frame on that same file.
+    for count in [7, 1, 9, 2] {
+        let pages: Vec<_> = (0..count)
+            .map(|index| {
+                let id = restart::PAGE_ID + u32::try_from(index).expect("bounded page ID");
+                let mut page = Page::new(PageType::BTreeLeaf, id);
+                page.insert_cell(b"key", b"after")
+                    .expect("fixture cell fits");
+                page.update_checksum();
+                (id, page)
+            })
+            .collect();
+        pager_io::write_pages(&mut file, &pages, true).expect("protected short frame");
+        assert!(pager_io::dwb_zone_is_clear(
+            &file.bytes.borrow()[start..start + pager_io::DWB_ZONE_BYTES]
+        ));
+        for (id, expected) in pages {
+            let actual = pager_io::read_page(&mut file, id, true).expect("home page survives");
+            assert_eq!(actual.as_bytes(), expected.as_bytes());
+        }
+    }
+    file.fail_len.set(true);
+    file.operations.borrow_mut().clear();
+    pager_io::write_pages(&mut file, &[], true).expect("empty batch performs no I/O");
+    assert!(file.operations.borrow().is_empty());
 }
 
 pub fn pager_failure_boundaries() {
@@ -278,6 +324,10 @@ pub fn pager_multiframe_checkpoint_io_and_crash_recovery() {
         2 * frames + 1
     );
     let operations = operations.clone();
+    let start = usize::try_from(pager_io::dwb_zone_offset()).expect("bounded zone offset");
+    assert!(pager_io::dwb_zone_is_clear(
+        &successful.bytes.borrow()[start..start + pager_io::DWB_ZONE_BYTES]
+    ));
     for (index, operation) in operations.iter().enumerate() {
         let fail_at = index + 1;
         let prefixes = match operation {
@@ -721,7 +771,7 @@ pub fn pager_orchestration_allocation_fence() {
     }
 }
 
-pub const CASES: [(&str, fn()); 14] = [
+pub const CASES: [(&str, fn()); 15] = [
     (
         "btree_persisted_round_trip",
         btree::btree_persisted_round_trip,
@@ -752,6 +802,10 @@ pub const CASES: [(&str, fn()); 14] = [
         pager_orchestration_open_policy,
     ),
     ("pager_barriers_and_restart", pager_barriers_and_restart),
+    (
+        "pager_small_frames_and_fresh_files",
+        pager_small_frames_and_fresh_files,
+    ),
     ("pager_failure_boundaries", pager_failure_boundaries),
     (
         "pager_multiframe_checkpoint_io_and_crash_recovery",
