@@ -755,3 +755,36 @@ Cost sketch: P argument AST nodes retain O(P) traversal plus typed evaluation,
 existing value clones and B-byte literal parsing; nested legacy arrays retain
 repeated substring scans bounded by depth 128. The extraction adds no storage
 scan/write, network traffic or IPC and claims no measured speedup.
+
+
+## Shared native common scalar dispatcher
+
+`reddb-engine::query::runtime::scalar_functions` owns the legacy projection
+arms for arithmetic, CASE, CAST, COALESCE, concatenation, case conversion,
+character/byte/bit lengths, reversal, ABS/ROUND and MONEY construction/accessors.
+The server delegates to those same arms. The host supplies optional argument
+resolution with input admission, database-free CASE conditions and the remaining
+specialized/effectful fallback. Native database-aware dispatch still runs before
+this shared layer. No new dependency or alternative JavaScript evaluator is added.
+
+Legacy names stay case-sensitive after stripping an output alias suffix.
+Missing arguments retain None independently of SQL NULL. CASE and COALESCE
+retain branch/argument short-circuiting; CONCAT variants retain their distinct
+NULL handling and plain-text/display-string conversions. MONEY retains its
+one-versus-two-argument error behavior and reversed retry/admission order.
+Native numeric, typed-evaluator and output-secret policies are unchanged.
+Clock/session/crypto/geo, regex and remaining text functions stay in the host.
+
+Shared native/WASM cases exercise results, Unicode lengths, malformed/missing
+arguments, fallback without eager resolution, branch short-circuiting, money
+retry order and input denial. The offline OPFS fixture now projects CASE over
+recovered quantities and concatenates nullable names with CAST values across
+WAL recovery, an update and checkpoint, with full browser restarts and the HTTP
+listener stopped. This test-only host remains partial. Public stored-query and
+application-transaction capability flags remain false.
+
+Cost sketch: N rows retain their existing per-call argument/condition visits;
+CASE/COALESCE skip unselected arguments, text operations scan their existing B
+bytes/characters and allocate their existing output strings, and MONEY performs
+at most two coercions. The move adds no storage scan/write, network call or IPC
+and claims no measured speedup.
