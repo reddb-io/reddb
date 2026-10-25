@@ -111,6 +111,10 @@ async function sharedConformance(browserPage) {
     'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
     'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
     'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
+    'record_projection_fields_aliases_and_literals', 'record_projection_star_and_column_layout',
+    'record_projection_document_paths', 'record_projection_bindings_and_window_output',
+    'record_projection_typed_values_and_labels', 'record_projection_fallback_and_data_errors',
+    'record_projection_secret_sensitivity', 'record_projection_output_policy_and_redaction',
   ])
 }
 
@@ -698,7 +702,7 @@ for (const browser of browsers) {
       } finally { await context.setOffline(false) }
     })
 
-    storageTest('canonical WHERE and ORDER BY recover rows after offline WAL and checkpoint restarts', async () => {
+    storageTest('canonical projection, WHERE and ORDER BY recover rows after offline WAL and checkpoint restarts', async () => {
       async function fixture(phase) {
         const current = await page()
         try {

@@ -22,6 +22,17 @@ mod record_filters_restart;
 #[path = "support/record_ordering.rs"]
 mod record_ordering;
 
+#[path = "support/record_projection.rs"]
+mod record_projection;
+
+#[test]
+fn portable_record_projection_conformance() {
+    for (name, run) in record_projection::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_record_ordering_conformance() {
     for (name, run) in record_ordering::CASES {

@@ -1,4 +1,4 @@
-//! RQL WHERE/ORDER BY over recovered records, without a public query runtime.
+//! RQL projection/WHERE/ORDER BY over recovered records, without a public dispatcher.
 use reddb_engine::catalog::{
     codec::*, enforcement::CollectionContractEnforcer, CollectionContract,
 };
@@ -100,6 +100,7 @@ fn verify<F: VfsFile>(
         })
         .collect();
     super::record_ordering::verify_recovered(&records, contract, updated);
+    super::record_projection::verify_recovered(&records, contract, updated);
     let mut counts = vec![];
     for predicate in [
         "rid = 9007199254740993",
