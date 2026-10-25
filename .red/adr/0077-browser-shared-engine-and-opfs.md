@@ -614,3 +614,40 @@ Cost sketch: N admitted records retain their existing per-record predicate,
 comparison and path-resolution work, with statically dispatched callbacks and
 nullable catalog lookup only after a miss. Relocation adds no scans, files,
 network traffic or IPC, and claims no measured performance gain.
+
+## Shared runtime ordering and top-K
+
+`reddb-engine::query::runtime::ordering` owns the native ORDER BY comparison,
+flat-buffer sort-key extraction, stable full sort and quickselect top-K. Native
+entry points delegate to these same algorithms. The host supplies expression
+evaluation, secret input admission and identity-key construction; native
+expression misses retain their absent-key behavior. The environment-controlled
+top-K kill-switch stays in the native adapter and becomes an explicit boolean
+at the shared boundary. Record admission, visibility and validation remain host
+responsibilities.
+
+Existing optional-key/NULL and direction semantics, abbreviated text keys,
+exact integer comparison and record cloning remain unchanged. Pairwise
+comparison retains its identity-key fallback; full sort and top-K retain stable
+input-order ties. These are distinct native behaviors, not a new unified tie
+policy. Top-K still selects only the `offset + limit` prefix when worthwhile;
+the caller applies the actual OFFSET/LIMIT. Bounds that exceed `usize::MAX`
+saturate instead of wrapping on wasm32, preventing a wide SQL bound from
+silently selecting a small prefix.
+
+Shared native/WASM cases cover signed/unsigned integers beyond JavaScript's
+exact range, missing/NULL keys, mixed directions, text-prefix collisions,
+expression evaluation once per row/key, stable top-K parity, disabled top-K,
+wide bounds, identity/secret callbacks and NaN edge behavior. The existing
+test-only OPFS recovery fixture now also evaluates parsed WHERE/ORDER BY queries
+with LIMIT/OFFSET over recovered generated fields, nullable columns and JSON
+paths, before/after an update and checkpoint, with full offline browser
+restarts and the HTTP host stopped. This composition over supplied records is
+not a public stored-query dispatcher; browser stored-query and application
+transaction capability flags remain false.
+
+Cost sketch: N records and K ordering clauses retain O(N * K) key extraction
+and key storage, O(N log N) full-sort comparisons or average O(N) selection plus
+O(L log L) prefix sorting for L = offset + limit, and the existing output
+record clones. The move adds no scan, file write, network traffic or IPC; no
+measured speedup is claimed.

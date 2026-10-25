@@ -19,6 +19,17 @@ mod record_filters;
 #[path = "support/record_filters_restart.rs"]
 mod record_filters_restart;
 
+#[path = "support/record_ordering.rs"]
+mod record_ordering;
+
+#[test]
+fn portable_record_ordering_conformance() {
+    for (name, run) in record_ordering::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_record_filter_conformance() {
     for (name, run) in record_filters::CASES {

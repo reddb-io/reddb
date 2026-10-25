@@ -1,4 +1,4 @@
-// Test-only WHERE over recovered records; the public SQL runtime is still pending.
+// Test-only WHERE/ORDER BY over recovered records; the public SQL runtime is pending.
 import init, { runRecordFilterFixture } from './wasm/pager.js'
 
 self.onmessage = async ({ data: { phase } }) => {

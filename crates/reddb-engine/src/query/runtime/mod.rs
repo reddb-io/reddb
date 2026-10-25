@@ -1,6 +1,7 @@
 //! Canonical record-level runtime semantics. Hosts retain read admission and secret policy.
 pub mod field_resolution;
 pub mod filter;
+pub mod ordering;
 pub mod values;
 
 pub fn is_universal_entity_source(table: &str) -> bool {

@@ -22,6 +22,10 @@ mod record_filters;
 mod record_filters_restart;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/record_ordering.rs"]
+mod record_ordering;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/codec_corpus.rs"]
 mod codec_corpus;
 
@@ -115,7 +119,8 @@ pub fn run_conformance() -> String {
         .chain(resident_file::CASES.iter())
         .chain(catalog::CASES.iter())
         .chain(enforcement::CASES.iter())
-        .chain(record_filters::CASES.iter());
+        .chain(record_filters::CASES.iter())
+        .chain(record_ordering::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

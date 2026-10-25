@@ -1,4 +1,4 @@
-//! RQL WHERE over recovered records, without exposing a public query runtime.
+//! RQL WHERE/ORDER BY over recovered records, without a public query runtime.
 use reddb_engine::catalog::{
     codec::*, enforcement::CollectionContractEnforcer, CollectionContract,
 };
@@ -83,7 +83,11 @@ fn seed<F: VfsFile>(
     Ok(())
 }
 
-fn verify<F: VfsFile>(store: &EmbeddedResidentStore<F>, contract: &CollectionContract) -> Vec<u32> {
+fn verify<F: VfsFile>(
+    store: &EmbeddedResidentStore<F>,
+    contract: &CollectionContract,
+    updated: bool,
+) -> Vec<u32> {
     let records: Vec<UnifiedRecord> = IDS
         .iter()
         .map(|id| {
@@ -95,6 +99,7 @@ fn verify<F: VfsFile>(store: &EmbeddedResidentStore<F>, contract: &CollectionCon
                 .expect("canonical record")
         })
         .collect();
+    super::record_ordering::verify_recovered(&records, contract, updated);
     let mut counts = vec![];
     for predicate in [
         "rid = 9007199254740993",
@@ -157,7 +162,7 @@ pub fn run<F: VfsFile>(file: F, phase: u32) -> Result<Vec<u32>, Box<dyn Error>> 
             assert!(store.state()?.manifest.wal_live_bytes > 0);
         }
         1 => {
-            assert_eq!(verify(&store, contract), [1, 1, 1, 4, 4, 2, 2]);
+            assert_eq!(verify(&store, contract, false), [1, 1, 1, 4, 4, 2, 2]);
             let (entity, metadata) = store
                 .get("orders", EntityId::new(IDS[0]))?
                 .expect("row to update");
@@ -181,7 +186,7 @@ pub fn run<F: VfsFile>(file: F, phase: u32) -> Result<Vec<u32>, Box<dyn Error>> 
         2 => assert_eq!(store.state()?.manifest.wal_live_bytes, 0),
         _ => return Err(std::io::Error::other("invalid record-filter fixture phase").into()),
     }
-    let counts = verify(&store, contract);
+    let counts = verify(&store, contract, phase != 0);
     assert_eq!(
         counts,
         if phase == 0 {

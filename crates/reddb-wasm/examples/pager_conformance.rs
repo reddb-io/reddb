@@ -2,6 +2,11 @@
 
 #[cfg(target_arch = "wasm32")]
 #[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/record_ordering.rs"]
+mod record_ordering;
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 #[path = "../../reddb-engine/tests/support/record_filters.rs"]
 mod record_filters;
 
