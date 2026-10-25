@@ -34,6 +34,122 @@ impl RedDB {
     }
 }
 
+#[cfg(test)]
+mod native_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn fulltext_snapshot_counts_and_posting_order_match_the_frame() {
+        let documents = vec![
+            (EntityId::new(3), "alpha alpha beta".to_string()),
+            (EntityId::new(1), "beta gamma".to_string()),
+            (EntityId::new(2), String::new()),
+        ];
+        let mut postings = BTreeMap::new();
+        for (entity_id, text) in &documents {
+            RedDB::native_fulltext_add_document(&mut postings, *entity_id, text);
+        }
+        let (bytes, counts) =
+            RedDB::serialize_native_fulltext_artifact("rows", documents.len() as u32, postings);
+        assert_eq!(counts, (3, 3, 4));
+        assert_eq!(
+            RedDB::inspect_native_fulltext_artifact(&bytes).expect("fulltext counts"),
+            counts
+        );
+        let frame = reddb_file::decode_native_fulltext_frame(&bytes).expect("fulltext frame");
+        let beta = frame
+            .terms
+            .iter()
+            .find(|term| term.term == "beta")
+            .expect("beta term");
+        assert_eq!(
+            beta.postings
+                .iter()
+                .map(|posting| (posting.entity_id, posting.term_count))
+                .collect::<Vec<_>>(),
+            vec![(3, 1), (1, 1)]
+        );
+        let expected = reddb_file::NativeFulltextFrame {
+            collection: "rows".to_string(),
+            doc_count: 3,
+            terms: vec![
+                reddb_file::NativeFulltextTerm {
+                    term: "alpha".to_string(),
+                    postings: vec![reddb_file::NativeFulltextPosting {
+                        entity_id: 3,
+                        term_count: 2,
+                    }],
+                },
+                reddb_file::NativeFulltextTerm {
+                    term: "beta".to_string(),
+                    postings: vec![
+                        reddb_file::NativeFulltextPosting {
+                            entity_id: 3,
+                            term_count: 1,
+                        },
+                        reddb_file::NativeFulltextPosting {
+                            entity_id: 1,
+                            term_count: 1,
+                        },
+                    ],
+                },
+                reddb_file::NativeFulltextTerm {
+                    term: "gamma".to_string(),
+                    postings: vec![reddb_file::NativeFulltextPosting {
+                        entity_id: 1,
+                        term_count: 1,
+                    }],
+                },
+            ],
+        };
+        assert_eq!(bytes, reddb_file::encode_native_fulltext_frame(&expected));
+    }
+
+    #[test]
+    fn document_snapshot_keeps_duplicate_entries_and_distinct_path_counts() {
+        let (bytes, counts) = RedDB::serialize_native_document_pathvalue_artifact(
+            "rows",
+            vec![
+                (
+                    EntityId::new(7),
+                    vec![
+                        ("path.a".to_string(), "shared".to_string()),
+                        ("path.b".to_string(), "one".to_string()),
+                        ("path.a".to_string(), "shared".to_string()),
+                    ],
+                ),
+                (
+                    EntityId::new(3),
+                    vec![
+                        ("path.a".to_string(), "shared".to_string()),
+                        ("path.b".to_string(), String::new()),
+                        ("path.c".to_string(), "two".to_string()),
+                    ],
+                ),
+            ],
+        );
+        assert_eq!(counts, (2, 3, 6));
+        assert_eq!(
+            RedDB::inspect_native_document_pathvalue_artifact(&bytes).expect("document counts"),
+            (2, 3, 6, 4)
+        );
+        let frame = reddb_file::decode_native_doc_pathvalue_frame(&bytes).expect("document frame");
+        assert_eq!(
+            frame
+                .docs
+                .iter()
+                .map(|doc| doc.entity_id)
+                .collect::<Vec<_>>(),
+            vec![7, 3]
+        );
+        assert_eq!(frame.docs[0].entries[0].path, frame.docs[0].entries[2].path);
+        assert_eq!(
+            frame.docs[0].entries[0].value,
+            frame.docs[0].entries[2].value
+        );
+    }
+}
+
 impl RedDB {
     pub(crate) fn native_registry_summary_from_metadata(
         &self,
@@ -148,42 +264,50 @@ impl RedDB {
             let Some(manager) = self.store.get_collection(&collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
             let mut vectors = Vec::new();
             let mut graph_edges = Vec::new();
-            let mut fulltext_documents = Vec::new();
+            let mut fulltext_doc_count = 0;
+            let mut fulltext_postings = BTreeMap::new();
             let mut document_records = Vec::new();
-            for entity in entities {
-                match entity.data {
+            // Derivation reads raw values, not the owned read's restored schema.
+            // Preserve segment iteration order without cloning the collection.
+            manager.for_each_entity(|entity| {
+                match &entity.data {
                     EntityData::Vector(vector) => {
                         if !vector.dense.is_empty() {
-                            vectors.push((entity.id, vector.dense));
+                            vectors.push((entity.id, vector.dense.clone()));
                         }
                     }
                     EntityData::Edge(edge) => {
-                        if let EntityKind::GraphEdge(edge_kind) = entity.kind {
+                        if let EntityKind::GraphEdge(edge_kind) = &entity.kind {
                             graph_edges.push((
                                 entity.id,
-                                edge_kind.from_node,
-                                edge_kind.to_node,
-                                edge_kind.label,
+                                edge_kind.from_node.clone(),
+                                edge_kind.to_node.clone(),
+                                edge_kind.label.clone(),
                                 edge.weight,
                             ));
                         }
                     }
                     data => {
-                        let text = Self::native_fulltext_text_for_entity(&data);
+                        let text = Self::native_fulltext_text_for_entity(data);
                         if !text.trim().is_empty() {
-                            fulltext_documents.push((entity.id, text));
+                            fulltext_doc_count += 1;
+                            Self::native_fulltext_add_document(
+                                &mut fulltext_postings,
+                                entity.id,
+                                &text,
+                            );
                         }
                         if let Some(document) =
-                            Self::native_document_pathvalue_for_entity(entity.id, &data)
+                            Self::native_document_pathvalue_for_entity(entity.id, data)
                         {
                             document_records.push(document);
                         }
                     }
                 }
-            }
+                true
+            });
             if !vectors.is_empty() {
                 let dimension = vectors[0].1.len();
                 let mut hnsw = HnswIndex::with_dimension(dimension);
@@ -260,11 +384,13 @@ impl RedDB {
                 artifacts.push((summary, bytes));
             }
 
-            if !fulltext_documents.is_empty() {
-                let bytes =
-                    Self::serialize_native_fulltext_artifact(&collection, &fulltext_documents);
-                let (doc_count, term_count, posting_count) =
-                    Self::inspect_native_fulltext_artifact(&bytes).unwrap_or((0, 0, 0));
+            if fulltext_doc_count != 0 {
+                let (bytes, (doc_count, term_count, posting_count)) =
+                    Self::serialize_native_fulltext_artifact(
+                        &collection,
+                        fulltext_doc_count,
+                        fulltext_postings,
+                    );
                 let summary = NativeVectorArtifactSummary {
                     collection: collection.clone(),
                     artifact_kind: "text.fulltext".to_string(),
@@ -278,14 +404,11 @@ impl RedDB {
             }
 
             if !document_records.is_empty() {
-                let bytes = Self::serialize_native_document_pathvalue_artifact(
-                    &collection,
-                    &document_records,
-                );
-                let (doc_count, path_count, value_count, unique_value_count) =
-                    Self::inspect_native_document_pathvalue_artifact(&bytes)
-                        .unwrap_or((0, 0, 0, 0));
-                let _ = unique_value_count;
+                let (bytes, (doc_count, path_count, value_count)) =
+                    Self::serialize_native_document_pathvalue_artifact(
+                        &collection,
+                        document_records,
+                    );
                 let summary = NativeVectorArtifactSummary {
                     collection: collection.clone(),
                     artifact_kind: "document.pathvalue".to_string(),
@@ -337,24 +460,30 @@ impl RedDB {
         Ok((edge_count, nodes.len() as u64, labels.len() as u32))
     }
 
+    fn native_fulltext_add_document(
+        postings: &mut BTreeMap<String, Vec<(u64, u32)>>,
+        entity_id: EntityId,
+        text: &str,
+    ) {
+        let mut frequencies: BTreeMap<String, u32> = BTreeMap::new();
+        for token in Self::native_fulltext_tokenize(text) {
+            *frequencies.entry(token).or_insert(0) += 1;
+        }
+        for (token, count) in frequencies {
+            postings
+                .entry(token)
+                .or_default()
+                .push((entity_id.raw(), count));
+        }
+    }
+
     fn serialize_native_fulltext_artifact(
         collection: &str,
-        documents: &[(EntityId, String)],
-    ) -> Vec<u8> {
-        let mut postings: BTreeMap<String, Vec<(u64, u32)>> = BTreeMap::new();
-        for (entity_id, text) in documents {
-            let mut frequencies: BTreeMap<String, u32> = BTreeMap::new();
-            for token in Self::native_fulltext_tokenize(text) {
-                *frequencies.entry(token).or_insert(0) += 1;
-            }
-            for (token, count) in frequencies {
-                postings
-                    .entry(token)
-                    .or_default()
-                    .push((entity_id.raw(), count));
-            }
-        }
-
+        doc_count: u32,
+        postings: BTreeMap<String, Vec<(u64, u32)>>,
+    ) -> (Vec<u8>, (u64, u64, u64)) {
+        let term_count = postings.len() as u64;
+        let posting_count = postings.values().map(|items| items.len() as u64).sum();
         let terms = postings
             .into_iter()
             .map(|(term, postings)| reddb_file::NativeFulltextTerm {
@@ -370,11 +499,12 @@ impl RedDB {
                     .collect(),
             })
             .collect();
-        reddb_file::encode_native_fulltext_frame(&reddb_file::NativeFulltextFrame {
+        let bytes = reddb_file::encode_native_fulltext_frame(&reddb_file::NativeFulltextFrame {
             collection: collection.to_string(),
-            doc_count: documents.len() as u32,
+            doc_count,
             terms,
-        })
+        });
+        (bytes, (doc_count as u64, term_count, posting_count))
     }
 
     pub(crate) fn inspect_native_fulltext_artifact(
@@ -395,25 +525,34 @@ impl RedDB {
 
     fn serialize_native_document_pathvalue_artifact(
         collection: &str,
-        documents: &[(EntityId, Vec<(String, String)>)],
-    ) -> Vec<u8> {
-        let docs: Vec<reddb_file::NativeDocPathValue> = documents
+        documents: Vec<(EntityId, Vec<(String, String)>)>,
+    ) -> (Vec<u8>, (u64, u64, u64)) {
+        let doc_count = documents.len() as u64;
+        let value_count = documents
             .iter()
+            .map(|(_, entries)| entries.len() as u64)
+            .sum();
+        let path_count = documents
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|(path, _)| path.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len() as u64;
+        let docs: Vec<reddb_file::NativeDocPathValue> = documents
+            .into_iter()
             .map(|(entity_id, entries)| reddb_file::NativeDocPathValue {
                 entity_id: entity_id.raw(),
                 entries: entries
-                    .iter()
-                    .map(|(path, value)| reddb_file::NativeDocPathValueEntry {
-                        path: path.clone(),
-                        value: value.clone(),
-                    })
+                    .into_iter()
+                    .map(|(path, value)| reddb_file::NativeDocPathValueEntry { path, value })
                     .collect(),
             })
             .collect();
-        reddb_file::encode_native_doc_pathvalue_frame(&reddb_file::NativeDocPathValueFrame {
-            collection: collection.to_string(),
-            docs,
-        })
+        let bytes =
+            reddb_file::encode_native_doc_pathvalue_frame(&reddb_file::NativeDocPathValueFrame {
+                collection: collection.to_string(),
+                docs,
+            });
+        (bytes, (doc_count, path_count, value_count))
     }
 
     pub(crate) fn inspect_native_document_pathvalue_artifact(

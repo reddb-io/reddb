@@ -128,3 +128,33 @@ or credentials; they do not change publication order or fix the memory failure.
 cargo test --locked -p reddb-io-engine --lib snapshot_scan_does_not_miss_a_sealed_entity_moving_into_growing
 cargo test --locked -p reddb-io-engine --lib
 ```
+
+## Native publication memory regressions
+
+The released 1.26.8 container also exhausted a 512 MiB cgroup with a 256 MiB
+engine budget after acknowledging 60,000 synthetic JSON-text rows. Creating an
+unrelated empty table triggers native secondary-artifact publication. Borrowed
+row traversal, ownership transfer and direct summary counting remove whole-row
+copies, but did not alone pass the constrained case. Building fulltext postings
+one source row at a time removes the additional collection of text strings.
+
+A separate allocator regression identified another publication spike: flushing
+8,192 dirty 16 KiB pages (128 MiB) allocated 268,500,992 extra bytes. The pager
+materialized the entire dirty cache and extended another page-image vector.
+Taking compact cache IDs and staging at most 256 page images per batch reduced
+the measured extra peak to 5,261,560 bytes. Each batch retains its WAL-before-home
+barrier and double-write protection; the header follows all batches. The test
+checks every page after cold reopen. Failed resident batches remain dirty.
+
+All 400 engine unit tests, 17 portable integration tests, native artifact shrink,
+fulltext allocation/cold-reopen and freelist dirty-eviction regressions passed.
+Tests use an owned temporary directory because the host's quota-enabled `/tmp`
+returned EDQUOT; the failed attempt is retained separately from its same-source
+successful retry. These are candidate measurements, not fleet acceptance.
+
+On source `6ace5e4fd` plus the pager/text-memory patch, both debug and optimized
+local binaries acknowledge all 60,000 rows, create the unrelated table and
+complete an explicit checkpoint without OOM. Optimized checkpoint time is
+1.889 s. The optimized binary still exhausts memory while rebuilding native
+artifacts during graceful shutdown; debug completes without an OOM. This is a
+remaining acceptance failure. No stable publication or live rollout is admitted.

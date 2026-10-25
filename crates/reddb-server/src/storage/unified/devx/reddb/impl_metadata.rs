@@ -1386,14 +1386,8 @@ impl RedDB {
             )?;
         tracing::debug!(target: "reddb::checkpoint", "native artifact payload preparation started");
         let vector_artifact_payloads = vector_artifact_records
-            .iter()
-            .map(|(summary, bytes)| {
-                (
-                    summary.collection.clone(),
-                    summary.artifact_kind.clone(),
-                    bytes.clone(),
-                )
-            })
+            .into_iter()
+            .map(|(summary, bytes)| (summary.collection, summary.artifact_kind, bytes))
             .collect::<Vec<_>>();
         tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication started");
         let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) =
@@ -1401,6 +1395,9 @@ impl RedDB {
                 &vector_artifact_payloads,
                 existing_vector_artifact_page,
             )?;
+        // The pager owns these bytes now. Do not retain a second artifact set
+        // across the store flush and its dirty-page staging buffers.
+        drop(vector_artifact_payloads);
         tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication finished");
         let mut header = Self::native_header_from_metadata(metadata);
         header.manifest_page = manifest_page;

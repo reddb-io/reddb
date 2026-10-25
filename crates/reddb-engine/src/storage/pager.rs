@@ -891,22 +891,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             self.cache.mark_dirty(page_id);
         }
 
-        // Flush dirty pages from cache (through DWB if enabled)
-        dirty_pages.extend(self.cache.flush_dirty());
-        if !dirty_pages.is_empty() {
-            // WAL-FIRST: ensure every WAL record describing a dirty
-            // page is durable BEFORE the page itself reaches disk.
-            // Pages with `lsn == 0` are exempt (freelist trunks, header
-            // shadow pages, anything not produced by a WAL append).
-            let max_lsn = dirty_pages
-                .iter()
-                .filter_map(|(_, page)| page.header().ok().map(|h| h.lsn))
-                .max()
-                .unwrap_or(0);
-            if max_lsn > 0 {
-                self.wal.flush_until(max_lsn)?;
-            }
-            self.write_pages_through_dwb(&dirty_pages)?;
+        // IDs are compact; page images are not. At 16 KiB per page, staging
+        // 256 images plus one DWB frame uses about 5 MiB, independently of
+        // the dirty cache size. Publish the header only after every batch.
+        const FLUSH_BATCH_PAGES: usize = 256;
+        for batch in dirty_pages.chunks(FLUSH_BATCH_PAGES) {
+            self.write_dirty_page_batch(batch)?;
+        }
+        drop(dirty_pages);
+        let page_ids = self.cache.page_ids();
+        for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
+            let pages = self.cache.flush_dirty_pages(ids);
+            self.write_dirty_page_batch(&pages)?;
         }
 
         // Write header if dirty
@@ -915,6 +911,32 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
 
         Ok(())
+    }
+
+    fn write_dirty_page_batch(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        // Every image's WAL must be durable before its home write, including
+        // dirty data evicted while publishing freelist trunks. LSN zero is
+        // reserved for pages not produced by a WAL append.
+        let result = (|| {
+            let max_lsn = pages
+                .iter()
+                .filter_map(|(_, page)| page.header().ok().map(|header| header.lsn))
+                .max()
+                .unwrap_or(0);
+            if max_lsn > 0 {
+                self.wal.flush_until(max_lsn)?;
+            }
+            self.write_pages_through_dwb(pages)
+        })();
+        if result.is_err() {
+            for (page_id, _) in pages {
+                self.cache.mark_dirty(*page_id);
+            }
+        }
+        result
     }
 
     /// Sync file to disk (fsync)
