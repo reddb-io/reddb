@@ -27,6 +27,10 @@ fn column(name: &str) -> PhysicalDeclaredColumnContract {
     PhysicalDeclaredColumnContract {
         name: name.into(),
         data_type: "integer".into(),
+        sql_type: Some(reddb_file::PhysicalSqlTypeName {
+            name: "integer".into(),
+            modifiers: vec![],
+        }),
         ..Default::default()
     }
 }
@@ -84,6 +88,43 @@ fn contract_round_trip() {
         expected.declared_model = model.into();
         expected.vector_dimension = Some(384);
         expected.vector_metric = Some("cosine".into());
+        expected.analytical_storage = Some(reddb_file::PhysicalAnalyticalStorageConfig {
+            columnar: true,
+            time_key: "time".into(),
+            order_by_key: Some("tenant".into()),
+        });
+        expected.subscriptions = vec![reddb_file::PhysicalSubscriptionDescriptor {
+            name: "order_events".into(),
+            source: "orders".into(),
+            target_queue: "events".into(),
+            ops_filter: vec!["insert".into(), "update".into(), "delete".into()],
+            where_filter: Some("quantity > 0".into()),
+            redact_fields: vec!["secret".into()],
+            enabled: true,
+            all_tenants: false,
+        }];
+        expected.ai_policy = Some(reddb_file::PhysicalAiPolicy {
+            embed: Some(reddb_file::PhysicalAiEmbedPolicy {
+                fields: vec!["body".into()],
+                provider: "fixture".into(),
+                model: "embedding".into(),
+            }),
+            moderate: Some(reddb_file::PhysicalAiModeratePolicy {
+                fields: vec!["body".into()],
+                provider: "fixture".into(),
+                model: "moderation".into(),
+                sync_gate: true,
+                degraded_mode: "closed".into(),
+                reject_action: "flag".into(),
+                hard_delete_on_reject: false,
+            }),
+            vision: Some(reddb_file::PhysicalAiVisionPolicy {
+                image_field: "image".into(),
+                output_kinds: vec!["caption".into()],
+                provider: "fixture".into(),
+                model: "vision".into(),
+            }),
+        });
         let native_json = reddb_file::encode_physical_collection_contract_json(&expected)
             .expect("canonical file codec");
         let decoded =
