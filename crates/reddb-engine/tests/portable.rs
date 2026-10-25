@@ -7,6 +7,20 @@ mod portable;
 #[path = "support/catalog.rs"]
 mod catalog;
 
+#[path = "support/enforcement.rs"]
+mod enforcement;
+
+#[path = "support/enforcement_restart.rs"]
+mod enforcement_restart;
+
+#[test]
+fn portable_contract_enforcement_conformance() {
+    for (name, run) in enforcement::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_catalog_conformance() {
     for (name, run) in catalog::CASES {

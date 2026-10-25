@@ -1,25 +1,19 @@
-//! Final-record expressions, evaluated before uniqueness, indexes and publication.
+//! Final-record expressions, before uniqueness, indexes and publication.
 use super::*;
+use crate::catalog::schema::generated_order;
 use reddb_rql::ast::FieldRef;
 use reddb_rql::schema_expression::SchemaExpression;
 use std::collections::BTreeMap;
 
-use reddb_engine::catalog::schema::generated_order;
-pub(crate) use reddb_engine::catalog::schema::has_contract_expressions;
-
-pub(crate) fn validate_contract_expressions(contract: &CollectionContract) -> RedDBResult<()> {
-    Ok(reddb_engine::catalog::schema::validate_contract_expressions(contract)?)
-}
-
-fn expression_error(column: &str, error: impl std::fmt::Display) -> crate::RedDBError {
-    crate::RedDBError::Query(format!("column '{column}' expression: {error}"))
+fn expression_error(column: &str, error: impl std::fmt::Display) -> ContractError {
+    ContractError::Query(format!("column '{column}' expression: {error}"))
 }
 
 pub(super) fn apply_contract_expressions(
     contract: &CollectionContract,
     columns: &[ResolvedColumnRule],
     fields: &mut Vec<(String, Value)>,
-) -> RedDBResult<()> {
+) -> ContractResult<()> {
     if !has_contract_expressions(contract) {
         return Ok(());
     }
@@ -29,14 +23,15 @@ pub(super) fn apply_contract_expressions(
         .collect();
     values.extend(fields.iter().cloned());
     let evaluate = |expression: &SchemaExpression, values: &BTreeMap<String, Value>| {
-        crate::storage::query::evaluator::evaluate(expression.expression(), &|field: &FieldRef| {
-            match field {
+        crate::query::evaluator::evaluate(
+            expression.expression(),
+            &|field: &FieldRef| match field {
                 FieldRef::TableColumn { table, column } if table.is_empty() => {
                     values.get(column).cloned()
                 }
                 _ => None,
-            }
-        })
+            },
+        )
     };
     for column in generated_order(contract)? {
         let expression = column

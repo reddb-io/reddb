@@ -947,6 +947,19 @@ impl From<crate::storage::wal::TxError> for RedDBError {
     }
 }
 
+impl From<reddb_engine::catalog::enforcement::ContractError> for RedDBError {
+    fn from(error: reddb_engine::catalog::enforcement::ContractError) -> Self {
+        match error {
+            reddb_engine::catalog::enforcement::ContractError::Query(message) => {
+                Self::Query(message)
+            }
+            reddb_engine::catalog::enforcement::ContractError::InvalidOperation(message) => {
+                Self::InvalidOperation(message)
+            }
+        }
+    }
+}
+
 impl From<reddb_engine::catalog::schema::ContractExpressionError> for RedDBError {
     fn from(error: reddb_engine::catalog::schema::ContractExpressionError) -> Self {
         Self::Query(error.message)
