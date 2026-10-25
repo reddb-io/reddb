@@ -95,6 +95,9 @@ async function sharedConformance(browserPage) {
     'resident_file_models_and_checkpoint', 'resident_file_owned_restart_fixture',
     'resident_file_rejected_batch_restores_committed_state', 'resident_file_publication_failure_boundaries',
     'resident_file_checkpoint_failure_boundaries', 'resident_file_wal_capacity_preserves_committed_state',
+    'catalog_contract_round_trip', 'catalog_legacy_defaults_and_corruption',
+    'catalog_schema_resolution', 'catalog_stored_expression_admission',
+    'catalog_immutable_cache_and_invalidation', 'catalog_snapshot_recovery',
   ])
 }
 
@@ -513,6 +516,48 @@ for (const browser of browsers) {
           await launch({ offline: true })
           assert.deepEqual(await recover(), { entities: 8, snapshot: nativeSnapshot })
           assert.equal(networkRequests.length, requestsBefore, 'offline snapshot recovery reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('collection contracts and stored expressions recover from OPFS after an offline browser restart', async () => {
+      async function recover(seed) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (seed) => {
+            const worker = new Worker('/packages/browser/test/catalog-worker.js', { type: 'module' })
+            const call = (snapshot) => new Promise((resolve, reject) => {
+              worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+              worker.onerror = (event) => reject(new Error(event.message))
+              worker.postMessage(snapshot)
+            })
+            const file = await RedDBBrowser.openArtifact({ name: 'catalog-snapshot-recovery' })
+            try {
+              if (seed) await file.checkpoint((await call(null)).snapshot)
+              const { contracts } = await call(await file.readSnapshot())
+              return contracts
+            } finally {
+              await file.close()
+              worker.terminate()
+            }
+          }, seed)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          assert.equal(await recover(true), 1)
+          await context.close()
+          await launch({ offline: true })
+          assert.equal(await recover(false), 1)
+          assert.equal(networkRequests.length, requestsBefore, 'offline catalog recovery reached the HTTP host')
         })
       } finally { await context.setOffline(false) }
     })

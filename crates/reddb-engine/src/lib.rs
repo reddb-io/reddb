@@ -15,6 +15,8 @@
     clippy::new_without_default
 )]
 
+#[doc(hidden)]
+pub mod catalog;
 mod clock;
 #[doc(hidden)]
 pub mod execution;

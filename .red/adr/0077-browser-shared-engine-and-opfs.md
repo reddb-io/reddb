@@ -525,3 +525,28 @@ WAL/root flush barriers, without a second resident-store copy. Rejected logical
 batches reload O(database + live WAL) bytes; overflow checkpoints serialize
 O(database) bytes and reserve the existing bounded headroom. No network call or
 measured performance gain is introduced.
+
+## Shared collection contracts and schema admission
+
+`reddb-engine::catalog` owns the native collection contract types, runtime/file
+codec mappings, immutable contract cache, column-rule resolution and stored
+expression validation/dependency ordering. Native paths alias the same types
+and functions; native query errors retain their existing messages and category.
+`reddb-file` remains the persisted JSON/table byte-format authority. This move
+does not change contract defaults, file versions or native metadata publication.
+
+Shared native/WASM cases cover model round trips, legacy defaults, corrupt
+contracts, typed table definitions, generated dependencies and invalid CHECKs,
+and cache snapshots across replacement, removal and invalidation. A test-only
+OPFS fixture persists a canonical resident snapshot containing a collection and
+its expression-bearing contract, restarts the entire browser offline with the
+HTTP listener stopped, and reconstructs/validates that catalog. Native cache
+tests retain their concurrent-load races. The host still owns DDL publication,
+mutation enforcement, authorization and transactions. Public stored-data RQL
+and application transactions remain pending; browser capability flags stay
+unchanged.
+
+Cost sketch: decoding C contracts with K total columns retains O(C + K) codec
+work, plus the existing dependency-order scan for generated columns. Updating
+an immutable cache with live readers copies O(C) Arc entries; relocating it
+adds no second catalog, file operation or IPC. No measured speedup is claimed.

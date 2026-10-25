@@ -171,6 +171,19 @@ fn server_does_not_own_physical_metadata_document_codec() {
         .split("#[cfg(test)]")
         .next()
         .expect("json_codec.rs has non-test source");
+    let catalog_codec = read(root.join("crates/reddb-engine/src/catalog/codec.rs"));
+    let runtime_codecs = format!("{json_codec_non_test}\n{catalog_codec}");
+    assert!(json_codec_non_test.contains("pub(super) use reddb_engine::catalog::codec::*;"));
+    for moved in [
+        "collection_contract_to_json",
+        "declared_column_contract_to_json",
+        "analytical_storage_to_json",
+        "subscription_descriptor_to_json",
+        "analytics_view_descriptor_to_json",
+    ] {
+        assert!(!json_codec_non_test.contains(&format!("fn {moved}")));
+        assert!(catalog_codec.contains(&format!("pub fn {moved}")));
+    }
     let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
 
     for forbidden in [
@@ -303,7 +316,7 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "expect_object(value, \"collection_contract\")",
     ] {
         assert!(
-            !json_codec_non_test.contains(forbidden),
+            !runtime_codecs.contains(forbidden),
             "physical metadata fragment codec belongs in reddb-file, found {forbidden:?}"
         );
     }
@@ -339,8 +352,8 @@ fn server_does_not_own_physical_metadata_document_codec() {
         "collection_contract_from_persisted",
     ] {
         assert!(
-            json_codec_non_test.contains(required),
-            "server physical metadata adapter should route through {required}"
+            runtime_codecs.contains(required),
+            "runtime physical metadata adapters should route through {required}"
         );
     }
 }

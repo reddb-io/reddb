@@ -5,6 +5,11 @@ on:
     paths:
       - 'crates/reddb-file/**'
       - 'crates/reddb-engine/**'
+      - 'crates/reddb-server/src/catalog.rs'
+      - 'crates/reddb-server/src/physical.rs'
+      - 'crates/reddb-server/src/physical/**'
+      - 'crates/reddb-server/src/application/collection_contract*'
+      - 'crates/reddb-server/src/storage/unified/devx/reddb/contract_cache.rs'
       - 'crates/reddb-server/src/storage/query/**'
       - 'crates/reddb-server/src/storage/engine/**'
       - 'crates/reddb-server/src/storage/transaction/**'
@@ -113,6 +118,12 @@ jobs:
           cargo test --locked -p reddb-io-server --lib runtime::table_row_mvcc_resolver
           cargo test --locked -p reddb-io --test grouped_mvcc_transactions
           cargo test --locked -p reddb-io-server --test vault_transactions --test vacuum_snapshot_horizon --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update
+      - name: Verify shared catalog through native schema enforcement and recovery
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked -p reddb-io-server --lib physical::json_codec
+          cargo test --locked -p reddb-io-server --lib storage::unified::devx::reddb::contract_cache
+          cargo test --locked -p reddb-io --test grouped_sql_core e2e_collection_expressions
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
         run: cargo check --locked --workspace --all-targets

@@ -4,6 +4,17 @@ mod codec_corpus;
 #[path = "support/portable.rs"]
 mod portable;
 
+#[path = "support/catalog.rs"]
+mod catalog;
+
+#[test]
+fn portable_catalog_conformance() {
+    for (name, run) in catalog::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[path = "support/storage.rs"]
 mod storage;
 
