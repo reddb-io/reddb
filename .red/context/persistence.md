@@ -80,6 +80,8 @@ and do not change the stored file format.
 When embedded options open an existing paged file, collection definitions remain
 in physical metadata. The binary dump's auxiliary contract blob is only used for
 an actual embedded artifact; paged checkpoints do not serialize that blob.
+Actual paged mode also retains native metadata and index-artifact publication
+when the selected options still carry the default embedded single-file profile.
 Catalog model snapshots reuse one physical metadata observation for their
 declared and operational resource lists; index reconciliation retains its native
 artifact checks and fallback when persisted index declarations are empty.

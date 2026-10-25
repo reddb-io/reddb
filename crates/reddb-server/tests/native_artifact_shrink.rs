@@ -19,6 +19,15 @@ fn fulltext_artifact(runtime: &RedDBRuntime) -> (u32, Vec<u8>) {
 
 #[test]
 fn vacuum_shrinks_native_fulltext_artifact_and_cold_reopens() {
+    qualify_shrink(false);
+}
+
+#[test]
+fn reopened_paged_default_profile_publishes_shrunk_native_artifacts() {
+    qualify_shrink(true);
+}
+
+fn qualify_shrink(reopen_with_default_profile: bool) {
     let directory = tempfile::tempdir().expect("temporary database");
     let path = directory.path().join("native-shrink.rdb");
     let options = || {
@@ -49,6 +58,14 @@ fn vacuum_shrinks_native_fulltext_artifact_and_cold_reopens() {
     let (pages_before, _) = fulltext_artifact(&runtime);
     assert!(pages_before > 1, "fixture must span multiple native pages");
 
+    let runtime = if reopen_with_default_profile {
+        drop(runtime);
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path))
+            .expect("existing paged file under the default embedded options")
+    } else {
+        runtime
+    };
+
     runtime
         .execute_query("DELETE FROM artifact_rows WHERE id >= 8")
         .expect("remove indexed rows");
@@ -60,7 +77,12 @@ fn vacuum_shrinks_native_fulltext_artifact_and_cold_reopens() {
     assert!(pages_after < pages_before);
     drop(runtime);
 
-    let recovered = RedDBRuntime::with_options(options()).expect("cold reopen");
+    let recovered = RedDBRuntime::with_options(if reopen_with_default_profile {
+        RedDBOptions::persistent(&path)
+    } else {
+        options()
+    })
+    .expect("cold reopen");
     assert_eq!(fulltext_artifact(&recovered).1, expected_artifact);
     let rows = recovered
         .execute_query("SELECT id,payload FROM artifact_rows ORDER BY id")
