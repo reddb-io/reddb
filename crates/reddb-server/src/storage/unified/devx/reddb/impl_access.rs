@@ -34,122 +34,6 @@ impl RedDB {
     }
 }
 
-#[cfg(test)]
-mod native_snapshot_tests {
-    use super::*;
-
-    #[test]
-    fn fulltext_snapshot_counts_and_posting_order_match_the_frame() {
-        let documents = vec![
-            (EntityId::new(3), "alpha alpha beta".to_string()),
-            (EntityId::new(1), "beta gamma".to_string()),
-            (EntityId::new(2), String::new()),
-        ];
-        let mut postings = BTreeMap::new();
-        for (entity_id, text) in &documents {
-            RedDB::native_fulltext_add_document(&mut postings, *entity_id, text);
-        }
-        let (bytes, counts) =
-            RedDB::serialize_native_fulltext_artifact("rows", documents.len() as u32, postings);
-        assert_eq!(counts, (3, 3, 4));
-        assert_eq!(
-            RedDB::inspect_native_fulltext_artifact(&bytes).expect("fulltext counts"),
-            counts
-        );
-        let frame = reddb_file::decode_native_fulltext_frame(&bytes).expect("fulltext frame");
-        let beta = frame
-            .terms
-            .iter()
-            .find(|term| term.term == "beta")
-            .expect("beta term");
-        assert_eq!(
-            beta.postings
-                .iter()
-                .map(|posting| (posting.entity_id, posting.term_count))
-                .collect::<Vec<_>>(),
-            vec![(3, 1), (1, 1)]
-        );
-        let expected = reddb_file::NativeFulltextFrame {
-            collection: "rows".to_string(),
-            doc_count: 3,
-            terms: vec![
-                reddb_file::NativeFulltextTerm {
-                    term: "alpha".to_string(),
-                    postings: vec![reddb_file::NativeFulltextPosting {
-                        entity_id: 3,
-                        term_count: 2,
-                    }],
-                },
-                reddb_file::NativeFulltextTerm {
-                    term: "beta".to_string(),
-                    postings: vec![
-                        reddb_file::NativeFulltextPosting {
-                            entity_id: 3,
-                            term_count: 1,
-                        },
-                        reddb_file::NativeFulltextPosting {
-                            entity_id: 1,
-                            term_count: 1,
-                        },
-                    ],
-                },
-                reddb_file::NativeFulltextTerm {
-                    term: "gamma".to_string(),
-                    postings: vec![reddb_file::NativeFulltextPosting {
-                        entity_id: 1,
-                        term_count: 1,
-                    }],
-                },
-            ],
-        };
-        assert_eq!(bytes, reddb_file::encode_native_fulltext_frame(&expected));
-    }
-
-    #[test]
-    fn document_snapshot_keeps_duplicate_entries_and_distinct_path_counts() {
-        let (bytes, counts) = RedDB::serialize_native_document_pathvalue_artifact(
-            "rows",
-            vec![
-                (
-                    EntityId::new(7),
-                    vec![
-                        ("path.a".to_string(), "shared".to_string()),
-                        ("path.b".to_string(), "one".to_string()),
-                        ("path.a".to_string(), "shared".to_string()),
-                    ],
-                ),
-                (
-                    EntityId::new(3),
-                    vec![
-                        ("path.a".to_string(), "shared".to_string()),
-                        ("path.b".to_string(), String::new()),
-                        ("path.c".to_string(), "two".to_string()),
-                    ],
-                ),
-            ],
-        );
-        assert_eq!(counts, (2, 3, 6));
-        assert_eq!(
-            RedDB::inspect_native_document_pathvalue_artifact(&bytes).expect("document counts"),
-            (2, 3, 6, 4)
-        );
-        let frame = reddb_file::decode_native_doc_pathvalue_frame(&bytes).expect("document frame");
-        assert_eq!(
-            frame
-                .docs
-                .iter()
-                .map(|doc| doc.entity_id)
-                .collect::<Vec<_>>(),
-            vec![7, 3]
-        );
-        assert_eq!(frame.docs[0].entries[0].path, frame.docs[0].entries[2].path);
-        assert_eq!(
-            frame.docs[0].entries[0].value,
-            frame.docs[0].entries[2].value
-        );
-    }
-}
-
 impl RedDB {
     pub(crate) fn native_registry_summary_from_metadata(
         &self,
@@ -1594,5 +1478,121 @@ impl RedDB {
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
+    }
+}
+
+#[cfg(test)]
+mod native_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn fulltext_snapshot_counts_and_posting_order_match_the_frame() {
+        let documents = vec![
+            (EntityId::new(3), "alpha alpha beta".to_string()),
+            (EntityId::new(1), "beta gamma".to_string()),
+            (EntityId::new(2), String::new()),
+        ];
+        let mut postings = BTreeMap::new();
+        for (entity_id, text) in &documents {
+            RedDB::native_fulltext_add_document(&mut postings, *entity_id, text);
+        }
+        let (bytes, counts) =
+            RedDB::serialize_native_fulltext_artifact("rows", documents.len() as u32, postings);
+        assert_eq!(counts, (3, 3, 4));
+        assert_eq!(
+            RedDB::inspect_native_fulltext_artifact(&bytes).expect("fulltext counts"),
+            counts
+        );
+        let frame = reddb_file::decode_native_fulltext_frame(&bytes).expect("fulltext frame");
+        let beta = frame
+            .terms
+            .iter()
+            .find(|term| term.term == "beta")
+            .expect("beta term");
+        assert_eq!(
+            beta.postings
+                .iter()
+                .map(|posting| (posting.entity_id, posting.term_count))
+                .collect::<Vec<_>>(),
+            vec![(3, 1), (1, 1)]
+        );
+        let expected = reddb_file::NativeFulltextFrame {
+            collection: "rows".to_string(),
+            doc_count: 3,
+            terms: vec![
+                reddb_file::NativeFulltextTerm {
+                    term: "alpha".to_string(),
+                    postings: vec![reddb_file::NativeFulltextPosting {
+                        entity_id: 3,
+                        term_count: 2,
+                    }],
+                },
+                reddb_file::NativeFulltextTerm {
+                    term: "beta".to_string(),
+                    postings: vec![
+                        reddb_file::NativeFulltextPosting {
+                            entity_id: 3,
+                            term_count: 1,
+                        },
+                        reddb_file::NativeFulltextPosting {
+                            entity_id: 1,
+                            term_count: 1,
+                        },
+                    ],
+                },
+                reddb_file::NativeFulltextTerm {
+                    term: "gamma".to_string(),
+                    postings: vec![reddb_file::NativeFulltextPosting {
+                        entity_id: 1,
+                        term_count: 1,
+                    }],
+                },
+            ],
+        };
+        assert_eq!(bytes, reddb_file::encode_native_fulltext_frame(&expected));
+    }
+
+    #[test]
+    fn document_snapshot_keeps_duplicate_entries_and_distinct_path_counts() {
+        let (bytes, counts) = RedDB::serialize_native_document_pathvalue_artifact(
+            "rows",
+            vec![
+                (
+                    EntityId::new(7),
+                    vec![
+                        ("path.a".to_string(), "shared".to_string()),
+                        ("path.b".to_string(), "one".to_string()),
+                        ("path.a".to_string(), "shared".to_string()),
+                    ],
+                ),
+                (
+                    EntityId::new(3),
+                    vec![
+                        ("path.a".to_string(), "shared".to_string()),
+                        ("path.b".to_string(), String::new()),
+                        ("path.c".to_string(), "two".to_string()),
+                    ],
+                ),
+            ],
+        );
+        assert_eq!(counts, (2, 3, 6));
+        assert_eq!(
+            RedDB::inspect_native_document_pathvalue_artifact(&bytes).expect("document counts"),
+            (2, 3, 6, 4)
+        );
+        let frame = reddb_file::decode_native_doc_pathvalue_frame(&bytes).expect("document frame");
+        assert_eq!(
+            frame
+                .docs
+                .iter()
+                .map(|doc| doc.entity_id)
+                .collect::<Vec<_>>(),
+            vec![7, 3]
+        );
+        assert_eq!(frame.docs[0].entries[0].path, frame.docs[0].entries[2].path);
+        assert_eq!(
+            frame.docs[0].entries[0].value,
+            frame.docs[0].entries[2].value
+        );
     }
 }
