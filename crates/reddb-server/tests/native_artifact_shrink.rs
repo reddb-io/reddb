@@ -70,6 +70,9 @@ fn vacuum_shrinks_native_fulltext_artifact_and_cold_reopens() {
     assert_eq!(rows.len(), 8);
     for (id, row) in rows.iter().enumerate() {
         assert_eq!(row.get("id").expect("id").to_string(), id.to_string());
-        assert_eq!(row.get("payload").expect("payload").as_text(), Some(payload));
+        assert_eq!(
+            row.get("payload").expect("payload").as_text(),
+            Some(payload)
+        );
     }
 }
