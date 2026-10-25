@@ -56,3 +56,22 @@ pub fn run_btree_fixture(
     tree_fixture::run(browser::BrowserFile::new(handle), phase)
         .map_err(|error| js_sys::Error::new(&error.to_string()).into())
 }
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/record_corpus.rs"]
+mod record_corpus;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../../reddb-engine/tests/support/resident_file_restart.rs"]
+mod resident_fixture;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = runResidentStoreFixture)]
+pub fn run_resident_store_fixture(
+    handle: browser::SyncFile,
+    phase: u32,
+) -> Result<u32, wasm_bindgen::JsValue> {
+    resident_fixture::run(browser::BrowserFile::new(handle), phase)
+        .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+}

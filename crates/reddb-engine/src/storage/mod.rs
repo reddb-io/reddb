@@ -46,3 +46,6 @@ pub mod error;
 pub mod store_wal;
 
 mod resident_snapshot;
+
+#[doc(hidden)]
+pub mod resident_file;

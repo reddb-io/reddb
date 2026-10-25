@@ -11,6 +11,7 @@ const assets = [
   './query-worker.js',
   './snapshot-worker.js',
   './store-wal-worker.js',
+  './resident-file-worker.js',
   './wasm/conformance.js',
   './wasm/conformance_bg.wasm',
   './pager-worker.js',

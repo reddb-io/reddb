@@ -68,6 +68,13 @@ mod resident_store;
 mod store_wal;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/resident_file.rs"]
+mod resident_file;
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/resident_file_restart.rs"]
+mod resident_file_restart;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -84,7 +91,8 @@ pub fn run_conformance() -> String {
         .chain(manager::CASES.iter())
         .chain(read_indexes::CASES.iter())
         .chain(resident_store::CASES.iter())
-        .chain(store_wal::CASES.iter());
+        .chain(store_wal::CASES.iter())
+        .chain(resident_file::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

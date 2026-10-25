@@ -158,3 +158,16 @@ fn portable_store_wal_replay_conformance() {
         run();
     }
 }
+
+#[path = "support/resident_file.rs"]
+mod resident_file;
+#[path = "support/resident_file_restart.rs"]
+mod resident_file_restart;
+
+#[test]
+fn portable_resident_file_conformance() {
+    for (name, run) in resident_file::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

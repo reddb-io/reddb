@@ -80,7 +80,7 @@ async function sharedConformance(browserPage) {
     'metadata_codec_native_goldens', 'metadata_codec_record_envelopes',
     'metadata_codec_malformed_payloads', 'metadata_codec_depth_boundary',
     'snapshot_native_store_fixture', 'snapshot_native_v1_v12_recovery', 'snapshot_empty_collections_and_legacy_tails',
-    'snapshot_corruption_and_callback_errors', 'snapshot_resident_recovery_options',
+    'snapshot_corruption_and_callback_errors', 'snapshot_resident_recovery_options', 'snapshot_native_committed_projection',
     'manager_models_and_constraint_lock', 'manager_snapshot_key_versions',
     'manager_moderation_and_serializable_reads', 'manager_bounded_scan_and_consolidation',
     'manager_ordered_graph_candidates',
@@ -92,6 +92,9 @@ async function sharedConformance(browserPage) {
     'store_wal_canonical_action_frames', 'store_wal_impossible_counts_and_truncation',
     'store_wal_entity_record_replay', 'store_wal_host_index_boundaries', 'store_wal_atomic_resident_refresh',
     'store_wal_recovery_fixture',
+    'resident_file_models_and_checkpoint', 'resident_file_owned_restart_fixture',
+    'resident_file_rejected_batch_restores_committed_state', 'resident_file_publication_failure_boundaries',
+    'resident_file_checkpoint_failure_boundaries', 'resident_file_wal_capacity_preserves_committed_state',
   ])
 }
 
@@ -555,6 +558,46 @@ for (const browser of browsers) {
           await launch({ offline: true })
           assert.deepEqual(await recover(false), seeded)
           assert.equal(networkRequests.length, requestsBefore, 'offline logical WAL recovery reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('owned resident store publishes models, fences a failed flush and recovers OPFS offline', async () => {
+      async function fixture(phase) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (phase) => {
+            const worker = new Worker('/packages/browser/test/resident-file-worker.js', { type: 'module' })
+            try {
+              return await new Promise((resolve, reject) => {
+                worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+                worker.onerror = (event) => reject(new Error(event.message))
+                worker.postMessage({ phase })
+              })
+            } finally { worker.terminate() }
+          }, phase)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          const seeded = await fixture(0)
+          assert.ok(seeded.entities >= 8)
+          assert.deepEqual(await fixture(1), { phase: 1, interrupted: true })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await fixture(2), { phase: 2, entities: seeded.entities })
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await fixture(3), { phase: 3, entities: seeded.entities })
+          assert.equal(networkRequests.length, requestsBefore, 'offline owned-store publication reached the HTTP host')
         })
       } finally { await context.setOffline(false) }
     })
