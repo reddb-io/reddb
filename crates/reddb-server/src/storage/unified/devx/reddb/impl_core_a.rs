@@ -627,14 +627,28 @@ impl RedDB {
         let _ = self.ec_consolidate_all();
         if let Some(path) = &self.path {
             if self.paged_mode {
+                let started = std::time::Instant::now();
+                tracing::debug!(target: "reddb::checkpoint", "local store publication started");
                 self.store.persist()?;
+                tracing::debug!(
+                    target: "reddb::checkpoint",
+                    duration_ms = started.elapsed().as_millis(),
+                    "local store publication finished"
+                );
             } else if embedded_single_file_selected(&self.options) {
                 let snapshot = self.store.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot)?;
             } else {
                 self.store.save_to_file(path)?;
             }
+            let started = std::time::Instant::now();
+            tracing::debug!(target: "reddb::checkpoint", "append-only publication started");
             self.publish_append_only_segments(path)?;
+            tracing::debug!(
+                target: "reddb::checkpoint",
+                duration_ms = started.elapsed().as_millis(),
+                "append-only publication finished"
+            );
             self.persist_metadata()?;
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a

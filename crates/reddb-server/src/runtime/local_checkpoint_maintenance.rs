@@ -50,6 +50,11 @@ impl LocalCheckpointMaintenance {
             return;
         }
         let started = Instant::now();
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            wal_bytes_before = bytes,
+            "local checkpoint attempt started"
+        );
         match runtime.checkpoint() {
             Ok(()) => {
                 self.dirty_since = None;

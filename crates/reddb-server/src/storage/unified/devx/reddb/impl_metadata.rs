@@ -443,6 +443,8 @@ impl RedDB {
             return Ok(());
         };
 
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "physical metadata preparation started");
         let _publication = self.store.vault_publication_lock.lock();
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let collection_roots = self.physical_collection_roots();
@@ -463,6 +465,11 @@ impl RedDB {
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
         metadata.save_for_data_path(path)?;
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            "physical metadata preparation finished"
+        );
         self.persist_native_physical_header(&metadata)?;
         Ok(())
     }
@@ -1294,6 +1301,7 @@ impl RedDB {
             return Ok(());
         }
 
+        tracing::debug!(target: "reddb::checkpoint", "native header preparation started");
         let _publication = self.store.vault_publication_lock.lock();
         let existing_page = self
             .store
@@ -1340,7 +1348,16 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "native artifact snapshots started");
         let vector_artifact_records = self.native_vector_artifact_records();
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            artifacts = vector_artifact_records.len(),
+            payload_bytes = vector_artifact_records.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+            "native artifact snapshots finished"
+        );
         let artifact_summaries = vector_artifact_records
             .iter()
             .map(|(summary, _)| summary.clone())
@@ -1367,6 +1384,7 @@ impl RedDB {
                 &metadata_state_summary,
                 existing_metadata_state_page,
             )?;
+        tracing::debug!(target: "reddb::checkpoint", "native artifact payload preparation started");
         let vector_artifact_payloads = vector_artifact_records
             .iter()
             .map(|(summary, bytes)| {
@@ -1377,11 +1395,13 @@ impl RedDB {
                 )
             })
             .collect::<Vec<_>>();
+        tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication started");
         let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) =
             self.store.write_native_vector_artifact_store(
                 &vector_artifact_payloads,
                 existing_vector_artifact_page,
             )?;
+        tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication finished");
         let mut header = Self::native_header_from_metadata(metadata);
         header.manifest_page = manifest_page;
         header.manifest_checksum = manifest_checksum;
@@ -1398,8 +1418,15 @@ impl RedDB {
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
         self.store.update_physical_file_header(header)?;
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "native header store publication started");
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            "native header store publication finished"
+        );
         Ok(())
     }
 

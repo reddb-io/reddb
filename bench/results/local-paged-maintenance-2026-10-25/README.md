@@ -75,15 +75,54 @@ measurements.
 
 ## Remaining gates
 
-The draft PR skipped the actual code CI lane; documentation-shim checks do not
-qualify code. Real code CI and a signed candidate container still need validation.
-Auth and the larger Platform native copies require actual container qualification
-under their resource limits, including writer latency, concurrent reads and crash
-recovery, before stable publication and fleet rollout.
+The draft PR skipped its automatic code CI lane; documentation-shim checks do not
+qualify code. An explicit full code CI run and the signed RC workflow later passed
+on source `a2d71f940`; the diagnostic events added afterward still need validation.
+The actual native-store results below still block stable publication and fleet
+rollout.
 
 ADR 0038 records a proposed transitional exception: this worker schedules full
 atomic checkpoints. It does not satisfy incremental per-tick maintenance or
 provide a hard storage cap. These finite tests do not establish universal closure.
+
+## Signed container and native stores
+
+The canonical RC workflow published `1.26.8-rc.363` from
+`a2d71f9405e0e45276d7ed9025b32ba15b619e19`. The RC tag source, binary attestation,
+container signature and equality of the container/public binary bytes were
+independently verified. Image digest:
+`sha256:45ef40952864417c24b4131324e2a19b2e4e4a4e23f7b872ac353a80c12f0046`.
+The explicit full code CI passed all 33 jobs on that source. Earlier draft checks
+and documentation-shim greens did not qualify the code.
+
+The native Auth copy ran with its live 2 GiB cgroup / 1 GiB engine budget and one
+CPU. All 37 original collections, earlier acknowledgements, 1,000 workload rows
+and index checks survived; 60 whole-table updates and 310 concurrent aggregates
+had no read failures. Query p99/max were 20.21/25.03 ms, writer max 6.659 s.
+The WAL drained automatically, the 14,675,329,024-byte main file did not grow,
+and the last acknowledged uncheckpointed write survived SIGKILL and cold reopen.
+Peak memory was 1,873,731,584 bytes, without OOM. However, actual background
+checkpoints took 6.851 and **10.151 s**: strict acceptance against the retained
+10 s checkpoint limit **fails**. Raw harness flags covered functional and
+explicit-checkpoint tests; separate acceptance evaluates background durations.
+
+The authenticated historical native Platform copy ran with its live 4 GiB
+cgroup / 2 GiB engine budget and one CPU, on an existing idle worker. It opened,
+verified all 170 original collection cardinalities and preserved the original
+acknowledgement, then exhausted its 4 GiB cgroup during the first operator
+DDL/write sequence, before any measured checkpoint completed. The engine exited
+137 and the client lost its connection; cgroup events recorded OOM kills.
+The failing copy remains frozen. This does not yet attribute the failure to the
+automatic worker, metadata publication or cache budgeting. A fresh original-copy
+control on published 1.26.8 is required before assigning causality. No native
+candidate acceptance or live rollout is claimed.
+
+Targeted `reddb::checkpoint` debug events mark store publication, append-only
+publication, physical metadata preparation, native artifact snapshots/payload
+preparation and native header publication. Enable them for isolated diagnosis
+with `RUST_LOG=info,reddb::checkpoint=debug` (and the same CLI log filter when
+explicitly set). They report stage, duration and artifact sizes, without payloads
+or credentials; they do not change publication order or fix the memory failure.
 
 ```bash
 cargo test --locked -p reddb-io-engine --lib snapshot_scan_does_not_miss_a_sealed_entity_moving_into_growing
