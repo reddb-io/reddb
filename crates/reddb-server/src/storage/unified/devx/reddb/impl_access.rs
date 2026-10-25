@@ -140,12 +140,69 @@ impl RedDB {
         }
     }
 
-    pub(crate) fn native_vector_artifact_records(
+    pub(super) fn prepare_native_artifact_publication(
         &self,
-    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
-        let mut artifacts = Vec::new();
+        existing: &[NativeVectorArtifactPageSummary],
+    ) -> NativeArtifactPublication {
+        let previous = self.native_artifact_versions.lock();
+        let mut publication = NativeArtifactPublication {
+            records: Vec::new(),
+            retained: Vec::new(),
+            summaries: Vec::new(),
+            versions: HashMap::new(),
+        };
+        let mut changed = Vec::new();
         for collection in self.store.list_collections() {
             let Some(manager) = self.store.get_collection(&collection) else {
+                continue;
+            };
+            let version = NativeArtifactVersion {
+                manager: Arc::downgrade(&manager),
+                segments: manager.checkpoint_revisions(),
+                summaries: Vec::new(),
+                pages: Vec::new(),
+            };
+            if let Some(previous) = previous.get(&collection).filter(|previous| {
+                previous.manager.ptr_eq(&version.manager)
+                    && previous.segments == version.segments
+                    && previous.pages.iter().all(|page| existing.contains(page))
+                    && existing
+                        .iter()
+                        .filter(|page| page.collection == collection)
+                        .count()
+                        == previous.pages.len()
+            }) {
+                publication.retained.extend(previous.pages.iter().cloned());
+                publication
+                    .summaries
+                    .extend(previous.summaries.iter().cloned());
+                publication.versions.insert(collection, previous.clone());
+            } else {
+                changed.push(collection.clone());
+                publication.versions.insert(collection, version);
+            }
+        }
+        drop(previous);
+        publication.records = self.native_vector_artifact_records(&changed);
+        for (summary, _) in &publication.records {
+            publication.summaries.push(summary.clone());
+            publication
+                .versions
+                .get_mut(&summary.collection)
+                .expect("artifact source collection")
+                .summaries
+                .push(summary.clone());
+        }
+        publication
+    }
+
+    fn native_vector_artifact_records(
+        &self,
+        collections: &[String],
+    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+        let mut artifacts = Vec::new();
+        for collection in collections {
+            let Some(manager) = self.store.get_collection(collection) else {
                 continue;
             };
             let mut vectors = Vec::new();
@@ -1484,6 +1541,117 @@ impl RedDB {
 #[cfg(test)]
 mod native_snapshot_tests {
     use super::*;
+
+    #[test]
+    fn native_artifacts_reuse_only_unchanged_published_collections() {
+        let directory = tempfile::tempdir().expect("temporary native store");
+        let path = directory.path().join("reuse.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(crate::storage::StorageDeployPreset::Serverless.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options.clone()).expect("runtime");
+        for table in ["unchanged_rows", "changed_rows"] {
+            runtime
+                .execute_query(&format!("CREATE TABLE {table} (id INT,payload TEXT)"))
+                .expect("table");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO {table} (id,payload) VALUES (1,'alpha beta')"
+                ))
+                .expect("row");
+        }
+        runtime.checkpoint().expect("initial publication");
+        let db = runtime.db();
+        let existing = || {
+            let header = db.store.physical_file_header().expect("header");
+            db.store
+                .read_native_vector_artifact_store(header.vector_artifact_page)
+                .expect("published artifacts")
+        };
+        let publication = db.prepare_native_artifact_publication(&existing());
+        assert!(publication.records.iter().all(|(summary, _)| {
+            !["unchanged_rows", "changed_rows"].contains(&summary.collection.as_str())
+        }));
+        assert!(publication
+            .retained
+            .iter()
+            .any(|page| page.collection == "unchanged_rows"));
+
+        runtime
+            .execute_query("UPDATE changed_rows SET payload='gamma delta' WHERE id=1")
+            .expect("change one collection");
+        let publication = db.prepare_native_artifact_publication(&existing());
+        assert!(publication
+            .records
+            .iter()
+            .any(|(summary, _)| summary.collection == "changed_rows"));
+        assert!(publication
+            .records
+            .iter()
+            .all(|(summary, _)| summary.collection != "unchanged_rows"));
+        runtime.checkpoint().expect("publish changed collection");
+
+        // A changed persisted reference invalidates reuse even if resident rows
+        // are unchanged. Never retain a cache entry across another publication.
+        let mut stale = existing();
+        stale
+            .iter_mut()
+            .find(|page| page.collection == "unchanged_rows")
+            .expect("published reference")
+            .checksum ^= 1;
+        assert!(db
+            .prepare_native_artifact_publication(&stale)
+            .records
+            .iter()
+            .any(|(summary, _)| summary.collection == "unchanged_rows"));
+
+        // Compare reused on-disk bytes with an independently rebuilt frame.
+        let header = db.store.physical_file_header().expect("header");
+        let fresh = db.native_vector_artifact_records(&["changed_rows".to_string()]);
+        for (summary, expected) in fresh {
+            let (_, actual) = db
+                .store
+                .read_native_vector_artifact_blob(
+                    header.vector_artifact_page,
+                    &summary.collection,
+                    Some(&summary.artifact_kind),
+                )
+                .expect("read frame")
+                .expect("published frame");
+            assert_eq!(actual, expected);
+        }
+        // Reusing a name and matching revisions cannot identify a replacement
+        // manager as the collection from the cached generation.
+        db.store
+            .drop_collection("unchanged_rows")
+            .expect("drop old collection");
+        db.store
+            .insert_auto(
+                "unchanged_rows",
+                UnifiedEntity::table_row(
+                    EntityId::new(0),
+                    "unchanged_rows",
+                    1,
+                    vec![Value::Integer(1), Value::text("replacement")],
+                ),
+            )
+            .expect("recreate collection");
+        assert!(db
+            .prepare_native_artifact_publication(&existing())
+            .records
+            .iter()
+            .any(|(summary, _)| summary.collection == "unchanged_rows"));
+        drop(db);
+        drop(runtime);
+        let reopened = crate::RedDBRuntime::with_options(options).expect("cold reopen");
+        let count = reopened
+            .execute_query("SELECT COUNT(*) AS n FROM changed_rows")
+            .expect("recovered collection");
+        assert_eq!(
+            count.result.records[0].get("n").expect("count").to_string(),
+            "1"
+        );
+    }
 
     #[test]
     fn fulltext_snapshot_counts_and_posting_order_match_the_frame() {

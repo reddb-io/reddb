@@ -1350,18 +1350,21 @@ impl RedDB {
         // the persisted summaries instead of rebuilding search indexes.
         let started = std::time::Instant::now();
         tracing::debug!(target: "reddb::checkpoint", "native artifact snapshots started");
-        let vector_artifact_records = self.native_vector_artifact_records();
+        let existing_artifacts = existing_vector_artifact_page
+            .map(|page| self.store.read_native_vector_artifact_store(page))
+            .transpose()?
+            .unwrap_or_default();
+        let publication = self.prepare_native_artifact_publication(&existing_artifacts);
+        let vector_artifact_records = publication.records;
         tracing::debug!(
             target: "reddb::checkpoint",
             duration_ms = started.elapsed().as_millis(),
             artifacts = vector_artifact_records.len(),
+            retained_artifacts = publication.retained.len(),
             payload_bytes = vector_artifact_records.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
             "native artifact snapshots finished"
         );
-        let artifact_summaries = vector_artifact_records
-            .iter()
-            .map(|(summary, _)| summary.clone())
-            .collect::<Vec<_>>();
+        let artifact_summaries = publication.summaries;
         let registry_summary = self.native_registry_summary_from_metadata(
             metadata,
             &artifact_summaries,
@@ -1390,9 +1393,10 @@ impl RedDB {
             .map(|(summary, bytes)| (summary.collection, summary.artifact_kind, bytes))
             .collect::<Vec<_>>();
         tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication started");
-        let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) =
-            self.store.write_native_vector_artifact_store(
+        let (vector_artifact_page, vector_artifact_checksum, vector_artifact_pages) =
+            self.store.write_native_vector_artifact_store_retaining(
                 &vector_artifact_payloads,
+                &publication.retained,
                 existing_vector_artifact_page,
             )?;
         // The pager owns these bytes now. Do not retain a second artifact set
@@ -1419,6 +1423,25 @@ impl RedDB {
         tracing::debug!(target: "reddb::checkpoint", "native header store publication started");
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;
+        let mut versions = publication.versions;
+        // The publication fence serializes ordinary mutations. Raw manager
+        // access still invalidates reuse if its revisions changed meanwhile.
+        versions.retain(|collection, version| {
+            self.store
+                .get_collection(collection)
+                .is_some_and(|manager| {
+                    version.manager.ptr_eq(&Arc::downgrade(&manager))
+                        && version.segments == manager.checkpoint_revisions()
+                })
+        });
+        for (collection, version) in &mut versions {
+            version.pages = vector_artifact_pages
+                .iter()
+                .filter(|page| page.collection == *collection)
+                .cloned()
+                .collect();
+        }
+        *self.native_artifact_versions.lock() = versions;
         tracing::debug!(
             target: "reddb::checkpoint",
             duration_ms = started.elapsed().as_millis(),

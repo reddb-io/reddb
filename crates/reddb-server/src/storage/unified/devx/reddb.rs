@@ -69,6 +69,8 @@ pub struct RedDB {
     /// Per-collection HNSW vector index cache for fast approximate nearest neighbor search.
     /// Lazily built on first vector similarity query per collection.
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
+    /// Only revision proofs and published page references, never index payloads.
+    native_artifact_versions: parking_lot::Mutex<HashMap<String, NativeArtifactVersion>>,
     /// Default TTL policy declared at the collection level, in milliseconds.
     collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
     /// In-memory cache of collection contracts keyed by collection name.
@@ -365,6 +367,21 @@ pub struct NativeVectorArtifactBatchInspection {
     pub valid_count: usize,
     pub artifacts: Vec<NativeVectorArtifactInspection>,
     pub failures: Vec<(String, String, String)>,
+}
+
+#[derive(Clone)]
+struct NativeArtifactVersion {
+    manager: std::sync::Weak<super::super::manager::SegmentManager>,
+    segments: Vec<(u64, u64)>,
+    summaries: Vec<NativeVectorArtifactSummary>,
+    pages: Vec<NativeVectorArtifactPageSummary>,
+}
+
+struct NativeArtifactPublication {
+    records: Vec<(NativeVectorArtifactSummary, Vec<u8>)>,
+    retained: Vec<NativeVectorArtifactPageSummary>,
+    summaries: Vec<NativeVectorArtifactSummary>,
+    versions: HashMap<String, NativeArtifactVersion>,
 }
 
 mod contract_cache;

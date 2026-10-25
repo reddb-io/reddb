@@ -186,3 +186,35 @@ optimized binary from the storage-memory patch, before integration of the
 subsequent upstream query-sharing commits. The integrated signed RC still needs
 its own artifact and native-store acceptance. No stable publication or fleet
 rollout has occurred on the strength of these local tests.
+
+## Repeated native-index construction and publication
+
+The integrated, signed `1.26.8-rc.366` passes all 33 full-CI jobs and the
+60,000-row constrained image test, including payload validation, crash recovery
+and exit-zero shutdown. The original native Platform copy still fails: its
+automatic checkpoint takes 87.326 seconds and the operator checkpoint returns
+HTTP 503 after the 30-second handler deadline. There is no OOM. All 170 original
+collection cardinalities and the earlier acknowledged value remain valid.
+The failed copy is retained, staging's temporary memory request quota is restored
+to 10 GiB, and no live database is upgraded on this evidence.
+
+A larger synthetic image reproduction uses 300,000 JSON-text rows, one CPU,
+a 4 GiB cgroup and a 2 GiB engine budget. Unrelated empty-table DDL takes
+23.866 seconds; an explicit checkpoint takes 12.281 seconds. Debug events show
+238,102,522 native artifact bytes reconstructed twice for the DDL, taking
+10.182 and 11.136 seconds, while the later store-publication phase takes
+52 milliseconds. These local data files live on tmpfs: this isolates repeated
+derivation cost and does not qualify OCI disk performance.
+
+Publication now retains a successfully published collection's page references
+only while its manager identity, segment revisions and exact published artifact
+references match. This cache contains no payload copies. It advances only after
+durable publication; mutations, collection replacement and changed references
+require reconstruction. Cold processes conservatively reconstruct their first
+publication: no unverified persisted source proof is assumed.
+
+The blob writer also compares actual encoded page content, including next-page
+links and cleared tails. Identical pages do not re-enter the WAL or dirty-page
+queue. A regression first reproduced three unnecessarily dirty pages; with the
+fix an unchanged three-page blob leaves zero dirty pages and changing one byte
+dirties exactly one page, preserving the changed payload after cold reopen.

@@ -583,6 +583,7 @@ impl RedDB {
             options: options.clone(),
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
+            native_artifact_versions: parking_lot::Mutex::new(HashMap::new()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
             collection_contract_cache: super::contract_cache::CollectionContractCache::default(),
             remote_backend: options.remote_backend.clone(),

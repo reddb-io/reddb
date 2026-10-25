@@ -103,6 +103,7 @@ impl UnifiedStore {
             .map(|root| self.read_native_blob_chain_page_ids(root))
             .transpose()?
             .unwrap_or_default();
+        let existing_pages = page_ids.len();
         while page_ids.len() < page_count as usize {
             page_ids.push(
                 pager
@@ -129,6 +130,16 @@ impl UnifiedStore {
             let content_start = crate::storage::engine::HEADER_SIZE;
             let copy_len = data.len().min(bytes.len() - content_start);
             bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
+            if index < existing_pages {
+                let previous = pager
+                    .read_page(page_id)
+                    .map_err(|err| StoreError::Serialization(err.to_string()))?;
+                // Compare actual encoded bytes, including next-page links and
+                // cleared tails. A checksum alone is not an equality proof.
+                if previous.as_bytes()[content_start..] == page.as_bytes()[content_start..] {
+                    continue;
+                }
+            }
             pager
                 .write_page(page_id, page)
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
@@ -181,6 +192,15 @@ impl UnifiedStore {
         artifacts: &[(String, String, Vec<u8>)],
         existing_page: Option<u32>,
     ) -> Result<(u32, u64, Vec<NativeVectorArtifactPageSummary>), StoreError> {
+        self.write_native_vector_artifact_store_retaining(artifacts, &[], existing_page)
+    }
+
+    pub(crate) fn write_native_vector_artifact_store_retaining(
+        &self,
+        artifacts: &[(String, String, Vec<u8>)],
+        retained: &[NativeVectorArtifactPageSummary],
+        existing_page: Option<u32>,
+    ) -> Result<(u32, u64, Vec<NativeVectorArtifactPageSummary>), StoreError> {
         let _publication = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Ok((0, 0, Vec::new()));
@@ -190,6 +210,16 @@ impl UnifiedStore {
             .map(|page| self.read_native_vector_artifact_store(page))
             .transpose()?
             .unwrap_or_default();
+        if retained.iter().any(|entry| {
+            !existing.contains(entry)
+                || artifacts.iter().any(|(collection, kind, _)| {
+                    entry.collection == *collection && entry.artifact_kind == *kind
+                })
+        }) {
+            return Err(StoreError::Serialization(
+                "retained native artifact does not match the published generation".to_string(),
+            ));
+        }
         let page_id = match existing_page.filter(|page| *page != 0) {
             Some(page) => page,
             None => pager
@@ -198,7 +228,7 @@ impl UnifiedStore {
                 .page_id(),
         };
 
-        let mut summaries = Vec::new();
+        let mut summaries = retained.to_vec();
         for (collection, artifact_kind, bytes) in artifacts {
             let existing_root = existing
                 .iter()
@@ -219,9 +249,11 @@ impl UnifiedStore {
         }
 
         for previous in &existing {
-            if !artifacts.iter().any(|(collection, kind, _)| {
-                previous.collection == *collection && previous.artifact_kind == *kind
-            }) {
+            if !retained.contains(previous)
+                && !artifacts.iter().any(|(collection, kind, _)| {
+                    previous.collection == *collection && previous.artifact_kind == *kind
+                })
+            {
                 self.detached_native_blob_pages
                     .lock()
                     .extend(self.read_native_blob_chain_page_ids(previous.root_page)?);
@@ -313,6 +345,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unchanged_native_blob_pages_remain_clean() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("unchanged-blob.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
+        let mut payload = vec![7; capacity * 3];
+        let (root, _, _) = store
+            .write_native_blob_chain(&payload, None)
+            .expect("initial blob");
+        store.persist().expect("durable initial blob");
+        let pager = store.pager().expect("pager");
+        assert_eq!(pager.dirty_page_count(), 0);
+
+        store
+            .write_native_blob_chain(&payload, Some(root))
+            .expect("unchanged publication");
+        assert_eq!(
+            pager.dirty_page_count(),
+            0,
+            "an unchanged native index must not re-enter the WAL and dirty-page queue"
+        );
+
+        payload[capacity + 13] = 9;
+        store
+            .write_native_blob_chain(&payload, Some(root))
+            .expect("single-page change");
+        assert_eq!(pager.dirty_page_count(), 1);
+        store.persist().expect("durable changed blob");
+        drop(store);
+
+        let reopened = UnifiedStore::open(&path).expect("cold reopen");
+        assert_eq!(
+            reopened.read_native_blob_chain(root).expect("durable blob"),
+            payload
+        );
+    }
+
+    #[test]
     fn shrinking_native_blob_does_not_read_the_previous_tail() {
         let directory = tempfile::tempdir().expect("temporary store");
         let store = UnifiedStore::open(&directory.path().join("blob.rdb")).expect("paged store");
@@ -360,6 +433,25 @@ mod tests {
             .publish_detached_native_blob_pages()
             .expect("quarantine detached pages");
         page
+    }
+
+    #[test]
+    fn retained_native_artifact_requires_the_exact_published_reference() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("retain.rdb")).expect("store");
+        let artifact = ("rows".into(), "text.fulltext".into(), vec![7; 1024]);
+        let page = publish_artifacts(&store, &[artifact]);
+        let mut retained = store
+            .read_native_vector_artifact_store(page)
+            .expect("references");
+        retained[0].checksum ^= 1;
+        let pager = store.pager().expect("pager");
+        let before = pager.page_count().expect("page count");
+        assert!(store
+            .write_native_vector_artifact_store_retaining(&[], &retained, Some(page))
+            .is_err());
+        assert_eq!(pager.page_count().expect("unchanged page count"), before);
+        assert_eq!(pager.dirty_page_count(), 0);
     }
 
     #[test]
