@@ -1,6 +1,6 @@
 //! Merge physical graph candidates; visibility and authorization remain at the read boundary.
 use super::*;
-use crate::storage::unified::segment::{GraphIndexCursor, SCAN_BATCH_SIZE};
+use crate::storage::segment::{GraphIndexCursor, SCAN_BATCH_SIZE};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -23,7 +23,8 @@ impl SegmentManager {
     /// Emit candidates in physical-ID, collection-ordinal order. Duplicate
     /// occurrences stay adjacent, including across aliases and segments. The
     /// caller decides which collection has the first visible copy before RLS.
-    pub(crate) fn visit_ordered_graph_index_batches<E>(
+    #[doc(hidden)]
+    pub fn visit_ordered_graph_index_batches<E>(
         managers: &[(usize, Arc<Self>)],
         kind: GraphEntityKind,
         keys: &[EntityId],

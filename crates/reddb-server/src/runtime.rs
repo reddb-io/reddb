@@ -119,9 +119,7 @@ impl SystemInfo {
     /// Whether the system has enough cores to benefit from parallelism.
     /// Returns false on single-core machines where thread overhead > gains.
     pub fn should_parallelize() -> bool {
-        std::thread::available_parallelism()
-            .map(|p| p.get() > 1)
-            .unwrap_or(false)
+        reddb_engine::execution::should_parallelize()
     }
 
     pub fn collect() -> Self {

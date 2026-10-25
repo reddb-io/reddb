@@ -52,6 +52,10 @@ mod metadata_corpus;
 mod snapshot;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/manager.rs"]
+mod manager;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -64,7 +68,8 @@ pub fn run_conformance() -> String {
         .chain(records::CASES.iter())
         .chain(segments::CASES.iter())
         .chain(metadata_codec::CASES.iter())
-        .chain(snapshot::CASES.iter());
+        .chain(snapshot::CASES.iter())
+        .chain(manager::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

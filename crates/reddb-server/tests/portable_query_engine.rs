@@ -80,6 +80,25 @@ fn portable_scalar_corpus_matches_the_native_runtime() {
 }
 
 #[test]
+fn native_collection_paths_keep_the_shared_lifecycle_type() {
+    use reddb_engine::storage::manager::{ManagerConfig, SegmentManager};
+    use reddb_server::storage::unified as native;
+
+    let manager: native::SegmentManager =
+        SegmentManager::with_config("shared", ManagerConfig::default());
+    let _: native::manager::ManagerStats = manager.stats();
+    let _: native::visibility_map::VisibilityMap =
+        reddb_engine::storage::visibility_map::VisibilityMap::new();
+    let store = native::UnifiedStore::new();
+    store
+        .create_collection("shared")
+        .expect("native collection");
+    let _: std::sync::Arc<SegmentManager> = store
+        .get_collection("shared")
+        .expect("shared native manager");
+}
+
+#[test]
 fn native_public_operator_paths_keep_the_same_types() {
     use reddb_engine::query::{engine::binding, executor, filter};
     use reddb_server::storage::query as native;

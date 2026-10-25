@@ -2688,6 +2688,7 @@ dependencies = [
  "crc32fast",
  "parking_lot",
  "proptest",
+ "rayon",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
