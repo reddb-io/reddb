@@ -184,6 +184,16 @@ generation, byte offset, length and checksum; projection compares the exact WAL
 bytes with the current canonical row before modifying the tree. Missing images
 can use those proofs, while missing or stale proofs retain full validation.
 
+Cross-segment reads retain the growing topology gate through their sealed probes.
+Relocating a sealed row publishes its replacement under the exclusive topology
+gate and pins sealed membership against consolidation. The writable destination
+receives the preserved sequence identity and metadata before the source is removed.
+This prevents a visible preimage from disappearing between scan phases; rejected
+destination admission leaves the source intact. The transient work is one row,
+without materializing a collection. Bounded cursor consumers still execute after
+their source and topology guards have been released. Persistent formats and WAL
+publication order are unchanged.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.

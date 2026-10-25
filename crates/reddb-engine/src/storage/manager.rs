@@ -222,7 +222,8 @@ pub struct SegmentManager {
     /// Replaces stats.total_entities on the write path to eliminate a lock
     /// acquisition per row (from 4 lock ops per insert → 2).
     total_entities_atomic: AtomicU64,
-    /// Currently active growing segment
+    /// Currently active growing segment. Readers retain this topology gate across
+    /// growing/sealed probes; sealing and relocation publish under its write gate.
     growing: RwLock<Option<Arc<RwLock<GrowingSegment>>>>,
     /// Sealed segments (immutable, queryable)
     sealed: RwLock<Vec<Arc<RwLock<GrowingSegment>>>>,
@@ -657,7 +658,8 @@ impl SegmentManager {
     #[doc(hidden)]
     pub fn get_with<T>(&self, id: EntityId, visit: impl FnOnce(&UnifiedEntity) -> T) -> Option<T> {
         // Growing segment first (most likely for recent inserts)
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(visit(entity));
@@ -685,7 +687,8 @@ impl SegmentManager {
         id: EntityId,
         mut before_segment: impl FnMut() -> bool,
     ) -> Option<EntityId> {
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             if !before_segment() {
                 return None;
             }
@@ -808,7 +811,8 @@ impl SegmentManager {
 
         // Growing segment — one read lock for the entire batch.
         // Non-blocking first: if a writer is active, fall back to blocking.
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -883,7 +887,8 @@ impl SegmentManager {
         let mut remaining: Vec<usize> = REMAINING_SCRATCH.with(|cell| cell.take());
         remaining.clear();
 
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -926,7 +931,8 @@ impl SegmentManager {
     #[allow(dead_code)] // Retain the existing native helper during extraction.
     fn scan_for_entity(&self, id: EntityId) -> Option<UnifiedEntity> {
         // Check growing
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(entity.clone());
@@ -958,29 +964,61 @@ impl SegmentManager {
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
         let entity_id = entity.id;
-        let sealed_arc = self
-            .find_sealed_segment_arc(entity_id)
-            .ok_or(SegmentError::NotFound(entity_id))?;
-
-        let metadata_to_apply = {
-            let mut sealed = sealed_arc.write();
-            let existing_metadata = sealed.get_metadata(entity_id);
-            if !sealed.force_delete(entity_id) {
+        let mut entity = Some(entity);
+        loop {
+            self.get_or_create_growing();
+            // Publish the move under the same topology gate that readers keep
+            // across growing and sealed. Never expose a removed source without
+            // its replacement. Cost is one row, without cloning a collection.
+            let growing_slot = self.growing.write();
+            let Some(growing_arc) = growing_slot.as_ref() else {
+                continue;
+            };
+            let mut growing = growing_arc.write();
+            if growing.is_tombstoned(entity_id) {
+                drop(growing);
+                drop(growing_slot);
+                self.force_seal()?;
+                continue;
+            }
+            if growing.contains(entity_id) {
+                // Another update may have moved it after the caller's probe.
+                growing.update(entity.take().expect("unpublished relocation image"))?;
+                if let Some(metadata) = metadata {
+                    growing.set_metadata(entity_id, metadata.clone())?;
+                }
+                return Ok(());
+            }
+            // Pin membership through publication so consolidation cannot replace
+            // the source between lookup and removal.
+            let sealed_slots = self.sealed.read();
+            let source = sealed_slots
+                .iter()
+                .find(|segment| segment.read().contains(entity_id))
+                .ok_or(SegmentError::NotFound(entity_id))?;
+            let mut source = source.write();
+            if !source.contains(entity_id) {
                 return Err(SegmentError::NotFound(entity_id));
             }
-            metadata.cloned().or(existing_metadata)
-        };
-
-        let growing_id = self.with_restoration_segment(entity_id, |growing| {
-            growing.insert_preserving_sequence(entity)?;
-            if let Some(metadata) = metadata_to_apply {
-                growing.set_metadata(entity_id, metadata)?;
+            let metadata = metadata.cloned().or_else(|| source.get_metadata(entity_id));
+            growing
+                .insert_preserving_sequence(entity.take().expect("unpublished relocation image"))?;
+            if let Some(metadata) = metadata {
+                growing
+                    .set_metadata(entity_id, metadata)
+                    .expect("inserted relocation image is writable and present");
             }
-            Ok(growing.id())
-        })?;
-
-        self.entity_segment.write().insert(entity_id, growing_id);
-        Ok(())
+            assert!(
+                source.force_delete(entity_id),
+                "locked relocation source is present"
+            );
+            let growing_id = growing.id();
+            drop(source);
+            drop(sealed_slots);
+            drop(growing);
+            self.entity_segment.write().insert(entity_id, growing_id);
+            return Ok(());
+        }
     }
 
     /// Update an entity
@@ -1287,7 +1325,8 @@ impl SegmentManager {
     /// Get metadata for an entity
     pub fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
         // Fast path: probe growing segment directly (no entity_segment needed).
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             if growing.contains(id) {
                 return growing.get_metadata(id);
@@ -1298,7 +1337,7 @@ impl SegmentManager {
         let segment_id = self.entity_segment.read().get(&id).copied();
 
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self.growing.read().as_ref() {
+            if let Some(growing_arc) = growing_slot.as_ref() {
                 let growing = growing_arc.read();
                 if growing.id() == seg_id {
                     return growing.get_metadata(id);
@@ -1473,7 +1512,8 @@ impl SegmentManager {
         exclude_id: Option<EntityId>,
         reserves_key: &impl Fn(&UnifiedEntity) -> bool,
     ) -> Option<EntityId> {
-        if let Some(growing) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing) = growing_slot.as_ref() {
             if let Some(id) = growing.read().find_unique_key_conflict(
                 columns,
                 key_index,
@@ -1656,7 +1696,8 @@ impl SegmentManager {
         &self,
         mut callback: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
     ) {
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             if !growing.for_each_fast(|entity| callback(entity, growing.get_metadata(entity.id))) {
                 return;
@@ -1682,7 +1723,8 @@ impl SegmentManager {
         // Growing segment — direct iteration (no Box<dyn>)
         // Try non-blocking read first; fall back to blocking only when a writer
         // is actively holding the write lock (rare in read-heavy workloads).
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             if !before_segment() {
                 return;
             }
@@ -1742,7 +1784,8 @@ impl SegmentManager {
         // Growing segment — always sequential (single writer lock,
         // usually small working set).
         let mut acc = init();
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -1823,7 +1866,8 @@ impl SegmentManager {
         // (holding the write lock), try_read() returns None and we fall back to
         // the blocking read.  In low-contention workloads (reads far outnumber
         // writes) the try_read() almost always succeeds and readers never stall.
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             scan_stats.segments_total += 1;
             scan_stats.segments_scanned += 1;
             let growing = if let Some(g) = growing_arc.try_read() {
@@ -1886,7 +1930,8 @@ impl SegmentManager {
 
         // Growing segment — always scan, no zone skip (zones are partial).
         // Non-blocking try_read() avoids stalling behind in-progress inserts.
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             scan_stats.segments_total += 1;
             scan_stats.segments_scanned += 1;
             let growing = if let Some(g) = growing_arc.try_read() {
@@ -2003,7 +2048,8 @@ impl SegmentManager {
             }
         };
         let mut best = None;
-        if let Some(growing) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing) = growing_slot.as_ref() {
             probe(&growing.read(), &mut best);
         }
         for segment in self.sealed.read().iter() {
@@ -2259,7 +2305,8 @@ impl SegmentManager {
 
         // Query growing segment — try non-blocking read first (avoids stalling
         // behind an in-progress insert; falls back to blocking if writer is active).
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -2318,7 +2365,8 @@ impl SegmentManager {
     /// Returns `false` only when every consulted segment proves absence.
     /// Missing segment state is conservative and returns `true`.
     pub fn bloom_may_contain_key(&self, key: &[u8]) -> bool {
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             if growing.may_contain_exact_key(key) {
                 return true;
@@ -2343,7 +2391,8 @@ impl SegmentManager {
         let mut results = Vec::new();
 
         // Growing segment
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             results.extend(growing.filter_metadata(filters));
         }
@@ -2362,7 +2411,8 @@ impl SegmentManager {
         let mut results = Vec::new();
 
         // Growing segment
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let growing = growing_arc.read();
             for entity in growing.iter_kind(kind) {
                 results.push(entity.clone());
@@ -2393,7 +2443,8 @@ impl SegmentManager {
     pub fn segment_ids(&self) -> Vec<SegmentId> {
         let mut ids = Vec::new();
 
-        if let Some(growing_arc) = self.growing.read().as_ref() {
+        let growing_slot = self.growing.read();
+        if let Some(growing_arc) = growing_slot.as_ref() {
             ids.push(growing_arc.read().id());
         }
 
@@ -2865,6 +2916,68 @@ mod tests {
         entity.set_xmin(xmin);
         entity.set_xmax(xmax);
         entity
+    }
+
+    #[test]
+    fn snapshot_scan_does_not_miss_a_sealed_entity_moving_into_growing() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let manager = Arc::new(SegmentManager::new("keys"));
+        manager
+            .insert(lookup_version(1, "sealed", 3, 0))
+            .expect("sealed preimage");
+        manager.force_seal().expect("seal preimage");
+        let source = Arc::clone(&manager.sealed.read()[0]);
+        manager
+            .insert(lookup_version(2, "growing", 3, 0))
+            .expect("growing row");
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::new(),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        let (begin, requested) = mpsc::channel();
+        let (started, ready) = mpsc::channel();
+        let writer_manager = Arc::clone(&manager);
+        let writer = std::thread::spawn(move || {
+            requested.recv().expect("reader reached growing row");
+            started.send(()).expect("writer attempts relocation");
+            // This is update's real fallback after its growing probe missed.
+            writer_manager
+                .rewrite_sealed_entity_into_growing(lookup_version(1, "sealed", 3, 12), None)
+                .expect("relocate the still-visible preimage");
+        });
+        let mut begin = Some(begin);
+        let mut ids = Vec::new();
+        manager.scan_for_each(Some(&snapshot), |entity| {
+            ids.push(entity.id.raw());
+            if entity.id.raw() == 2 {
+                begin
+                    .take()
+                    .expect("one growing row")
+                    .send(())
+                    .expect("start writer");
+                ready
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("writer started");
+                // A safe relocation may wait for this scan. The old path instead
+                // removes the sealed preimage before waiting for growing's lock.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while source.read().contains(EntityId::new(1)) && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+            }
+            true
+        });
+        writer.join().expect("writer finished");
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2], "relocation hid a row from a live snapshot");
     }
 
     #[test]
