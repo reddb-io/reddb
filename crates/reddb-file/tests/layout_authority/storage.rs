@@ -960,21 +960,26 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
     for required in [
-        "reddb_file::decode_native_store_header",
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
         "reddb_file::encode_native_dump_count",
         "reddb_file::encode_native_dump_collection_header",
         "reddb_file::encode_native_dump_entity_record",
         "reddb_file::encode_native_dump_cross_ref",
-        "reddb_engine::storage::snapshot::{visit_snapshot, SnapshotVisitor}",
-        "visit_snapshot(buf, &mut Restore(&store))",
+        "reddb_engine::storage::resident_store::ResidentStore::from_snapshot",
     ] {
         assert!(
             impl_file.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
         );
     }
+
+    let recovery = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
+    assert!(
+        recovery.contains("use super::snapshot::{visit_snapshot, SnapshotVisitor}")
+            && recovery.contains("let version = visit_snapshot("),
+        "shared resident reconstruction must use canonical snapshot decoding"
+    );
 
     let snapshot = read(root.join("crates/reddb-engine/src/storage/snapshot.rs"));
     for required in [

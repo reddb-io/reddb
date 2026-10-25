@@ -1,7 +1,9 @@
 //! Native dump recovery cases also executed by the browser WASM harness.
 use reddb_engine::storage::{
-    entity::UnifiedEntity,
+    entity::{EntityId, UnifiedEntity},
+    manager::ManagerConfig,
     metadata::Metadata,
+    resident_store::ResidentStore,
     snapshot::{visit_snapshot, SnapshotVisitor},
 };
 use reddb_file::native_value::NativeReader;
@@ -15,6 +17,10 @@ pub const CASES: &[(&str, fn())] = &[
         optional_tails,
     ),
     ("snapshot_corruption_and_callback_errors", malformed),
+    (
+        "snapshot_resident_recovery_options",
+        resident_recovery_options,
+    ),
 ];
 
 fn native_store_fixture() {
@@ -36,7 +42,14 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         .cross_refs
         .iter()
         .any(|cross_ref| cross_ref.source_id == 1024 && cross_ref.target_id == 1026));
-    let resident = recovered_resident_fixture(&restored);
+    let (resident, version) =
+        ResidentStore::from_snapshot(bytes, &ManagerConfig::default(), true, 1000)
+            .expect("canonical resident recovery");
+    assert_eq!(version, 12);
+    assert!(resident
+        .get_refs_from(EntityId::new(1024))
+        .iter()
+        .any(|(id, _, _)| id.raw() == 1026));
     assert_eq!(resident.list_collections().len(), 9);
     assert_eq!(
         resident
@@ -64,7 +77,7 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         assert_eq!(
             manager.query_all(|_| true).len(),
             1,
-            "physical history survives sealing"
+            "physical history survives recovery"
         );
         assert_eq!(
             reddb_engine::storage::metadata_codec::serialize_entity_record(
@@ -92,33 +105,6 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         );
     }
     8
-}
-
-// Test-only host reconstruction: production catalog/WAL policy remains native.
-fn recovered_resident_fixture(
-    restored: &Restored,
-) -> reddb_engine::storage::resident_store::ResidentStore {
-    use reddb_engine::storage::{manager::SegmentManager, resident_store::ResidentStore};
-    use std::sync::Arc;
-    let resident = ResidentStore::new();
-    for (name, records) in &restored.collections {
-        let manager = Arc::new(SegmentManager::new(name));
-        for (entity, metadata) in records {
-            resident.register_entity_id(entity.id);
-            manager
-                .restore_snapshot_entity(entity.clone())
-                .expect("restore live entity");
-            if let Some(metadata) = metadata {
-                manager
-                    .set_metadata(entity.id, metadata.clone())
-                    .expect("restore live metadata");
-            }
-        }
-        manager.force_seal().expect("seal recovered collection");
-        resident.collections.write().insert(name.clone(), manager);
-    }
-    resident.set_aux_metadata(restored.auxiliary.clone());
-    resident
 }
 
 #[derive(Default)]
@@ -204,12 +190,34 @@ fn native_versions() {
             visit_snapshot(&dump(version, true), &mut restored).expect("native snapshot"),
             version
         );
-        assert!(restored.collections["empty"].is_empty());
+        let (resident, recovered_version) = ResidentStore::from_snapshot(
+            &dump(version, true),
+            &ManagerConfig::default(),
+            true,
+            1000,
+        )
+        .expect("canonical resident version recovery");
+        assert_eq!(recovered_version, version);
+        assert_eq!(resident.list_collections().len(), 2);
+        assert_eq!(resident.get_collection("empty").expect("empty").count(), 0);
+        assert_eq!(resident.aux_metadata(), restored.auxiliary);
+        let manager = resident
+            .get_collection("ação")
+            .expect("recovered collection");
+        assert_eq!(manager.count(), 8);
         let entities = &restored.collections["ação"];
         assert_eq!(entities.len(), 8);
         for (index, (entity, metadata)) in entities.iter().enumerate() {
             assert_eq!(entity.id.raw(), 1024 + index as u64);
             assert_eq!(entity.sequence_id, 99);
+            let managed = manager.get(entity.id).expect("canonical resident entity");
+            assert_eq!(managed.sequence_id, entity.sequence_id);
+            assert_eq!(managed.xmin, entity.xmin);
+            assert_eq!(managed.xmax, entity.xmax);
+            assert_eq!(
+                manager.get_metadata(entity.id).map(|value| value.fields),
+                metadata.as_ref().map(|value| value.fields.clone())
+            );
             assert_eq!(entity.xmin, if version >= 9 { 17 } else { 0 });
             assert_eq!(entity.xmax, if version >= 9 { 23 } else { 0 });
             assert_eq!(
@@ -282,4 +290,40 @@ fn malformed() {
         visit_snapshot(&bytes, &mut Rejected),
         Err("host refused collection".into())
     );
+}
+
+fn resident_recovery_options() {
+    let config = ManagerConfig::default();
+    for auto_index_refs in [false, true] {
+        let (store, version) =
+            ResidentStore::from_snapshot(&dump(12, false), &config, auto_index_refs, 1000)
+                .expect("canonical reference indexing policy");
+        assert_eq!(version, 12);
+        assert_eq!(
+            store.get_refs_from(EntityId::new(1024)).is_empty(),
+            !auto_index_refs
+        );
+        assert_eq!(store.next_entity_id().raw(), 1032);
+        assert!(store
+            .get_collection("ação")
+            .expect("recovered")
+            .get(EntityId::new(1024))
+            .is_some());
+    }
+    let (store, _) = ResidentStore::from_snapshot(&dump(12, true), &config, false, 0)
+        .expect("native explicit-reference cap policy");
+    assert!(store.get_refs_from(EntityId::new(1024)).is_empty());
+    let (store, _) = ResidentStore::from_snapshot(&dump(12, true), &config, false, 1000)
+        .expect("native explicit-reference restoration");
+    assert!(store
+        .get_refs_from(EntityId::new(1024))
+        .iter()
+        .any(|(id, _, _)| id.raw() == 1026));
+    let bytes = dump(12, true);
+    for end in [0, 8, bytes.len() - 1] {
+        assert!(
+            ResidentStore::from_snapshot(&bytes[..end], &config, true, 1000).is_err(),
+            "failed recovery returns no resident target"
+        );
+    }
 }

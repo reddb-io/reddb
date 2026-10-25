@@ -290,27 +290,8 @@ impl UnifiedStore {
 
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
-        let name = name.into();
-        // Fast path: shared read lock — zero contention for existing collections
-        {
-            let collections = self.resident.collections.read();
-            if let Some(manager) = collections.get(&name) {
-                return Arc::clone(manager);
-            }
-        }
-        // Slow path: exclusive write lock — only when collection is missing
-        let mut collections = self.resident.collections.write();
-        // Double-check after acquiring write lock (another thread may have created it)
-        if let Some(manager) = collections.get(&name) {
-            return Arc::clone(manager);
-        }
-        let manager = Arc::new(SegmentManager::with_config(
-            &name,
-            self.config.manager_config.clone(),
-        ));
-        collections.insert(name, Arc::clone(&manager));
-        self.mark_paged_registry_dirty();
-        manager
+        self.resident
+            .get_or_create_collection(name, &self.config.manager_config)
     }
 
     /// Get a collection
@@ -1356,91 +1337,26 @@ impl UnifiedStore {
         ref_type: RefType,
         weight: f32,
     ) -> Result<(), StoreError> {
-        // Check source exists
-        let source_manager = self
-            .get_collection(source_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(source_collection.to_string()))?;
-
-        if source_manager.get(source_id).is_none() {
-            return Err(StoreError::EntityNotFound(source_id));
-        }
-
-        // Check target exists
-        let target_manager = self
-            .get_collection(target_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(target_collection.to_string()))?;
-
-        if target_manager.get(target_id).is_none() {
-            return Err(StoreError::EntityNotFound(target_id));
-        }
-
-        // Check limits
-        let current_refs = self
-            .resident
-            .cross_refs
-            .read()
-            .get(&source_id)
-            .map_or(0, |v| v.len());
-
-        if current_refs >= self.config.max_cross_refs {
-            return Err(StoreError::TooManyRefs(source_id));
-        }
-
-        let mut registry_dirty = false;
-        {
-            let mut forward = self.resident.cross_refs.write();
-            let refs = forward.entry(source_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == target_id && *kind == ref_type && coll == target_collection
-            });
-            if inserted {
-                refs.push((target_id, ref_type, target_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        {
-            let mut reverse = self.resident.reverse_refs.write();
-            let refs = reverse.entry(target_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == source_id && *kind == ref_type && coll == source_collection
-            });
-            if inserted {
-                refs.push((source_id, ref_type, source_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        if let Some(mut entity) = source_manager.get(source_id) {
-            if !entity.cross_refs().iter().any(|xref| {
-                xref.target == target_id
-                    && xref.ref_type == ref_type
-                    && xref.target_collection == target_collection
-            }) {
-                let cross_ref = CrossRef::with_weight(
-                    source_id,
-                    target_id,
-                    target_collection,
-                    ref_type,
-                    weight,
-                );
-                entity.add_cross_ref(cross_ref);
-                let _ = source_manager.update(entity.clone());
-                registry_dirty = true;
-                self.persist_entities_to_pager(source_collection, std::slice::from_ref(&entity))?;
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-            if matches!(
+        let registry_dirty = self.resident.add_cross_ref_in_memory(
+            source_collection,
+            source_id,
+            target_collection,
+            target_id,
+            ref_type,
+            weight,
+            self.config.max_cross_refs,
+            |entity| {
+                self.persist_entities_to_pager(source_collection, std::slice::from_ref(entity))
+            },
+        )?;
+        if registry_dirty
+            && matches!(
                 self.config.durability_mode,
                 crate::api::DurabilityMode::Strict
-            ) {
-                self.flush_paged_state()?;
-            }
+            )
+        {
+            self.flush_paged_state()?;
         }
-
         Ok(())
     }
 

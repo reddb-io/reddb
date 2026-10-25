@@ -1,7 +1,8 @@
 //! Canonical multi-collection resident reads, independent of durable host writes.
 use reddb_engine::storage::{
     entity::{EntityId, RefType, UnifiedEntity},
-    manager::SegmentManager,
+    error::StoreError,
+    manager::{ManagerConfig, SegmentManager},
     metadata::{Metadata, MetadataFilter, MetadataValue},
     resident_store::ResidentStore,
 };
@@ -14,6 +15,10 @@ use std::sync::Arc;
 
 pub const CASES: &[(&str, fn())] = &[
     ("resident_store_global_identity", global_identity),
+    (
+        "resident_store_reference_write_boundaries",
+        reference_write_boundaries,
+    ),
     (
         "resident_store_cross_collection_snapshot",
         cross_collection_snapshot,
@@ -211,4 +216,88 @@ fn graph_metadata_and_references() {
     );
     store.set_aux_metadata(b"opaque catalog".to_vec());
     assert_eq!(store.aux_metadata(), b"opaque catalog");
+}
+
+fn reference_write_boundaries() {
+    use std::cell::Cell;
+    use std::sync::atomic::Ordering;
+    let store = ResidentStore::new();
+    let config = ManagerConfig::default();
+    for (collection, id) in [("source", 1), ("target", 2)] {
+        store
+            .get_or_create_collection(collection, &config)
+            .restore_snapshot_entity(UnifiedEntity::table_row(
+                EntityId::new(id),
+                collection,
+                id,
+                vec![],
+            ))
+            .expect("reference endpoint");
+    }
+    store.paged_registry_dirty.store(false, Ordering::Release);
+    let called = Cell::new(false);
+    assert!(store
+        .add_cross_ref_in_memory(
+            "source",
+            EntityId::new(1),
+            "target",
+            EntityId::new(2),
+            RefType::RowToNode,
+            0.5,
+            1000,
+            |entity| {
+                called.set(true);
+                assert_eq!(entity.cross_refs().len(), 1);
+                assert_eq!(store.get_refs_from(entity.id).len(), 1);
+                assert_eq!(store.get_refs_to(EntityId::new(2)).len(), 1);
+                assert!(
+                    !store.paged_registry_dirty.load(Ordering::Acquire),
+                    "native pager hook precedes registry dirty publication"
+                );
+                Ok(())
+            }
+        )
+        .expect("add reference"));
+    assert!(called.get());
+    assert!(store.paged_registry_dirty.load(Ordering::Acquire));
+    store.paged_registry_dirty.store(false, Ordering::Release);
+    assert!(!store
+        .add_cross_ref_in_memory(
+            "source",
+            EntityId::new(1),
+            "target",
+            EntityId::new(2),
+            RefType::RowToNode,
+            0.5,
+            1000,
+            |_| panic!("duplicate reference has no pager write")
+        )
+        .expect("duplicate"));
+    assert!(!store.paged_registry_dirty.load(Ordering::Acquire));
+    assert!(matches!(
+        store.add_cross_ref_in_memory(
+            "source",
+            EntityId::new(1),
+            "target",
+            EntityId::new(2),
+            RefType::RowToNode,
+            0.5,
+            1,
+            |_| panic!("limit precedes mutation")
+        ),
+        Err(StoreError::TooManyRefs(_))
+    ));
+    assert!(matches!(
+        store.add_cross_ref_in_memory(
+            "missing",
+            EntityId::new(1),
+            "target",
+            EntityId::new(2),
+            RefType::RowToNode,
+            0.5,
+            1000,
+            |_| panic!("missing endpoint")
+        ),
+        Err(StoreError::CollectionNotFound(_))
+    ));
 }

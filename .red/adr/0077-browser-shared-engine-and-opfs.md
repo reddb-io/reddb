@@ -458,3 +458,32 @@ Cost sketch: replay of N records retains O(N) decode/index work; collection
 replacement temporarily retains its previous and replacement manager while
 old readers exist. Moving the code adds no second WAL or IPC per record and
 changes no flush ordering. No measured performance gain is claimed.
+
+## Shared native snapshot reconstruction
+
+`ResidentStore::from_snapshot` reconstructs a private resident store through the
+existing canonical snapshot visitor. The native file loader delegates to that
+implementation and retains format upgrades and host configuration. Collection
+creation, identity/row allocator floors, sequence identity, metadata, graph
+labels, automatic reference indexing, legacy explicit-reference tails and
+opaque catalog bytes follow the existing native restoration path. An error
+returns no partially recovered target.
+
+The resident cross-reference mutation also supplies the native pager callback
+at its original position: forward/reverse indexes and the source entity change
+before persistence, then the registry dirty bit is published. Strict paged
+flushing remains in the native adapter. Existing endpoint validation, reference
+caps and duplicate handling are unchanged, including the legacy snapshot
+loader's handling of optional reference tails.
+
+Identical native/WASM cases load the frozen native snapshot using this
+production recovery method, exercise versions 1 through 12, reference policy
+and caps, allocator floors, metadata and failed recovery. The real OPFS offline
+snapshot restart probe uses the same loader. This supplies resident recovery;
+public catalog dispatch and durable application transaction publication remain
+pending.
+
+Cost sketch: N snapshot records are decoded and adopted once, with their
+existing derived-index work; no serialization round trip or second resident
+copy is added. Explicit references retain the existing per-source duplicate
+scan and configured cap. No extra file or network operation is introduced.
