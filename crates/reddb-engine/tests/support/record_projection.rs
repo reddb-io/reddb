@@ -2,7 +2,7 @@
 use reddb_engine::catalog::CollectionContract;
 use reddb_engine::query::{
     evaluator::{self, EvalError},
-    runtime::{filter::resolve_filter_row_value, projection::*},
+    runtime::{filter::resolve_filter_row_value, projection::*, projection_value::*},
     unified::{MatchedEdge, MatchedNode, UnifiedRecord, VectorSearchResult},
 };
 use reddb_rql::ast::{CompareOp, Expr, FieldRef, Filter, Projection};
@@ -10,6 +10,12 @@ use reddb_types::Value;
 use std::{cell::Cell, collections::HashMap, sync::Arc};
 
 pub const CASES: &[(&str, fn())] = &[
+    ("projection_value_legacy_literals", legacy_literals),
+    (
+        "projection_value_resolution_and_fallback",
+        value_resolution_and_fallback,
+    ),
+    ("projection_value_secret_input_order", secret_input_order),
     (
         "record_projection_fields_aliases_and_literals",
         fields_aliases_and_literals,
@@ -44,6 +50,8 @@ struct Host<'a> {
     fallback_calls: Cell<usize>,
     output_calls: Cell<usize>,
     deny_output: bool,
+    input_calls: Cell<usize>,
+    deny_input: bool,
 }
 
 impl<'a> Host<'a> {
@@ -54,6 +62,8 @@ impl<'a> Host<'a> {
             fallback_calls: Cell::new(0),
             output_calls: Cell::new(0),
             deny_output: false,
+            input_calls: Cell::new(0),
+            deny_input: false,
         }
     }
 }
@@ -101,12 +111,8 @@ impl ProjectionHost for Host<'_> {
         let operation = name.split(':').next().unwrap_or(name);
         match operation {
             "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
-                // This fixture admits simple canonical argument expressions;
-                // native argument/literal dispatch remains in its own host.
-                let resolve = |argument: &Projection| {
-                    let (expression, _) = reddb_rql::sql_lowering::projection_to_expr(argument)?;
-                    self.evaluate_expression(&expression, source).ok()
-                };
+                let resolve =
+                    |argument: &Projection| eval_projection_value_with_host(self, argument, source);
                 Some(reddb_engine::query::runtime::numeric::arith_binop(
                     operation,
                     resolve(arguments.first()?)?,
@@ -116,12 +122,8 @@ impl ProjectionHost for Host<'_> {
             _ => Some(Value::text("host fallback")),
         }
     }
-    fn evaluate_literal(&self, column: &str, source: &UnifiedRecord) -> Option<Value> {
-        // Test host covers canonical literal expressions; native legacy sentinel
-        // decoding stays in its existing host, not in a second browser codec.
-        let (expression, _) =
-            reddb_rql::sql_lowering::projection_to_expr(&Projection::Column(column.into()))?;
-        self.evaluate_expression(&expression, source).ok()
+    fn evaluate_literal(&self, column: &str, _: &UnifiedRecord) -> Option<Value> {
+        decode_projection_literal(column)
     }
     fn evaluation_error(&self, error: EvalError, sensitive: bool) -> String {
         if sensitive {
@@ -138,6 +140,209 @@ impl ProjectionHost for Host<'_> {
             Ok(value)
         }
     }
+}
+
+// Test-only scalar host: real shared argument traversal and arithmetic, with
+// explicit fallback sentinels for effects not implemented by this fixture.
+impl ProjectionValueHost for Host<'_> {
+    fn try_expression(&self, expression: &Expr, source: &UnifiedRecord) -> Option<Value> {
+        if self.forced_error.is_some() {
+            return None;
+        }
+        evaluator::evaluate(expression, &|field: &FieldRef| {
+            resolve_filter_row_value(
+                source,
+                field,
+                None,
+                None,
+                &super::record_filters::plaintext,
+                |_, _| false,
+            )
+        })
+        .ok()
+    }
+    fn fallback_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        self.evaluate_function(name, arguments, source)
+    }
+    fn fallback_filter(&self, filter: &Filter, source: &UnifiedRecord) -> bool {
+        self.evaluate_filter(filter, source)
+    }
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        self.input_calls.set(self.input_calls.get() + 1);
+        if self.deny_input {
+            None
+        } else {
+            Some(value)
+        }
+    }
+}
+
+fn legacy_literals() {
+    for (input, expected) in [
+        ("LIT:", Value::Null),
+        ("LIT:42", Value::Integer(42)),
+        ("LIT:2.5", Value::Float(2.5)),
+        ("LIT:hello", Value::text("hello")),
+        ("LIT:null", Value::text("null")),
+        ("LIT:@RL:null", Value::Null),
+        ("LIT:@RL:[]", Value::Array(vec![])),
+        ("LIT:@RL:V[]", Value::Vector(vec![])),
+        ("LIT:@RL:V[1,2.5]", Value::Vector(vec![1.0, 2.5])),
+        (
+            "LIT:@RL:[true,false,null,[1],V[2,3],\"text\"]",
+            Value::Array(vec![
+                Value::Boolean(true),
+                Value::Boolean(false),
+                Value::Null,
+                Value::Array(vec![Value::Integer(1)]),
+                Value::Vector(vec![2.0, 3.0]),
+                Value::text("text"),
+            ]),
+        ),
+        ("LIT:@RL:V[bad]", Value::text("@RL:V[bad]")),
+        ("LIT:@RL:[1,]", Value::text("@RL:[1,]")),
+        // Preserve the legacy splitter's quoted-comma behavior.
+        ("LIT:@RL:[\"a,b\"]", Value::text("@RL:[\"a,b\"]")),
+        (r#"LIT:@RL:"a\"b\\c""#, Value::text("a\"b\\c")),
+    ] {
+        assert_eq!(decode_projection_literal(input), Some(expected), "{input}");
+    }
+    assert_eq!(decode_projection_literal("quantity"), None);
+    let depth = reddb_rql::limits::JSON_LITERAL_MAX_DEPTH as usize;
+    let payload = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+    let value = decode_projection_literal(&format!("LIT:@RL:{payload}"));
+    assert!(matches!(value, Some(Value::Array(_))), "depth boundary");
+    let payload = format!("[{payload}]");
+    assert_eq!(
+        decode_projection_literal(&format!("LIT:@RL:{payload}")),
+        Some(Value::text(format!("@RL:{payload}"))),
+        "over-depth retains text fallback"
+    );
+}
+
+fn value_resolution_and_fallback() {
+    let mut source = source();
+    source.set("position", Value::Integer(8));
+    let host = Host::new(None);
+    for projection in [
+        Projection::Column("quantity".into()),
+        Projection::Alias("quantity".into(), "amount".into()),
+        Projection::Field(field("quantity"), None),
+    ] {
+        assert_eq!(
+            eval_projection_value_with_host(&host, &projection, &source),
+            Some(Value::Integer(3))
+        );
+    }
+    let window =
+        projections("SELECT ROW_NUMBER() OVER (ORDER BY quantity) AS position FROM orders");
+    assert_eq!(
+        eval_projection_value_with_host(&host, &window[0], &source),
+        Some(Value::Integer(8))
+    );
+    assert_eq!(
+        eval_projection_value_with_host(&host, &Projection::All, &source),
+        None
+    );
+    assert_eq!(
+        eval_projection_value_with_host(&host, &Projection::Column("missing".into()), &source),
+        None
+    );
+    let columns = projections("SELECT (quantity + 1) * 2 AS nested FROM orders");
+    assert_eq!(
+        eval_projection_value_with_host(&host, &columns[0], &source),
+        Some(Value::Integer(8))
+    );
+    assert_eq!(
+        host.fallback_calls.get(),
+        2,
+        "nested ADD and MUL use canonical legacy arguments"
+    );
+    let host = Host {
+        forced_error: Some(EvalError::DivisionByZero),
+        ..Host::new(None)
+    };
+    let columns =
+        projections("SELECT UPPER(nickname) AS display, quantity > 1 AS accepted FROM orders");
+    assert_eq!(
+        eval_projection_value_with_host(&host, &columns[0], &source),
+        Some(Value::text("host fallback"))
+    );
+    assert_eq!(
+        eval_projection_value_with_host(&host, &columns[1], &source),
+        Some(Value::Boolean(true))
+    );
+    assert_eq!(
+        host.fallback_calls.get(),
+        2,
+        "optional arguments fall back even on typed data errors"
+    );
+}
+
+fn secret_input_order() {
+    let source = source();
+    let host = Host::new(None);
+    let plain = Projection::Column("quantity".into());
+    let alias = Projection::Alias("quantity".into(), "amount".into());
+    assert_eq!(
+        eval_projection_value_with_host(&host, &alias, &source),
+        Some(Value::Integer(3))
+    );
+    assert_eq!(
+        host.input_calls.get(),
+        2,
+        "column and outer alias each admit input"
+    );
+    host.input_calls.set(0);
+    let literal = Projection::Column("LIT:7".into());
+    assert_eq!(
+        eval_projection_value_with_host(&host, &literal, &source),
+        Some(Value::Integer(7))
+    );
+    assert_eq!(
+        host.input_calls.get(),
+        0,
+        "direct literal returns before admission"
+    );
+    let host = Host {
+        deny_input: true,
+        ..Host::new(None)
+    };
+    assert_eq!(
+        eval_projection_value_with_host(&host, &plain, &source),
+        None
+    );
+    assert_eq!(host.input_calls.get(), 1);
+    host.input_calls.set(0);
+    assert_eq!(
+        eval_projection_value_with_host(&host, &alias, &source),
+        None
+    );
+    assert_eq!(
+        host.input_calls.get(),
+        1,
+        "denied inner value skips outer admission"
+    );
+    assert_eq!(
+        eval_projection_value_with_host(&host, &literal, &source),
+        Some(Value::Integer(7))
+    );
+    host.input_calls.set(0);
+    let alias = Projection::Alias("LIT:7".into(), "literal".into());
+    assert_eq!(
+        eval_projection_value_with_host(&host, &alias, &source),
+        None
+    );
+    assert_eq!(
+        host.input_calls.get(),
+        1,
+        "aliased literal still requires admission"
+    );
 }
 
 fn field(column: &str) -> FieldRef {
@@ -502,7 +707,7 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         0,
         "the recovered query executes through canonical typed evaluation"
     );
-    let query = super::record_filters::table_query("SELECT o.rid AS identity, quantity * 2 AS doubled, total / quantity AS unit_price, quantity / 0 AS zero_divisor FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1");
+    let query = super::record_filters::table_query("SELECT o.rid AS identity, quantity * 2 AS doubled, (quantity + 1) * 2 AS nested, total / quantity AS unit_price, quantity / 0 AS zero_divisor FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1");
     let columns = reddb_rql::sql_lowering::effective_table_projections(&query);
     let selected = super::record_ordering::ordered_records(records, &query, Some(contract), false);
     for (index, source) in selected.iter().enumerate() {
@@ -513,12 +718,16 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
             projected.get("doubled"),
             Some(&Value::Integer(doubled[index]))
         );
+        assert_eq!(
+            projected.get("nested"),
+            Some(&Value::Integer(doubled[index] + 2))
+        );
         assert_eq!(projected.get("unit_price"), Some(&Value::Float(5.0)));
         assert_eq!(projected.get("zero_divisor"), Some(&Value::Null));
     }
     assert_eq!(
         host.fallback_calls.get(),
-        6,
-        "three legacy operations per recovered row"
+        10,
+        "five legacy operations including nested arguments per recovered row"
     );
 }

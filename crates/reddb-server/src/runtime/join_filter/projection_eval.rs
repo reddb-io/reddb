@@ -5,72 +5,44 @@ pub(in crate::runtime) fn eval_projection_value(
     proj: &Projection,
     source: &UnifiedRecord,
 ) -> Option<Value> {
-    let value = match proj {
-        Projection::Column(col) => {
-            if let Some(lit_val) = col.strip_prefix("LIT:") {
-                if lit_val.is_empty() {
-                    return Some(Value::Null);
-                }
-                // Composite sentinel — Array/Vector/Blob roundtrip via
-                // JSON-ish encoding (see `serialize_value_json` in
-                // `sql_lowering`). Preserves shape across the
-                // Projection-based legacy scalar dispatcher.
-                if let Some(payload) = lit_val.strip_prefix("@RL:") {
-                    if let Some(v) = parse_rl_literal(payload) {
-                        return Some(v);
-                    }
-                }
-                if let Ok(n) = lit_val.parse::<i64>() {
-                    return Some(Value::Integer(n));
-                }
-                if let Ok(n) = lit_val.parse::<f64>() {
-                    return Some(Value::Float(n));
-                }
-                return Some(Value::text(lit_val.to_string()));
-            }
-            source.get(col.as_str()).cloned()
-        }
-        Projection::Alias(col, _) => {
-            eval_projection_value(&Projection::Column(col.clone()), source)
-        }
-        Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
-        Projection::Function(name, inner_args) => reddb_rql::sql_lowering::projection_to_expr(proj)
-            .and_then(|(expr, _)| {
-                let row = RecordRow {
-                    db: None,
-                    record: source,
-                    table_name: None,
-                    table_alias: None,
-                };
-                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
-                    .ok()
-            })
-            .or_else(|| evaluate_scalar_function(name, inner_args, source)),
-        Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
-            .and_then(|(expr, _)| {
-                let row = RecordRow {
-                    db: None,
-                    record: source,
-                    table_name: None,
-                    table_alias: None,
-                };
-                crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(&expr, &row)
-                    .ok()
-            })
-            .or_else(|| {
-                Some(Value::Boolean(evaluate_runtime_filter(
-                    source, filter, None, None,
-                )))
-            }),
-        Projection::All => None,
-        // Slice 7b (#590): window output is pre-materialised on the
-        // record under the alias by `runtime::window_phase::apply`.
-        Projection::Window { name, alias, .. } => {
-            let label: String = alias.clone().unwrap_or_else(|| name.clone());
-            source.get(label.as_str()).cloned()
-        }
-    };
-    value.and_then(crate::runtime::execution_context::secret_query_input)
+    reddb_engine::query::runtime::projection_value::eval_projection_value_with_host(
+        &RuntimeProjectionValueHost,
+        proj,
+        source,
+    )
+}
+
+struct RuntimeProjectionValueHost;
+impl reddb_engine::query::runtime::projection_value::ProjectionValueHost
+    for RuntimeProjectionValueHost
+{
+    fn try_expression(
+        &self,
+        expression: &reddb_rql::ast::Expr,
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        let row = RecordRow {
+            db: None,
+            record: source,
+            table_name: None,
+            table_alias: None,
+        };
+        crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row).ok()
+    }
+    fn fallback_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        evaluate_scalar_function(name, arguments, source)
+    }
+    fn fallback_filter(&self, filter: &Filter, source: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter(source, filter, None, None)
+    }
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        crate::runtime::execution_context::secret_query_input(value)
+    }
 }
 
 pub(in crate::runtime) fn eval_projection_value_with_db(
