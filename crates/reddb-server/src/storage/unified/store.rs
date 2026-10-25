@@ -451,7 +451,7 @@ mod shared_state_tests {
         let id = store
             .insert_auto(
                 "nodes",
-                UnifiedEntity::graph_node(EntityId::new(0), "nodes", "Person", HashMap::new()),
+                UnifiedEntity::graph_node(EntityId::new(0), "Person", "person", HashMap::new()),
             )
             .expect("native mutation");
         assert_eq!(id.raw(), 1);

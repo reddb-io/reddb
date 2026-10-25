@@ -151,8 +151,8 @@ fn graph_metadata_and_references() {
         manager
             .insert(UnifiedEntity::graph_node(
                 EntityId::new(id),
-                name,
                 "Person",
+                "person",
                 HashMap::new(),
             ))
             .expect("node");
