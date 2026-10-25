@@ -2,7 +2,7 @@
 use crate::physical::CollectionContract;
 pub(super) use reddb_engine::catalog::cache::CollectionContractCache;
 #[cfg(test)]
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
