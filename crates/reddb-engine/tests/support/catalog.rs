@@ -97,7 +97,7 @@ fn contract_round_trip() {
             name: "order_events".into(),
             source: "orders".into(),
             target_queue: "events".into(),
-            ops_filter: vec!["insert".into(), "update".into(), "delete".into()],
+            ops_filter: vec!["INSERT".into(), "UPDATE".into(), "DELETE".into()],
             where_filter: Some("quantity > 0".into()),
             redact_fields: vec!["secret".into()],
             enabled: true,
