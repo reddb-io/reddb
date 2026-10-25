@@ -41,6 +41,8 @@ on:
       - 'crates/reddb-rql/**'
       - 'crates/reddb-types/**'
       - 'packages/browser/**'
+      - 'drivers/node/Cargo.lock'
+      - 'drivers/python/Cargo.lock'
       - 'drivers/dart/**'
       - 'drivers/dotnet/**'
       - 'Cargo.toml'
@@ -85,6 +87,11 @@ jobs:
         if: runner.os == 'Linux'
         with:
           version: '28.3'
+      - name: Verify standalone native driver dependency locks
+        if: runner.os == 'Linux'
+        run: |
+          cargo metadata --locked --manifest-path drivers/node/Cargo.toml --format-version 1 > /dev/null
+          cargo metadata --locked --manifest-path drivers/python/Cargo.toml --format-version 1 > /dev/null
       - name: Compare portable execution with the native runtime and query regressions
         if: runner.os == 'Linux'
         run: cargo test --locked -p reddb-io-server --test portable_query_engine --test runtime_query_behavior --test dead_storage_modules --test vault_import_corruption
