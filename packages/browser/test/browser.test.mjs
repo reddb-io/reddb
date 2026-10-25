@@ -81,6 +81,9 @@ async function sharedConformance(browserPage) {
     'metadata_codec_malformed_payloads', 'metadata_codec_depth_boundary',
     'snapshot_native_store_fixture', 'snapshot_native_v1_v12_recovery', 'snapshot_empty_collections_and_legacy_tails',
     'snapshot_corruption_and_callback_errors',
+    'manager_models_and_constraint_lock', 'manager_snapshot_key_versions',
+    'manager_moderation_and_serializable_reads', 'manager_bounded_scan_and_consolidation',
+    'manager_ordered_graph_candidates',
   ])
 }
 

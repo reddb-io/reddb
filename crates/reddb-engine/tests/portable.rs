@@ -114,3 +114,14 @@ fn portable_snapshot_conformance() {
         run();
     }
 }
+
+#[path = "support/manager.rs"]
+mod manager;
+
+#[test]
+fn portable_collection_lifecycle_conformance() {
+    for (name, run) in manager::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

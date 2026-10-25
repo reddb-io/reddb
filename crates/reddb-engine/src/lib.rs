@@ -16,6 +16,8 @@
 )]
 
 mod clock;
+#[doc(hidden)]
+pub mod execution;
 pub mod query;
 pub mod storage;
 pub mod transaction;

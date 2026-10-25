@@ -296,8 +296,9 @@ these types, including primitive metadata conversions and the existing locked
 segment trait adapter. This removes the next native dependency from collection
 reads and writes without introducing another entity store for the browser.
 
-The native segment manager still owns lifecycle, consolidation, snapshot and
-moderation admission; native WAL and catalog publication remain host policy.
+The shared segment manager now owns lifecycle, consolidation, explicit snapshot
+and persisted moderation-marker admission; native WAL and catalog publication
+remain host policy.
 Physical candidates provide neither visibility nor authorization. Public browser
 stored-data queries and durable application transactions still require the
 remaining runtime integration. No file bytes or versions change in this move.
@@ -329,3 +330,29 @@ rejects deeper metadata previously accepted by the unbounded native reader.
 Frozen original-native metadata bytes and V1–V12 entity fixtures qualify the same
 cases natively and in browser WASM. Formats/versions and the public browser API
 are unchanged. Application WAL recovery and stored-data dispatch remain pending.
+
+
+## Shared collection lifecycle
+
+`reddb-engine::storage::manager` owns the native collection manager, paced
+consolidation, retained-source accounting, snapshot scans, keyed-version probes
+and ordered physical graph candidate merging. Native paths re-export the same
+types. Host-only integration tests still check ambient snapshot independence,
+query-callsite guards and runtime memory admission. The persisted moderation
+marker predicate and explicit-snapshot entity gate have one shared authority;
+authorization, tenants and moderation providers remain host responsibilities.
+
+Native scans retain their existing scoped-thread and Rayon paths. WASM uses
+serial scans and reductions inside the dedicated Worker, without attempting to
+spawn Rust threads. The same conformance cases cover reentrant collection gates,
+entity shapes, own/aborted savepoint versions, moderation/SSI read tracking,
+bounded cancellable scans through consolidation, pinned-source accounting and
+ordered graph candidates in native Rust and browser WASM. They are collection
+lifecycle coverage; persistent stored-data SQL, catalog integration and durable
+transaction publication through the public Browser SDK remain pending.
+
+Cost sketch: scanning N entities still visits N candidates, and consolidation
+copies at most the configured entities per tick (4,096 by default). A cursor
+retains its original source until completion/cancellation, so an in-flight
+consolidation can temporarily retain both source and destination payloads. This
+extraction adds no IPC or file-format change and makes no measured speed claim.

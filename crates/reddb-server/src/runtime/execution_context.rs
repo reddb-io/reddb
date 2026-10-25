@@ -1123,20 +1123,5 @@ pub fn entity_visible_with_context(
     ctx: Option<&SnapshotContext>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
-    // Same moderation visibility gate as the thread-local path (#1274):
-    // parallel scan workers capture the snapshot context but must apply
-    // the moderation marker check identically.
-    if crate::runtime::ai::moderation::entity_moderation_hidden(entity) {
-        return false;
-    }
-    match ctx {
-        Some(ctx) => {
-            let visible = visibility_check(ctx, entity.xmin, entity.xmax);
-            if visible {
-                record_serializable_read(ctx, entity);
-            }
-            visible
-        }
-        None => true,
-    }
+    reddb_engine::storage::visibility::entity_visible_with_context(ctx, entity)
 }

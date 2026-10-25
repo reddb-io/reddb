@@ -29,3 +29,7 @@ mod segment_unique_key;
 
 pub mod metadata_codec;
 pub mod snapshot;
+
+pub mod manager;
+pub mod visibility;
+pub mod visibility_map;

@@ -42,6 +42,42 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
         let (entity, metadata) = &collection[0];
         assert_eq!(entity.id, expected.id);
         assert_eq!(entity.kind, expected.kind);
+        // The actual OPFS restart fixture must rebuild the canonical live
+        // collection too, rather than only decode a vector of records.
+        let manager = reddb_engine::storage::manager::SegmentManager::new(format!(
+            "codec_{}",
+            expected.id.raw()
+        ));
+        manager
+            .restore_snapshot_entity(entity.clone())
+            .expect("restore live entity");
+        if let Some(metadata) = metadata.clone() {
+            manager
+                .set_metadata(entity.id, metadata)
+                .expect("restore live metadata");
+        }
+        manager.force_seal().expect("seal recovered collection");
+        let managed = manager
+            .get(entity.id)
+            .expect("recovered entity remains discoverable");
+        assert_eq!(
+            manager.query_all(|_| true).len(),
+            1,
+            "physical history survives sealing"
+        );
+        assert_eq!(
+            reddb_engine::storage::metadata_codec::serialize_entity_record(
+                &managed,
+                manager.get_metadata(entity.id).as_ref(),
+                12,
+            ),
+            reddb_engine::storage::metadata_codec::serialize_entity_record(
+                entity,
+                metadata.as_ref(),
+                12
+            ),
+            "recovery retains MVCC, sequence, payload and metadata bytes",
+        );
         assert!(
             restored
                 .cross_refs
