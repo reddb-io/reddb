@@ -1,6 +1,7 @@
 use super::*;
 use crate::api::DurabilityMode;
 use crate::storage::wal::{WalReader, WalRecord, WalWriter};
+use reddb_engine::storage::resident_file::EMBEDDED_WAL_HEADROOM_LIMIT;
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,11 +54,6 @@ impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<
 /// `REDDB_GROUP_COMMIT_WINDOW_MS` to any non-zero value to bypass
 /// this floor — explicit ms config wins.
 const DEFAULT_ADAPTIVE_WINDOW_US: u64 = 200;
-
-// Extra disk reservation for normal embedded overflow checkpoints, not a
-// per-write buffer allocation. Fresh files stay at 64 KiB. A single larger
-// indivisible action retains the existing capacity/oversize contract.
-const EMBEDDED_WAL_HEADROOM_LIMIT: u64 = 1024 * 1024;
 
 /// Shorthand — `Arc<parking_lot::Mutex<WalWriter>>` avoids poisoning
 /// (one writer panicking mid-append used to taint every subsequent

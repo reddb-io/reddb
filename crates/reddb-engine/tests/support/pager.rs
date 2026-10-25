@@ -15,24 +15,24 @@ mod orchestration_restart;
 mod btree;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Operation {
+pub(crate) enum Operation {
     Write(u64, usize),
     Sync,
 }
 
 #[derive(Default)]
-struct MemoryFile {
-    bytes: RefCell<Vec<u8>>,
-    durable: RefCell<Vec<u8>>,
+pub(crate) struct MemoryFile {
+    pub(crate) bytes: RefCell<Vec<u8>>,
+    pub(crate) durable: RefCell<Vec<u8>>,
     position: u64,
-    operations: Rc<RefCell<Vec<Operation>>>,
-    fail_at: Option<usize>,
-    fail_prefix: Option<usize>,
-    fail_len: Cell<bool>,
+    pub(crate) operations: Rc<RefCell<Vec<Operation>>>,
+    pub(crate) fail_at: Option<usize>,
+    pub(crate) fail_prefix: Option<usize>,
+    pub(crate) fail_len: Cell<bool>,
 }
 
 impl MemoryFile {
-    fn from_bytes(bytes: Vec<u8>) -> Self {
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
         Self {
             durable: RefCell::new(bytes.clone()),
             bytes: RefCell::new(bytes),
@@ -579,7 +579,7 @@ pub fn pager_orchestration_checkpoint_recovery() {
         .expect("checkpoint survives fresh pager");
 }
 
-struct BorrowedMemoryFile<'a>(&'a mut MemoryFile);
+pub(crate) struct BorrowedMemoryFile<'a>(pub(crate) &'a mut MemoryFile);
 impl VfsFile for BorrowedMemoryFile<'_> {
     fn try_clone(&self) -> io::Result<Self> {
         Err(io::ErrorKind::Unsupported.into())

@@ -487,3 +487,41 @@ Cost sketch: N snapshot records are decoded and adopted once, with their
 existing derived-index work; no serialization round trip or second resident
 copy is added. Explicit references retain the existing per-source duplicate
 scan and configured cap. No extra file or network operation is introduced.
+
+## Owned artifact publication of resident batches
+
+`EmbeddedResidentStore<F: VfsFile>` combines canonical snapshot recovery, logical
+store replay and the single-owner `EmbeddedRdbFile` publication barriers. It
+publishes already-admitted logical batches; SQL isolation, catalog admission
+and provisional application transaction state remain outside this controller.
+Physical reads return owned values and cannot observe a batch while its mutable
+publication call is executing. No public JS/TS database capability is enabled
+by introducing this controller.
+
+The native snapshot emitter now lives in the shared resident implementation.
+The native adapter keeps its publication guard, pending-version/XID projection
+and format-version update. A hook retains that update's original position
+before the CRC footer while collection/reference guards remain held. Native
+frames, deleted-row projection, metadata and auxiliary bytes are unchanged.
+
+Before staging a batch, the owned controller folds the old committed image if
+WAL capacity is insufficient. The headroom limit is the same 1 MiB policy used
+by native embedded overflow recovery, with larger indivisible actions retaining
+their required capacity. Successful batches become readable after the native
+WAL and root barriers. Rejected replay restores the committed snapshot/WAL;
+ambiguous I/O or interrupted publication fences all reads/writes until reopen.
+It cannot checkpoint provisional rows to recover from an uncertain append.
+
+Shared native/WASM cases cover every canonical record shape and metadata,
+rejected batches, every recorded WAL/root/checkpoint write and flush boundary,
+old-or-new whole-batch recovery and WAL growth with incompressible data. The
+OPFS fixture seeds the same corpus, interrupts the WAL flush, restarts the
+entire browser offline, restores a deleted physical identity and checkpoints
+through the production owned controller. These are durable storage primitives;
+public stored-data RQL and application transactions still require runtime work.
+
+Cost sketch: a valid B-byte batch needs O(B) replay/encoding and the existing
+WAL/root flush barriers, without a second resident-store copy. Rejected logical
+batches reload O(database + live WAL) bytes; overflow checkpoints serialize
+O(database) bytes and reserve the existing bounded headroom. No network call or
+measured performance gain is introduced.

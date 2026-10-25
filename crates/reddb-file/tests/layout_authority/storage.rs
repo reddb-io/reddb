@@ -959,6 +959,7 @@ fn server_does_not_redeclare_native_store_file_contracts() {
     }
 
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
+    let snapshot_writer = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
     for required in [
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
@@ -966,13 +967,19 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         "reddb_file::encode_native_dump_collection_header",
         "reddb_file::encode_native_dump_entity_record",
         "reddb_file::encode_native_dump_cross_ref",
-        "reddb_engine::storage::resident_store::ResidentStore::from_snapshot",
     ] {
         assert!(
-            impl_file.contains(required),
+            snapshot_writer.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
         );
     }
+
+    let native_compact: String = impl_file.split_whitespace().collect();
+    assert!(
+        impl_file.contains("reddb_engine::storage::resident_store::ResidentStore::from_snapshot")
+            && native_compact.contains("self.resident.snapshot_bytes("),
+        "native store must use the shared resident snapshot reader and writer"
+    );
 
     let recovery = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
     assert!(

@@ -5,12 +5,13 @@
     clippy::cast_possible_truncation
 )]
 
-use super::entity::{EntityId, EntityKind, RefType, UnifiedEntity};
+use super::entity::{EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::error::StoreError;
 use super::manager::ManagerConfig;
 use super::metadata::Metadata;
 use super::resident_store::ResidentStore;
 use super::snapshot::{visit_snapshot, SnapshotVisitor};
+use std::collections::HashSet;
 
 impl ResidentStore {
     /// Return a complete recovery target only after decoding succeeds. Hosts
@@ -134,5 +135,89 @@ impl ResidentStore {
             self.update_graph_label_index(collection, &label, id);
         }
         Ok(id)
+    }
+}
+
+impl ResidentStore {
+    /// Serialize the native committed snapshot projection. The host holds its
+    /// publication fence and supplies pending/aborted xid exclusions. The
+    /// format-publication hook retains the native position before the footer,
+    /// while collection/reference read guards still protect the captured image.
+    #[allow(clippy::cast_possible_truncation)] // Preserve native count encoding.
+    pub fn snapshot_bytes(
+        &self,
+        pending_versions: &HashSet<EntityId>,
+        excluded_xids: &HashSet<u64>,
+        before_footer: impl FnOnce(),
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Version 9 includes explicit table-row logical identity plus MVCC
+        // xmin/xmax alongside the V7 metadata envelope.
+        buf.extend_from_slice(&reddb_file::encode_native_store_header(
+            reddb_file::STORE_VERSION_CURRENT,
+        ));
+
+        // Get all collections
+        let collections = self.collections.read();
+        reddb_file::encode_native_dump_count(&mut buf, collections.len() as u32);
+
+        let fv = reddb_file::STORE_VERSION_CURRENT;
+        for (name, manager) in collections.iter() {
+            // Get all entities from this collection
+            let entities = manager.query_all(|entity| {
+                if pending_versions.contains(&entity.id) {
+                    return false;
+                }
+                !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
+                    || !excluded_xids.contains(&entity.xmin)
+            });
+            reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
+
+            // V7+: serialize entity+metadata as a length-prefixed record.
+            // Each record: [u32 len][serialize_entity_record bytes]
+            for mut entity in entities {
+                // Unfinished and rolled-back deletions cannot become committed
+                // tombstones when recovery reconstructs the xid floor.
+                if matches!(entity.data, EntityData::Row(_)) && excluded_xids.contains(&entity.xmax)
+                {
+                    entity.xmax = 0;
+                }
+                let metadata = manager.get_metadata(entity.id);
+                let record =
+                    super::metadata_codec::serialize_entity_record(&entity, metadata.as_ref(), fv);
+                reddb_file::encode_native_dump_entity_record(&mut buf, &record);
+            }
+        }
+
+        // Write cross-references
+        let cross_refs = self.cross_refs.read();
+        let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
+        reddb_file::encode_native_dump_count(&mut buf, total_refs as u32);
+
+        for (source_id, refs) in cross_refs.iter() {
+            for (target_id, ref_type, collection) in refs {
+                reddb_file::encode_native_dump_cross_ref(
+                    &mut buf,
+                    source_id.raw(),
+                    target_id.raw(),
+                    ref_type.to_byte(),
+                    collection,
+                );
+            }
+        }
+
+        // V10+: trailing opaque auxiliary-metadata blob (collection contracts
+        // for the single-file artifact). Always written — empty when unused —
+        // so the read side can unconditionally expect it for V10 dumps.
+        {
+            let aux = self.aux_metadata.read();
+            reddb_file::encode_native_dump_entity_record(&mut buf, &aux);
+        }
+
+        before_footer();
+
+        reddb_file::append_native_store_crc32_footer(&mut buf);
+        buf
     }
 }

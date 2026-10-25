@@ -21,6 +21,10 @@ pub const CASES: &[(&str, fn())] = &[
         "snapshot_resident_recovery_options",
         resident_recovery_options,
     ),
+    (
+        "snapshot_native_committed_projection",
+        native_committed_projection,
+    ),
 ];
 
 fn native_store_fixture() {
@@ -329,4 +333,84 @@ fn resident_recovery_options() {
             "failed recovery returns no resident target"
         );
     }
+}
+
+fn native_committed_projection() {
+    use reddb_engine::storage::{
+        entity::{EntityData, EntityKind},
+        store_wal::StoreWalAction,
+    };
+    use std::cell::Cell;
+    use std::collections::{HashMap, HashSet};
+    let config = ManagerConfig::default();
+    let store = ResidentStore::new();
+    let mut old = UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![]);
+    old.ensure_table_logical_id();
+    old.xmax = 30;
+    let mut active = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![]);
+    active.xmin = 30;
+    let mut graph = UnifiedEntity::graph_node(EntityId::new(3), "kept", "node", HashMap::new());
+    graph.xmin = 30;
+    let pending = UnifiedEntity::graph_node(EntityId::new(4), "pending", "node", HashMap::new());
+    let mut vector = UnifiedEntity::vector(EntityId::new(5), "vectors", vec![1.0]);
+    vector.xmin = 30;
+    for (collection, entity) in [
+        ("rows", old),
+        ("rows", active),
+        ("graph", graph),
+        ("graph", pending),
+        ("vectors", vector),
+    ] {
+        store
+            .apply_replayed_action(
+                &StoreWalAction::upsert_entity(collection, &entity, None, 12),
+                12,
+                &config,
+            )
+            .expect("projection seed");
+    }
+    let called = Cell::new(false);
+    let bytes = store.snapshot_bytes(
+        &HashSet::from([EntityId::new(4)]),
+        &HashSet::from([30]),
+        || {
+            called.set(true);
+            assert!(
+                store.collections.try_write().is_none(),
+                "native format hook retains collection guard"
+            );
+            assert!(
+                store.cross_refs.try_write().is_none(),
+                "native format hook retains reference guard"
+            );
+        },
+    );
+    assert!(called.get());
+    let mut restored = Restored::default();
+    assert_eq!(
+        visit_snapshot(&bytes, &mut restored).expect("canonical emitted snapshot"),
+        12
+    );
+    let rows = &restored.collections["rows"];
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.id.raw(), 1);
+    assert_eq!(
+        rows[0].0.xmax, 0,
+        "unfinished deletion is not published as committed"
+    );
+    assert!(matches!(rows[0].0.data, EntityData::Row(_)));
+    assert_eq!(restored.collections["graph"].len(), 1);
+    assert!(matches!(
+        restored.collections["graph"][0].0.kind,
+        EntityKind::GraphNode(_)
+    ));
+    assert!(restored.collections["vectors"].is_empty());
+    let (resident, _) = ResidentStore::from_snapshot(
+        include_bytes!("../fixtures/native-store-v12.rdst"),
+        &config,
+        true,
+        1000,
+    )
+    .expect("frozen native source");
+    verify_native_snapshot(&resident.snapshot_bytes(&HashSet::new(), &HashSet::new(), || {}));
 }

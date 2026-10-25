@@ -87,73 +87,10 @@ impl UnifiedStore {
             || (0, Default::default()),
             |manager| manager.checkpoint_excluded_state(),
         );
-        let mut buf = Vec::new();
-
-        // Version 9 includes explicit table-row logical identity plus MVCC
-        // xmin/xmax alongside the V7 metadata envelope.
-        buf.extend_from_slice(&reddb_file::encode_native_store_header(
-            STORE_VERSION_CURRENT,
-        ));
-
-        // Get all collections
-        let collections = self.resident.collections.read();
-        reddb_file::encode_native_dump_count(&mut buf, collections.len() as u32);
-
-        let fv = STORE_VERSION_CURRENT;
-        for (name, manager) in collections.iter() {
-            // Get all entities from this collection
-            let entities = manager.query_all(|entity| {
-                if pending_vault_versions.contains(&entity.id) {
-                    return false;
-                }
-                !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                    || !excluded.contains(&entity.xmin)
-            });
-            reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
-
-            // V7+: serialize entity+metadata as a length-prefixed record.
-            // Each record: [u32 len][serialize_entity_record bytes]
-            for mut entity in entities {
-                // Unfinished and rolled-back deletions cannot become committed
-                // tombstones when recovery reconstructs the xid floor.
-                if matches!(entity.data, EntityData::Row(_)) && excluded.contains(&entity.xmax) {
-                    entity.xmax = 0;
-                }
-                let metadata = manager.get_metadata(entity.id);
-                let record = Self::serialize_entity_record(&entity, metadata.as_ref(), fv);
-                reddb_file::encode_native_dump_entity_record(&mut buf, &record);
-            }
-        }
-
-        // Write cross-references
-        let cross_refs = self.resident.cross_refs.read();
-        let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
-        reddb_file::encode_native_dump_count(&mut buf, total_refs as u32);
-
-        for (source_id, refs) in cross_refs.iter() {
-            for (target_id, ref_type, collection) in refs {
-                reddb_file::encode_native_dump_cross_ref(
-                    &mut buf,
-                    source_id.raw(),
-                    target_id.raw(),
-                    ref_type.to_byte(),
-                    collection,
-                );
-            }
-        }
-
-        // V10+: trailing opaque auxiliary-metadata blob (collection contracts
-        // for the single-file artifact). Always written — empty when unused —
-        // so the read side can unconditionally expect it for V10 dumps.
-        {
-            let aux = self.resident.aux_metadata.read();
-            reddb_file::encode_native_dump_entity_record(&mut buf, &aux);
-        }
-
-        self.set_format_version(STORE_VERSION_CURRENT);
-
-        reddb_file::append_native_store_crc32_footer(&mut buf);
-        buf
+        self.resident
+            .snapshot_bytes(&pending_vault_versions, &excluded, || {
+                self.set_format_version(STORE_VERSION_CURRENT);
+            })
     }
 
     /// Read entity using the canonical native/browser logical codec.
