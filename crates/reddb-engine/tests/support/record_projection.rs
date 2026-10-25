@@ -2,14 +2,37 @@
 use reddb_engine::catalog::CollectionContract;
 use reddb_engine::query::{
     evaluator::{self, EvalError},
-    runtime::{filter::resolve_filter_row_value, projection::*, projection_value::*},
+    runtime::{
+        filter::{evaluate_runtime_filter_result_with_host, resolve_filter_row_value, FilterHost},
+        projection::*,
+        projection_value::*,
+        scalar_functions::*,
+    },
     unified::{MatchedEdge, MatchedNode, UnifiedRecord, VectorSearchResult},
 };
 use reddb_rql::ast::{CompareOp, Expr, FieldRef, Filter, Projection};
 use reddb_types::Value;
-use std::{cell::Cell, collections::HashMap, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    sync::Arc,
+};
 
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "scalar_dispatch_arithmetic_and_cast",
+        scalar_arithmetic_and_cast,
+    ),
+    (
+        "scalar_dispatch_case_and_coalesce_lazy",
+        scalar_case_and_coalesce,
+    ),
+    ("scalar_dispatch_text_and_lengths", scalar_text_and_lengths),
+    ("scalar_dispatch_money", scalar_money),
+    (
+        "scalar_dispatch_missing_and_host_fallback",
+        scalar_missing_and_fallback,
+    ),
     ("projection_value_legacy_literals", legacy_literals),
     (
         "projection_value_resolution_and_fallback",
@@ -52,6 +75,7 @@ struct Host<'a> {
     deny_output: bool,
     input_calls: Cell<usize>,
     deny_input: bool,
+    resolved_columns: RefCell<Vec<String>>,
 }
 
 impl<'a> Host<'a> {
@@ -64,6 +88,7 @@ impl<'a> Host<'a> {
             deny_output: false,
             input_calls: Cell::new(0),
             deny_input: false,
+            resolved_columns: RefCell::new(vec![]),
         }
     }
 }
@@ -108,20 +133,9 @@ impl ProjectionHost for Host<'_> {
         source: &UnifiedRecord,
     ) -> Option<Value> {
         self.fallback_calls.set(self.fallback_calls.get() + 1);
-        let operation = name.split(':').next().unwrap_or(name);
-        match operation {
-            "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
-                let resolve =
-                    |argument: &Projection| eval_projection_value_with_host(self, argument, source);
-                Some(reddb_engine::query::runtime::numeric::arith_binop(
-                    operation,
-                    resolve(arguments.first()?)?,
-                    resolve(arguments.get(1)?)?,
-                ))
-            }
-            _ => Some(Value::text("host fallback")),
-        }
+        evaluate_scalar_function_with_host(self, name, arguments, source)
     }
+
     fn evaluate_literal(&self, column: &str, _: &UnifiedRecord) -> Option<Value> {
         decode_projection_literal(column)
     }
@@ -142,8 +156,54 @@ impl ProjectionHost for Host<'_> {
     }
 }
 
-// Test-only scalar host: real shared argument traversal and arithmetic, with
-// explicit fallback sentinels for effects not implemented by this fixture.
+impl ScalarFunctionHost for Host<'_> {
+    fn resolve_argument(&self, argument: &Projection, source: &UnifiedRecord) -> Option<Value> {
+        if let Projection::Column(column) = argument {
+            self.resolved_columns.borrow_mut().push(column.clone());
+        }
+        eval_projection_value_with_host(self, argument, source)
+    }
+    fn evaluate_condition(&self, filter: &Filter, source: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter_result_with_host(
+            &ConditionHost { host: self, source },
+            source,
+            filter,
+            None,
+            None,
+        )
+        .expect("fixture filter evaluation")
+    }
+    fn fallback_function(&self, _: &str, _: &[Projection], _: &UnifiedRecord) -> Option<Value> {
+        Some(Value::text("host fallback"))
+    }
+}
+
+struct ConditionHost<'a, 'b> {
+    host: &'a Host<'b>,
+    source: &'a UnifiedRecord,
+}
+impl FilterHost for ConditionHost<'_, '_> {
+    type Error = EvalError;
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        ProjectionValueHost::secret_query_input(self.host, value)
+    }
+    fn evaluate_expression(&self, expression: &Expr) -> Result<Option<Value>, EvalError> {
+        evaluator::evaluate(expression, &|field: &FieldRef| {
+            resolve_filter_row_value(
+                self.source,
+                field,
+                None,
+                None,
+                &|value| ProjectionValueHost::secret_query_input(self.host, value),
+                |_, _| false,
+            )
+        })
+        .map(Some)
+    }
+}
+
+// Test-only host: shared argument/scalar/filter execution, with explicit
+// fallback sentinels for effects not implemented by this fixture.
 impl ProjectionValueHost for Host<'_> {
     fn try_expression(&self, expression: &Expr, source: &UnifiedRecord) -> Option<Value> {
         if self.forced_error.is_some() {
@@ -180,6 +240,394 @@ impl ProjectionValueHost for Host<'_> {
             Some(value)
         }
     }
+}
+
+fn scalar_values(name: &str, values: Vec<Value>) -> Option<Value> {
+    let mut source = UnifiedRecord::new();
+    let arguments = values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let column = format!("argument_{index}");
+            source.set(&column, value);
+            Projection::Column(column)
+        })
+        .collect::<Vec<_>>();
+    evaluate_scalar_function_with_host(&Host::new(None), name, &arguments, &source)
+}
+
+fn scalar_arithmetic_and_cast() {
+    for (name, values, expected) in [
+        (
+            "ADD:sum",
+            vec![Value::Integer(2), Value::Integer(3)],
+            Value::Integer(5),
+        ),
+        (
+            "SUB",
+            vec![Value::Integer(2), Value::Integer(3)],
+            Value::Integer(-1),
+        ),
+        (
+            "MUL",
+            vec![Value::Integer(2), Value::Integer(3)],
+            Value::Integer(6),
+        ),
+        (
+            "DIV",
+            vec![Value::Integer(6), Value::Integer(2)],
+            Value::Float(3.0),
+        ),
+        (
+            "MOD",
+            vec![Value::Integer(6), Value::Integer(0)],
+            Value::Null,
+        ),
+        ("ABS", vec![Value::Integer(-3)], Value::Integer(3)),
+        ("ABS", vec![Value::Float(-2.5)], Value::Float(2.5)),
+        ("ABS", vec![Value::text("3")], Value::Null),
+        ("ROUND", vec![Value::Float(2.5)], Value::Float(3.0)),
+        ("ROUND", vec![Value::text("2.5")], Value::text("2.5")),
+    ] {
+        assert_eq!(scalar_values(name, values), Some(expected), "{name}");
+    }
+    let host = Host::new(None);
+    let source = source();
+    for (target, expected) in [
+        ("TYPE:TEXT", Value::text("3")),
+        ("TYPE:DOUBLE", Value::Float(3.0)),
+        ("TYPE:unknown", Value::Null),
+        ("TEXT", Value::Null),
+    ] {
+        assert_eq!(
+            evaluate_scalar_function_with_host(
+                &host,
+                "CAST",
+                &[
+                    Projection::Column("quantity".into()),
+                    Projection::Column(target.into()),
+                ],
+                &source
+            ),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "CAST",
+            &[Projection::Column("quantity".into()), Projection::All,],
+            &source
+        ),
+        Some(Value::Null)
+    );
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "CAST",
+            &[
+                Projection::Column("nickname".into()),
+                Projection::Column("TYPE:INT".into()),
+            ],
+            &source
+        ),
+        Some(Value::Null)
+    );
+}
+
+fn scalar_case_and_coalesce() {
+    let source = source();
+    let host = Host::new(None);
+    let condition = |op, value| {
+        Projection::Expression(
+            Box::new(Filter::Compare {
+                field: field("quantity"),
+                op,
+                value: Value::Integer(value),
+            }),
+            None,
+        )
+    };
+    let column = |name: &str| Projection::Column(name.into());
+    let arguments = [
+        condition(CompareOp::Gt, 4),
+        column("unreachable"),
+        condition(CompareOp::Eq, 3),
+        column("nickname"),
+        condition(CompareOp::Eq, 3),
+        column("unreachable"),
+        column("unreachable"),
+    ];
+    assert_eq!(
+        evaluate_scalar_function_with_host(&host, "CASE:chosen", &arguments, &source),
+        Some(Value::text("Bee"))
+    );
+    assert_eq!(*host.resolved_columns.borrow(), ["nickname"]);
+    host.resolved_columns.borrow_mut().clear();
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "CASE",
+            &[
+                condition(CompareOp::Gt, 4),
+                column("unreachable"),
+                column("nickname"),
+            ],
+            &source
+        ),
+        Some(Value::text("Bee"))
+    );
+    assert_eq!(*host.resolved_columns.borrow(), ["nickname"]);
+    host.resolved_columns.borrow_mut().clear();
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "CASE",
+            &[condition(CompareOp::Gt, 4), column("unreachable"),],
+            &source
+        ),
+        Some(Value::Null)
+    );
+    assert!(host.resolved_columns.borrow().is_empty());
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "CASE",
+            &[condition(CompareOp::Eq, 3), column("missing"),],
+            &source
+        ),
+        Some(Value::Null),
+        "selected missing value becomes NULL"
+    );
+    host.resolved_columns.borrow_mut().clear();
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "COALESCE",
+            &[
+                column("missing"),
+                column("LIT:@RL:null"),
+                column("nickname"),
+                column("unreachable"),
+            ],
+            &source
+        ),
+        Some(Value::text("Bee"))
+    );
+    assert_eq!(
+        *host.resolved_columns.borrow(),
+        ["missing", "LIT:@RL:null", "nickname"]
+    );
+    assert_eq!(
+        scalar_values("COALESCE", vec![Value::Null, Value::Null]),
+        Some(Value::Null)
+    );
+    assert_eq!(scalar_values("CASE", vec![]), Some(Value::Null));
+    assert_eq!(scalar_values("COALESCE", vec![]), Some(Value::Null));
+}
+
+fn scalar_text_and_lengths() {
+    for (name, values, expected) in [
+        (
+            "CONCAT",
+            vec![Value::text("a"), Value::Null, Value::Integer(2)],
+            Value::text("a2"),
+        ),
+        ("CONCAT", vec![], Value::text("")),
+        (
+            "CONCAT_WS",
+            vec![
+                Value::text(":"),
+                Value::Null,
+                Value::text("a"),
+                Value::Integer(2),
+            ],
+            Value::text("'a':2"),
+        ),
+        (
+            "CONCAT_WS",
+            vec![Value::Null, Value::text("a")],
+            Value::Null,
+        ),
+        (
+            "CONCAT_WS",
+            vec![Value::Integer(7), Value::text("a"), Value::text("b")],
+            Value::text("'a'7'b'"),
+        ),
+        ("UPPER", vec![Value::text("éa")], Value::text("ÉA")),
+        ("LOWER", vec![Value::text("ÉA")], Value::text("éa")),
+        ("UPPER", vec![Value::Integer(7)], Value::Integer(7)),
+        ("LOWER", vec![Value::Null], Value::Null),
+        ("LENGTH", vec![Value::text("é🦀")], Value::Integer(2)),
+        (
+            "CHAR_LENGTH",
+            vec![Value::Blob(vec![1, 2, 3])],
+            Value::Integer(3),
+        ),
+        (
+            "CHARACTER_LENGTH",
+            vec![Value::Array(vec![Value::Null, Value::Null])],
+            Value::Integer(2),
+        ),
+        ("LENGTH", vec![Value::Integer(7)], Value::Null),
+        ("OCTET_LENGTH", vec![Value::text("é🦀")], Value::Integer(6)),
+        ("BIT_LENGTH", vec![Value::text("é🦀")], Value::Integer(48)),
+        (
+            "OCTET_LENGTH",
+            vec![Value::Blob(vec![1, 2])],
+            Value::Integer(2),
+        ),
+        (
+            "BIT_LENGTH",
+            vec![Value::Blob(vec![1, 2])],
+            Value::Integer(16),
+        ),
+        ("OCTET_LENGTH", vec![Value::Array(vec![])], Value::Null),
+        ("BIT_LENGTH", vec![Value::Integer(1)], Value::Null),
+        ("REVERSE", vec![Value::text("é🦀a")], Value::text("a🦀é")),
+        ("REVERSE", vec![Value::Integer(1)], Value::Null),
+    ] {
+        assert_eq!(scalar_values(name, values), Some(expected), "{name}");
+    }
+}
+
+fn scalar_money() {
+    let money = Value::Money {
+        asset_code: "BRL".into(),
+        minor_units: 1099,
+        scale: 2,
+    };
+    for values in [
+        vec![Value::text("BRL 10.99")],
+        vec![Value::AssetCode("BRL".into()), Value::text("10.99")],
+        vec![Value::text("10.99"), Value::Currency(*b"BRL")],
+    ] {
+        assert_eq!(scalar_values("MONEY", values), Some(money.clone()));
+    }
+    assert_eq!(
+        scalar_values("MONEY_ASSET", vec![money.clone()]),
+        Some(Value::AssetCode("BRL".into()))
+    );
+    assert_eq!(
+        scalar_values("MONEY_MINOR", vec![money.clone()]),
+        Some(Value::BigInt(1099))
+    );
+    assert_eq!(
+        scalar_values("MONEY_SCALE", vec![money]),
+        Some(Value::Integer(2))
+    );
+    for name in ["MONEY_ASSET", "MONEY_MINOR", "MONEY_SCALE"] {
+        assert_eq!(
+            scalar_values(name, vec![Value::text("invalid")]),
+            Some(Value::Null)
+        );
+    }
+    assert_eq!(scalar_values("MONEY", vec![]), Some(Value::Null));
+    assert_eq!(
+        scalar_values("MONEY", vec![Value::text("invalid")]),
+        Some(Value::Null)
+    );
+    assert_eq!(scalar_values("MONEY", vec![Value::Null]), None);
+    assert_eq!(
+        scalar_values(
+            "MONEY",
+            vec![Value::text("invalid"), Value::text("invalid")]
+        ),
+        None
+    );
+    let mut source = UnifiedRecord::new();
+    source.set("left", Value::text("invalid"));
+    source.set("right", Value::text("invalid"));
+    let host = Host::new(None);
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "MONEY",
+            &[
+                Projection::Column("left".into()),
+                Projection::Column("right".into()),
+            ],
+            &source
+        ),
+        None
+    );
+    assert_eq!(
+        *host.resolved_columns.borrow(),
+        ["left", "right", "right", "left"],
+        "retain native reversed retry and admission order"
+    );
+}
+
+fn scalar_missing_and_fallback() {
+    let host = Host::new(None);
+    let source = source();
+    for name in [
+        "ADD",
+        "SUB",
+        "MUL",
+        "DIV",
+        "MOD",
+        "CAST",
+        "UPPER",
+        "LOWER",
+        "LENGTH",
+        "OCTET_LENGTH",
+        "BIT_LENGTH",
+        "CONCAT_WS",
+        "REVERSE",
+        "ABS",
+        "ROUND",
+        "MONEY_ASSET",
+        "MONEY_MINOR",
+        "MONEY_SCALE",
+    ] {
+        assert_eq!(
+            evaluate_scalar_function_with_host(&host, name, &[], &source),
+            None,
+            "{name}"
+        );
+    }
+    let missing = [
+        Projection::Column("missing".into()),
+        Projection::Column("unreachable".into()),
+    ];
+    for name in ["ADD", "CONCAT", "CONCAT_WS"] {
+        host.resolved_columns.borrow_mut().clear();
+        assert_eq!(
+            evaluate_scalar_function_with_host(&host, name, &missing, &source),
+            None
+        );
+        assert_eq!(
+            *host.resolved_columns.borrow(),
+            ["missing"],
+            "do not resolve past an absent argument"
+        );
+    }
+    for name in ["NATIVE_ONLY:label", "upper", ""] {
+        host.resolved_columns.borrow_mut().clear();
+        assert_eq!(
+            evaluate_scalar_function_with_host(&host, name, &missing, &source),
+            Some(Value::text("host fallback"))
+        );
+        assert!(
+            host.resolved_columns.borrow().is_empty(),
+            "fallback owns its own arguments"
+        );
+    }
+    let host = Host {
+        deny_input: true,
+        ..Host::new(None)
+    };
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "UPPER",
+            &[Projection::Column("nickname".into()),],
+            &source
+        ),
+        None,
+        "shared dispatch must honor input denial"
+    );
 }
 
 fn legacy_literals() {
@@ -289,7 +737,7 @@ fn value_resolution_and_fallback() {
         projections("SELECT UPPER(nickname) AS display, quantity > 1 AS accepted FROM orders");
     assert_eq!(
         eval_projection_value_with_host(&host, &columns[0], &source),
-        Some(Value::text("host fallback"))
+        Some(Value::text("BEE"))
     );
     assert_eq!(
         eval_projection_value_with_host(&host, &columns[1], &source),
@@ -567,10 +1015,7 @@ fn fallback_and_data_errors() {
         };
         let row =
             project(&host, &source(), &[function.clone(), boolean.clone()]).expect("host fallback");
-        assert_eq!(
-            row.get("UPPER(nickname)"),
-            Some(&Value::text("host fallback"))
-        );
+        assert_eq!(row.get("UPPER(nickname)"), Some(&Value::text("BEE")));
         assert_eq!(row.get("accepted"), Some(&Value::Boolean(true)));
         assert_eq!(host.fallback_calls.get(), 2);
     }
@@ -748,4 +1193,22 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         10,
         "five legacy operations including nested arguments per recovered row"
     );
+    let columns = projections("SELECT CASE WHEN quantity > 2 THEN quantity * 2 ELSE quantity + 100 END AS adjusted, CONCAT(LOWER(COALESCE(nickname, 'none')), ':', CAST(quantity AS TEXT)) AS caption FROM orders");
+    for (index, source) in selected.iter().enumerate() {
+        let projected = project(&host, source, &columns).expect("recovered shared scalar dispatch");
+        let adjusted = if updated { [8, 6] } else { [6, 102] };
+        let captions = if updated {
+            ["none:4", "bee:3"]
+        } else {
+            ["bee:3", "other:2"]
+        };
+        assert_eq!(
+            projected.get("adjusted"),
+            Some(&Value::Integer(adjusted[index]))
+        );
+        assert_eq!(
+            projected.get("caption"),
+            Some(&Value::text(captions[index]))
+        );
+    }
 }
