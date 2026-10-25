@@ -25,6 +25,17 @@ mod record_ordering;
 #[path = "support/record_projection.rs"]
 mod record_projection;
 
+#[path = "support/numeric_scalars.rs"]
+mod numeric_scalars;
+
+#[test]
+fn portable_numeric_scalar_conformance() {
+    for (name, run) in numeric_scalars::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_record_projection_conformance() {
     for (name, run) in record_projection::CASES {

@@ -115,6 +115,10 @@ async function sharedConformance(browserPage) {
     'record_projection_document_paths', 'record_projection_bindings_and_window_output',
     'record_projection_typed_values_and_labels', 'record_projection_fallback_and_data_errors',
     'record_projection_secret_sensitivity', 'record_projection_output_policy_and_redaction',
+    'numeric_scalar_operand_coercion', 'numeric_scalar_arithmetic_types',
+    'numeric_scalar_null_and_zero', 'numeric_scalar_timestamp_ms',
+    'numeric_scalar_legacy_precision', 'numeric_scalar_cast_fast_paths',
+    'numeric_scalar_cast_validation',
   ])
 }
 

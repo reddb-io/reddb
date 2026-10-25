@@ -91,9 +91,30 @@ impl ProjectionHost for Host<'_> {
         self.fallback_calls.set(self.fallback_calls.get() + 1);
         true
     }
-    fn evaluate_function(&self, _: &str, _: &[Projection], _: &UnifiedRecord) -> Option<Value> {
+    fn evaluate_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
         self.fallback_calls.set(self.fallback_calls.get() + 1);
-        Some(Value::text("host fallback"))
+        let operation = name.split(':').next().unwrap_or(name);
+        match operation {
+            "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
+                // This fixture admits simple canonical argument expressions;
+                // native argument/literal dispatch remains in its own host.
+                let resolve = |argument: &Projection| {
+                    let (expression, _) = reddb_rql::sql_lowering::projection_to_expr(argument)?;
+                    self.evaluate_expression(&expression, source).ok()
+                };
+                Some(reddb_engine::query::runtime::numeric::arith_binop(
+                    operation,
+                    resolve(arguments.first()?)?,
+                    resolve(arguments.get(1)?)?,
+                ))
+            }
+            _ => Some(Value::text("host fallback")),
+        }
     }
     fn evaluate_literal(&self, column: &str, source: &UnifiedRecord) -> Option<Value> {
         // Test host covers canonical literal expressions; native legacy sentinel
@@ -480,5 +501,24 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         host.fallback_calls.get(),
         0,
         "the recovered query executes through canonical typed evaluation"
+    );
+    let query = super::record_filters::table_query("SELECT o.rid AS identity, quantity * 2 AS doubled, total / quantity AS unit_price, quantity / 0 AS zero_divisor FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1");
+    let columns = reddb_rql::sql_lowering::effective_table_projections(&query);
+    let selected = super::record_ordering::ordered_records(records, &query, Some(contract), false);
+    for (index, source) in selected.iter().enumerate() {
+        let projected = project(&host, source, &columns).expect("recovered legacy arithmetic");
+        assert_eq!(projected.get("identity"), source.get("rid"));
+        let doubled = if updated { [8, 6] } else { [6, 4] };
+        assert_eq!(
+            projected.get("doubled"),
+            Some(&Value::Integer(doubled[index]))
+        );
+        assert_eq!(projected.get("unit_price"), Some(&Value::Float(5.0)));
+        assert_eq!(projected.get("zero_divisor"), Some(&Value::Null));
+    }
+    assert_eq!(
+        host.fallback_calls.get(),
+        6,
+        "three legacy operations per recovered row"
     );
 }
