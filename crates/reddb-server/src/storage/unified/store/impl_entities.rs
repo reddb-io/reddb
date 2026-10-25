@@ -224,21 +224,14 @@ impl UnifiedStore {
         label: &str,
         entity_id: EntityId,
     ) {
-        let key = (collection.to_string(), label.to_string());
-        let mut idx = self.graph_label_index.write();
-        idx.entry(key).or_default().push(entity_id);
+        self.resident
+            .update_graph_label_index(collection, label, entity_id)
     }
 
     /// Remove a specific entity_id from the graph label index (called on delete).
     pub(crate) fn remove_from_graph_label_index(&self, collection: &str, entity_id: EntityId) {
-        let mut idx = self.graph_label_index.write();
-        for ((col, _), ids) in idx.iter_mut() {
-            if col == collection {
-                ids.retain(|&id| id != entity_id);
-            }
-        }
-        // Prune empty entries to keep the index compact
-        idx.retain(|_, ids| !ids.is_empty());
+        self.resident
+            .remove_from_graph_label_index(collection, entity_id)
     }
 
     pub(crate) fn remove_from_graph_label_index_batch(
@@ -246,39 +239,24 @@ impl UnifiedStore {
         collection: &str,
         entity_ids: &[EntityId],
     ) {
-        if entity_ids.is_empty() {
-            return;
-        }
-        let id_set: std::collections::HashSet<EntityId> = entity_ids.iter().copied().collect();
-        let mut idx = self.graph_label_index.write();
-        for ((col, _), ids) in idx.iter_mut() {
-            if col == collection {
-                ids.retain(|id| !id_set.contains(id));
-            }
-        }
-        idx.retain(|_, ids| !ids.is_empty());
+        self.resident
+            .remove_from_graph_label_index_batch(collection, entity_ids)
     }
 
     /// Look up entity IDs for a graph node label across all collections.
     pub fn lookup_graph_nodes_by_label(&self, label: &str) -> Vec<EntityId> {
-        let idx = self.graph_label_index.read();
-        idx.iter()
-            .filter(|((_, l), _)| l == label)
-            .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+        self.resident.lookup_graph_nodes_by_label(label)
     }
 
     /// Look up entity IDs for a graph node label scoped to a single collection.
     pub fn lookup_graph_nodes_by_label_in(&self, collection: &str, label: &str) -> Vec<EntityId> {
-        let idx = self.graph_label_index.read();
-        idx.get(&(collection.to_string(), label.to_string()))
-            .cloned()
-            .unwrap_or_default()
+        self.resident
+            .lookup_graph_nodes_by_label_in(collection, label)
     }
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = name.into();
-        let mut collections = self.collections.write();
+        let mut collections = self.resident.collections.write();
 
         if collections.contains_key(&name) {
             return Err(StoreError::CollectionExists(name));
@@ -291,14 +269,14 @@ impl UnifiedStore {
         let create = match self.prepare_operational_collection_create(&name) {
             Ok(create) => create,
             Err(err) => {
-                let mut collections = self.collections.write();
+                let mut collections = self.resident.collections.write();
                 collections.remove(&name);
                 return Err(err);
             }
         };
         if let Some(create) = create {
             if let Err(err) = create.publish().map_err(StoreError::Io) {
-                let mut collections = self.collections.write();
+                let mut collections = self.resident.collections.write();
                 collections.remove(&name);
                 return Err(err);
             }
@@ -315,13 +293,13 @@ impl UnifiedStore {
         let name = name.into();
         // Fast path: shared read lock — zero contention for existing collections
         {
-            let collections = self.collections.read();
+            let collections = self.resident.collections.read();
             if let Some(manager) = collections.get(&name) {
                 return Arc::clone(manager);
             }
         }
         // Slow path: exclusive write lock — only when collection is missing
-        let mut collections = self.collections.write();
+        let mut collections = self.resident.collections.write();
         // Double-check after acquiring write lock (another thread may have created it)
         if let Some(manager) = collections.get(&name) {
             return Arc::clone(manager);
@@ -337,12 +315,12 @@ impl UnifiedStore {
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.collections.read().get(name).map(Arc::clone)
+        self.resident.get_collection(name)
     }
 
     /// Get the context index for cross-structure search.
     pub fn context_index(&self) -> &ContextIndex {
-        &self.context_index
+        self.resident.context_index()
     }
 
     /// Drain WAL-replayed `VectorInsert` records for `collection`
@@ -464,17 +442,17 @@ impl UnifiedStore {
     /// field. RedDB uses it to carry collection contracts through the
     /// single-file artifact.
     pub fn set_aux_metadata(&self, bytes: Vec<u8>) {
-        *self.aux_metadata.write() = bytes;
+        self.resident.set_aux_metadata(bytes)
     }
 
     /// Read the opaque store-level auxiliary metadata blob. Empty when unset.
     pub fn aux_metadata(&self) -> Vec<u8> {
-        self.aux_metadata.read().clone()
+        self.resident.aux_metadata()
     }
 
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
-        self.collections.read().keys().cloned().collect()
+        self.resident.list_collections()
     }
 
     /// Drop a collection
@@ -482,7 +460,7 @@ impl UnifiedStore {
         let _vault_guard = self.vault_publication_lock.lock();
         let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
-            let mut collections = self.collections.write();
+            let mut collections = self.resident.collections.write();
 
             collections
                 .remove(name)
@@ -493,7 +471,7 @@ impl UnifiedStore {
         let entity_ids: Vec<EntityId> = entities.iter().map(|entity| entity.id).collect();
 
         for entity_id in &entity_ids {
-            self.context_index.remove_entity(*entity_id);
+            self.resident.context_index.remove_entity(*entity_id);
             let _ = self.unindex_cross_refs(*entity_id);
         }
 
@@ -501,23 +479,28 @@ impl UnifiedStore {
             self.retire_btree(tree);
         }
 
-        self.entity_cache.retain(|entity_id, (collection, _)| {
-            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-        });
+        self.resident
+            .entity_cache
+            .retain(|entity_id, (collection, _)| {
+                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+            });
 
-        self.cross_refs.write().retain(|source_id, refs| {
+        self.resident.cross_refs.write().retain(|source_id, refs| {
             refs.retain(|(target_id, _, target_collection)| {
                 target_collection != name && !entity_ids.iter().any(|id| id == target_id)
             });
             !entity_ids.iter().any(|id| id == source_id)
         });
 
-        self.reverse_refs.write().retain(|target_id, refs| {
-            refs.retain(|(source_id, _, source_collection)| {
-                source_collection != name && !entity_ids.iter().any(|id| id == source_id)
+        self.resident
+            .reverse_refs
+            .write()
+            .retain(|target_id, refs| {
+                refs.retain(|(source_id, _, source_collection)| {
+                    source_collection != name && !entity_ids.iter().any(|id| id == source_id)
+                });
+                !entity_ids.iter().any(|id| id == target_id)
             });
-            !entity_ids.iter().any(|id| id == target_id)
-        });
 
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::DropCollection {
@@ -894,7 +877,9 @@ impl UnifiedStore {
             None
         };
         // Index into context index before consuming the entity
-        self.context_index.index_entity(collection, &entity);
+        self.resident
+            .context_index
+            .index_entity(collection, &entity);
 
         // Serialize the canonical segment image after insertion: the segment
         // assigns its sequence identity. Borrow it instead of cloning payloads.
@@ -1054,14 +1039,8 @@ impl UnifiedStore {
         collection: &str,
         logical_id: EntityId,
     ) -> Vec<UnifiedEntity> {
-        self.get_collection(collection)
-            .map(|manager| {
-                manager.query_all(|entity| {
-                    matches!(entity.kind, EntityKind::TableRow { .. })
-                        && entity.logical_id() == logical_id
-                })
-            })
-            .unwrap_or_default()
+        self.resident
+            .table_row_versions_by_logical_id(collection, logical_id)
     }
 
     pub fn vacuum_mvcc_history(
@@ -1137,10 +1116,10 @@ impl UnifiedStore {
         let new_id = new_version.id;
         let inherited_metadata = metadata.cloned().or_else(|| manager.get_metadata(old_id));
 
-        self.entity_cache.remove(old_id.raw());
-        self.entity_cache.remove(new_id.raw());
+        self.resident.entity_cache.remove(old_id.raw());
+        self.resident.entity_cache.remove(new_id.raw());
         manager.update(old_version.clone())?;
-        self.context_index.remove_entity(old_id);
+        self.resident.context_index.remove_entity(old_id);
 
         self.register_entity_id(new_version.id);
         if let EntityKind::TableRow { ref mut row_id, .. } = new_version.kind {
@@ -1155,7 +1134,9 @@ impl UnifiedStore {
         if let Some(metadata) = inherited_metadata {
             manager.set_metadata(new_id, metadata)?;
         }
-        self.context_index.index_entity(collection, &new_version);
+        self.resident
+            .context_index
+            .index_entity(collection, &new_version);
         if self.config.auto_index_refs {
             self.index_cross_refs(&new_version, collection)?;
         }
@@ -1202,27 +1183,7 @@ impl UnifiedStore {
 
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
-        // Sharded LRU probe: hits / misses are counted by `EntityCache::get`,
-        // so external observers can read `entity_cache_hit_rate()` without
-        // any extra wiring on the call site.
-        if let Some(cached) = self.entity_cache.get(id.raw()) {
-            return Some(cached);
-        }
-
-        // Cache miss — fall back to the full collection scan, then memoise.
-        let collections = self.collections.read();
-        for (name, manager) in collections.iter() {
-            if let Some(entity) = manager.get(id) {
-                let result = (name.clone(), entity);
-                // Drop the collections read guard before taking any cache
-                // lock — the cache shards are independent, but releasing
-                // here keeps `collections` contention low.
-                drop(collections);
-                self.entity_cache.insert(id.raw(), result.clone());
-                return Some(result);
-            }
-        }
-        None
+        self.resident.get_any(id)
     }
 
     /// Hit rate of the store's entity cache (`get_any` lookups).
@@ -1231,19 +1192,19 @@ impl UnifiedStore {
     /// Exposed for observability — e.g. dashboards distinguishing graph
     /// workloads (high hit rate) from OLTP DML (≈ 0 % hit rate).
     pub fn entity_cache_hit_rate(&self) -> Option<f64> {
-        self.entity_cache.hit_rate()
+        self.resident.entity_cache_hit_rate()
     }
 
     /// Snapshot of cache hit / miss / eviction counters and current size.
     pub fn entity_cache_stats(&self) -> super::super::entity_cache::EntityCacheStats {
-        self.entity_cache.stats()
+        self.resident.entity_cache_stats()
     }
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
         let publication = self.vault_publication_lock.lock();
         // Invalidate entity cache (read-lock probe; no write lock when cold).
-        self.entity_cache.remove(id.raw());
+        self.resident.entity_cache.remove(id.raw());
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
@@ -1304,7 +1265,9 @@ impl UnifiedStore {
         // only acquired when the shard actually carries one of these ids,
         // so the bench-typical zero-hit `delete_sequential` workload never
         // takes a write lock here at all.
-        self.entity_cache.remove_many(ids.iter().map(|id| id.raw()));
+        self.resident
+            .entity_cache
+            .remove_many(ids.iter().map(|id| id.raw()));
 
         let manager = self
             .get_collection(collection)
@@ -1413,6 +1376,7 @@ impl UnifiedStore {
 
         // Check limits
         let current_refs = self
+            .resident
             .cross_refs
             .read()
             .get(&source_id)
@@ -1424,7 +1388,7 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         {
-            let mut forward = self.cross_refs.write();
+            let mut forward = self.resident.cross_refs.write();
             let refs = forward.entry(source_id).or_default();
             let inserted = !refs.iter().any(|(id, kind, coll)| {
                 *id == target_id && *kind == ref_type && coll == target_collection
@@ -1436,7 +1400,7 @@ impl UnifiedStore {
         }
 
         {
-            let mut reverse = self.reverse_refs.write();
+            let mut reverse = self.resident.reverse_refs.write();
             let refs = reverse.entry(target_id).or_default();
             let inserted = !refs.iter().any(|(id, kind, coll)| {
                 *id == source_id && *kind == ref_type && coll == source_collection
@@ -1482,16 +1446,12 @@ impl UnifiedStore {
 
     /// Get cross-references from an entity
     pub fn get_refs_from(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
-        self.cross_refs.read().get(&id).cloned().unwrap_or_default()
+        self.resident.get_refs_from(id)
     }
 
     /// Get cross-references to an entity
     pub fn get_refs_to(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
-        self.reverse_refs
-            .read()
-            .get(&id)
-            .cloned()
-            .unwrap_or_default()
+        self.resident.get_refs_to(id)
     }
 
     /// Expand cross-references to get related entities
@@ -1564,7 +1524,7 @@ impl UnifiedStore {
                 continue;
             }
             {
-                let mut forward = self.cross_refs.write();
+                let mut forward = self.resident.cross_refs.write();
                 let refs = forward.entry(cross_ref.source).or_default();
                 let inserted = !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.target
@@ -1582,7 +1542,7 @@ impl UnifiedStore {
             }
 
             {
-                let mut reverse = self.reverse_refs.write();
+                let mut reverse = self.resident.reverse_refs.write();
                 let refs = reverse.entry(cross_ref.target).or_default();
                 let inserted = !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
@@ -1604,10 +1564,10 @@ impl UnifiedStore {
     /// Remove cross-references for an entity
     pub(crate) fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
         // Remove forward refs
-        self.cross_refs.write().remove(&id);
+        self.resident.cross_refs.write().remove(&id);
 
         // Remove from reverse refs (scan all)
-        let mut reverse = self.reverse_refs.write();
+        let mut reverse = self.resident.reverse_refs.write();
         for refs in reverse.values_mut() {
             refs.retain(|(source, _, _)| *source != id);
         }
@@ -1638,11 +1598,11 @@ impl UnifiedStore {
         //     `add_cross_ref`), AND
         //   - no deleted id is a key in `reverse_refs` (no inbound refs to drop).
         let needs_forward_cleanup = {
-            let forward = self.cross_refs.read();
+            let forward = self.resident.cross_refs.read();
             id_set.iter().any(|id| forward.contains_key(id))
         };
         let needs_reverse_cleanup = {
-            let reverse = self.reverse_refs.read();
+            let reverse = self.resident.reverse_refs.read();
             id_set.iter().any(|id| reverse.contains_key(id))
         };
 
@@ -1653,7 +1613,7 @@ impl UnifiedStore {
         }
 
         if needs_forward_cleanup {
-            let mut forward = self.cross_refs.write();
+            let mut forward = self.resident.cross_refs.write();
             for id in &id_set {
                 forward.remove(id);
             }
@@ -1663,7 +1623,7 @@ impl UnifiedStore {
             // The inner `values_mut()` scan is only needed when at least one
             // deleted id was a *source* somewhere — which, by the invariant
             // above, can only happen when it had outbound forward refs.
-            let mut reverse = self.reverse_refs.write();
+            let mut reverse = self.resident.reverse_refs.write();
             if needs_forward_cleanup {
                 for refs in reverse.values_mut() {
                     refs.retain(|(source, _, _)| !id_set.contains(source));
@@ -1688,59 +1648,7 @@ impl UnifiedStore {
     where
         F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
-        // Issue #815 — snapshot the (name, manager) handles under a brief
-        // read lock, then release the `collections` lock *before* the
-        // potentially long per-collection scan. Holding `collections.read()`
-        // across a full-store scan let a large `/catalog` snapshot block (and
-        // be blocked by) the replica apply loop's collection-creation writes:
-        // under parking_lot a writer waiting behind the long read parks every
-        // subsequent reader, so `/catalog` and readiness wedged during a big
-        // WAL re-apply. The managers are `Arc`-shared with their own internal
-        // locks, so scanning them off the map lock is safe and keeps the HTTP
-        // surface responsive.
-        let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
-            collections
-                .iter()
-                .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
-                .collect()
-        };
-
-        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
-        if !use_parallel {
-            // Single collection — no parallelism overhead
-            return pairs
-                .into_iter()
-                .flat_map(|(name, mgr)| {
-                    mgr.query_all(filter.clone())
-                        .into_iter()
-                        .map(move |e| (name.clone(), e))
-                })
-                .collect();
-        }
-
-        // Multiple collections — scan in parallel
-        let filter_ref = &filter;
-        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|s| {
-            pairs
-                .iter()
-                .map(|(name, manager)| {
-                    let name = (*name).clone();
-                    s.spawn(move || {
-                        manager
-                            .query_all(|e| filter_ref(e))
-                            .into_iter()
-                            .map(|e| (name.clone(), e))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap_or_default())
-                .collect()
-        });
-
-        collection_results.into_iter().flatten().collect()
+        self.resident.query_all(filter)
     }
 
     /// Scan every collection under an explicit MVCC snapshot.
@@ -1752,48 +1660,7 @@ impl UnifiedStore {
     where
         F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
-        let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
-            collections
-                .iter()
-                .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
-                .collect()
-        };
-
-        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
-        if !use_parallel {
-            return pairs
-                .into_iter()
-                .flat_map(|(name, manager)| {
-                    manager
-                        .scan(snapshot, filter.clone())
-                        .into_iter()
-                        .map(move |entity| (name.clone(), entity))
-                })
-                .collect();
-        }
-
-        let filter_ref = &filter;
-        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|scope| {
-            pairs
-                .iter()
-                .map(|(name, manager)| {
-                    let name = name.clone();
-                    scope.spawn(move || {
-                        manager
-                            .scan(snapshot, |entity| filter_ref(entity))
-                            .into_iter()
-                            .map(|entity| (name.clone(), entity))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or_default())
-                .collect()
-        });
-
-        collection_results.into_iter().flatten().collect()
+        self.resident.scan(snapshot, filter)
     }
 
     /// Filter by metadata across all collections
@@ -1801,16 +1668,7 @@ impl UnifiedStore {
         &self,
         filters: &[(String, MetadataFilter)],
     ) -> Vec<(String, EntityId)> {
-        let mut results = Vec::new();
-        let collections = self.collections.read();
-
-        for (name, manager) in collections.iter() {
-            for id in manager.filter_metadata(filters) {
-                results.push((name.clone(), id));
-            }
-        }
-
-        results
+        self.resident.filter_metadata_all(filters)
     }
 
     /// Get statistics
@@ -1821,7 +1679,7 @@ impl UnifiedStore {
         // store lock across a full-store stats scan was part of the same
         // wedge that froze `/catalog` during a large replica re-apply.
         let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
+            let collections = self.resident.collections.read();
             collections
                 .iter()
                 .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
@@ -1854,7 +1712,7 @@ impl UnifiedStore {
 
     /// Run maintenance on all collections
     pub fn run_maintenance(&self) -> Result<(), StoreError> {
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         for manager in collections.values() {
             manager.run_maintenance()?;
         }
@@ -1863,7 +1721,7 @@ impl UnifiedStore {
 
     /// Bytes pressure consolidation could plausibly return across collections.
     pub fn reclaimable_segment_bytes(&self) -> u64 {
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         collections
             .values()
             .map(|manager| manager.reclaimable_bytes())
@@ -1873,7 +1731,7 @@ impl UnifiedStore {
     /// Advance pressure-triggered consolidation by one paced tick per
     /// collection. Returns true if any collection started or advanced a run.
     pub fn pressure_consolidation_tick(&self) -> bool {
-        let managers: Vec<_> = self.collections.read().values().cloned().collect();
+        let managers: Vec<_> = self.resident.collections.read().values().cloned().collect();
         // A plain loop, not `any()`: every collection must receive its tick —
         // short-circuiting on the first advanced run would starve the rest.
         let mut advanced = false;

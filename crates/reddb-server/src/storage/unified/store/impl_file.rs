@@ -16,30 +16,17 @@ impl UnifiedStore {
 
     /// Allocate a global entity ID
     pub fn next_entity_id(&self) -> EntityId {
-        EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
+        self.resident.next_entity_id()
     }
 
     /// Reserve `n` contiguous global entity IDs with one fetch_add.
     /// Caller assigns `id = EntityId::new(start + i)` per entity.
     pub fn reserve_entity_ids(&self, n: u64) -> std::ops::Range<u64> {
-        let start = self.next_entity_id.fetch_add(n, Ordering::SeqCst);
-        start..start + n
+        self.resident.reserve_entity_ids(n)
     }
 
     pub(crate) fn register_entity_id(&self, id: EntityId) {
-        let candidate = id.raw().saturating_add(1);
-        let mut current = self.next_entity_id.load(Ordering::SeqCst);
-        while candidate > current {
-            match self.next_entity_id.compare_exchange(
-                current,
-                candidate,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(updated) => current = updated,
-            }
-        }
+        self.resident.register_entity_id(id)
     }
 
     /// Load a persisted image and rebuild its derived indexes, retaining the
@@ -63,7 +50,9 @@ impl UnifiedStore {
             }
         }
         entity.ensure_table_logical_id();
-        self.context_index.index_entity(collection, &entity);
+        self.resident
+            .context_index
+            .index_entity(collection, &entity);
         if self.config.auto_index_refs {
             self.index_cross_refs(&entity, collection)?;
         }
@@ -199,7 +188,7 @@ impl UnifiedStore {
         ));
 
         // Get all collections
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         reddb_file::encode_native_dump_count(&mut buf, collections.len() as u32);
 
         let fv = STORE_VERSION_CURRENT;
@@ -229,7 +218,7 @@ impl UnifiedStore {
         }
 
         // Write cross-references
-        let cross_refs = self.cross_refs.read();
+        let cross_refs = self.resident.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         reddb_file::encode_native_dump_count(&mut buf, total_refs as u32);
 
@@ -249,7 +238,7 @@ impl UnifiedStore {
         // for the single-file artifact). Always written — empty when unused —
         // so the read side can unconditionally expect it for V10 dumps.
         {
-            let aux = self.aux_metadata.read();
+            let aux = self.resident.aux_metadata.read();
             reddb_file::encode_native_dump_entity_record(&mut buf, &aux);
         }
 

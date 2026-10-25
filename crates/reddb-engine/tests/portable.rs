@@ -136,3 +136,14 @@ fn portable_resident_read_index_conformance() {
         run();
     }
 }
+
+#[path = "support/resident_store.rs"]
+mod resident_store;
+
+#[test]
+fn portable_resident_store_conformance() {
+    for (name, run) in resident_store::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

@@ -86,6 +86,8 @@ async function sharedConformance(browserPage) {
     'manager_ordered_graph_candidates',
     'resident_index_document_tokens', 'resident_index_replacement_and_scope',
     'resident_entity_cache_invalidation',
+    'resident_store_global_identity', 'resident_store_cross_collection_snapshot',
+    'resident_store_models_and_cache', 'resident_store_graph_metadata_and_references',
   ])
 }
 
