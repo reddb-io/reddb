@@ -286,7 +286,7 @@ mod json_codec;
 mod metadata_file;
 pub mod shm;
 
-pub(crate) use self::json_codec::{
+pub(crate) use reddb_engine::catalog::codec::{
     deserialize_collection_contracts, serialize_collection_contracts,
 };
 
