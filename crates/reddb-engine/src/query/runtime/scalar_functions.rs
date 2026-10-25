@@ -1,15 +1,17 @@
 //! Native legacy scalar dispatch shared by server and WASM hosts.
 use super::numeric::{arith_binop, cast_value_to};
+use super::temporal::*;
 use super::text::*;
 use super::values::value_as_i64;
 use crate::query::unified::UnifiedRecord;
 use reddb_rql::ast::{Filter, Projection};
 use reddb_types::Value;
 
-/// Hosts resolve arguments with their input policy, evaluate CASE conditions
+/// Hosts supply Unix milliseconds, resolve arguments with their input policy, evaluate CASE conditions
 /// without database context, and retain scalar effects not owned by this module.
 /// Resolution stays lazy; None is distinct from an admitted SQL NULL.
 pub trait ScalarFunctionHost {
+    fn current_unix_ms(&self) -> i64;
     fn resolve_argument(&self, argument: &Projection, source: &UnifiedRecord) -> Option<Value>;
     fn evaluate_condition(&self, filter: &Filter, source: &UnifiedRecord) -> bool;
     fn fallback_function(
@@ -292,6 +294,19 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
             Value::Text(text) => Some(Value::text(quote_literal_text(&text))),
             other => Some(Value::text(quote_literal_text(&other.display_string()))),
         },
+        "TIME_BUCKET" => {
+            let bucket_ns = resolve_time_bucket_duration(args, 0)?;
+            let timestamp_ns = resolve_time_bucket_timestamp(args, source, &|argument| {
+                host.resolve_argument(argument, source)
+            })?;
+            Some(Value::UnsignedInteger(bucket_start_ns(
+                bucket_ns,
+                timestamp_ns,
+            )))
+        }
+        "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(host.current_unix_ms())),
+        "CURRENT_DATE" => Some(Value::Date((host.current_unix_ms() / 86_400_000) as i32)),
+        "CURRENT_TIME" => Some(Value::Time(time_ms_since_midnight(host.current_unix_ms()))),
         _ => host.fallback_function(name, args, source),
     }
 }

@@ -225,6 +225,9 @@ struct RuntimeScalarFunctionHost;
 impl reddb_engine::query::runtime::scalar_functions::ScalarFunctionHost
     for RuntimeScalarFunctionHost
 {
+    fn current_unix_ms(&self) -> i64 {
+        reddb_engine::query::runtime::temporal::current_unix_ms()
+    }
     fn resolve_argument(&self, argument: &Projection, source: &UnifiedRecord) -> Option<Value> {
         eval_projection_value(argument, source)
     }
@@ -255,15 +258,6 @@ fn evaluate_native_scalar_function(
             Some(Value::Float(crate::geo::haversine_km(
                 lat1, lon1, lat2, lon2,
             )))
-        }
-        "TIME_BUCKET" => {
-            let bucket_ns = resolve_time_bucket_duration(args, 0)?;
-            let timestamp_ns = resolve_time_bucket_timestamp(args, source)?;
-            let bucket_start = timestamp_ns
-                .checked_div(bucket_ns)
-                .map(|bucket| bucket * bucket_ns)
-                .unwrap_or(timestamp_ns);
-            Some(Value::UnsignedInteger(bucket_start))
         }
         "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
@@ -401,27 +395,6 @@ fn evaluate_native_scalar_function(
             let dropped = crate::auth::locks::global()
                 .release_all(crate::runtime::impl_core::current_connection_id());
             Some(Value::Integer(dropped as i64))
-        }
-        "NOW" | "CURRENT_TIMESTAMP" => {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            Some(Value::TimestampMs(ms))
-        }
-        "CURRENT_DATE" => {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            Some(Value::Date((ms / 86_400_000) as i32))
-        }
-        "CURRENT_TIME" => {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            Some(Value::Time(ms.rem_euclid(86_400_000) as u32))
         }
         _ => Some(Value::Null),
     }

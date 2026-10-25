@@ -19,6 +19,11 @@ use std::{
 };
 
 pub const CASES: &[(&str, fn())] = &[
+    ("scalar_dispatch_clock_values", scalar_clock_values),
+    (
+        "scalar_dispatch_time_bucket_inputs",
+        scalar_time_bucket_inputs,
+    ),
     (
         "scalar_dispatch_substrings_and_patterns",
         scalar_substrings_and_patterns,
@@ -84,6 +89,8 @@ struct Host<'a> {
     input_calls: Cell<usize>,
     deny_input: bool,
     resolved_columns: RefCell<Vec<String>>,
+    unix_ms: Option<i64>,
+    clock_reads: Cell<usize>,
 }
 
 impl<'a> Host<'a> {
@@ -97,6 +104,8 @@ impl<'a> Host<'a> {
             input_calls: Cell::new(0),
             deny_input: false,
             resolved_columns: RefCell::new(vec![]),
+            unix_ms: None,
+            clock_reads: Cell::new(0),
         }
     }
 }
@@ -165,6 +174,11 @@ impl ProjectionHost for Host<'_> {
 }
 
 impl ScalarFunctionHost for Host<'_> {
+    fn current_unix_ms(&self) -> i64 {
+        self.clock_reads.set(self.clock_reads.get() + 1);
+        self.unix_ms
+            .unwrap_or_else(reddb_engine::query::runtime::temporal::current_unix_ms)
+    }
     fn resolve_argument(&self, argument: &Projection, source: &UnifiedRecord) -> Option<Value> {
         if let Projection::Column(column) = argument {
             self.resolved_columns.borrow_mut().push(column.clone());
@@ -262,6 +276,192 @@ fn scalar_values(name: &str, values: Vec<Value>) -> Option<Value> {
         })
         .collect::<Vec<_>>();
     evaluate_scalar_function_with_host(&Host::new(None), name, &arguments, &source)
+}
+
+pub fn runtime_clock_values() -> Vec<i64> {
+    let source = UnifiedRecord::new();
+    let host = Host::new(None);
+    ["NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"]
+        .iter()
+        .map(|name| {
+            match evaluate_scalar_function_with_host(&host, name, &[], &source)
+                .expect("clock scalar")
+            {
+                Value::TimestampMs(ms) => ms,
+                Value::Date(days) => i64::from(days),
+                Value::Time(ms) => i64::from(ms),
+                other => panic!("unexpected clock result {other:?}"),
+            }
+        })
+        .collect()
+}
+
+fn scalar_clock_values() {
+    let source = UnifiedRecord::new();
+    for (unix_ms, days, time) in [(0, 0, 0), (172_800_123, 2, 123), (-1, 0, 86_399_999)] {
+        let host = Host {
+            unix_ms: Some(unix_ms),
+            ..Host::new(None)
+        };
+        for (name, expected) in [
+            ("NOW:observed", Value::TimestampMs(unix_ms)),
+            ("CURRENT_TIMESTAMP", Value::TimestampMs(unix_ms)),
+            ("CURRENT_DATE", Value::Date(days)),
+            ("CURRENT_TIME", Value::Time(time)),
+        ] {
+            assert_eq!(
+                evaluate_scalar_function_with_host(
+                    &host,
+                    name,
+                    &[Projection::Column("ignored".into()),],
+                    &source
+                ),
+                Some(expected),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            host.clock_reads.get(),
+            4,
+            "each clock scalar reads the host once"
+        );
+        assert!(
+            host.resolved_columns.borrow().is_empty(),
+            "native clock calls ignore extra arguments"
+        );
+    }
+    let before = reddb_engine::query::runtime::temporal::current_unix_ms();
+    let clocks = runtime_clock_values();
+    let after = reddb_engine::query::runtime::temporal::current_unix_ms();
+    assert!(clocks[..2]
+        .iter()
+        .all(|value| *value >= before.min(after) && *value <= before.max(after)));
+    assert!(
+        clocks[2] >= before.min(after) / 86_400_000 && clocks[2] <= before.max(after) / 86_400_000
+    );
+}
+
+fn scalar_time_bucket_inputs() {
+    let mut source = UnifiedRecord::new();
+    source.set("timestamp_ns", Value::Integer(17_000_000));
+    source.set("timestamp_ms", Value::TimestampMs(99));
+    let host = Host::new(None);
+    let duration = Projection::Column("LIT:5ms".into());
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TIME_BUCKET",
+            std::slice::from_ref(&duration),
+            &source
+        ),
+        Some(Value::UnsignedInteger(15_000_000))
+    );
+    for (timestamp, expected) in [
+        (
+            Projection::Column("missing".into()),
+            Some(Value::UnsignedInteger(15_000_000)),
+        ),
+        (
+            Projection::Column("LIT:12000000".into()),
+            Some(Value::UnsignedInteger(10_000_000)),
+        ),
+        (Projection::Column("LIT:@RL:null".into()), None),
+        (Projection::Column("LIT:-1".into()), None),
+    ] {
+        assert_eq!(
+            evaluate_scalar_function_with_host(
+                &host,
+                "TIME_BUCKET",
+                &[duration.clone(), timestamp],
+                &source
+            ),
+            expected
+        );
+    }
+    assert_eq!(
+        evaluate_scalar_function_with_host(&host, "TIME_BUCKET", &[], &source),
+        None
+    );
+    for invalid in [
+        "LIT:100",
+        "LIT:invalid",
+        "LIT:18446744073709551615s",
+        "timestamp_ns",
+    ] {
+        host.resolved_columns.borrow_mut().clear();
+        assert_eq!(
+            evaluate_scalar_function_with_host(
+                &host,
+                "TIME_BUCKET",
+                &[
+                    Projection::Column(invalid.into()),
+                    Projection::Column("unreachable".into()),
+                ],
+                &source
+            ),
+            None
+        );
+        assert!(
+            host.resolved_columns.borrow().is_empty(),
+            "invalid duration skips timestamp resolution"
+        );
+    }
+    source.set("timestamp_ns", Value::Null);
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TIME_BUCKET",
+            std::slice::from_ref(&duration),
+            &source
+        ),
+        Some(Value::UnsignedInteger(95_000_000))
+    );
+    source.set("timestamp_ms", Value::Integer(17_000_000));
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TIME_BUCKET",
+            std::slice::from_ref(&duration),
+            &source
+        ),
+        Some(Value::UnsignedInteger(15_000_000)),
+        "field labels do not infer timestamp units"
+    );
+    source.set("timestamp_ms", Value::Null);
+    source.set("timestamp", Value::Timestamp(2));
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TIME_BUCKET",
+            &[Projection::Column("LIT:raw".into()),],
+            &source
+        ),
+        Some(Value::UnsignedInteger(2_000_000_000))
+    );
+    source.set("timestamp", Value::TimestampMs(i64::MAX));
+    assert_eq!(
+        evaluate_scalar_function_with_host(&host, "TIME_BUCKET", &[duration], &source),
+        None,
+        "overflow is unresolved rather than a wrapped bucket"
+    );
+    source.set("timestamp_ns", Value::Integer(17_000_000));
+    let host = Host {
+        deny_input: true,
+        ..Host::new(None)
+    };
+    assert_eq!(
+        evaluate_scalar_function_with_host(
+            &host,
+            "TIME_BUCKET",
+            &[
+                Projection::Column("LIT:5ms".into()),
+                Projection::Column("timestamp_ms".into()),
+            ],
+            &source
+        ),
+        Some(Value::UnsignedInteger(15_000_000)),
+        "denied/missing explicit argument retains native raw-field fallback"
+    );
 }
 
 fn scalar_substrings_and_patterns() {
@@ -1478,5 +1678,33 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
             projected.get("quoted"),
             Some(&Value::text(format!("'{}'", names[index])))
         );
+    }
+    let columns = projections("SELECT TIME_BUCKET('10ms', total * 1000000) AS bucket, TIME_BUCKET('raw', total) AS raw_total, NOW() AS observed, CURRENT_DATE AS today, CURRENT_TIME AS utc_time FROM orders");
+    let host = Host {
+        unix_ms: Some(172_800_123),
+        ..Host::new(Some(contract))
+    };
+    for (index, source) in selected.iter().enumerate() {
+        let projected = project(&host, source, &columns).expect("recovered temporal scalars");
+        let buckets = if updated {
+            [20_000_000, 10_000_000]
+        } else {
+            [10_000_000, 10_000_000]
+        };
+        let totals = if updated { [20, 15] } else { [15, 10] };
+        assert_eq!(
+            projected.get("bucket"),
+            Some(&Value::UnsignedInteger(buckets[index]))
+        );
+        assert_eq!(
+            projected.get("raw_total"),
+            Some(&Value::UnsignedInteger(totals[index]))
+        );
+        assert_eq!(
+            projected.get("observed"),
+            Some(&Value::TimestampMs(172_800_123))
+        );
+        assert_eq!(projected.get("today"), Some(&Value::Date(2)));
+        assert_eq!(projected.get("utc_time"), Some(&Value::Time(123)));
     }
 }
