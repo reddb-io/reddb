@@ -30,6 +30,10 @@ mod record_ordering;
 mod record_projection;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/numeric_scalars.rs"]
+mod numeric_scalars;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/codec_corpus.rs"]
 mod codec_corpus;
 
@@ -125,7 +129,8 @@ pub fn run_conformance() -> String {
         .chain(enforcement::CASES.iter())
         .chain(record_filters::CASES.iter())
         .chain(record_ordering::CASES.iter())
-        .chain(record_projection::CASES.iter());
+        .chain(record_projection::CASES.iter())
+        .chain(numeric_scalars::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

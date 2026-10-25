@@ -690,3 +690,34 @@ existing expression/path work and output-value/binding clones. Visible-column
 collection retains native schema sampling and heterogeneous-layout fallback;
 sensitivity keeps its existing AST traversal. The move adds no storage scan,
 file write, network traffic or IPC, and claims no measured speedup.
+
+## Shared native projection numeric scalars
+
+`reddb-engine::query::runtime::numeric` owns the native projection dispatcher’s
+numeric-operand representation/coercion, arithmetic operations, millisecond
+timestamp arithmetic and CAST helper. Native entry points alias these exact
+functions/types. Argument resolution, legacy literal decoding, session/secret
+policy and the remaining scalar dispatcher stay in their existing native host.
+
+This preserves the existing distinction from typed expression evaluation:
+legacy projection division/modulo by zero returns NULL, numeric division
+returns Float, numeric text/decimal coercion follows the native dispatcher,
+and millisecond timestamp operations retain checked arithmetic. Existing
+f64 intermediate arithmetic, unsigned-to-signed coercion and saturating casts
+are characterized rather than silently changed during extraction; this is not
+a new exact-integer arithmetic guarantee. Typed evaluator/comparison semantics
+are unchanged.
+
+Shared native/WASM cases cover operand coercion, result types, NULL/zero and
+invalid inputs, timestamp bounds, existing precision behavior, CAST fast paths
+and validator fallback. The offline OPFS fixture additionally projects actual
+MUL/DIV fallback results over recovered rows after WHERE, ORDER BY and pagination,
+including NULL for a zero divisor, before/after an admitted update and checkpoint.
+Its test host resolves supported simple arguments through canonical expressions;
+it is not a complete legacy scalar host or public stored-query dispatcher.
+Stored-query and application-transaction capability flags remain false.
+
+Cost sketch: each arithmetic/CAST call retains its existing constant-size
+operand work plus O(B) parsing/coercion when a B-byte text value is supplied.
+The move adds no record copy, storage scan, file write, network traffic or IPC,
+and claims no measured speedup.
