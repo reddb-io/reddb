@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "reddb-io-client",
  "reddb-io-file",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -2135,14 +2135,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "crc32fast",
  "parking_lot",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "prost",
  "reddb-io-wire",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-python"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "prost",
  "pyo3",
@@ -2203,14 +2203,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2272,14 +2272,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.26.7"
+version = "1.26.8"
 dependencies = [
  "hmac",
  "reddb-io-types",
