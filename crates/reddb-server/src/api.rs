@@ -947,6 +947,12 @@ impl From<crate::storage::wal::TxError> for RedDBError {
     }
 }
 
+impl From<reddb_engine::catalog::schema::ContractExpressionError> for RedDBError {
+    fn from(error: reddb_engine::catalog::schema::ContractExpressionError) -> Self {
+        Self::Query(error.message)
+    }
+}
+
 impl From<crate::storage::StoreError> for RedDBError {
     fn from(err: crate::storage::StoreError) -> Self {
         match err {

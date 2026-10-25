@@ -2686,6 +2686,7 @@ name = "reddb-io-engine"
 version = "1.26.7"
 dependencies = [
  "crc32fast",
+ "hex",
  "parking_lot",
  "proptest",
  "rayon",

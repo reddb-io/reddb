@@ -9,7 +9,6 @@ use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::physical::CollectionContract;
 use crate::storage::unified::MetadataValue;
 use crate::RedDBResult;
-use reddb_rql::analyzer::resolve_declared_data_type;
 use reddb_types::coerce::coerce as coerce_schema_value;
 use reddb_types::{DataType, Value};
 
@@ -1278,122 +1277,14 @@ fn coerce_contract_literal(
     }
 }
 
-struct ResolvedColumnRule {
-    name: String,
-    data_type: DataType,
-    data_type_name: String,
-    not_null: bool,
-    default: Option<String>,
-    enum_variants: Vec<String>,
-}
+use reddb_engine::catalog::schema::ResolvedColumnRule;
 
 fn resolved_contract_columns(
-    contract: &crate::physical::CollectionContract,
+    contract: &CollectionContract,
 ) -> RedDBResult<Vec<ResolvedColumnRule>> {
-    if let Some(table_def) = &contract.table_def {
-        return Ok(table_def
-            .columns
-            .iter()
-            .map(|column| ResolvedColumnRule {
-                name: column.name.clone(),
-                data_type: column.data_type,
-                data_type_name: data_type_name(column.data_type).to_string(),
-                not_null: !column.nullable,
-                default: column
-                    .default
-                    .as_ref()
-                    .map(|bytes| String::from_utf8_lossy(bytes).to_string()),
-                enum_variants: column.enum_variants.clone(),
-            })
-            .collect());
-    }
-
-    contract
-        .declared_columns
-        .iter()
-        .map(|column| {
-            let data_type = column
-                .sql_type
-                .as_ref()
-                .map(reddb_rql::analyzer::resolve_sql_type_name)
-                .transpose()
-                .map_err(|err| crate::RedDBError::Query(err.to_string()))?
-                .unwrap_or(parse_declared_data_type(&column.data_type)?);
-            Ok(ResolvedColumnRule {
-                name: column.name.clone(),
-                data_type,
-                data_type_name: column.data_type.clone(),
-                not_null: column.not_null,
-                default: column.default.clone(),
-                enum_variants: column.enum_variants.clone(),
-            })
-        })
-        .collect()
-}
-
-fn parse_declared_data_type(value: &str) -> RedDBResult<DataType> {
-    resolve_declared_data_type(value).map_err(|err| crate::RedDBError::Query(err.to_string()))
-}
-
-fn data_type_name(data_type: DataType) -> &'static str {
-    match data_type {
-        DataType::Integer => "integer",
-        DataType::UnsignedInteger => "unsigned_integer",
-        DataType::Float => "float",
-        DataType::Text => "text",
-        DataType::Blob => "blob",
-        DataType::Boolean => "boolean",
-        DataType::Timestamp => "timestamp",
-        DataType::Duration => "duration",
-        DataType::IpAddr => "ipaddr",
-        DataType::MacAddr => "macaddr",
-        DataType::Vector => "vector",
-        DataType::Nullable => "nullable",
-        DataType::Unknown => "unknown",
-        DataType::Json => "json",
-        DataType::Uuid => "uuid",
-        DataType::NodeRef => "noderef",
-        DataType::EdgeRef => "edgeref",
-        DataType::VectorRef => "vectorref",
-        DataType::RowRef => "rowref",
-        DataType::Color => "color",
-        DataType::Email => "email",
-        DataType::Url => "url",
-        DataType::Phone => "phone",
-        DataType::Semver => "semver",
-        DataType::Cidr => "cidr",
-        DataType::Date => "date",
-        DataType::Time => "time",
-        DataType::Decimal => "decimal",
-        DataType::DecimalText => "decimal_text",
-        DataType::Enum => "enum",
-        DataType::Array => "array",
-        DataType::TimestampMs => "timestamp_ms",
-        DataType::Ipv4 => "ipv4",
-        DataType::Ipv6 => "ipv6",
-        DataType::Subnet => "subnet",
-        DataType::Port => "port",
-        DataType::Latitude => "latitude",
-        DataType::Longitude => "longitude",
-        DataType::GeoPoint => "geopoint",
-        DataType::Country2 => "country2",
-        DataType::Country3 => "country3",
-        DataType::Lang2 => "lang2",
-        DataType::Lang5 => "lang5",
-        DataType::Currency => "currency",
-        DataType::AssetCode => "asset_code",
-        DataType::Money => "money",
-        DataType::ColorAlpha => "color_alpha",
-        DataType::BigInt => "bigint",
-        DataType::KeyRef => "keyref",
-        DataType::DocRef => "docref",
-        DataType::TableRef => "tableref",
-        DataType::PageRef => "pageref",
-        DataType::Secret => "secret",
-        DataType::Password => "password",
-        DataType::TextZstd => "text",
-        DataType::BlobZstd => "blob",
-    }
+    Ok(reddb_engine::catalog::schema::resolved_contract_columns(
+        contract,
+    )?)
 }
 
 fn value_matches_declared_type(value: &Value, target: DataType) -> bool {

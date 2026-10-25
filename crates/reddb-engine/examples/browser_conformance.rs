@@ -2,6 +2,10 @@
 //! This is built separately and never included in the application WASM bundle.
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/catalog.rs"]
+mod catalog;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/codec_corpus.rs"]
 mod codec_corpus;
 
@@ -92,7 +96,8 @@ pub fn run_conformance() -> String {
         .chain(read_indexes::CASES.iter())
         .chain(resident_store::CASES.iter())
         .chain(store_wal::CASES.iter())
-        .chain(resident_file::CASES.iter());
+        .chain(resident_file::CASES.iter())
+        .chain(catalog::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }
@@ -104,6 +109,18 @@ pub fn run_conformance() -> String {
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = verifyNativeSnapshot)]
 pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
     snapshot::verify_native_snapshot(bytes)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = catalogSnapshotFixture)]
+pub fn catalog_snapshot_fixture() -> Vec<u8> {
+    catalog::snapshot_fixture()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = verifyCatalogSnapshot)]
+pub fn verify_catalog_snapshot(bytes: &[u8]) -> u32 {
+    catalog::verify_snapshot(bytes)
 }
 
 /// Test-only encoded native store actions for the offline OPFS recovery fixture.
