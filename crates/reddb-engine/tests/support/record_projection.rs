@@ -253,6 +253,21 @@ fn value_resolution_and_fallback() {
         eval_projection_value_with_host(&host, &Projection::Column("missing".into()), &source),
         None
     );
+    let columns =
+        projections("SELECT UPPER(nickname) AS display, quantity > 1 AS accepted FROM orders");
+    assert_eq!(
+        eval_projection_value_with_host(&host, &columns[0], &source),
+        Some(Value::text("BEE"))
+    );
+    assert_eq!(
+        eval_projection_value_with_host(&host, &columns[1], &source),
+        Some(Value::Boolean(true))
+    );
+    assert_eq!(
+        host.fallback_calls.get(),
+        0,
+        "successful typed arguments skip fallback"
+    );
     let columns = projections("SELECT (quantity + 1) * 2 AS nested FROM orders");
     assert_eq!(
         eval_projection_value_with_host(&host, &columns[0], &source),
