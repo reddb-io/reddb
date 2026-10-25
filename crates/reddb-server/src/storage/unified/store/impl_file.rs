@@ -29,44 +29,6 @@ impl UnifiedStore {
         self.resident.register_entity_id(id)
     }
 
-    /// Load a persisted image and rebuild its derived indexes, retaining the
-    /// stored sequence instead of assigning one from snapshot iteration order.
-    fn restore_snapshot_entity(
-        &self,
-        collection: &str,
-        mut entity: UnifiedEntity,
-    ) -> Result<EntityId, StoreError> {
-        let manager = self.get_or_create_collection(collection);
-        if entity.id.raw() == 0 {
-            entity.id = self.next_entity_id();
-        } else {
-            self.register_entity_id(entity.id);
-        }
-        if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
-            if *row_id == 0 {
-                *row_id = manager.next_row_id();
-            } else {
-                manager.register_row_id(*row_id);
-            }
-        }
-        entity.ensure_table_logical_id();
-        self.resident
-            .context_index
-            .index_entity(collection, &entity);
-        if self.config.auto_index_refs {
-            self.index_cross_refs(&entity, collection)?;
-        }
-        let graph_label = match &entity.kind {
-            EntityKind::GraphNode(node) => Some(node.label.clone()),
-            _ => None,
-        };
-        let id = manager.restore_snapshot_entity(entity)?;
-        if let Some(label) = graph_label {
-            self.update_graph_label_index(collection, &label, id);
-        }
-        Ok(id)
-    }
-
     /// Load store from binary file
     ///
     /// Binary dump framing is defined by `reddb_file::native_store`.
@@ -94,70 +56,16 @@ impl UnifiedStore {
         buf: &[u8],
         config: UnifiedStoreConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        use reddb_engine::storage::snapshot::{visit_snapshot, SnapshotVisitor};
-
-        struct Restore<'a>(&'a UnifiedStore);
-        impl SnapshotVisitor for Restore<'_> {
-            fn collection(&mut self, name: &str) -> Result<(), String> {
-                self.0.get_or_create_collection(name);
-                Ok(())
-            }
-
-            fn entity(
-                &mut self,
-                collection: &str,
-                entity: UnifiedEntity,
-                metadata: Option<Metadata>,
-            ) -> Result<(), String> {
-                let id = entity.id;
-                self.0
-                    .restore_snapshot_entity(collection, entity)
-                    .map_err(|err| err.to_string())?;
-                if let Some(metadata) = metadata {
-                    if let Some(manager) = self.0.get_collection(collection) {
-                        let _ = manager.set_metadata(id, metadata);
-                    }
-                }
-                Ok(())
-            }
-
-            fn cross_ref(
-                &mut self,
-                cross_ref: reddb_file::NativeDumpCrossRef,
-            ) -> Result<(), String> {
-                let source_collection = self
-                    .0
-                    .get_any(EntityId::new(cross_ref.source_id))
-                    .map(|(name, _)| name)
-                    .unwrap_or_else(|| cross_ref.target_collection.clone());
-                let _ = self.0.add_cross_ref(
-                    &source_collection,
-                    EntityId::new(cross_ref.source_id),
-                    &cross_ref.target_collection,
-                    EntityId::new(cross_ref.target_id),
-                    RefType::from_byte(cross_ref.ref_type),
-                    1.0,
-                );
-                Ok(())
-            }
-
-            fn auxiliary(&mut self, bytes: &[u8]) -> Result<(), String> {
-                self.0.set_aux_metadata(bytes.to_vec());
-                Ok(())
-            }
-        }
-
-        let version = reddb_file::decode_native_store_header(buf).map_err(|err| err.to_string())?;
+        let (resident, version) =
+            reddb_engine::storage::resident_store::ResidentStore::from_snapshot(
+                buf,
+                &config.manager_config,
+                config.auto_index_refs,
+                config.max_cross_refs,
+            )?;
         let mut store = Self::with_config(config);
-        // Recovery is private until complete and must not append old images to WAL.
-        let embedded_wal_path = store.config.embedded_wal_path.take();
-        store.set_format_version(version);
-        visit_snapshot(buf, &mut Restore(&store))?;
-
-        if store.format_version() < STORE_VERSION_CURRENT {
-            store.set_format_version(STORE_VERSION_CURRENT);
-        }
-        store.config.embedded_wal_path = embedded_wal_path;
+        store.resident = resident;
+        store.set_format_version(version.max(STORE_VERSION_CURRENT));
 
         Ok(store)
     }

@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -34,7 +34,6 @@ use super::entity::{
 };
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
-use super::segment::SegmentError;
 use crate::api::{DurabilityMode, GroupCommitOptions};
 use crate::physical::{ManifestEvent, ManifestEventKind};
 use crate::storage::engine::pager::PagerError;
@@ -195,58 +194,7 @@ impl UnifiedStoreConfig {
 // Error Types
 // ============================================================================
 
-/// Errors from UnifiedStore operations
-#[derive(Debug)]
-pub enum StoreError {
-    /// Collection already exists
-    CollectionExists(String),
-    /// Collection not found
-    CollectionNotFound(String),
-    /// Entity not found
-    EntityNotFound(EntityId),
-    /// Too many cross-references
-    TooManyRefs(EntityId),
-    /// Segment error
-    Segment(SegmentError),
-    /// I/O error
-    Io(std::io::Error),
-    /// Checksummed storage bytes failed validation.
-    StorageIntegrity(crate::api::StorageIntegrityError),
-    /// Serialization error
-    Serialization(String),
-    /// Internal error (lock poisoning, invariant violation)
-    Internal(String),
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CollectionExists(name) => write!(f, "Collection already exists: {}", name),
-            Self::CollectionNotFound(name) => write!(f, "Collection not found: {}", name),
-            Self::EntityNotFound(id) => write!(f, "Entity not found: {}", id),
-            Self::TooManyRefs(id) => write!(f, "Too many cross-references for entity: {}", id),
-            Self::Segment(e) => write!(f, "Segment error: {:?}", e),
-            Self::Io(e) => write!(f, "I/O error: {}", e),
-            Self::StorageIntegrity(e) => write!(f, "{e}"),
-            Self::Serialization(msg) => write!(f, "Serialization error: {}", msg),
-            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-impl From<SegmentError> for StoreError {
-    fn from(e: SegmentError) -> Self {
-        Self::Segment(e)
-    }
-}
-
-impl From<std::io::Error> for StoreError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
+pub use reddb_engine::storage::error::StoreError;
 
 // ============================================================================
 // Statistics
@@ -374,15 +322,8 @@ pub struct UnifiedStore {
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
     /// Detached artifact pages stay unavailable until native metadata is durable.
     detached_native_blob_pages: parking_lot::Mutex<std::collections::BTreeSet<u32>>,
-    /// Whether the paged registry on page 1 must be rewritten before the next flush.
-    paged_registry_dirty: AtomicBool,
     /// Logical store WAL / grouped durability coordinator for paged mode.
     commit: Option<Arc<StoreCommitCoordinator>>,
-    /// Counts how often `unindex_cross_refs_batch` took the read-only fast
-    /// path (no inbound refs, no outbound refs for any deleted id) and so
-    /// avoided acquiring the `cross_refs` / `reverse_refs` write locks.
-    /// Used by tests to pin the early-exit; cheap relaxed counter otherwise.
-    unindex_cross_refs_fast_path: AtomicU64,
     /// WAL-replayed `VectorInsert` records, captured at open time and
     /// drained per-collection on first `vector.turbo` access (issue
     /// #694). Boot-time recovery: the in-memory TurboQuant index is

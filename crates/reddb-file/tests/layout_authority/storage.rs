@@ -96,9 +96,10 @@ fn server_uses_reddb_file_for_pager_shadow_sidecar_groups() {
 #[test]
 fn server_does_not_own_unified_store_wal_action_frame() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/storage/unified/store/commit.rs"));
+    let native = read(root.join("crates/reddb-server/src/storage/unified/store/commit.rs"));
+    let shared = read(root.join("crates/reddb-engine/src/storage/store_wal.rs"));
 
-    for forbidden in [
+    let forbidden = [
         "const STORE_WAL_VERSION",
         "store wal action too short",
         "unsupported store wal version",
@@ -109,11 +110,14 @@ fn server_does_not_own_unified_store_wal_action_frame() {
         "fn write_bytes(",
         "fn read_string(",
         "fn read_bytes(",
-    ] {
-        assert!(
-            !text.contains(forbidden),
-            "UnifiedStore WAL action frame belongs in reddb-file, found {forbidden:?}"
-        );
+    ];
+    for (host, text) in [("native", &native), ("shared", &shared)] {
+        for forbidden in forbidden {
+            assert!(
+                !text.contains(forbidden),
+                "{host} WAL action frame belongs in reddb-file, found {forbidden:?}"
+            );
+        }
     }
 
     for required in [
@@ -122,10 +126,15 @@ fn server_does_not_own_unified_store_wal_action_frame() {
         "reddb_file::StoreWalActionFrame",
     ] {
         assert!(
-            text.contains(required),
+            shared.contains(required),
             "UnifiedStore WAL action frame should route through {required}"
         );
     }
+    assert!(
+        native.contains("pub(crate) use reddb_engine::storage::store_wal::StoreWalAction;")
+            && native.contains("reddb_engine::storage::store_wal::apply_replayed_action("),
+        "native store must use the canonical typed actions and replay dispatcher"
+    );
 }
 
 #[test]
@@ -951,21 +960,26 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
     for required in [
-        "reddb_file::decode_native_store_header",
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
         "reddb_file::encode_native_dump_count",
         "reddb_file::encode_native_dump_collection_header",
         "reddb_file::encode_native_dump_entity_record",
         "reddb_file::encode_native_dump_cross_ref",
-        "reddb_engine::storage::snapshot::{visit_snapshot, SnapshotVisitor}",
-        "visit_snapshot(buf, &mut Restore(&store))",
+        "reddb_engine::storage::resident_store::ResidentStore::from_snapshot",
     ] {
         assert!(
             impl_file.contains(required),
             "UnifiedStore dump header/footer should route through {required}"
         );
     }
+
+    let recovery = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
+    assert!(
+        recovery.contains("use super::snapshot::{visit_snapshot, SnapshotVisitor}")
+            && recovery.contains("let version = visit_snapshot("),
+        "shared resident reconstruction must use canonical snapshot decoding"
+    );
 
     let snapshot = read(root.join("crates/reddb-engine/src/storage/snapshot.rs"));
     for required in [

@@ -10,18 +10,30 @@
 )]
 
 use super::context_index::ContextIndex;
-use super::entity::{EntityId, EntityKind, RefType, UnifiedEntity};
+use super::entity::{CrossRef, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::entity_cache::EntityCache;
+use super::error::StoreError;
+use super::manager::ManagerConfig;
 use super::manager::SegmentManager;
 use super::metadata::MetadataFilter;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Resident state of one store. This type supplies no durable commit boundary.
 #[doc(hidden)]
 pub struct ResidentStore {
+    /// Whether the paged registry on page 1 must be rewritten before the next flush.
+    #[doc(hidden)]
+    pub paged_registry_dirty: AtomicBool,
+    /// Counts how often `unindex_cross_refs_batch` took the read-only fast
+    /// path (no inbound refs, no outbound refs for any deleted id) and so
+    /// avoided acquiring the `cross_refs` / `reverse_refs` write locks.
+    /// Used by tests to pin the early-exit; cheap relaxed counter otherwise.
+    #[doc(hidden)]
+    pub unindex_cross_refs_fast_path: AtomicU64,
+
     /// Global entity ID counter
     #[doc(hidden)]
     pub next_entity_id: AtomicU64,
@@ -58,6 +70,8 @@ pub struct ResidentStore {
 impl ResidentStore {
     pub fn new() -> Self {
         Self {
+            paged_registry_dirty: AtomicBool::new(false),
+            unindex_cross_refs_fast_path: AtomicU64::new(0),
             next_entity_id: AtomicU64::new(1),
             collections: RwLock::new(HashMap::new()),
             cross_refs: RwLock::new(HashMap::new()),
@@ -347,8 +361,491 @@ impl ResidentStore {
     }
 }
 
+impl ResidentStore {
+    pub fn index_cross_refs(
+        &self,
+        entity: &UnifiedEntity,
+        collection: &str,
+    ) -> Result<(), StoreError> {
+        let mut registry_dirty = false;
+        for cross_ref in entity.cross_refs() {
+            if cross_ref.target_collection.is_empty() {
+                continue;
+            }
+            {
+                let mut forward = self.cross_refs.write();
+                let refs = forward.entry(cross_ref.source).or_default();
+                let inserted = !refs.iter().any(|(id, kind, coll)| {
+                    *id == cross_ref.target
+                        && *kind == cross_ref.ref_type
+                        && coll == &cross_ref.target_collection
+                });
+                if inserted {
+                    refs.push((
+                        cross_ref.target,
+                        cross_ref.ref_type,
+                        cross_ref.target_collection.clone(),
+                    ));
+                    registry_dirty = true;
+                }
+            }
+
+            {
+                let mut reverse = self.reverse_refs.write();
+                let refs = reverse.entry(cross_ref.target).or_default();
+                let inserted = !refs.iter().any(|(id, kind, coll)| {
+                    *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
+                });
+                if inserted {
+                    refs.push((cross_ref.source, cross_ref.ref_type, collection.to_string()));
+                    registry_dirty = true;
+                }
+            }
+        }
+
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+
+        Ok(())
+    }
+
+    pub fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
+        // Remove forward refs
+        self.cross_refs.write().remove(&id);
+
+        // Remove from reverse refs (scan all)
+        let mut reverse = self.reverse_refs.write();
+        for refs in reverse.values_mut() {
+            refs.retain(|(source, _, _)| *source != id);
+        }
+        reverse.remove(&id);
+        self.mark_paged_registry_dirty();
+
+        Ok(())
+    }
+
+    pub fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let id_set: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
+
+        // Read-only probe: under steady-state delete workloads most rows have
+        // no cross-refs at all, so both maps are entirely cold for the batch.
+        // Acquiring the write lock to scan `reverse_refs.values_mut()` over an
+        // unrelated dictionary was the dominant cost in #85's `delete_sequential`
+        // profile. The read-lock probe below is O(|ids|) hashmap lookups against
+        // each map, vs. O(|reverse_refs|) for the write-path scan it replaces.
+        //
+        // Decision: skip the write path iff
+        //   - no deleted id is a key in `cross_refs`  (no outbound refs to drop,
+        //     and so no `(deleted_id, _, _)` source entry exists anywhere in
+        //     `reverse_refs.values()` either — the two maps are kept in sync by
+        //     `add_cross_ref`), AND
+        //   - no deleted id is a key in `reverse_refs` (no inbound refs to drop).
+        let needs_forward_cleanup = {
+            let forward = self.cross_refs.read();
+            id_set.iter().any(|id| forward.contains_key(id))
+        };
+        let needs_reverse_cleanup = {
+            let reverse = self.reverse_refs.read();
+            id_set.iter().any(|id| reverse.contains_key(id))
+        };
+
+        if !needs_forward_cleanup && !needs_reverse_cleanup {
+            self.unindex_cross_refs_fast_path
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        if needs_forward_cleanup {
+            let mut forward = self.cross_refs.write();
+            for id in &id_set {
+                forward.remove(id);
+            }
+        }
+
+        if needs_reverse_cleanup || needs_forward_cleanup {
+            // The inner `values_mut()` scan is only needed when at least one
+            // deleted id was a *source* somewhere — which, by the invariant
+            // above, can only happen when it had outbound forward refs.
+            let mut reverse = self.reverse_refs.write();
+            if needs_forward_cleanup {
+                for refs in reverse.values_mut() {
+                    refs.retain(|(source, _, _)| !id_set.contains(source));
+                }
+            }
+            reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
+        }
+        self.mark_paged_registry_dirty();
+
+        Ok(())
+    }
+
+    pub fn unindex_cross_refs_fast_path_hits(&self) -> u64 {
+        self.unindex_cross_refs_fast_path.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_paged_registry_dirty(&self) {
+        self.paged_registry_dirty.store(true, Ordering::Release);
+    }
+
+    pub fn create_collection_in_memory(
+        &self,
+        name: &str,
+        manager_config: &ManagerConfig,
+    ) -> Result<(), StoreError> {
+        let mut collections = self.collections.write();
+        if collections.contains_key(name) {
+            return Ok(());
+        }
+        let manager = SegmentManager::with_config(name, manager_config.clone());
+        collections.insert(name.to_string(), Arc::new(manager));
+        self.mark_paged_registry_dirty();
+        Ok(())
+    }
+}
+
+impl ResidentStore {
+    pub fn apply_replayed_upsert(
+        &self,
+        collection: &str,
+        record: &[u8],
+        format_version: u32,
+        manager_config: &ManagerConfig,
+    ) -> Result<EntityId, StoreError> {
+        self.create_collection_in_memory(collection, manager_config)?;
+        let (entity, metadata) =
+            super::metadata_codec::deserialize_entity_record(record, format_version)
+                .map_err(StoreError::Serialization)?;
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
+
+        self.register_entity_id(entity.id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            manager.register_row_id(*row_id);
+        }
+
+        self.context_index.remove_entity(entity.id);
+        let _ = self.unindex_cross_refs(entity.id);
+        self.remove_from_graph_label_index(collection, entity.id);
+
+        if manager.get(entity.id).is_some() {
+            manager
+                .update_with_metadata(entity.clone(), metadata.as_ref())
+                .map_err(StoreError::from)?;
+        } else {
+            manager.restore_snapshot_entity(entity.clone())?;
+            if let Some(metadata) = metadata.as_ref() {
+                manager.set_metadata(entity.id, metadata.clone())?;
+            }
+        }
+
+        self.context_index.index_entity(collection, &entity);
+        if let EntityKind::GraphNode(node) = &entity.kind {
+            self.update_graph_label_index(collection, &node.label, entity.id);
+        }
+        self.index_cross_refs(&entity, collection)?;
+
+        Ok(entity.id)
+    }
+}
+
+impl ResidentStore {
+    pub fn drop_collection_in_memory(
+        &self,
+        name: &str,
+        retire_index: impl FnOnce(),
+    ) -> Result<(), StoreError> {
+        let manager = {
+            let mut collections = self.collections.write();
+            match collections.remove(name) {
+                Some(manager) => manager,
+                None => return Ok(()),
+            }
+        };
+
+        let entities = manager.query_all(|_| true);
+        let entity_ids: Vec<EntityId> = entities.iter().map(|entity| entity.id).collect();
+        for entity_id in &entity_ids {
+            self.context_index.remove_entity(*entity_id);
+            let _ = self.unindex_cross_refs(*entity_id);
+        }
+        retire_index();
+        self.entity_cache.retain(|entity_id, (collection, _)| {
+            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+        });
+        self.remove_from_graph_label_index_batch(name, &entity_ids);
+        self.mark_paged_registry_dirty();
+        Ok(())
+    }
+
+    pub fn apply_replayed_delete(
+        &self,
+        collection: &str,
+        id: EntityId,
+        update_index: impl FnOnce(),
+    ) -> Result<(), StoreError> {
+        self.entity_cache.remove(id.raw());
+        if let Some(manager) = self.get_collection(collection) {
+            let deleted = manager.delete(id)?;
+            if !deleted {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+
+        update_index();
+
+        let _ = self.unindex_cross_refs(id);
+        self.remove_from_graph_label_index(collection, id);
+        self.context_index.remove_entity(id);
+        Ok(())
+    }
+
+    pub fn swap_collection_state(
+        &self,
+        name: &str,
+        new_manager: Arc<SegmentManager>,
+        prepared: &[UnifiedEntity],
+    ) {
+        {
+            let mut collections = self.collections.write();
+            collections.insert(name.to_string(), new_manager);
+        }
+
+        self.entity_cache
+            .retain(|_, (collection, _)| collection != name);
+        self.remove_from_graph_label_index_batch(
+            name,
+            &prepared.iter().map(|e| e.id).collect::<Vec<_>>(),
+        );
+    }
+
+    pub fn prepare_replayed_refresh_collection(
+        &self,
+        collection: &str,
+        records: &[Vec<u8>],
+        format_version: u32,
+        manager_config: &ManagerConfig,
+    ) -> Result<(Arc<SegmentManager>, Vec<UnifiedEntity>), StoreError> {
+        let new_manager = Arc::new(SegmentManager::with_config(
+            collection,
+            manager_config.clone(),
+        ));
+
+        let mut prepared: Vec<UnifiedEntity> = Vec::with_capacity(records.len());
+        for record in records {
+            let (entity, _metadata) =
+                super::metadata_codec::deserialize_entity_record(record, format_version)
+                    .map_err(StoreError::Serialization)?;
+            self.register_entity_id(entity.id);
+            if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                new_manager.register_row_id(*row_id);
+            }
+            prepared.push(entity);
+        }
+
+        if !prepared.is_empty() {
+            new_manager.bulk_insert(prepared.clone()).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "replay refresh_collection: bulk_insert failed: {e}"
+                )))
+            })?;
+        }
+
+        Ok((new_manager, prepared))
+    }
+}
+
 impl Default for ResidentStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ResidentStore {
+    /// Replay without a paged index. Hosts retain their existing private-recovery
+    /// publication fence and rebuild or update durable indexes separately.
+    pub fn apply_replayed_action(
+        &self,
+        action: &super::store_wal::StoreWalAction,
+        format_version: u32,
+        manager_config: &ManagerConfig,
+    ) -> Result<(), StoreError> {
+        super::store_wal::apply_replayed_action(
+            &ResidentReplayTarget {
+                store: self,
+                format_version,
+                manager_config,
+            },
+            action,
+        )
+    }
+}
+
+struct ResidentReplayTarget<'a> {
+    store: &'a ResidentStore,
+    format_version: u32,
+    manager_config: &'a ManagerConfig,
+}
+
+impl super::store_wal::StoreReplayTarget for ResidentReplayTarget<'_> {
+    fn has_collection(&self, name: &str) -> bool {
+        self.store.get_collection(name).is_some()
+    }
+    fn create_collection(&self, name: &str) -> Result<(), StoreError> {
+        self.store
+            .create_collection_in_memory(name, self.manager_config)
+    }
+    fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        self.store.drop_collection_in_memory(name, || {})
+    }
+    fn upsert(&self, collection: &str, record: &[u8]) -> Result<(), StoreError> {
+        self.store.apply_replayed_upsert(
+            collection,
+            record,
+            self.format_version,
+            self.manager_config,
+        )?;
+        Ok(())
+    }
+    fn delete(&self, collection: &str, id: EntityId) -> Result<(), StoreError> {
+        self.store.apply_replayed_delete(collection, id, || {})
+    }
+    fn refresh(&self, collection: &str, records: &[Vec<u8>]) -> Result<(), StoreError> {
+        let (manager, prepared) = self.store.prepare_replayed_refresh_collection(
+            collection,
+            records,
+            self.format_version,
+            self.manager_config,
+        )?;
+        self.store
+            .swap_collection_state(collection, manager, &prepared);
+        Ok(())
+    }
+}
+
+impl ResidentStore {
+    pub fn get_or_create_collection(
+        &self,
+        name: impl Into<String>,
+        manager_config: &ManagerConfig,
+    ) -> Arc<SegmentManager> {
+        let name = name.into();
+        // Fast path: shared read lock — zero contention for existing collections
+        {
+            let collections = self.collections.read();
+            if let Some(manager) = collections.get(&name) {
+                return Arc::clone(manager);
+            }
+        }
+        // Slow path: exclusive write lock — only when collection is missing
+        let mut collections = self.collections.write();
+        // Double-check after acquiring write lock (another thread may have created it)
+        if let Some(manager) = collections.get(&name) {
+            return Arc::clone(manager);
+        }
+        let manager = Arc::new(SegmentManager::with_config(&name, manager_config.clone()));
+        collections.insert(name, Arc::clone(&manager));
+        self.mark_paged_registry_dirty();
+        manager
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_cross_ref_in_memory(
+        &self,
+        source_collection: &str,
+        source_id: EntityId,
+        target_collection: &str,
+        target_id: EntityId,
+        ref_type: RefType,
+        weight: f32,
+        max_cross_refs: usize,
+        persist_entity: impl FnOnce(&UnifiedEntity) -> Result<(), StoreError>,
+    ) -> Result<bool, StoreError> {
+        // Check source exists
+        let source_manager = self
+            .get_collection(source_collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(source_collection.to_string()))?;
+
+        if source_manager.get(source_id).is_none() {
+            return Err(StoreError::EntityNotFound(source_id));
+        }
+
+        // Check target exists
+        let target_manager = self
+            .get_collection(target_collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(target_collection.to_string()))?;
+
+        if target_manager.get(target_id).is_none() {
+            return Err(StoreError::EntityNotFound(target_id));
+        }
+
+        // Check limits
+        let current_refs = self
+            .cross_refs
+            .read()
+            .get(&source_id)
+            .map_or(0, |v| v.len());
+
+        if current_refs >= max_cross_refs {
+            return Err(StoreError::TooManyRefs(source_id));
+        }
+
+        let mut registry_dirty = false;
+        {
+            let mut forward = self.cross_refs.write();
+            let refs = forward.entry(source_id).or_default();
+            let inserted = !refs.iter().any(|(id, kind, coll)| {
+                *id == target_id && *kind == ref_type && coll == target_collection
+            });
+            if inserted {
+                refs.push((target_id, ref_type, target_collection.to_string()));
+                registry_dirty = true;
+            }
+        }
+
+        {
+            let mut reverse = self.reverse_refs.write();
+            let refs = reverse.entry(target_id).or_default();
+            let inserted = !refs.iter().any(|(id, kind, coll)| {
+                *id == source_id && *kind == ref_type && coll == source_collection
+            });
+            if inserted {
+                refs.push((source_id, ref_type, source_collection.to_string()));
+                registry_dirty = true;
+            }
+        }
+
+        if let Some(mut entity) = source_manager.get(source_id) {
+            if !entity.cross_refs().iter().any(|xref| {
+                xref.target == target_id
+                    && xref.ref_type == ref_type
+                    && xref.target_collection == target_collection
+            }) {
+                let cross_ref = CrossRef::with_weight(
+                    source_id,
+                    target_id,
+                    target_collection,
+                    ref_type,
+                    weight,
+                );
+                entity.add_cross_ref(cross_ref);
+                let _ = source_manager.update(entity.clone());
+                registry_dirty = true;
+                persist_entity(&entity)?;
+            }
+        }
+
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+
+        Ok(registry_dirty)
     }
 }

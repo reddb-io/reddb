@@ -613,7 +613,7 @@ impl UnifiedStore {
     }
 
     pub(crate) fn mark_paged_registry_dirty(&self) {
-        self.paged_registry_dirty.store(true, Ordering::Release);
+        self.resident.mark_paged_registry_dirty()
     }
 
     /// Get (or lazily create) the per-collection B-tree under a *read*
@@ -639,9 +639,11 @@ impl UnifiedStore {
             return Ok(());
         };
 
-        if self.paged_registry_dirty.load(Ordering::Acquire) {
+        if self.resident.paged_registry_dirty.load(Ordering::Acquire) {
             self.flush_paged_registry()?;
-            self.paged_registry_dirty.store(false, Ordering::Release);
+            self.resident
+                .paged_registry_dirty
+                .store(false, Ordering::Release);
             return Ok(());
         }
 
@@ -777,9 +779,7 @@ impl UnifiedStore {
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
-            paged_registry_dirty: AtomicBool::new(false),
             commit: None,
-            unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
@@ -860,9 +860,7 @@ impl UnifiedStore {
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
-            paged_registry_dirty: AtomicBool::new(false),
             commit,
-            unindex_cross_refs_fast_path: AtomicU64::new(0),
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),

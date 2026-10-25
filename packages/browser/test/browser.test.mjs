@@ -80,15 +80,18 @@ async function sharedConformance(browserPage) {
     'metadata_codec_native_goldens', 'metadata_codec_record_envelopes',
     'metadata_codec_malformed_payloads', 'metadata_codec_depth_boundary',
     'snapshot_native_store_fixture', 'snapshot_native_v1_v12_recovery', 'snapshot_empty_collections_and_legacy_tails',
-    'snapshot_corruption_and_callback_errors',
+    'snapshot_corruption_and_callback_errors', 'snapshot_resident_recovery_options',
     'manager_models_and_constraint_lock', 'manager_snapshot_key_versions',
     'manager_moderation_and_serializable_reads', 'manager_bounded_scan_and_consolidation',
     'manager_ordered_graph_candidates',
     'manager_restored_identity_keeps_cursor_boundary',
     'resident_index_document_tokens', 'resident_index_replacement_and_scope',
     'resident_entity_cache_invalidation',
-    'resident_store_global_identity', 'resident_store_cross_collection_snapshot',
+    'resident_store_global_identity', 'resident_store_reference_write_boundaries', 'resident_store_cross_collection_snapshot',
     'resident_store_models_and_cache', 'resident_store_graph_metadata_and_references',
+    'store_wal_canonical_action_frames', 'store_wal_impossible_counts_and_truncation',
+    'store_wal_entity_record_replay', 'store_wal_host_index_boundaries', 'store_wal_atomic_resident_refresh',
+    'store_wal_recovery_fixture',
   ])
 }
 
@@ -507,6 +510,51 @@ for (const browser of browsers) {
           await launch({ offline: true })
           assert.deepEqual(await recover(), { entities: 8, snapshot: nativeSnapshot })
           assert.equal(networkRequests.length, requestsBefore, 'offline snapshot recovery reached the HTTP host')
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('logical store WAL restores models and metadata after an offline OPFS restart', async () => {
+      async function recover(seed) {
+        const current = await page()
+        try {
+          return await current.evaluate(async (seed) => {
+            const worker = new Worker('/packages/browser/test/store-wal-worker.js', { type: 'module' })
+            const call = (payloads) => new Promise((resolve, reject) => {
+              worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data)
+              worker.onerror = (event) => reject(new Error(event.message))
+              worker.postMessage(payloads)
+            })
+            const file = await RedDBBrowser.openArtifact({ name: 'logical-store-recovery' })
+            try {
+              if (seed) await file.append((await call(null)).actions)
+              const payloads = await file.readWal()
+              const { entities } = await call(payloads)
+              return { entities, actions: payloads.length }
+            } finally {
+              await file.close()
+              worker.terminate()
+            }
+          }, seed)
+        } finally { await current.close() }
+      }
+      const first = await page()
+      await first.evaluate(async () => {
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+      })
+      await first.waitForFunction(() => navigator.serviceWorker.controller)
+      await first.close()
+      await context.setOffline(true)
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          const seeded = await recover(true)
+          assert.ok(seeded.entities >= 8, 'canonical multimodel corpus')
+          assert.equal(seeded.actions, 1 + seeded.entities * 3, 'create, delete and restore actions')
+          await context.close()
+          await launch({ offline: true })
+          assert.deepEqual(await recover(false), seeded)
+          assert.equal(networkRequests.length, requestsBefore, 'offline logical WAL recovery reached the HTTP host')
         })
       } finally { await context.setOffline(false) }
     })

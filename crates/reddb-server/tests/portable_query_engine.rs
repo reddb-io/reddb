@@ -48,6 +48,16 @@ use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::{json, Value};
 
 #[test]
+fn native_storage_error_paths_keep_shared_type_authority() {
+    use reddb_engine::storage::error::{StorageIntegrityError, StoreError};
+    let detail = StorageIntegrityError::new("wal", "42", Some("rows".into()), "checksum");
+    let native: reddb_server::api::StorageIntegrityError = detail.clone();
+    assert_eq!(native, detail);
+    let native: reddb_server::storage::StoreError = StoreError::StorageIntegrity(native);
+    assert!(matches!(native, StoreError::StorageIntegrity(value) if value == detail));
+}
+
+#[test]
 fn portable_scalar_corpus_matches_the_native_runtime() {
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
         .expect("native in-memory runtime opens");

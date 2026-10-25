@@ -147,3 +147,14 @@ fn portable_resident_store_conformance() {
         run();
     }
 }
+
+#[path = "support/store_wal.rs"]
+mod store_wal;
+
+#[test]
+fn portable_store_wal_replay_conformance() {
+    for (name, run) in store_wal::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

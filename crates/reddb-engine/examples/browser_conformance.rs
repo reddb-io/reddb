@@ -64,6 +64,10 @@ mod read_indexes;
 mod resident_store;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/store_wal.rs"]
+mod store_wal;
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = runConformance)]
 pub fn run_conformance() -> String {
     let cases = portable::CASES
@@ -79,7 +83,8 @@ pub fn run_conformance() -> String {
         .chain(snapshot::CASES.iter())
         .chain(manager::CASES.iter())
         .chain(read_indexes::CASES.iter())
-        .chain(resident_store::CASES.iter());
+        .chain(resident_store::CASES.iter())
+        .chain(store_wal::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }
@@ -91,6 +96,46 @@ pub fn run_conformance() -> String {
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = verifyNativeSnapshot)]
 pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
     snapshot::verify_native_snapshot(bytes)
+}
+
+/// Test-only encoded native store actions for the offline OPFS recovery fixture.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = storeWalFixtureCount)]
+pub fn store_wal_fixture_count() -> u32 {
+    u32::try_from(store_wal::recovery_actions().len()).expect("fixture count fits u32")
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = storeWalFixtureAction)]
+pub fn store_wal_fixture_action(index: u32) -> Vec<u8> {
+    store_wal::recovery_actions()[index as usize].encode()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+#[derive(Default)]
+pub struct StoreWalRecoveryFixture(reddb_engine::storage::resident_store::ResidentStore);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+impl StoreWalRecoveryFixture {
+    #[wasm_bindgen::prelude::wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self(reddb_engine::storage::resident_store::ResidentStore::new())
+    }
+
+    pub fn replay(&self, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
+        use reddb_engine::storage::{manager::ManagerConfig, store_wal::StoreWalAction};
+        let action = StoreWalAction::decode(bytes)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+        self.0
+            .apply_replayed_action(&action, 12, &ManagerConfig::default())
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+    }
+
+    pub fn verify(&self) -> u32 {
+        store_wal::verify_recovery(&self.0)
+    }
 }
 
 /// Test-only host-clock probe: JS checks seconds against Date.now before/after.

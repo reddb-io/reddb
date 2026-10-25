@@ -216,6 +216,14 @@ fn read_record_list(data: &[u8], pos: &mut usize, label: &'static str) -> io::Re
         ));
     }
     let count = read_u32(data, pos)? as usize;
+    // Every record needs at least its u32 byte-length prefix. Reject an
+    // impossible count before reserving a potentially enormous record vector.
+    if count > data.len().saturating_sub(*pos) / std::mem::size_of::<u32>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label}: implausible record count"),
+        ));
+    }
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         records.push(read_bytes(data, pos)?);
@@ -324,6 +332,30 @@ mod tests {
             assert_eq!(encoded[0], STORE_WAL_ACTION_VERSION);
             assert_eq!(decode_store_wal_action_frame(&encoded).unwrap(), frame);
         }
+    }
+
+    #[test]
+    fn record_lists_reject_impossible_counts_before_allocation() {
+        for tag in [5, 6] {
+            let mut bytes = vec![STORE_WAL_ACTION_VERSION, tag];
+            write_string(&mut bytes, "data").expect("collection");
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            assert_eq!(
+                decode_store_wal_action_frame(&bytes)
+                    .expect_err("impossible count")
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let valid = StoreWalActionFrame::BulkUpsertEntityRecords {
+            collection: "data".into(),
+            records: vec![Vec::new(); 64],
+        };
+        let encoded = encode_store_wal_action_frame(&valid).expect("empty opaque records");
+        assert_eq!(
+            decode_store_wal_action_frame(&encoded).expect("exact count bound"),
+            valid
+        );
     }
 
     #[test]

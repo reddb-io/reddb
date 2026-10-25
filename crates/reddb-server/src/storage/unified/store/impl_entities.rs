@@ -290,27 +290,8 @@ impl UnifiedStore {
 
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
-        let name = name.into();
-        // Fast path: shared read lock — zero contention for existing collections
-        {
-            let collections = self.resident.collections.read();
-            if let Some(manager) = collections.get(&name) {
-                return Arc::clone(manager);
-            }
-        }
-        // Slow path: exclusive write lock — only when collection is missing
-        let mut collections = self.resident.collections.write();
-        // Double-check after acquiring write lock (another thread may have created it)
-        if let Some(manager) = collections.get(&name) {
-            return Arc::clone(manager);
-        }
-        let manager = Arc::new(SegmentManager::with_config(
-            &name,
-            self.config.manager_config.clone(),
-        ));
-        collections.insert(name, Arc::clone(&manager));
-        self.mark_paged_registry_dirty();
-        manager
+        self.resident
+            .get_or_create_collection(name, &self.config.manager_config)
     }
 
     /// Get a collection
@@ -1356,91 +1337,26 @@ impl UnifiedStore {
         ref_type: RefType,
         weight: f32,
     ) -> Result<(), StoreError> {
-        // Check source exists
-        let source_manager = self
-            .get_collection(source_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(source_collection.to_string()))?;
-
-        if source_manager.get(source_id).is_none() {
-            return Err(StoreError::EntityNotFound(source_id));
-        }
-
-        // Check target exists
-        let target_manager = self
-            .get_collection(target_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(target_collection.to_string()))?;
-
-        if target_manager.get(target_id).is_none() {
-            return Err(StoreError::EntityNotFound(target_id));
-        }
-
-        // Check limits
-        let current_refs = self
-            .resident
-            .cross_refs
-            .read()
-            .get(&source_id)
-            .map_or(0, |v| v.len());
-
-        if current_refs >= self.config.max_cross_refs {
-            return Err(StoreError::TooManyRefs(source_id));
-        }
-
-        let mut registry_dirty = false;
-        {
-            let mut forward = self.resident.cross_refs.write();
-            let refs = forward.entry(source_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == target_id && *kind == ref_type && coll == target_collection
-            });
-            if inserted {
-                refs.push((target_id, ref_type, target_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        {
-            let mut reverse = self.resident.reverse_refs.write();
-            let refs = reverse.entry(target_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == source_id && *kind == ref_type && coll == source_collection
-            });
-            if inserted {
-                refs.push((source_id, ref_type, source_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        if let Some(mut entity) = source_manager.get(source_id) {
-            if !entity.cross_refs().iter().any(|xref| {
-                xref.target == target_id
-                    && xref.ref_type == ref_type
-                    && xref.target_collection == target_collection
-            }) {
-                let cross_ref = CrossRef::with_weight(
-                    source_id,
-                    target_id,
-                    target_collection,
-                    ref_type,
-                    weight,
-                );
-                entity.add_cross_ref(cross_ref);
-                let _ = source_manager.update(entity.clone());
-                registry_dirty = true;
-                self.persist_entities_to_pager(source_collection, std::slice::from_ref(&entity))?;
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-            if matches!(
+        let registry_dirty = self.resident.add_cross_ref_in_memory(
+            source_collection,
+            source_id,
+            target_collection,
+            target_id,
+            ref_type,
+            weight,
+            self.config.max_cross_refs,
+            |entity| {
+                self.persist_entities_to_pager(source_collection, std::slice::from_ref(entity))
+            },
+        )?;
+        if registry_dirty
+            && matches!(
                 self.config.durability_mode,
                 crate::api::DurabilityMode::Strict
-            ) {
-                self.flush_paged_state()?;
-            }
+            )
+        {
+            self.flush_paged_state()?;
         }
-
         Ok(())
     }
 
@@ -1518,129 +1434,23 @@ impl UnifiedStore {
         entity: &UnifiedEntity,
         collection: &str,
     ) -> Result<(), StoreError> {
-        let mut registry_dirty = false;
-        for cross_ref in entity.cross_refs() {
-            if cross_ref.target_collection.is_empty() {
-                continue;
-            }
-            {
-                let mut forward = self.resident.cross_refs.write();
-                let refs = forward.entry(cross_ref.source).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.target
-                        && *kind == cross_ref.ref_type
-                        && coll == &cross_ref.target_collection
-                });
-                if inserted {
-                    refs.push((
-                        cross_ref.target,
-                        cross_ref.ref_type,
-                        cross_ref.target_collection.clone(),
-                    ));
-                    registry_dirty = true;
-                }
-            }
-
-            {
-                let mut reverse = self.resident.reverse_refs.write();
-                let refs = reverse.entry(cross_ref.target).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
-                });
-                if inserted {
-                    refs.push((cross_ref.source, cross_ref.ref_type, collection.to_string()));
-                    registry_dirty = true;
-                }
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-        }
-
-        Ok(())
+        self.resident.index_cross_refs(entity, collection)
     }
 
     /// Remove cross-references for an entity
     pub(crate) fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
-        // Remove forward refs
-        self.resident.cross_refs.write().remove(&id);
-
-        // Remove from reverse refs (scan all)
-        let mut reverse = self.resident.reverse_refs.write();
-        for refs in reverse.values_mut() {
-            refs.retain(|(source, _, _)| *source != id);
-        }
-        reverse.remove(&id);
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs(id)
     }
 
     pub(crate) fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_set: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
-
-        // Read-only probe: under steady-state delete workloads most rows have
-        // no cross-refs at all, so both maps are entirely cold for the batch.
-        // Acquiring the write lock to scan `reverse_refs.values_mut()` over an
-        // unrelated dictionary was the dominant cost in #85's `delete_sequential`
-        // profile. The read-lock probe below is O(|ids|) hashmap lookups against
-        // each map, vs. O(|reverse_refs|) for the write-path scan it replaces.
-        //
-        // Decision: skip the write path iff
-        //   - no deleted id is a key in `cross_refs`  (no outbound refs to drop,
-        //     and so no `(deleted_id, _, _)` source entry exists anywhere in
-        //     `reverse_refs.values()` either — the two maps are kept in sync by
-        //     `add_cross_ref`), AND
-        //   - no deleted id is a key in `reverse_refs` (no inbound refs to drop).
-        let needs_forward_cleanup = {
-            let forward = self.resident.cross_refs.read();
-            id_set.iter().any(|id| forward.contains_key(id))
-        };
-        let needs_reverse_cleanup = {
-            let reverse = self.resident.reverse_refs.read();
-            id_set.iter().any(|id| reverse.contains_key(id))
-        };
-
-        if !needs_forward_cleanup && !needs_reverse_cleanup {
-            self.unindex_cross_refs_fast_path
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-
-        if needs_forward_cleanup {
-            let mut forward = self.resident.cross_refs.write();
-            for id in &id_set {
-                forward.remove(id);
-            }
-        }
-
-        if needs_reverse_cleanup || needs_forward_cleanup {
-            // The inner `values_mut()` scan is only needed when at least one
-            // deleted id was a *source* somewhere — which, by the invariant
-            // above, can only happen when it had outbound forward refs.
-            let mut reverse = self.resident.reverse_refs.write();
-            if needs_forward_cleanup {
-                for refs in reverse.values_mut() {
-                    refs.retain(|(source, _, _)| !id_set.contains(source));
-                }
-            }
-            reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
-        }
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs_batch(ids)
     }
 
     /// Test/observability hook: number of times `unindex_cross_refs_batch`
     /// took the read-only fast path. Used to pin the early-exit in tests
     /// and as a cheap signal in delete-heavy benchmarks.
     pub fn unindex_cross_refs_fast_path_hits(&self) -> u64 {
-        self.unindex_cross_refs_fast_path.load(Ordering::Relaxed)
+        self.resident.unindex_cross_refs_fast_path_hits()
     }
 
     /// Query across all collections with a filter
