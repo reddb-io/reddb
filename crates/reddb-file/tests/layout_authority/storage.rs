@@ -1681,11 +1681,12 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
         );
     }
 
-    // Server consumes the codecs and no longer defines the byte formats.
+    // Runtime adapters consume the codecs and never define their byte formats.
     let server = root.join("crates/reddb-server/src");
     let hnsw = read(server.join("storage/engine/hnsw.rs"));
     let ivf = read(server.join("storage/engine/ivf.rs"));
-    let physical = read(server.join("physical/json_codec.rs"));
+    let engine = root.join("crates/reddb-engine/src");
+    let catalog = read(engine.join("catalog/codec.rs"));
     let access = read(server.join("storage/unified/devx/reddb/impl_access.rs"));
 
     for (label, text, calls) in [
@@ -1706,8 +1707,8 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
             ][..],
         ),
         (
-            "physical/json_codec.rs",
-            &physical,
+            "shared catalog/codec.rs",
+            &catalog,
             &[
                 "reddb_file::encode_table_def",
                 "reddb_file::decode_table_def",
@@ -1727,12 +1728,15 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
         ),
     ] {
         for call in calls {
-            assert!(text.contains(call), "server {label} must consume {call:?}");
+            assert!(text.contains(call), "runtime {label} must consume {call:?}");
         }
     }
 
-    // No server file may re-declare a relocated payload magic in shipped code.
-    for path in rust_files_under(&server) {
+    // Neither runtime may redeclare a relocated payload magic in shipped code.
+    for path in rust_files_under(&server)
+        .into_iter()
+        .chain(rust_files_under(&engine))
+    {
         let text = read(&path);
         let shipped = non_test_source(&text);
         for magic in [
