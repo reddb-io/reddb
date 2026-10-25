@@ -788,3 +788,41 @@ CASE/COALESCE skip unselected arguments, text operations scan their existing B
 bytes/characters and allocate their existing output strings, and MONEY performs
 at most two coercions. The move adds no storage scan/write, network call or IPC
 and claims no measured speedup.
+
+
+## Shared native text scalars and wide bounds
+
+`reddb-engine::query::runtime::text` owns the native Unicode substring,
+regex substring, position, left/right slice, trim and literal-quoting helpers.
+Both the typed native evaluator and legacy projection dispatcher use them.
+The shared scalar dispatcher now owns SUBSTRING/SUBSTR, POSITION, TRIM/BTRIM,
+LTRIM/RTRIM, LEFT/RIGHT and QUOTE_LITERAL. Argument admission, missing-versus-NULL
+behavior and typed-to-legacy fallback policy are unchanged.
+
+The engine explicitly depends on the same `regex = "1"` implementation already
+used by the server; standalone driver locks record that dependency edge without
+upgrading packages. Regex first-capture behavior, invalid/no-match NULL handling
+and the existing parser depth limit of 250 are preserved. The limit is explicit
+in the builder; regex compilation and allocation defaults remain unchanged.
+No JavaScript regex replacement or pattern translation is added.
+
+Wide substring start/count and negative slice lengths saturate rather than
+truncate on wasm32. This preserves native 64-bit results for bounds above
+2^32 and i64 extremes: an out-of-range start returns empty text, a large positive
+count takes the remaining text, and a large negative LEFT/RIGHT length removes
+all characters. Existing negative substring-count rejection and optional
+missing/NULL argument quirks remain characterized rather than normalized.
+
+Shared native/WASM cases cover Unicode, wide bounds, regex captures and the
+regex depth boundary, trims/quoting, missing/NULL arguments and input denial.
+The offline OPFS fixture now projects wide substrings, regex captures, slices
+and quoted values over recovered nullable fields before/after WAL recovery,
+update and checkpoint, with full browser restarts and the HTTP listener stopped.
+Native typed-evaluator regressions also cover these shared helper bindings.
+Public stored-query and application-transaction capabilities remain false.
+
+Cost sketch: B-byte strings retain their existing scans/output allocations and
+substring/slice character buffers; regex calls retain per-call compilation
+bounded by the existing parser/program limits. Sharing removes duplicate helper
+bodies without adding a scan, storage write, network call or IPC. No measured
+speedup or production WASM size reduction is claimed.

@@ -2349,103 +2349,52 @@ fn value_as_u64(value: &Value) -> Option<u64> {
     }
 }
 
-fn substring_text(text: &str, start: i64, count: Option<i64>) -> Option<String> {
-    if count.is_some_and(|count| count < 0) {
-        return None;
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let start_idx = if start <= 1 {
-        0
-    } else {
-        usize::try_from(start - 1).ok()?
-    };
-
-    if start_idx >= chars.len() {
-        return Some(String::new());
-    }
-
-    let end_idx = match count {
-        Some(count) => start_idx.saturating_add(count as usize).min(chars.len()),
-        None => chars.len(),
-    };
-
-    Some(chars[start_idx..end_idx].iter().collect())
-}
-
-fn substring_pattern_text(text: &str, pattern: &str) -> Option<String> {
-    let regex = regex::Regex::new(pattern).ok()?;
-    let captures = regex.captures(text)?;
-    if captures.len() > 1 {
-        return captures.get(1).map(|capture| capture.as_str().to_string());
-    }
-    captures.get(0).map(|capture| capture.as_str().to_string())
-}
-
-fn position_text(needle: &str, haystack: &str) -> i64 {
-    if needle.is_empty() {
-        return 1;
-    }
-    haystack
-        .find(needle)
-        .map(|byte_idx| haystack[..byte_idx].chars().count() as i64 + 1)
-        .unwrap_or(0)
-}
-
-fn slice_left_text(text: &str, count: i64) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let take = normalized_slice_len(chars.len(), count);
-    chars.into_iter().take(take).collect()
-}
-
-fn slice_right_text(text: &str, count: i64) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let take = normalized_slice_len(chars.len(), count);
-    let len = chars.len();
-    chars.into_iter().skip(len.saturating_sub(take)).collect()
-}
-
-fn normalized_slice_len(len: usize, count: i64) -> usize {
-    if count >= 0 {
-        usize::try_from(count).unwrap_or(usize::MAX).min(len)
-    } else {
-        len.saturating_sub(count.unsigned_abs() as usize)
-    }
-}
-
-fn quote_literal_text(text: &str) -> String {
-    let escaped = text.replace('\'', "''");
-    if text.contains('\\') {
-        format!("E'{}'", escaped.replace('\\', "\\\\"))
-    } else {
-        format!("'{escaped}'")
-    }
-}
-
-fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String {
-    match chars {
-        Some(chars) => {
-            let predicate = |ch| chars.contains(ch);
-            match (left, right) {
-                (true, true) => text.trim_matches(predicate).to_string(),
-                (true, false) => text.trim_start_matches(predicate).to_string(),
-                (false, true) => text.trim_end_matches(predicate).to_string(),
-                (false, false) => text.to_string(),
-            }
-        }
-        None => match (left, right) {
-            (true, true) => text.trim().to_string(),
-            (true, false) => text.trim_start().to_string(),
-            (false, true) => text.trim_end().to_string(),
-            (false, false) => text.to_string(),
-        },
-    }
-}
+use reddb_engine::query::runtime::text::{
+    position_text, quote_literal_text, slice_left_text, slice_right_text, substring_pattern_text,
+    substring_text, trim_text,
+};
 
 #[cfg(test)]
 mod tests {
     use super::dispatch_builtin_function;
     use reddb_types::Value;
+
+    #[test]
+    fn test_shared_text_bounds_and_regex() {
+        assert_eq!(
+            dispatch_builtin_function(
+                "SUBSTRING",
+                &[
+                    Value::text("aé🦀z"),
+                    Value::Integer(2),
+                    Value::Integer(4_294_967_296),
+                ]
+            ),
+            Some(Value::text("é🦀z"))
+        );
+        assert_eq!(
+            dispatch_builtin_function(
+                "SUBSTRING",
+                &[Value::text("aé🦀z"), Value::Integer(i64::MAX),]
+            ),
+            Some(Value::text(""))
+        );
+        assert_eq!(
+            dispatch_builtin_function("RIGHT", &[Value::text("aé🦀z"), Value::Integer(i64::MIN),]),
+            Some(Value::text(""))
+        );
+        assert_eq!(
+            dispatch_builtin_function(
+                "SUBSTRING",
+                &[Value::text("é42z"), Value::text("é([0-9]+)z"),]
+            ),
+            Some(Value::text("42"))
+        );
+        assert_eq!(
+            dispatch_builtin_function("SUBSTRING", &[Value::text("b"), Value::text("(a)?b"),]),
+            Some(Value::Null)
+        );
+    }
 
     #[test]
     fn test_money_constructor_two_args() {

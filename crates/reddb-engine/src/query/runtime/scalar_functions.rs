@@ -1,5 +1,7 @@
 //! Native legacy scalar dispatch shared by server and WASM hosts.
 use super::numeric::{arith_binop, cast_value_to};
+use super::text::*;
+use super::values::value_as_i64;
 use crate::query::unified::UnifiedRecord;
 use reddb_rql::ast::{Filter, Projection};
 use reddb_types::Value;
@@ -189,6 +191,106 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
         "MONEY_SCALE" => match resolve_scalar_arg(args, 0, source)? {
             Value::Money { scale, .. } => Some(Value::Integer(i64::from(scale))),
             _ => Some(Value::Null),
+        },
+        "SUBSTRING" | "SUBSTR" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            match resolve_scalar_arg(args, 1, source)? {
+                Value::Text(pattern) if func_name == "SUBSTRING" && args.len() == 2 => {
+                    Some(match substring_pattern_text(&text, &pattern) {
+                        Some(matched) => Value::text(matched),
+                        None => Value::Null,
+                    })
+                }
+                start_value => {
+                    let start = value_as_i64(&start_value)?;
+                    let count = args.get(2).and_then(|_| {
+                        resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
+                    });
+                    Some(Value::text(substring_text(&text, start, count)?))
+                }
+            }
+        }
+        "POSITION" => {
+            let needle = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let haystack = match resolve_scalar_arg(args, 1, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Integer(position_text(&needle, &haystack)))
+        }
+        "TRIM" | "BTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::text(trim_text(&text, chars.as_deref(), true, true)))
+        }
+        "LTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::text(trim_text(&text, chars.as_deref(), true, false)))
+        }
+        "RTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::text(trim_text(&text, chars.as_deref(), false, true)))
+        }
+        "LEFT" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count =
+                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
+            Some(Value::text(slice_left_text(&text, count)))
+        }
+        "RIGHT" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count =
+                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
+            Some(Value::text(slice_right_text(&text, count)))
+        }
+        "QUOTE_LITERAL" => match resolve_scalar_arg(args, 0, source)? {
+            Value::Null => Some(Value::Null),
+            Value::Text(text) => Some(Value::text(quote_literal_text(&text))),
+            other => Some(Value::text(quote_literal_text(&other.display_string()))),
         },
         _ => host.fallback_function(name, args, source),
     }
