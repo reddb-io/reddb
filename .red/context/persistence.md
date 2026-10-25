@@ -156,6 +156,14 @@ and therefore cannot preserve automatic retirement across a downgrade. Failed
 unpublished allocations remain conservative recovery garbage; this mechanism
 does not claim a general orphan-page vacuum of pre-upgrade files.
 
+Native index blob replacement terminates the chain at the new payload boundary.
+Shrunk tails, empty blobs and removed artifacts remain outside the allocator
+until the native summary and physical header have been synced. They then enter
+the existing `RDF1` quarantine and become reusable after a later durable catalog
+publication. Native blob reads share the publication fence with replacement.
+A crash before quarantine admission can leave conservative garbage; this is
+not a general reclaim of previously unreachable native artifact pages.
+
 Free-list trunks consume already-free pages instead of extending the file.
 Before a consumed trunk can be overwritten, its old allocator role is removed
 durably from both superblock copies. A sync that makes reclaimed pages live

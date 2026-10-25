@@ -372,6 +372,8 @@ pub struct UnifiedStore {
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
+    /// Detached artifact pages stay unavailable until native metadata is durable.
+    detached_native_blob_pages: parking_lot::Mutex<std::collections::BTreeSet<u32>>,
     /// Whether the paged registry on page 1 must be rewritten before the next flush.
     paged_registry_dirty: AtomicBool,
     /// Logical store WAL / grouped durability coordinator for paged mode.

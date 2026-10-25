@@ -209,7 +209,12 @@ impl FreeList {
             ]);
             self.free_pages.push(page_id);
         }
-        self.total_free = self.total_free.saturating_add(count as u32 + 1);
+        // Spilling already counted these IDs. Only the consumed trunk becomes
+        // newly free. After reopen, learn any previously unknown resident IDs.
+        self.total_free = self
+            .total_free
+            .saturating_add(1)
+            .max(self.free_pages.len() as u32);
         self.dirty = true;
 
         // Update trunk head to next trunk
@@ -468,5 +473,49 @@ mod tests {
         // (16384 - 32 - 8) / 4 = 4086
         assert_eq!(FREE_IDS_PER_TRUNK, 4086);
         assert_eq!(FREE_IDS_PER_TRUNK, 4086);
+    }
+
+    #[test]
+    fn consuming_a_trunk_does_not_count_its_free_ids_twice() {
+        let mut list = FreeList::new();
+        list.free_batch(&[100, 101, 102, 103]);
+        let trunk = list.flush_to_trunks(0, || panic!("must reuse a free page"));
+        assert_eq!(trunk.len(), 1);
+        assert_eq!(list.total_free(), 3);
+        list.load_from_trunk(&trunk[0]).expect("load own trunk");
+        assert_eq!(
+            list.total_free(),
+            4,
+            "only the consumed trunk becomes newly free"
+        );
+        let ids: Vec<_> = std::iter::from_fn(|| list.allocate()).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(list.total_free(), 0);
+
+        let mut reopened = FreeList::from_header(trunk[0].page_id(), 0);
+        reopened
+            .load_from_trunk(&trunk[0])
+            .expect("learn reopened IDs");
+        assert_eq!(reopened.total_free(), 4);
+    }
+
+    #[test]
+    fn merging_trunks_counts_known_and_reopened_ids_once() {
+        for reopen in [false, true] {
+            let mut list = FreeList::new();
+            let ids: Vec<_> = (100..9100).collect();
+            list.free_batch(&ids);
+            let trunks = list.flush_to_trunks(0, || panic!("must reuse free pages"));
+            if reopen {
+                list = FreeList::from_header(list.trunk_head(), 0);
+            }
+            list.merge_all_trunks(|id| trunks.iter().find(|page| page.page_id() == id).cloned())
+                .expect("merge all trunks");
+            assert_eq!(list.total_free(), ids.len() as u32);
+            let allocated: std::collections::BTreeSet<_> =
+                std::iter::from_fn(|| list.allocate()).collect();
+            assert_eq!(allocated, ids.into_iter().collect());
+            assert_eq!(list.total_free(), 0);
+        }
     }
 }
