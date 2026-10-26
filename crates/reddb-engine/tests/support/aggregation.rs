@@ -12,7 +12,30 @@ mod aggregate_planning;
 #[path = "aggregate_result_cases.rs"]
 mod aggregate_result_cases;
 
+#[path = "group_binding_cases.rs"]
+mod group_binding_cases;
+
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "aggregate_group_bindings_alias_resolution",
+        group_binding_cases::alias_resolution,
+    ),
+    (
+        "aggregate_group_bindings_expression_labels",
+        group_binding_cases::expression_labels,
+    ),
+    (
+        "aggregate_group_bindings_shape_and_host_admission",
+        group_binding_cases::shape_and_host_admission,
+    ),
+    (
+        "aggregate_group_bindings_depth_limits",
+        group_binding_cases::depth_limits,
+    ),
+    (
+        "aggregate_group_bindings_result_metadata",
+        group_binding_cases::result_metadata,
+    ),
     (
         "aggregate_results_grouped_columns_and_hidden",
         aggregate_result_cases::grouped_columns_and_hidden_values,
@@ -410,9 +433,9 @@ pub fn verify_recovered(
 ) {
     use reddb_engine::query::planning::aggregation::prepare_aggregate_runtime_plan;
     use reddb_engine::query::runtime::filter::resolve_filter_row_value;
-    use reddb_rql::sql_lowering::{effective_table_group_by_exprs, effective_table_projections};
+    use reddb_rql::sql_lowering::effective_table_projections;
     use std::collections::HashMap;
-    let query = super::record_filters::table_query("SELECT o.meta.tenant AS tenant, COUNT(*) AS n, SUM(total) AS amount, AVG(total) AS mean, MEDIAN(total) AS middle FROM orders AS o WHERE quantity > 0 GROUP BY o.meta.tenant HAVING MAX(total) >= 15 ORDER BY MAX(quantity) DESC, tenant ASC LIMIT 1 OFFSET 1");
+    let query = super::record_filters::table_query("SELECT o.meta.tenant AS tenant, COUNT(*) AS n, SUM(total) AS amount, AVG(total) AS mean, MEDIAN(total) AS middle FROM orders AS o WHERE quantity > 0 GROUP BY tenant HAVING MAX(total) >= 15 ORDER BY MAX(quantity) DESC, tenant ASC LIMIT 1 OFFSET 1");
     let runtime =
         prepare_aggregate_runtime_plan(&query).expect("recovered native aggregate planning");
     let all_visible_projections = effective_table_projections(&query);
@@ -423,7 +446,6 @@ pub fn verify_recovered(
         .collect();
     let projections = &runtime.aggregate_projections;
     let plan = CompiledAggPlan::compile(projections).expect("recovered aggregate plan");
-    let group_by = effective_table_group_by_exprs(&query);
     let mut groups = HashMap::new();
     for record in records {
         if !super::record_filters::matches_where(record, &query, Some(contract))
@@ -444,7 +466,11 @@ pub fn verify_recovered(
             })
             .expect("recovered aggregate expression")
         };
-        let group_values: Vec<_> = group_by.iter().map(evaluate).collect();
+        let group_values: Vec<_> = runtime
+            .group_bindings
+            .iter()
+            .map(|binding| evaluate(&binding.expression))
+            .collect();
         let key = build_aggregate_group_key(&group_values);
         let (_, state) = groups
             .entry(key)
@@ -487,7 +513,6 @@ pub fn verify_recovered(
         AggregateResultContext {
             query: &query,
             visible_projections: &all_visible_projections,
-            group_by: &group_by,
             runtime_plan: &runtime,
             slots: &plan,
             sensitivity_source: None,

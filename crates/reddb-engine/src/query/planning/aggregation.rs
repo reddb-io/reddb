@@ -10,11 +10,13 @@ use reddb_rql::ast::{
 };
 use reddb_rql::sql_lowering::{
     effective_table_group_by_exprs, effective_table_having_filter, effective_table_projections,
+    projection_to_expr,
 };
 use reddb_types::Value;
 
 #[derive(Default)]
 pub struct AggregateRuntimePlan {
+    pub group_bindings: Vec<AggregateGroupBinding>,
     pub aggregate_projections: Vec<Projection>,
     pub hidden_aggregates: Vec<Projection>,
     pub having: Option<Filter>,
@@ -81,6 +83,7 @@ pub fn prepare_aggregate_runtime_plan(
             .map(Node::Projection)
             .chain(effective_having.iter().map(Node::Filter)),
     )?;
+    let group_bindings = compile_group_bindings(query, &effective_projections)?;
     let visible_outputs = effective_projections
         .iter()
         .filter_map(visible_aggregate_output_name_unchecked)
@@ -98,9 +101,10 @@ pub fn prepare_aggregate_runtime_plan(
             _ => {}
         }
     }
-    for expression in effective_table_group_by_exprs(query) {
-        if let Some(label) = render_expr_signature_unchecked(&expression) {
-            reserved_outputs.insert(label);
+    for binding in &group_bindings {
+        reserved_outputs.insert(binding.output_label.clone());
+        if let Some(key) = &binding.key {
+            reserved_outputs.insert(key.clone());
         }
     }
     let mut hidden = HiddenAggregateRegistry {
@@ -134,6 +138,7 @@ pub fn prepare_aggregate_runtime_plan(
             && seen.insert(aggregate_projection_signature(&name, arguments))
     });
     Ok(AggregateRuntimePlan {
+        group_bindings,
         aggregate_projections,
         hidden_aggregates: hidden.projections,
         having,
@@ -752,4 +757,188 @@ fn validate_nodes<'a>(roots: impl IntoIterator<Item = Node<'a>>) -> Result<(), &
         }
     }
     Ok(())
+}
+
+/// Canonical group binding, compiled after resolving SELECT aliases.
+/// `key` retains the native raw record binding; `output_label` is the visible name.
+#[derive(Debug, Clone)]
+pub struct AggregateGroupBinding {
+    pub expression: Expr,
+    pub key: Option<String>,
+    pub output_label: String,
+}
+
+/// Backend-specific expression admission (for example native H3 resolution checks).
+/// Structural GROUP BY rules and their diagnostics remain canonical.
+pub trait AggregateShapeHost {
+    type Error;
+    fn validate_projection(&self, projection: &Projection) -> Result<(), Self::Error>;
+    fn validate_group_expression(&self, expression: &Expr) -> Result<(), Self::Error>;
+    fn query_error(&self, message: String) -> Self::Error;
+}
+
+pub fn prepare_aggregate_group_bindings(
+    query: &TableQuery,
+) -> Result<Vec<AggregateGroupBinding>, &'static str> {
+    validate_aggregate_planning_depth(query)?;
+    compile_group_bindings(query, &effective_table_projections(query))
+}
+
+fn compile_group_bindings(
+    query: &TableQuery,
+    projections: &[Projection],
+) -> Result<Vec<AggregateGroupBinding>, &'static str> {
+    let group_by = effective_table_group_by_exprs(query);
+    validate_nodes(
+        projections
+            .iter()
+            .map(Node::Projection)
+            .chain(group_by.iter().map(Node::Expr)),
+    )?;
+    let resolved = resolve_group_by_aliases(projections, group_by);
+    validate_nodes(resolved.iter().map(Node::Expr))?;
+    Ok(resolved
+        .into_iter()
+        .map(|expression| {
+            let key = group_expr_key(&expression);
+            let output_label = group_output_label(projections, &expression);
+            AggregateGroupBinding {
+                expression,
+                key,
+                output_label,
+            }
+        })
+        .collect())
+}
+
+pub fn validate_aggregate_projection_shape_with_host<H: AggregateShapeHost>(
+    host: &H,
+    query: &TableQuery,
+) -> Result<(), H::Error> {
+    validate_aggregate_planning_depth(query).map_err(|message| host.query_error(message.into()))?;
+    let effective_projections = effective_table_projections(query);
+    let bindings = compile_group_bindings(query, &effective_projections)
+        .map_err(|message| host.query_error(message.into()))?;
+    let has_group_by = !bindings.is_empty();
+
+    for projection in &effective_projections {
+        host.validate_projection(projection)?;
+
+        if matches!(
+            projection,
+            Projection::Function(name, _)
+                if is_aggregate_function(base_function_name(name))
+        ) {
+            continue;
+        }
+
+        if has_group_by
+            && projection_group_key(projection).is_some_and(|group_key| {
+                bindings
+                    .iter()
+                    .filter_map(|binding| binding.key.as_ref())
+                    .any(|entry| entry.eq_ignore_ascii_case(&group_key))
+            })
+        {
+            continue;
+        }
+
+        let label = projection_name(projection);
+        let message = if has_group_by {
+            format!("projection `{label}` must appear in GROUP BY or be an aggregate")
+        } else {
+            format!(
+                "projection `{label}` must be an aggregate because the query contains aggregate functions"
+            )
+        };
+        return Err(host.query_error(message));
+    }
+
+    for binding in &bindings {
+        host.validate_group_expression(&binding.expression)?;
+    }
+
+    Ok(())
+}
+
+fn resolve_group_by_aliases(projections: &[Projection], group_by: Vec<Expr>) -> Vec<Expr> {
+    group_by
+        .into_iter()
+        .map(|expr| {
+            let Expr::Column {
+                field: FieldRef::TableColumn { table, column },
+                ..
+            } = &expr
+            else {
+                return expr;
+            };
+            if !table.is_empty() {
+                return expr;
+            }
+            projections
+                .iter()
+                .find(|projection| projection_name(projection).eq_ignore_ascii_case(column))
+                .and_then(|projection| projection_to_expr(projection).map(|(expr, _)| expr))
+                .unwrap_or(expr)
+        })
+        .collect()
+}
+
+fn group_output_label(projections: &[Projection], group_expr: &Expr) -> String {
+    projections
+        .iter()
+        .find_map(|projection| {
+            let key = projection_group_key(projection)?;
+            if group_expr_key(group_expr)
+                .is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key))
+            {
+                Some(projection_name(projection))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| group_expr_key(group_expr).unwrap_or_else(|| "group".to_string()))
+}
+
+fn projection_group_key(projection: &Projection) -> Option<String> {
+    match projection {
+        Projection::Column(column) => Some(column.clone()),
+        Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
+            Some(column.clone())
+        }
+        Projection::Field(field, _) => Some(field_ref_name(field)),
+        Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
+            render_time_bucket_group_expr(args)
+        }
+        Projection::Function(_, _) => render_projection_signature(projection),
+        _ => None,
+    }
+}
+
+fn render_time_bucket_group_expr(args: &[Projection]) -> Option<String> {
+    let rendered = args
+        .iter()
+        .map(render_group_by_argument)
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("TIME_BUCKET({})", rendered.join(",")))
+}
+
+fn render_group_by_argument(arg: &Projection) -> Option<String> {
+    match arg {
+        Projection::Column(column) => Some(
+            column
+                .strip_prefix("LIT:")
+                .map(str::to_string)
+                .unwrap_or_else(|| column.clone()),
+        ),
+        Projection::All => Some("*".to_string()),
+        _ => None,
+    }
+}
+
+fn group_expr_key(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column { field, .. } => Some(field_ref_name(field)),
+        _ => render_expr_signature(expr),
+    }
 }
