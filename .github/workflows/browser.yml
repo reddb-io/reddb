@@ -32,6 +32,7 @@ on:
       - 'crates/reddb-server/src/runtime/query_exec/json_writers.rs'
       - 'crates/reddb-server/src/runtime/query_exec.rs'
       - 'crates/reddb-server/src/runtime/query_exec/aggregate.rs'
+      - 'crates/reddb-server/src/runtime/query_exec/table.rs'
       - 'crates/reddb-server/src/runtime/window_phase.rs'
       - 'tests/grouped_mvcc_transactions.rs'
       - 'tests/grouped/mvcc_transactions/**'

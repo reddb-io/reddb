@@ -132,6 +132,8 @@ async function sharedConformance(browserPage) {
     'temporal_duration_units_and_overflow', 'temporal_timestamp_conversion_and_bounds',
     'temporal_bucket_zero_and_wide_values',
     'geo_values_and_coordinate_forms', 'geo_spherical_and_ellipsoidal_math', 'geo_polygon_and_bounds',
+    'table_plan_callback_order_and_aliases', 'table_plan_fast_lookup_and_errors',
+    'table_plan_wide_bounds_and_topk', 'table_plan_depth_and_first_child',
   ])
 }
 

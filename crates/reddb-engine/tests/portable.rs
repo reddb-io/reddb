@@ -276,3 +276,14 @@ fn portable_geographic_conformance() {
         run();
     }
 }
+
+#[path = "support/table_plan.rs"]
+mod table_plan;
+
+#[test]
+fn portable_table_plan_conformance() {
+    for (name, run) in table_plan::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

@@ -18,6 +18,9 @@ use std::{
     sync::Arc,
 };
 
+#[path = "table_plan_projection.rs"]
+mod table_plan_projection;
+
 #[path = "geographic_projection.rs"]
 mod geographic_projection;
 
@@ -1602,6 +1605,7 @@ fn output_policy_and_redaction() {
 }
 
 pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract, updated: bool) {
+    table_plan_projection::verify_recovered(records, contract, updated);
     let sql = "SELECT o.rid AS identity, total AS amount, ABS(quantity) AS magnitude, COALESCE(nickname, 'none') AS display, payload.score AS score FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1";
     let query = super::record_filters::table_query(sql);
     let columns = reddb_rql::sql_lowering::effective_table_projections(&query);
