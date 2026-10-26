@@ -586,6 +586,7 @@ impl RedDB {
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
             native_artifact_versions: parking_lot::Mutex::new(HashMap::new()),
+            native_artifact_preparation: parking_lot::ReentrantMutex::new(()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
             collection_contract_cache: super::contract_cache::CollectionContractCache::default(),
             remote_backend: options.remote_backend.clone(),
@@ -626,6 +627,23 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Never wait for a preparation gate while holding the publication
+        // fence. An overlapping publisher retains only proven unchanged
+        // artifacts; ordinary row/WAL persistence still proceeds.
+        let _preparation = if self.paged_mode {
+            self.native_artifact_preparation.try_lock()
+        } else {
+            None
+        };
+        let native_publication = if self.paged_mode {
+            let existing = self.current_native_artifact_pages()?;
+            Some(self.prepare_native_artifact_publication_with_admission(
+                &existing,
+                _preparation.is_some(),
+            ))
+        } else {
+            None
+        };
         let _vault_guard = self.store.vault_publication_lock.lock();
         let _ = self.ec_consolidate_all();
         if let Some(path) = &self.path {
@@ -652,7 +670,7 @@ impl RedDB {
                 duration_ms = started.elapsed().as_millis(),
                 "append-only publication finished"
             );
-            self.persist_metadata()?;
+            self.persist_metadata_with_native_publication(native_publication)?;
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight

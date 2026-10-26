@@ -71,6 +71,9 @@ pub struct RedDB {
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
     /// Only revision proofs and published page references, never index payloads.
     native_artifact_versions: parking_lot::Mutex<HashMap<String, NativeArtifactVersion>>,
+    /// Admit one derived-payload preparation, without excluding row/WAL writes.
+    /// Publishers already holding the store fence only try this gate.
+    native_artifact_preparation: parking_lot::ReentrantMutex<()>,
     /// Default TTL policy declared at the collection level, in milliseconds.
     collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
     /// In-memory cache of collection contracts keyed by collection name.

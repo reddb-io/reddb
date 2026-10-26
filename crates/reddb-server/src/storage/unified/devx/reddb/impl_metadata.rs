@@ -426,6 +426,13 @@ impl RedDB {
     }
 
     pub(crate) fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_metadata_with_native_publication(None)
+    }
+
+    pub(super) fn persist_metadata_with_native_publication(
+        &self,
+        publication: Option<NativeArtifactPublication>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
@@ -470,7 +477,7 @@ impl RedDB {
             duration_ms = started.elapsed().as_millis(),
             "physical metadata preparation finished"
         );
-        self.persist_native_physical_header(&metadata)?;
+        self.persist_native_physical_header_with_publication(&metadata, publication)?;
         Ok(())
     }
 
@@ -1297,6 +1304,14 @@ impl RedDB {
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_native_physical_header_with_publication(metadata, None)
+    }
+
+    fn persist_native_physical_header_with_publication(
+        &self,
+        metadata: &PhysicalMetadataFile,
+        prepared: Option<NativeArtifactPublication>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
             return Ok(());
         }
@@ -1348,22 +1363,14 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
-        let started = std::time::Instant::now();
-        tracing::debug!(target: "reddb::checkpoint", "native artifact snapshots started");
         let existing_artifacts = existing_vector_artifact_page
             .map(|page| self.store.read_native_vector_artifact_store(page))
             .transpose()?
             .unwrap_or_default();
-        let publication = self.prepare_native_artifact_publication(&existing_artifacts);
+        let mut publication = prepared
+            .unwrap_or_else(|| self.prepare_native_artifact_publication(&existing_artifacts));
+        self.validate_native_artifact_publication(&mut publication, &existing_artifacts);
         let vector_artifact_records = publication.records;
-        tracing::debug!(
-            target: "reddb::checkpoint",
-            duration_ms = started.elapsed().as_millis(),
-            artifacts = vector_artifact_records.len(),
-            retained_artifacts = publication.retained.len(),
-            payload_bytes = vector_artifact_records.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
-            "native artifact snapshots finished"
-        );
         let artifact_summaries = publication.summaries;
         let registry_summary = self.native_registry_summary_from_metadata(
             metadata,

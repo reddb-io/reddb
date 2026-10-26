@@ -42,6 +42,113 @@ fn assert_artifact_matches_source(db: &RedDB) {
 }
 
 #[test]
+fn prepared_native_artifacts_reject_a_later_source_generation() {
+    let directory = tempfile::tempdir().expect("temporary native store");
+    let runtime = seed_runtime(paged_options(&directory.path().join("prepared.rdb")));
+    runtime
+        .execute_query("UPDATE cold_rows SET payload='beta gamma'")
+        .expect("first edit");
+    let db = runtime.db();
+    let mut prepared = db.prepare_native_artifact_publication(&descriptors(&db));
+    assert!(prepared
+        .records
+        .iter()
+        .any(|(summary, _)| summary.collection == "cold_rows"));
+    runtime
+        .execute_query("UPDATE cold_rows SET payload='delta epsilon'")
+        .expect("later edit");
+    db.validate_native_artifact_publication(&mut prepared, &descriptors(&db));
+    assert!(!prepared.versions.contains_key("cold_rows"));
+    assert!(prepared
+        .records
+        .iter()
+        .all(|(summary, _)| summary.collection != "cold_rows"));
+    assert!(prepared
+        .retained
+        .iter()
+        .all(|summary| summary.collection != "cold_rows"));
+    assert!(prepared
+        .summaries
+        .iter()
+        .all(|summary| summary.collection != "cold_rows"));
+    runtime
+        .checkpoint()
+        .expect("materialize current generation");
+    assert_artifact_matches_source(&db);
+}
+
+#[test]
+fn prepared_native_retention_rejects_a_replaced_page_reference() {
+    let directory = tempfile::tempdir().expect("temporary native store");
+    let runtime = seed_runtime(paged_options(&directory.path().join("retained.rdb")));
+    let db = runtime.db();
+    let existing = descriptors(&db);
+    let mut prepared = db.prepare_native_artifact_publication(&existing);
+    assert!(prepared
+        .retained
+        .iter()
+        .any(|page| page.collection == "cold_rows"));
+    let mut replaced = existing;
+    for page in &mut replaced {
+        if page.collection == "cold_rows" {
+            page.checksum ^= 1;
+        }
+    }
+    db.validate_native_artifact_publication(&mut prepared, &replaced);
+    assert!(!prepared.versions.contains_key("cold_rows"));
+    assert!(prepared
+        .retained
+        .iter()
+        .all(|page| page.collection != "cold_rows"));
+}
+
+#[test]
+fn overlapping_preparation_does_not_wait_under_publication() {
+    let directory = tempfile::tempdir().expect("temporary native store");
+    let runtime = seed_runtime(paged_options(&directory.path().join("admission.rdb")));
+    runtime
+        .execute_query("UPDATE cold_rows SET payload='changed source'")
+        .expect("edit");
+    let db = Arc::clone(&runtime.db());
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release_tx, release) = std::sync::mpsc::channel();
+    let owner = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let _admission = db.native_artifact_preparation.lock();
+            entered_tx.send(()).expect("admission observer");
+            release
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("release preparation");
+        })
+    };
+    entered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("admitted preparation");
+    let (completed_tx, completed) = std::sync::mpsc::channel();
+    let publisher = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let _publication = db.store.vault_publication_lock.lock();
+            let result = db.flush_local_only().map_err(|error| error.to_string());
+            completed_tx.send(result).expect("publication observer");
+        })
+    };
+    let result = completed.recv_timeout(std::time::Duration::from_secs(5));
+    release_tx.send(()).expect("release admission");
+    owner.join().expect("admission owner");
+    publisher.join().expect("overlapping publisher");
+    result
+        .expect("publication must not wait for preparation")
+        .expect("publication succeeds");
+    assert!(descriptors(&db)
+        .iter()
+        .all(|page| page.collection != "cold_rows"));
+    runtime.checkpoint().expect("materialize after admission");
+    assert_artifact_matches_source(&db);
+}
+
+#[test]
 fn native_artifacts_reuse_after_clean_cold_reopen() {
     let directory = tempfile::tempdir().expect("temporary native store");
     let path = directory.path().join("cold-reuse.rdb");

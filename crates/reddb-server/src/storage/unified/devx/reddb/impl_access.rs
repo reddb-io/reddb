@@ -144,9 +144,36 @@ impl RedDB {
         &self,
         existing: &[NativeVectorArtifactPageSummary],
     ) -> NativeArtifactPublication {
+        let admission = self.native_artifact_preparation.try_lock();
+        self.prepare_native_artifact_publication_with_admission(existing, admission.is_some())
+    }
+
+    pub(super) fn current_native_artifact_pages(
+        &self,
+    ) -> Result<Vec<NativeVectorArtifactPageSummary>, Box<dyn std::error::Error>> {
         let _publication = self.store.vault_publication_lock.lock();
-        let previous = self.native_artifact_versions.lock();
-        let recovered = if previous.is_empty() {
+        self.store
+            .physical_file_header()
+            .map(|header| {
+                self.store
+                    .read_native_vector_artifact_store(header.vector_artifact_page)
+            })
+            .transpose()
+            .map(|pages| pages.unwrap_or_default())
+            .map_err(Into::into)
+    }
+
+    pub(super) fn prepare_native_artifact_publication_with_admission(
+        &self,
+        existing: &[NativeVectorArtifactPageSummary],
+        allow_build: bool,
+    ) -> NativeArtifactPublication {
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "native artifact snapshots started");
+        // Publication takes the store fence before the version-map mutex.
+        // Clone the small proofs and release this mutex before any page read.
+        let previous = self.native_artifact_versions.lock().clone();
+        let recovered = if allow_build && previous.is_empty() {
             self.recovered_native_artifact_versions(existing)
         } else {
             HashMap::new()
@@ -189,6 +216,9 @@ impl RedDB {
                     .extend(previous.summaries.iter().cloned());
                 publication.versions.insert(collection, previous.clone());
             } else {
+                if !allow_build {
+                    continue;
+                }
                 let delta = previous.and_then(|previous| {
                     self.prepare_native_fulltext_delta(
                         &collection,
@@ -207,7 +237,6 @@ impl RedDB {
                 publication.versions.insert(collection, version);
             }
         }
-        drop(previous);
         let mut coverage = HashMap::new();
         publication
             .records
@@ -242,7 +271,53 @@ impl RedDB {
                 }
             }
         }
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            artifacts = publication.records.len(),
+            retained_artifacts = publication.retained.len(),
+            payload_bytes = publication.records.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+            "native artifact snapshots finished"
+        );
         publication
+    }
+
+    /// Called under the publication fence after primary rows have been flushed.
+    /// A changed source defers its disposable native cache, never its row/WAL
+    /// checkpoint. No retry or large rebuild runs in this critical section.
+    pub(super) fn validate_native_artifact_publication(
+        &self,
+        publication: &mut NativeArtifactPublication,
+        existing: &[NativeVectorArtifactPageSummary],
+    ) {
+        let _publication = self.store.vault_publication_lock.lock();
+        let before = publication.versions.len();
+        publication.versions.retain(|collection, version| {
+            version.source_digest.is_some()
+                && version.pages.iter().all(|page| existing.contains(page))
+                && self
+                    .store
+                    .get_collection(collection)
+                    .is_some_and(|manager| {
+                        version.manager.ptr_eq(&Arc::downgrade(&manager))
+                            && version.segments == manager.checkpoint_revisions()
+                    })
+        });
+        let accepted = &publication.versions;
+        publication
+            .records
+            .retain(|(summary, _)| accepted.contains_key(&summary.collection));
+        publication
+            .retained
+            .retain(|summary| accepted.contains_key(&summary.collection));
+        publication
+            .summaries
+            .retain(|summary| accepted.contains_key(&summary.collection));
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            deferred_sources = before - accepted.len(),
+            "native artifact sources validated"
+        );
     }
 
     fn native_artifact_records_with_coverage(

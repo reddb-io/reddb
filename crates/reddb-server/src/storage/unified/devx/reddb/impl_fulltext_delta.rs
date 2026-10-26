@@ -84,10 +84,22 @@ impl RedDB {
             };
             changes.insert(id.raw(), text);
         }
-        let bytes = self
-            .store
-            .read_native_artifact_payload(&previous.pages[0])
-            .ok()?;
+        let bytes = {
+            // A concurrent publisher can retire/reuse the old chain. Validate
+            // its identity and copy its frame under the fence; decode, delta
+            // application and serialization run after releasing the fence.
+            let _publication = self.store.vault_publication_lock.lock();
+            if !self
+                .current_native_artifact_pages()
+                .ok()?
+                .contains(&previous.pages[0])
+            {
+                return None;
+            }
+            self.store
+                .read_native_artifact_payload(&previous.pages[0])
+                .ok()?
+        };
         if bytes.len() as u64 != summary.serialized_bytes
             || crate::storage::engine::crc32(&bytes) as u64 != summary.checksum
         {

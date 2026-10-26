@@ -1,5 +1,10 @@
 # Native preparation blocks audited login, 2026-10-26
 
+Historical characterization frozen at commit
+`e5048b52e933d94c6872e8a8dc48ce3e90c09a3d`. The current affirmative regression
+and candidate correction are described in
+[native preparation generations](native-preparation-generations-2026-10-26.md).
+
 Runtime source remains `dd5e81d475ac6e6438947f2e289278ad52eee0cc`.
 The intervening commits through `1a83c6f982c2d49e8872248035eb0c8f7d5a59fd`
 change only experiment reports. This experiment adds an integration test and
@@ -109,7 +114,7 @@ References: [PostgreSQL WAL/checkpoints](https://www.postgresql.org/docs/current
 | Partitioned all-org/free usage, config/engine versions and AI tokens | Existing usage work | Pending; no new reporting verification here | Close after engine acceptance |
 | Filipe's STG free storage/sleep/wake simulation | Existing free database | Pending | Measure storage, idle suspension and wake latency |
 
-Run the focused reproduction with:
+From an isolated checkout of that frozen commit, run the reproduction with:
 
 ```bash
 cargo +1.95.0 test --locked -p reddb-io-server --test checkpoint_auth_contention -- --nocapture
@@ -117,5 +122,5 @@ cargo +1.95.0 test --locked -p reddb-io-server --test checkpoint_auth_contention
 
 This is a **characterization of the remaining defect**. Its passing result
 means the contention was reproduced, not that login availability is repaired.
-After a correction, replace the blocked/503 assertions with an affirmative
-availability regression and retain event-content/recovery checks.
+The following correction replaces the blocked/503 assertions with an
+affirmative availability regression and retains event-content/recovery checks.

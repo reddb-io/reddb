@@ -43,14 +43,18 @@ impl RedDB {
         &self,
         existing: &[NativeVectorArtifactPageSummary],
     ) -> HashMap<String, NativeArtifactVersion> {
-        let Some(header) = self.store.physical_file_header() else {
-            return HashMap::new();
-        };
-        let Ok(proofs) = self
-            .store
-            .read_native_artifact_sources(header.vector_artifact_page)
-        else {
-            return HashMap::new();
+        let proofs = {
+            let _publication = self.store.vault_publication_lock.lock();
+            let Some(header) = self.store.physical_file_header() else {
+                return HashMap::new();
+            };
+            let Ok(proofs) = self
+                .store
+                .read_native_artifact_sources(header.vector_artifact_page)
+            else {
+                return HashMap::new();
+            };
+            proofs
         };
         let mut versions = HashMap::new();
         for proof in proofs {
@@ -102,12 +106,17 @@ impl RedDB {
             }
             // Page checksums detect physical corruption; the persisted payload
             // checksum additionally binds these exact bytes to the source proof.
-            if proof
-                .pages
-                .iter()
-                .any(|page| self.store.read_native_artifact_payload(page).is_err())
-                || manager.checkpoint_revisions() != segments
-            {
+            let payloads_valid = {
+                let _publication = self.store.vault_publication_lock.lock();
+                self.current_native_artifact_pages().is_ok_and(|current| {
+                    proof.pages.iter().all(|page| current.contains(page))
+                        && proof
+                            .pages
+                            .iter()
+                            .all(|page| self.store.read_native_artifact_payload(page).is_ok())
+                })
+            };
+            if !payloads_valid || manager.checkpoint_revisions() != segments {
                 continue;
             }
             versions.insert(
