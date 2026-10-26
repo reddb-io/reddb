@@ -3,7 +3,7 @@
 Upstream package: `tonic 0.14.6`.
 Source: https://static.crates.io/crates/tonic/tonic-0.14.6.crate
 Upstream crate archive SHA-256: `ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef`.
-Upstream Git revision is retained in `.cargo_vcs_info.json`.
+Upstream Git revision is retained in `UPSTREAM.vcs.json`.
 
 This package is published as `reddb-io-tonic` under the RedDB release version.
 Its Rust library name is unchanged. The Rust sources and MIT license are copied
@@ -28,3 +28,6 @@ Cargo.toml.orig for its own publication-time normalized manifest metadata.
 
 The manifest permits the cosmetic collapsible_if Clippy lint introduced by the
 repository toolchain, retaining the verified upstream Rust sources unchanged.
+
+Cargo generates its own .cargo_vcs_info.json when publishing. UPSTREAM.vcs.json
+keeps the original upstream commit visible in the published package as well.
