@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
+  "description": "RedDB browser persistence, scalar execution and read-only local table SELECT; SQL writes and sync remain pending.",
   "exports": {
     ".": {
       "types": "./src/index.d.ts",
