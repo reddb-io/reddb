@@ -1304,13 +1304,24 @@ compression users now require zstd 0.14.3 with zstd-safe 8.2.0 and zstd-sys
 The bundled Zstandard library remains 1.5.7, with existing native
 compressed-frame/value/entity fixtures serving as compatibility gates.
 
-Tonic 0.14.6 still requires zstd 0.13 and therefore keeps a second legacy
-binding in native gRPC graphs. It is absent from the WASM dependency graph.
-The workspace/driver audits remain blocked by RUSTSEC-2026-0391, 0398 and 0403
-plus unsafe-API warnings on that transitive binding. The audit configuration
-and gRPC compression contract are unchanged. Landing this integration requires
-an upstream Tonic update or a separately reviewed compatibility patch/fork;
-the source API and browser tests do not imply that this dependency gate passed.
+Published Tonic 0.14.6 still requires zstd 0.13. RedDB therefore ships MIT-licensed
+compatibility distributions of the unchanged Tonic/Prost Rust sources as
+reddb-io-tonic and reddb-io-tonic-prost, using zstd 0.14.3 and one shared runtime
+identity. Builders remain upstream; generated stubs retain their existing Rust
+aliases. The three lockfiles no longer retain the old zstd/safe binding. The
+workspace, Node and Python audits run with the existing deny-warnings policy.
+
+These packages track the RedDB release version and publish before grpc-proto.
+Registry-normalized manifests keep their package names and fixed dependency;
+the fix does not rely on a consumer's root-only Cargo patch. Upstream archive
+checksums, unmodified Rust source digests, original manifests and MIT licenses
+are retained in the compatibility packages.
+
+The protocol/compression contract is preserved, including zstd, gzip and identity
+negotiation. Existing low-level Rust callers using upstream Tonic types directly
+must import the matching types through reddb_grpc_proto::tonic or use the
+compatibility package alias. This is a source-level migration for that API;
+high-level client and non-Rust wire interfaces remain unchanged.
 
 
 ## Local table SQL and single-owner transaction integration

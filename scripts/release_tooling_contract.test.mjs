@@ -2,12 +2,51 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
+
+test("gRPC compatibility runtimes retain upstream Rust sources and fixed compression bindings", () => {
+  for (const folder of ["reddb-tonic", "reddb-tonic-prost"]) {
+    const directory = `crates/${folder}`;
+    const hashes = JSON.parse(read(`${directory}/upstream-rust-sha256.json`));
+    for (const [file, expected] of Object.entries(hashes)) {
+      const actual = createHash("sha256").update(read(`${directory}/${file}`)).digest("hex");
+      assert.equal(actual, expected, `${directory}/${file} drifted from the pinned upstream source`);
+    }
+    assert.match(read(`${directory}/LICENSE`), /Permission is hereby granted/);
+    assert.match(read(`${directory}/Cargo.toml`), /^license = "MIT"$/m);
+  }
+  assert.match(read("crates/reddb-tonic/Cargo.toml"), /\[dependencies\.zstd\]\nversion = "0\.14\.3"/);
+  assert.match(read("crates/reddb-tonic-prost/Cargo.toml"), /\[dependencies\.tonic\]\nworkspace = true/);
+  for (const lockfile of ["Cargo.lock", "drivers/node/Cargo.lock", "drivers/python/Cargo.lock"]) {
+    const packages = read(lockfile).split("[[package]]");
+    assert.ok(packages.some(entry => /^name = "reddb-io-tonic"$/m.test(entry)));
+    assert.ok(packages.some(entry => /^name = "reddb-io-tonic-prost"$/m.test(entry)));
+    assert.ok(!packages.some(entry => /^name = "tonic"$/m.test(entry)), `${lockfile} retained upstream runtime`);
+    for (const entry of packages) {
+      if (/^name = "zstd"$/m.test(entry)) assert.match(entry, /^version = "0\.14\.3"$/m);
+      if (/^name = "zstd-safe"$/m.test(entry)) assert.match(entry, /^version = "8\.2\.0"$/m);
+    }
+  }
+});
+
+test("gRPC compatibility runtimes are versioned and published before generated stubs", () => {
+  const release = read(".github/workflows/release.yml");
+  assert.ok(release.indexOf("publish_one reddb-io-tonic\n") < release.indexOf("publish_one reddb-io-tonic-prost\n"));
+  assert.ok(release.indexOf("publish_one reddb-io-tonic-prost\n") < release.indexOf("publish_one reddb-io-grpc-proto\n"));
+  const sync = read("scripts/sync-version.js");
+  for (const name of ["reddb-io-tonic", "reddb-io-tonic-prost"]) {
+    assert.equal(sync.split(`'${name}'`).length - 1, 3, `${name} must track all three lockfiles`);
+  }
+  for (const folder of ["reddb-tonic", "reddb-tonic-prost"]) {
+    assert.ok(sync.includes(`'crates/${folder}/Cargo.toml'`));
+  }
+});
 
 /**
  * Regex source matching `uses: <repo>@<tag>` in either of the forms the

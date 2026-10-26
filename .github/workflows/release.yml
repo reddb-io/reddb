@@ -827,6 +827,8 @@ jobs:
           publish_one reddb-io-rql
           publish_one reddb-io-engine
           publish_one reddb-io-wire
+          publish_one reddb-io-tonic
+          publish_one reddb-io-tonic-prost
           publish_one reddb-io-grpc-proto
           publish_one reddb-io-client-connector
           publish_one reddb-io-server

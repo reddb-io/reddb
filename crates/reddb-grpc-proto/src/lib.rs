@@ -7,6 +7,16 @@
 //!
 //! Re-exports the entire `reddb.v1` module produced by
 //! `tonic_prost_build` at compile time.
+//!
+//! Import the matching runtime types through this crate's re-export:
+//! ```no_run
+//! use reddb_grpc_proto::{red_db_client::RedDbClient, tonic::Request, Empty};
+//! async fn health(endpoint: String) -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut client = RedDbClient::connect(endpoint).await?;
+//!     client.health(Request::new(Empty {})).await?;
+//!     Ok(())
+//! }
+//! ```
 
 #![allow(clippy::all)]
 // `clippy::all` does NOT include the pedantic `too_many_lines` lint, and the
@@ -16,6 +26,9 @@
 #![allow(clippy::too_many_lines)]
 
 tonic::include_proto!("reddb.v1");
+
+/// The exact Tonic runtime used by the generated stubs and their public types.
+pub use tonic;
 
 mod client;
 pub use client::RedDBClient;

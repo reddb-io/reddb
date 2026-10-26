@@ -6,6 +6,8 @@ members = [
     "crates/reddb-file",
     "crates/reddb-engine",
     "crates/reddb-grpc-proto",
+    "crates/reddb-tonic",
+    "crates/reddb-tonic-prost",
     "crates/reddb-rql",
     "crates/reddb-server",
     "crates/reddb-types",
@@ -25,6 +27,8 @@ homepage = "https://github.com/reddb-io/reddb"
 repository = "https://github.com/reddb-io/reddb"
 
 [workspace.dependencies]
+tonic = { package = "reddb-io-tonic", version = "1.0", path = "crates/reddb-tonic", default-features = false }
+tonic-prost = { package = "reddb-io-tonic-prost", version = "1.0", path = "crates/reddb-tonic-prost" }
 reddb-client = { package = "reddb-io-client", version = "1.0", path = "crates/reddb-client" }
 reddb-client-connector = { package = "reddb-io-client-connector", version = "1.0", path = "crates/reddb-client-connector" }
 reddb-crypto = { package = "reddb-io-crypto", version = "1.0", path = "crates/reddb-crypto" }
@@ -227,7 +231,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # spin up an async runtime via the macro form.
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread"] }
 # tonic for gRPC-side smoke tests.
-tonic = { version = "0.14", features = ["transport"] }
+tonic = { workspace = true, features = ["transport", "codegen", "router"] }
 # Streaming-RPC client tests (e.g. gRPC BatchInsert / #586) build
 # request streams via `tokio_stream::iter`. Server-side already
 # depends on it transitively through tonic; we restate it here as a

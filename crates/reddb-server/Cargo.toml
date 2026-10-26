@@ -65,8 +65,8 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 ed25519-dalek = "3"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
-tonic-prost = "0.14"
+tonic = { workspace = true, features = ["transport", "codegen", "router", "gzip", "zstd", "tls-ring"] }
+tonic-prost = { workspace = true }
 prost = "0.14"
 snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
@@ -199,6 +199,7 @@ name = "timeseries_ingest_bench"
 harness = false
 
 [dev-dependencies]
+http-body-util = "0.1"
 # Criterion benchmark harness for blob_cache_bench (#190).
 criterion = { version = "0.8", features = ["html_reports"] }
 # tempfile: L2-backed scenarios need a temp directory per bench group.

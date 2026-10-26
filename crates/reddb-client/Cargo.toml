@@ -104,7 +104,7 @@ serde_json = "1"
 # slim client-only feature set (`channel`, `codegen`); cargo unions
 # features across [dependencies] and [dev-dependencies], so this
 # only widens tonic during tests.
-tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
+tonic = { workspace = true, features = ["channel", "codegen", "server", "router"] }
 reddb-grpc-proto = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 # Proptest exercises HealthAwareRouter (issue #171): random RTT
