@@ -102,8 +102,25 @@ references and a volatile proof that every counted nonempty document had posting
 Nonempty documents without tokens invalidate that proof; subsequent changes use
 full derivation. JSON/blob additions, other artifacts and oversized inputs also
 fall back. Frames remain in the existing format, with postings ordered by entity
-ID, and their revision proofs advance only after durable publication. Cold opens
-still derive their initial source proof conservatively.
+ID, and their revision proofs advance only after durable publication.
+Cold reuse additionally requires an optional `RASR` reference after the native
+artifact descriptors. It names an in-file blob of versioned `RASP` source
+proofs, owned by `reddb-file`. Each proof binds a BLAKE3 digest of the raw
+collection source to its exact artifact descriptors and summaries. Cold
+admission checks that digest, the descriptor set and every payload checksum
+before seeding volatile manager/revision proofs. Replay, omitted or normalized
+transaction rows, replaced source content, corrupt payloads and unsupported
+proof versions retain full derivation. Legacy files lack the reference and
+derive their first proof; older writers drop it and cannot reclaim an unknown
+proof blob. Writer downgrades require a separately qualified recovery procedure.
+The proof blob uses the existing native blob replacement/quarantine mechanism.
+It introduces no sidecar and does not change the WAL, double-write or final
+header publication order. Source hashing is linear in changed collection bytes;
+cold validation is linear in source plus artifact bytes. Unchanged warm
+publications retain their digest. This does not make incremental full-text
+publication proportional to the journal delta. Runtime boot updates
+`red_config` with current process/system observations, so its source actually
+changes even when customer collections remain unchanged.
 Fingerprint scans sort compact entity ID/source references and borrow one row at
 a time. They preserve the existing hash order and values without materializing
 a second collection of payloads; source segments remain pinned for the scan.

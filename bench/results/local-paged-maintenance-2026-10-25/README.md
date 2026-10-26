@@ -327,3 +327,13 @@ the frame. A dedicated pressure test verifies exactly one full frame, three
 barriers, and the expected residual dirty count. The six-admission failure and
 recovery tests also verify multi-page bounded eviction. The published candidate
 must be tested again on a fresh fixture; RC371/RC372 results cannot qualify it.
+
+## Cold source provenance follow-up, 2026-10-26
+
+[Cold native source qualification](cold-native-source-2026-10-26.md) records
+the subsequent persisted-source proof correction and local regression matrix.
+RC373 remains rejected for the historical Platform first-publication latency
+and physical-growth gates. The temporary QA worker has been retired; rejected
+database copies and their PVCs remain preserved. No current-source historical
+Auth/Platform qualification, live fleet rollout or database-volume downscale
+is established by the miniature cold-reuse results.

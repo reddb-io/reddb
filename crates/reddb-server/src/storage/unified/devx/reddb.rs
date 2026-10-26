@@ -376,6 +376,7 @@ struct NativeArtifactVersion {
     summaries: Vec<NativeVectorArtifactSummary>,
     pages: Vec<NativeVectorArtifactPageSummary>,
     fulltext_document_ids_complete: bool,
+    source_digest: Option<[u8; 32]>,
 }
 
 struct NativeArtifactPublication {
@@ -392,8 +393,11 @@ mod impl_core_b;
 mod impl_ec;
 mod impl_fulltext_delta;
 mod impl_metadata;
+mod impl_native_source;
 mod impl_registry;
 mod native_fulltext_delta;
+#[cfg(test)]
+mod native_source_tests;
 
 impl Default for RedDB {
     fn default() -> Self {

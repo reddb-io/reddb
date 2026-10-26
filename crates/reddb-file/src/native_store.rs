@@ -774,7 +774,7 @@ pub struct NativeRegistryJobSummary {
     pub metadata: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NativeVectorArtifactSummary {
     pub collection: String,
     pub artifact_kind: String,
@@ -785,7 +785,7 @@ pub struct NativeVectorArtifactSummary {
     pub checksum: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NativeVectorArtifactPageSummary {
     pub collection: String,
     pub artifact_kind: String,

@@ -1,0 +1,260 @@
+use super::*;
+
+fn paged_options(path: &Path) -> RedDBOptions {
+    RedDBOptions::persistent(path)
+        .with_storage_profile(crate::storage::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+}
+
+fn seed_runtime(options: RedDBOptions) -> crate::RedDBRuntime {
+    let runtime = crate::RedDBRuntime::with_options(options).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE cold_rows (id INT,payload TEXT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO cold_rows (id,payload) VALUES (1,'alpha beta')")
+        .expect("row");
+    runtime.checkpoint().expect("publish artifacts");
+    runtime
+}
+
+fn descriptors(db: &RedDB) -> Vec<NativeVectorArtifactPageSummary> {
+    let header = db.store.physical_file_header().expect("header");
+    db.store
+        .read_native_vector_artifact_store(header.vector_artifact_page)
+        .expect("descriptors")
+}
+
+fn assert_artifact_matches_source(db: &RedDB) {
+    let header = db.store.physical_file_header().expect("published header");
+    for (summary, expected) in db.native_vector_artifact_records(&["cold_rows".into()]) {
+        let (_, actual) = db
+            .store
+            .read_native_vector_artifact_blob(
+                header.vector_artifact_page,
+                &summary.collection,
+                Some(&summary.artifact_kind),
+            )
+            .expect("read frame")
+            .expect("published frame");
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn native_artifacts_reuse_after_clean_cold_reopen() {
+    let directory = tempfile::tempdir().expect("temporary native store");
+    let path = directory.path().join("cold-reuse.rdb");
+    let options = paged_options(&path);
+    drop(seed_runtime(options.clone()));
+    for _ in 0..3 {
+        // Opening the engine alone leaves the source unchanged. Runtime boot
+        // intentionally writes red.system and is covered by the next test.
+        let db = RedDB::open_with_options(&options).expect("cold engine reopen");
+        let existing = descriptors(&db);
+        assert!(existing.iter().any(|page| page.collection == "cold_rows"));
+        let publication = db.prepare_native_artifact_publication(&existing);
+        assert!(
+            publication.records.is_empty(),
+            "unchanged sources must not rebuild"
+        );
+        assert_eq!(publication.retained.len(), existing.len());
+        assert_artifact_matches_source(&db);
+        db.flush_local_only().expect("publish reused sources");
+    }
+}
+
+#[test]
+fn native_artifacts_runtime_reopen_rebuilds_only_changed_boot_configuration() {
+    let directory = tempfile::tempdir().expect("temporary runtime store");
+    let options = paged_options(&directory.path().join("runtime-reuse.rdb"));
+    drop(seed_runtime(options.clone()));
+    let runtime = crate::RedDBRuntime::with_options(options).expect("runtime reopen");
+    let db = runtime.db();
+    let existing = descriptors(&db);
+    let header = db.store.physical_file_header().expect("header");
+    let proofs = db
+        .store
+        .read_native_artifact_sources(header.vector_artifact_page)
+        .expect("proofs");
+    let configuration = proofs
+        .iter()
+        .find(|proof| proof.collection == "red_config")
+        .expect("configuration source");
+    assert_ne!(
+        configuration.source_digest,
+        RedDB::native_artifact_source_digest(
+            "red_config",
+            &db.store
+                .get_collection("red_config")
+                .expect("boot configuration"),
+        ),
+        "runtime boot writes pid, started_at and memory availability"
+    );
+    let publication = db.prepare_native_artifact_publication(&existing);
+    let changed: BTreeSet<_> = publication
+        .records
+        .iter()
+        .map(|(summary, _)| summary.collection.as_str())
+        .collect();
+    assert_eq!(changed, BTreeSet::from(["red_config"]));
+    assert_eq!(
+        publication.retained.len(),
+        existing
+            .iter()
+            .filter(|page| page.collection != "red_config")
+            .count()
+    );
+    assert_artifact_matches_source(&db);
+}
+
+#[test]
+fn native_artifacts_reject_stale_sources_after_crash() {
+    const CHILD_PATH: &str = "REDDB_TEST_NATIVE_SOURCE_CRASH_PATH";
+    const CHILD_PHASE: &str = "REDDB_TEST_NATIVE_SOURCE_CRASH_PHASE";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = seed_runtime(paged_options(Path::new(&path)));
+        let phase = std::env::var(CHILD_PHASE).expect("crash phase");
+        if phase == "active" || phase == "aborted" {
+            runtime.execute_query("BEGIN").expect("transaction");
+            runtime
+                .execute_query("INSERT INTO cold_rows (id,payload) VALUES (2,'uncommitted')")
+                .expect("unfinished row");
+            runtime
+                .checkpoint()
+                .expect("checkpoint excludes unfinished primary row");
+            if phase == "aborted" {
+                runtime.execute_query("ROLLBACK").expect("abort");
+            }
+        } else {
+            runtime
+                .execute_query("UPDATE cold_rows SET payload='omega delta' WHERE id=1")
+                .expect("acknowledged update");
+            if phase == "primary" {
+                // Crash between primary durability and native publication.
+                runtime.db().store.persist().expect("durable primary only");
+            } else {
+                assert!(
+                    std::fs::metadata(reddb_file::layout::unified_wal_path(Path::new(&path)))
+                        .expect("recovery WAL")
+                        .len()
+                        > 8
+                );
+            }
+        }
+        std::process::exit(0); // No destructor may repair this fixture.
+    }
+    for phase in ["wal", "primary", "active", "aborted"] {
+        let directory = tempfile::tempdir().expect("crash fixture");
+        let path = directory.path().join("crash.rdb");
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "storage::unified::devx::reddb::native_source_tests::native_artifacts_reject_stale_sources_after_crash", "--nocapture"])
+            .env(CHILD_PATH, &path).env(CHILD_PHASE, phase).status().expect("crash child");
+        assert!(status.success(), "crash fixture failed: {phase}");
+        let runtime = crate::RedDBRuntime::with_options(paged_options(&path)).expect("recovery");
+        let result = runtime
+            .execute_query("SELECT payload FROM cold_rows WHERE id=1")
+            .expect("recovered value");
+        let expected = if phase == "wal" || phase == "primary" {
+            "omega delta"
+        } else {
+            "alpha beta"
+        };
+        assert_eq!(
+            result.result.records[0]
+                .get("payload")
+                .expect("payload")
+                .as_text(),
+            Some(expected),
+            "{phase}"
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM cold_rows WHERE id=2")
+            .expect("uncommitted row check")
+            .result
+            .records
+            .is_empty());
+        let db = runtime.db();
+        let publication = db.prepare_native_artifact_publication(&descriptors(&db));
+        assert!(
+            publication
+                .records
+                .iter()
+                .any(|(summary, _)| summary.collection == "cold_rows"),
+            "stale artifacts must rebuild: {phase}"
+        );
+        runtime.checkpoint().expect("publish recovered artifacts");
+        assert_artifact_matches_source(&db);
+    }
+}
+
+#[test]
+fn native_artifacts_cold_admission_checks_payloads_and_legacy_fallback() {
+    let directory = tempfile::tempdir().expect("corruption fixture");
+    let runtime = seed_runtime(paged_options(&directory.path().join("corrupt.rdb")));
+    let db = runtime.db();
+    let existing = descriptors(&db);
+    let reference = existing
+        .iter()
+        .find(|page| page.collection == "cold_rows")
+        .expect("row artifact");
+    let pager = db.store.pager().expect("pager");
+    let original = pager.read_page(reference.root_page).expect("artifact page");
+    let mut corrupt = original.clone();
+    corrupt.as_bytes_mut()
+        [crate::storage::engine::HEADER_SIZE + reddb_file::NATIVE_BLOB_PAGE_HEADER_BYTES] ^= 1;
+    pager
+        .write_page(reference.root_page, corrupt)
+        .expect("valid page with wrong payload");
+    db.native_artifact_versions.lock().clear();
+    assert!(db
+        .prepare_native_artifact_publication(&existing)
+        .records
+        .iter()
+        .any(|(summary, _)| summary.collection == "cold_rows"));
+    pager
+        .write_page(reference.root_page, original)
+        .expect("restore fixture payload");
+    let mut stale = existing.clone();
+    stale
+        .iter_mut()
+        .find(|page| page.collection == "cold_rows")
+        .expect("reference")
+        .checksum ^= 1;
+    assert!(db
+        .prepare_native_artifact_publication(&stale)
+        .records
+        .iter()
+        .any(|(summary, _)| summary.collection == "cold_rows"));
+
+    let mut header = db.store.physical_file_header().expect("header");
+    let (page, checksum, _) = db
+        .store
+        .write_native_vector_artifact_store_retaining(
+            &[],
+            &existing,
+            Some(header.vector_artifact_page),
+        )
+        .expect("legacy writer drops optional proof reference");
+    header.vector_artifact_page = page;
+    header.vector_artifact_checksum = checksum;
+    db.store
+        .update_physical_file_header(header)
+        .expect("legacy header");
+    db.store.persist().expect("legacy publication");
+    db.store
+        .publish_detached_native_blob_pages()
+        .expect("proof quarantine");
+    assert!(db
+        .store
+        .read_native_artifact_sources(page)
+        .expect("legacy sources")
+        .is_empty());
+    assert!(db
+        .prepare_native_artifact_publication(&existing)
+        .records
+        .iter()
+        .any(|(summary, _)| summary.collection == "cold_rows"));
+    runtime.checkpoint().expect("regenerate legacy proof");
+    assert_artifact_matches_source(&db);
+}

@@ -144,7 +144,13 @@ impl RedDB {
         &self,
         existing: &[NativeVectorArtifactPageSummary],
     ) -> NativeArtifactPublication {
+        let _publication = self.store.vault_publication_lock.lock();
         let previous = self.native_artifact_versions.lock();
+        let recovered = if previous.is_empty() {
+            self.recovered_native_artifact_versions(existing)
+        } else {
+            HashMap::new()
+        };
         let mut publication = NativeArtifactPublication {
             records: Vec::new(),
             retained: Vec::new(),
@@ -162,8 +168,12 @@ impl RedDB {
                 summaries: Vec::new(),
                 pages: Vec::new(),
                 fulltext_document_ids_complete: false,
+                source_digest: None,
             };
-            if let Some(previous) = previous.get(&collection).filter(|previous| {
+            let previous = previous
+                .get(&collection)
+                .or_else(|| recovered.get(&collection));
+            if let Some(previous) = previous.filter(|previous| {
                 previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
                     && previous.pages.iter().all(|page| existing.contains(page))
@@ -179,7 +189,7 @@ impl RedDB {
                     .extend(previous.summaries.iter().cloned());
                 publication.versions.insert(collection, previous.clone());
             } else {
-                let delta = previous.get(&collection).and_then(|previous| {
+                let delta = previous.and_then(|previous| {
                     self.prepare_native_fulltext_delta(
                         &collection,
                         &manager,
@@ -217,6 +227,20 @@ impl RedDB {
                 .expect("artifact source collection")
                 .summaries
                 .push(summary.clone());
+        }
+        for (collection, version) in &mut publication.versions {
+            if version.source_digest.is_none() {
+                if let Some(manager) = self.store.get_collection(collection) {
+                    if version.manager.ptr_eq(&Arc::downgrade(&manager))
+                        && version.segments == manager.checkpoint_revisions()
+                    {
+                        let digest = Self::native_artifact_source_digest(collection, &manager);
+                        if version.segments == manager.checkpoint_revisions() {
+                            version.source_digest = Some(digest);
+                        }
+                    }
+                }
+            }
         }
         publication
     }

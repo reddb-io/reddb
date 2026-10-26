@@ -1393,10 +1393,26 @@ impl RedDB {
             .map(|(summary, bytes)| (summary.collection, summary.artifact_kind, bytes))
             .collect::<Vec<_>>();
         tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication started");
+        let source_proofs = publication
+            .versions
+            .iter()
+            .filter_map(|(collection, version)| {
+                Some(
+                    reddb_file::native_artifact_source::NativeArtifactSourceProof {
+                        collection: collection.clone(),
+                        source_digest: version.source_digest?,
+                        summaries: version.summaries.clone(),
+                        pages: Vec::new(),
+                        fulltext_document_ids_complete: version.fulltext_document_ids_complete,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
         let (vector_artifact_page, vector_artifact_checksum, vector_artifact_pages) =
-            self.store.write_native_vector_artifact_store_retaining(
+            self.store.write_native_vector_artifact_store_with_sources(
                 &vector_artifact_payloads,
                 &publication.retained,
+                &source_proofs,
                 existing_vector_artifact_page,
             )?;
         // The pager owns these bytes now. Do not retain a second artifact set

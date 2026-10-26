@@ -1,4 +1,9 @@
 use super::*;
+use reddb_file::native_artifact_source::{
+    append_native_artifact_source_reference, decode_native_artifact_source_reference,
+    decode_native_artifact_sources, encode_native_artifact_sources, NativeArtifactSourceProof,
+    NativeArtifactSourceReference,
+};
 
 impl UnifiedStore {
     pub fn read_native_physical_state(&self) -> Result<NativePhysicalState, StoreError> {
@@ -201,6 +206,21 @@ impl UnifiedStore {
         retained: &[NativeVectorArtifactPageSummary],
         existing_page: Option<u32>,
     ) -> Result<(u32, u64, Vec<NativeVectorArtifactPageSummary>), StoreError> {
+        self.write_native_vector_artifact_store_with_sources(
+            artifacts,
+            retained,
+            &[],
+            existing_page,
+        )
+    }
+
+    pub(crate) fn write_native_vector_artifact_store_with_sources(
+        &self,
+        artifacts: &[(String, String, Vec<u8>)],
+        retained: &[NativeVectorArtifactPageSummary],
+        sources: &[NativeArtifactSourceProof],
+        existing_page: Option<u32>,
+    ) -> Result<(u32, u64, Vec<NativeVectorArtifactPageSummary>), StoreError> {
         let _publication = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Ok((0, 0, Vec::new()));
@@ -260,7 +280,41 @@ impl UnifiedStore {
             }
         }
 
-        let data = reddb_file::encode_native_vector_artifact_store_page(&summaries);
+        let mut data = reddb_file::encode_native_vector_artifact_store_page(&summaries);
+        let previous_source = existing_page
+            .map(|page| self.read_native_artifact_source_reference(page))
+            .transpose()?
+            .flatten();
+        if sources.is_empty() {
+            if let Some(previous) = previous_source {
+                self.detached_native_blob_pages
+                    .lock()
+                    .extend(self.read_native_blob_chain_page_ids(previous.root_page)?);
+            }
+        } else {
+            let mut sources = sources.to_vec();
+            for source in &mut sources {
+                source.pages = summaries
+                    .iter()
+                    .filter(|page| page.collection == source.collection)
+                    .cloned()
+                    .collect();
+            }
+            sources.sort_by(|a, b| a.collection.cmp(&b.collection));
+            let bytes = encode_native_artifact_sources(&sources)
+                .map_err(|err| StoreError::Serialization(err.to_string()))?;
+            let (root_page, _, checksum) = self.write_native_blob_chain(
+                &bytes,
+                previous_source.map(|reference| reference.root_page),
+            )?;
+            append_native_artifact_source_reference(
+                &mut data,
+                NativeArtifactSourceReference {
+                    root_page,
+                    checksum,
+                },
+            );
+        }
         let checksum = reddb_file::native_store_page_checksum(&data);
         let mut page = crate::storage::engine::Page::new(
             crate::storage::engine::PageType::NativeMeta,
@@ -268,12 +322,49 @@ impl UnifiedStore {
         );
         let bytes = page.as_bytes_mut();
         let content_start = crate::storage::engine::HEADER_SIZE;
-        let copy_len = data.len().min(bytes.len() - content_start);
-        bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
+        if data.len() > bytes.len() - content_start {
+            return Err(StoreError::Serialization(
+                "native artifact descriptors exceed one page".into(),
+            ));
+        }
+        bytes[content_start..content_start + data.len()].copy_from_slice(&data);
         pager
             .write_page(page_id, page)
             .map_err(|err| StoreError::Serialization(err.to_string()))?;
         Ok((page_id, checksum, summaries))
+    }
+
+    fn read_native_artifact_source_reference(
+        &self,
+        page_id: u32,
+    ) -> Result<Option<NativeArtifactSourceReference>, StoreError> {
+        if page_id == 0 {
+            return Ok(None);
+        }
+        let content = self.read_native_meta_page(page_id, "native artifact sources")?;
+        let summaries = reddb_file::decode_native_vector_artifact_store_page(&content)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        let offset = reddb_file::encode_native_vector_artifact_store_page(&summaries).len();
+        decode_native_artifact_source_reference(content.get(offset..).unwrap_or_default())
+            .map_err(|err| StoreError::Serialization(err.to_string()))
+    }
+
+    pub(crate) fn read_native_artifact_sources(
+        &self,
+        page_id: u32,
+    ) -> Result<Vec<NativeArtifactSourceProof>, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        let Some(reference) = self.read_native_artifact_source_reference(page_id)? else {
+            return Ok(Vec::new());
+        };
+        let bytes = self.read_native_blob_chain(reference.root_page)?;
+        if reddb_file::native_store_page_checksum(&bytes) != reference.checksum {
+            return Err(StoreError::Serialization(
+                "native artifact source checksum mismatch".into(),
+            ));
+        }
+        decode_native_artifact_sources(&bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))
     }
 
     pub fn read_native_vector_artifact_store(
@@ -343,6 +434,126 @@ impl UnifiedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_source_proof_blob_reuses_space_and_retires_removed_pages() {
+        let directory = tempfile::tempdir().expect("source proof fixture");
+        let path = directory.path().join("source-proofs.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let mut sources: Vec<_> = (0..256)
+            .map(|index| NativeArtifactSourceProof {
+                collection: format!("collection_{index:04}"),
+                source_digest: [17; 32],
+                summaries: Vec::new(),
+                pages: Vec::new(),
+                fulltext_document_ids_complete: false,
+            })
+            .collect();
+        let publish = |sources: &[NativeArtifactSourceProof]| {
+            let mut header = store.physical_file_header().expect("header");
+            let previous =
+                (header.vector_artifact_page != 0).then_some(header.vector_artifact_page);
+            let (page, checksum, _) = store
+                .write_native_vector_artifact_store_with_sources(&[], &[], sources, previous)
+                .expect("proof publication");
+            header.vector_artifact_page = page;
+            header.vector_artifact_checksum = checksum;
+            store
+                .update_physical_file_header(header)
+                .expect("header publication");
+            store.persist().expect("durable proof");
+            store
+                .publish_detached_native_blob_pages()
+                .expect("proof quarantine");
+            page
+        };
+        let page = publish(&sources);
+        let reference = store
+            .read_native_artifact_source_reference(page)
+            .expect("reference")
+            .expect("proof root");
+        let pages = store
+            .read_native_blob_chain_page_ids(reference.root_page)
+            .expect("proof pages");
+        assert!(
+            pages.len() > 1,
+            "proofs must cross a native metadata page boundary"
+        );
+        assert_eq!(
+            store
+                .read_native_artifact_sources(page)
+                .expect("large proof"),
+            sources
+        );
+        let length = std::fs::metadata(&path).expect("file length").len();
+        for cycle in 0..12 {
+            sources[0]
+                .source_digest
+                .fill(if cycle % 2 == 0 { 18 } else { 17 });
+            let page = publish(&sources);
+            assert_eq!(
+                store
+                    .read_native_artifact_source_reference(page)
+                    .expect("reference")
+                    .expect("root")
+                    .root_page,
+                reference.root_page
+            );
+            assert_eq!(
+                store
+                    .read_native_artifact_sources(page)
+                    .expect("updated proof"),
+                sources
+            );
+            assert_eq!(
+                std::fs::metadata(&path).expect("file length").len(),
+                length,
+                "proof growth at cycle {cycle}"
+            );
+        }
+        publish(&sources[..1]);
+        let (pending, published) = store
+            .pager()
+            .expect("pager")
+            .deferred_reclamation_pages()
+            .expect("retirement");
+        assert_eq!(pending.len(), pages.len() - 1);
+        assert_eq!(published.len(), pending.len());
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("reopen shortened proof");
+        assert_eq!(
+            reopened
+                .read_native_artifact_sources(page)
+                .expect("short proof survives"),
+            sources[..1]
+        );
+        reopened
+            .flush_paged_registry()
+            .expect("release retired pages");
+        let mut header = reopened.physical_file_header().expect("header");
+        let (page, checksum, _) = reopened
+            .write_native_vector_artifact_store(&[], Some(page))
+            .expect("legacy publication removes reference");
+        header.vector_artifact_page = page;
+        header.vector_artifact_checksum = checksum;
+        reopened
+            .update_physical_file_header(header)
+            .expect("legacy header");
+        reopened.persist().expect("legacy publication");
+        reopened
+            .publish_detached_native_blob_pages()
+            .expect("retire final proof page");
+        assert!(reopened
+            .read_native_artifact_sources(page)
+            .expect("legacy fallback")
+            .is_empty());
+        let (pending, _) = reopened
+            .pager()
+            .expect("pager")
+            .deferred_reclamation_pages()
+            .expect("final retirement");
+        assert_eq!(pending.len(), 1);
+    }
 
     #[test]
     fn unchanged_native_blob_pages_remain_clean() {
