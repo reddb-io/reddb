@@ -1078,3 +1078,47 @@ Cost sketch: for N rows and K key dimensions, each window keeps O(N*K) key memor
 plus O(N) indices/results and O(N log N) sorting; existing aggregate frame walks
 can cost O(N^2). The extraction adds no network request, disk write or IPC and
 makes no measured speedup claim.
+
+## Shared aggregate kernels
+
+`reddb-engine::query::runtime::aggregation` now owns the native slot compiler,
+accumulators, batch merging, typed group keys, numeric coercion and result
+construction for COUNT, SUM, AVG, MIN, MAX, VARIANCE, STDDEV, MEDIAN, PERCENTILE,
+GROUP_CONCAT, STRING_AGG, FIRST, LAST, ARRAY_AGG and COUNT_DISTINCT. Native generic
+aggregation delegates to these kernels. Its fast routes reuse the same numeric
+coercion and sum conversion. The host retains value comparison/secret policy and
+static projection evaluation; scan/visibility, grouping orchestration, HAVING,
+ORDER BY, limits, authorization and spill I/O remain native responsibilities.
+The native spill codec and field order are unchanged; shared state fields remain
+available to that codec and are not exposed as public JS/TS bindings.
+
+A regression test reproduced a native shared-slot bug: SUM/AVG/VARIANCE/STDDEV on
+10 and 20 accumulated the source four times, returning SUM 120 instead of 30.
+The compiler now assigns one updating projection per storage slot and marks the
+other projections as shared reads. A later statistical projection upgrades the
+updating slot to collect squared values, so projection order cannot change the
+result. The same rule avoids duplicate collection for MEDIAN/PERCENTILE and
+GROUP_CONCAT/STRING_AGG. Output labels and parameter evaluation remain unchanged.
+
+Rendered labels cannot identify an argument: a field and a literal can render
+alike. Slot identity therefore uses the complete typed argument's derived Debug
+rendering, including source spans, as process-local compiler metadata. It is
+never persisted or returned as an output name; no storage/wire format depends on
+it. This distinguishes argument shapes and remains reflexive for NaN literals.
+Projection recursion is capped at the canonical 128-level limit before rendering
+or cloning. Embedded Expr/Filter trees retain existing parser/AST admission.
+
+Eight native/WASM case groups cover shared slots, NULL/empty input, rich ordered
+values, aggregate parameters/aliases and typed argument identity, merging,
+numeric/nonfinite coercion, exact group keys, depth and host callbacks. Native SQL
+regression tests force the generic aggregate route in both projection orders.
+The recovered fixture runs filtered COUNT/SUM/AVG/MEDIAN grouped by a JSON tenant
+field after WAL recovery, updates, checkpoint and offline OPFS restarts. These
+are test hosts: public storedQueries/transactions flags remain false pending
+production catalog/admission/dispatch and durable transaction integration.
+
+Cost sketch: N rows update U distinct admitted argument/storage slots in O(N*U),
+without re-evaluating shared projections; compiler metadata is O(total argument
+AST size). Existing list/statistic aggregates retain O(N) values per group and
+sort on result construction; host memory/spill policy remains required. No extra
+network request, persistent write or IPC is added; no measured speedup is claimed.

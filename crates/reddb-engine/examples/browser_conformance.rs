@@ -2,6 +2,10 @@
 //! This is built separately and never included in the application WASM bundle.
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/aggregation.rs"]
+mod aggregation;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/catalog.rs"]
 mod catalog;
 
@@ -170,7 +174,8 @@ pub fn run_conformance() -> String {
         .chain(table_planning::CASES.iter())
         .chain(runtime_expressions::CASES.iter())
         .chain(value_functions::CASES.iter())
-        .chain(window_phase::CASES.iter());
+        .chain(window_phase::CASES.iter())
+        .chain(aggregation::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }
