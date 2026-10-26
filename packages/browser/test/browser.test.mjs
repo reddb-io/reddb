@@ -274,7 +274,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-only-tables', transactions: false, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
@@ -358,6 +358,47 @@ for (const browser of browsers) {
           } finally { await reopened.close() }
         })
       } finally { await context.setOffline(false) }
+    })
+
+    storageTest('public SQL creates a database and worker termination rolls back uncommitted writes', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/src/worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'sql-crash', create: true, worker })
+          await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+          await database.query("INSERT INTO notes VALUES (1, 'committed')")
+          await database.query('BEGIN')
+          await database.query("UPDATE notes SET body = 'uncommitted'")
+          await database.query("INSERT INTO notes VALUES (2, 'also uncommitted')")
+          worker.terminate()
+          await navigator.locks.request('reddb-browser:sql-crash', () => {})
+          const reopened = await RedDBBrowser.openDatabase({ name: 'sql-crash' })
+          try {
+            return await reopened.query('SELECT id, body FROM notes ORDER BY id')
+          } finally { await reopened.close() }
+        })
+        assert.deepEqual(result, { columns: ['id', 'body'], rows: [[1, 'committed']] })
+      } finally { await current.close() }
+    })
+
+    storageTest('create option preserves an existing corrupt SQL database', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const root = await navigator.storage.getDirectory()
+          const directory = await root.getDirectoryHandle('reddb-browser', { create: true })
+          const file = await directory.getFileHandle('sql-corrupt.rdb', { create: true })
+          const writer = await file.createWritable()
+          await writer.write(new Uint8Array([9, 8, 7]))
+          await writer.close()
+          let code
+          try { await RedDBBrowser.openDatabase({ name: 'sql-corrupt', create: true }) }
+          catch (error) { code = error.code }
+          return { code, bytes: [...new Uint8Array(await (await file.getFile()).arrayBuffer())] }
+        })
+        assert.deepEqual(result, { code: 'DATABASE_ERROR', bytes: [9, 8, 7] })
+      } finally { await current.close() }
     })
 
     storageTest('worker executes scalar RQL and preserves exact integers and artifact state', async () => {

@@ -34,7 +34,7 @@ pub(super) fn query(sql: &str) -> Result<TableQuery, LocalReadError> {
     Ok(query)
 }
 
-pub(super) fn expressions(
+pub(crate) fn expressions(
     query: &TableQuery,
     columns: &[ResolvedColumnRule],
 ) -> Result<(), LocalReadError> {

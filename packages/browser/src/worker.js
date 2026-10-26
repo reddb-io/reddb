@@ -35,7 +35,7 @@ function synchronous(value) {
   return value
 }
 
-async function open(name, readDatabase = false) {
+async function open(name, sqlDatabase = false, create = false) {
   await initialize()
   if (artifact || database) throw error('INVALID_ARGUMENT', 'This worker already owns an open file')
   await new Promise((resolve, reject) => {
@@ -43,8 +43,15 @@ async function open(name, readDatabase = false) {
       if (!lock) throw error('FILE_BUSY', 'This artifact is already open in another worker or tab')
       try {
         const root = await navigator.storage.getDirectory()
-        const directory = await root.getDirectoryHandle('reddb-browser', { create: !readDatabase })
-        const file = await directory.getFileHandle(`${name}.rdb`, { create: !readDatabase })
+        const directory = await root.getDirectoryHandle('reddb-browser', { create: !sqlDatabase || create })
+        let file
+        let created = false
+        try { file = await directory.getFileHandle(`${name}.rdb`, { create: !sqlDatabase }) }
+        catch (failure) {
+          if (!sqlDatabase || !create || failure.name !== 'NotFoundError') throw failure
+          file = await directory.getFileHandle(`${name}.rdb`, { create: true })
+          created = true
+        }
         if (typeof file.createSyncAccessHandle !== 'function') {
           throw error('STORAGE_UNSUPPORTED', 'This browser does not support synchronous OPFS access in a dedicated worker')
         }
@@ -56,7 +63,9 @@ async function open(name, readDatabase = false) {
           truncate: (size) => synchronous(access.truncate(size)),
           flush: () => synchronous(access.flush()),
         }
-        if (readDatabase) database = wasm.BrowserDatabase.open(fileIo, name)
+        if (sqlDatabase) database = created
+          ? wasm.BrowserDatabase.create(fileIo, name, Date.now())
+          : wasm.BrowserDatabase.open(fileIo, name)
         else artifact = fileIo.getSize() === 0
             ? wasm.BrowserArtifact.create(fileIo, name, Date.now())
             : wasm.BrowserArtifact.open(fileIo, name)
@@ -64,7 +73,7 @@ async function open(name, readDatabase = false) {
         resolve()
         await lifetime
       } catch (failure) {
-        const reported = readDatabase && failure.name === 'NotFoundError'
+        const reported = sqlDatabase && failure.name === 'NotFoundError'
           ? error('DATABASE_NOT_FOUND', 'The local .rdb file does not exist') : failure
         reject(reported)
         throw reported
@@ -90,7 +99,10 @@ function bytes(value) {
 async function execute(method, params) {
   if (method === 'initialize' || method === 'info') return initialize()
   if (method === 'open') return open(params.name)
-  if (method === 'openDatabase') return open(params.name, true)
+  if (method === 'openDatabase') {
+    if (typeof params.create !== 'boolean') throw error('INVALID_ARGUMENT', 'Expected a boolean create option')
+    return open(params.name, true, params.create)
+  }
   if (method === 'validateQuery' || method === 'executeScalar') {
     await initialize()
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
@@ -103,9 +115,9 @@ async function execute(method, params) {
     return
   }
   if (database) {
-    if (method !== 'query') throw error('QUERY_UNSUPPORTED', 'This database handle exposes read-only SELECT')
+    if (method !== 'query') throw error('QUERY_UNSUPPORTED', 'This database handle exposes local SQL')
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
-    return database.query(params.sql)
+    return database.query(params.sql, Date.now())
   }
   switch (method) {
     case 'generation': return artifact.generation()

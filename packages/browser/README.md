@@ -1,7 +1,7 @@
 # RedDB Browser — persistence and query engine
 
 The `@reddb-io/browser` package runs the canonical Rust `.rdb` artifact publication/recovery code, RQL parser and shared
-scalar evaluator in a dedicated WebAssembly worker, persisting through a real
+query evaluator in a dedicated WebAssembly worker, persisting through a real
 OPFS sync access handle.
 Artifact storage requires a secure context, module workers, OPFS and Web Locks.
 The storage-independent runtime only needs module workers and WebAssembly.
@@ -12,10 +12,12 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-The source SDK now also exposes read-only SELECT over existing local table artifacts.
-SQL writes, five-model local transactions, synchronization, conflict resolution
-and forwarding between tabs remain pending. The published `0.1.0` package predates
-`openDatabase`; this API is available from the source build until the next browser release. It is published on the `latest` npm channel and does not replace the remote `@reddb-io/client`.
+The source SDK exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+and explicit BEGIN/COMMIT/ROLLBACK transactions. The published `0.1.0` package
+predates `openDatabase` and these SQL operations; use a source-built tarball
+until the next browser release. Other models, synchronization, conflict
+resolution and forwarding between tabs remain pending. The browser package
+does not replace the remote `@reddb-io/client`.
 
 ## Use from JS/TS
 
@@ -41,28 +43,42 @@ try {
 Consumers receive built JS/Worker/WASM assets and TypeScript declarations; they
 need no Rust toolchain. The commands below are for engine/package contributors.
 
-## Read local tables from JS/TS
+## Local table SQL from JS/TS
 
-The source API opens an **existing**, application-owned OPFS `.rdb` with its
-persisted collection contracts, snapshot and committed WAL:
+Use `create: true` to create a missing local database. Existing native `.rdb`
+artifacts recover their persisted collection contracts, snapshot and committed WAL.
 
 ```ts
 import { openDatabase } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 
-const database = await openDatabase({ name: 'my-app', worker: new RedDBWorker() })
+const database = await openDatabase({
+  name: 'my-app', create: true, worker: new RedDBWorker(),
+})
 try {
-  const result = await database.query(
-    'SELECT rid, name, total FROM people WHERE total >= 10 ORDER BY total DESC LIMIT 20'
-  )
-  console.log(result.columns, result.rows)
+  await database.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+  await database.query('BEGIN')
+  await database.query("INSERT INTO notes VALUES (1, 'Offline'), (2, 'Temporary')")
+  await database.query("UPDATE notes SET body = 'Saved offline' WHERE id = 1")
+  await database.query('DELETE FROM notes WHERE id = 2')
+  await database.query('COMMIT')
+  console.log(await database.query('SELECT id, body FROM notes ORDER BY id'))
 } finally { await database.close() }
 ```
 
-This handle is read-only. It uses the same exclusive Web Lock/OPFS handle as
-`openArtifact`; a second owner receives `FILE_BUSY`. It does not create a missing
-file (`DATABASE_NOT_FOUND`), infer a missing catalog, append SQL to the WAL or
-checkpoint on close. `openArtifact` retains its separate low-level binary API.
+The example inserts fixed primary keys; subsequent runs should supply new IDs
+or update the existing records. The handle uses the same exclusive Web Lock/OPFS
+ownership as `openArtifact`; a second owner receives `FILE_BUSY`. Without
+`create: true`, missing files return `DATABASE_NOT_FOUND`. Corrupt existing files
+and missing/corrupt catalogs are errors, never recreated or inferred from rows.
+
+Mutations return `{ columns: ['affectedRows'], rows: [[count]] }`. A statement
+publishes only after all rows pass the shared schema, defaults, generated-field,
+CHECK and uniqueness rules. Inside BEGIN, reads see the handle's staged writes;
+COMMIT publishes them together. ROLLBACK, close or worker termination discard
+uncommitted changes. Statement errors abort an explicit transaction until
+ROLLBACK. Ambiguous storage failures fence the handle until reopen. Savepoints
+and explicit isolation options are not exposed by this single-owner API.
 
 Supported: one named table, aliases, `*`, literals, columns and JSON paths,
 arithmetic/casts/CASE, nullable predicates, source-expression ORDER BY with native
@@ -72,18 +88,24 @@ COALESCE, ABS, JSON_PARSE, JSON_EXTRACT/JSON_EXTRACT_TEXT and CONTAINS. Unknown
 fields/functions are rejected even on empty tables. Functions and operators use
 the canonical Rust evaluators; exact values retain `reddb-json-v1` tags.
 
-Writes, parameters, DISTINCT, grouping/aggregates, windows, joins/subqueries,
+Parameters, DISTINCT, grouping/aggregates, windows, joins/subqueries,
 universal/system sources, other collection models, TTL and retention are rejected
 explicitly. Materialization is capped at 100,000 visible source rows, independently
 of LIMIT. Superseded and moderated rows use the shared committed-scan visibility;
 secret values in `SELECT *` keep the canonical redacted JSON representation.
+Writes currently require ordinary table contracts without AI/event policies,
+context indexes or encrypted columns. RETURNING, ON CONFLICT, UPDATE LIMIT and
+compound assignment syntax are rejected. Transactions admit at most 100,000
+pending row actions. DML commits use the native WAL batch; catalog changes use
+one complete native snapshot publication. BEGIN copies the committed resident
+image, so transaction startup costs memory proportional to the local database.
 
 The embedding application owns this local file and its origin. This API does not
 establish a server user/tenant session or replay server RLS policies: export only
 the authorized subset into an application-owned file. Import a native `.rdb` into
 `navigator.storage.getDirectory()/reddb-browser/<name>.rdb` under the same
 `reddb-browser:<name>` Web Lock before opening it. Keep native binary bytes intact;
-no format translation is needed. SQL creation/writes through JS/TS are a later step.
+no format translation is needed. Newly created browser databases use the same format.
 
 ## Shared runtime and language interop
 
@@ -103,7 +125,8 @@ try {
 The versioned Worker/WASM contract reports `abiVersion: 1`,
 `valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
 and `scalarQueries` are true. Source builds also report `storedQueries: true`
-with `storedQueryMode: 'read-only-tables'`; `transactions` and `sync` remain false.
+with `storedQueryMode: 'read-write-tables'`, `sqlWrites: true` and
+`transactions: true`; `sync` remains false.
 Capabilities describe the engine, not the operations exposed by a particular handle. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
 opening storage. Cache the JS, Worker and WASM as one versioned unit.
 
@@ -170,8 +193,8 @@ adapter supplies file locks, encryption and its WAL writer through a synchronous
 barrier; portable pagers without a WAL reject nonzero page LSNs. Shared native/WASM
 fixtures cover failed allocation fences and WAL barriers. The OPFS restart fixture
 uses this complete pager and verifies checkpoint completion through another fresh
-pager. The production JS/TS API is unchanged: storage-backed queries, local
-transactions, runtime WAL/MVCC integration and encryption qualification remain pending.
+pager. Those page-level fixtures are distinct from the public local SQL API
+described above; encryption and concurrent multi-connection qualification remain pending.
 Native differential tests additionally compare
 the scalar corpus to actual `RedDBRuntime` query results.
 
@@ -239,8 +262,8 @@ HTTPS or a trusted localhost context is required for OPFS and Web Locks.
 The browser suite includes a test host's service worker and restarts the entire
 browser with networking disabled. It reloads the JS/worker/WASM assets, recovers
 OPFS data, writes again and executes a scalar query without reaching the HTTP
-host. This verifies the current artifact/scalar surface offline; storage-backed
-queries and application transactions still require the engine work below.
+host. Installed TS/Vite consumers additionally create tables and run CRUD,
+commit and rollback across two offline browser restarts with the HTTP listener stopped.
 
 ## Shared transaction state
 
@@ -254,10 +277,9 @@ serializable row/vault predicates with tenant separation. On Chromium/Firefox,
 the test host also caches this separate conformance artifact and reruns the suite
 after a full offline browser restart with the HTTP listener stopped.
 
-These are volatile engine assertions in a test-only WASM artifact. They do not
-expose transactions through the JS/TS SDK or qualify durable browser transaction
-recovery. Storage-backed dispatch, write conflict validation, WAL publication and
-recovery still require the runtime integration below.
+These are volatile engine assertions in a test-only WASM artifact. The public
+SDK uses exclusive single-owner transactions as described above; it does not
+expose this full native concurrent-MVCC/savepoint surface.
 
 ## Shared entities and read visibility
 
@@ -325,10 +347,9 @@ materializes full/projected records from its persisted entities after restart
 and verifies their fields before native export. Native integration compares
 shared records with actual stored-data query results after dump and paged reopen.
 
-These are internal/test-only engine paths. The public JS/TS API still exposes
-artifact operations and storage-free scalar SELECTs; stored-data dispatch,
-durable runtime transactions/WAL and application collection catalogs remain
-unfinished. No file format, wire envelope or public browser API changes here.
+These are internal/test-only extraction fixtures. Public local table SQL now
+uses the shared materialization, query and publication paths described above.
+Other collection models remain pending in the public SDK.
 
 ## Shared resident collection storage
 
@@ -361,8 +382,8 @@ invalid counts/tags/UTF-8, nesting at the RQL depth limit, checksum failures,
 legacy optional tails and host callback errors. Metadata nesting above the existing
 RQL JSON limit is now rejected; previously the native metadata reader was unbounded.
 The native host retains collection/index restoration, ID allocation and WAL policy.
-These internal recovery primitives do not yet expose stored-data queries or
-application transactions through the browser SDK.
+The public local table SQL API now builds on these recovery primitives; the
+internal fixtures remain separate from application entrypoints.
 
 ## Remaining work toward the approved Browser design
 

@@ -5,7 +5,7 @@ import { createRuntime, createInteropRuntime, BrowserError } from '../src/index.
 const info = {
   abiVersion: 1,
   valueEncoding: 'reddb-json-v1',
-  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-only-tables', transactions: false, sync: false },
+  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, sync: false },
 }
 class ScriptedWorker {
   messages = []

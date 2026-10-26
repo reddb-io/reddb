@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; shared native/WASM storage and query core; public read-only table SELECT in source builds; SQL writes, application transactions and sync pending
+Status: accepted architecture; shared native/WASM storage and query core; public local table SQL and single-owner transactions in source builds; other models and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -1311,3 +1311,50 @@ plus unsafe-API warnings on that transitive binding. The audit configuration
 and gRPC compression contract are unchanged. Landing this integration requires
 an upstream Tonic update or a separately reviewed compatibility patch/fork;
 the source API and browser tests do not imply that this dependency gate passed.
+
+
+## Local table SQL and single-owner transaction integration
+
+Source builds expose `openDatabase({ name, create?: boolean, worker? })` and
+`query(sql)` for CREATE TABLE, SELECT, INSERT, UPDATE, DELETE and plain
+BEGIN/COMMIT/ROLLBACK. Creation is explicit and never repairs a corrupt existing
+file. The parser, table contract builder, schema/default/generated/CHECK/unique
+rules, visible scans, expression evaluation and artifact formats are shared with
+native Rust. Native DDL calls the same table-contract builder with its host clock;
+portable table definitions accept an explicit Unix-seconds creation timestamp.
+
+The exclusively locked worker is the complete session boundary. Autocommit DML
+prepares every row and validates the final unique-key set before publishing one
+native WAL batch. BEGIN reconstructs a private resident snapshot. Transaction
+reads observe that private state, and all row actions publish together on COMMIT.
+A statement error aborts the transaction until ROLLBACK; close/worker death drops
+uncommitted state. Ambiguous I/O fences reads and writes until recovery.
+
+Catalog changes cannot be split from row publication: CREATE TABLE stages the
+collection and authoritative contract together, then publishes one complete
+canonical snapshot root. A transaction containing DDL commits its entire private
+catalog/data snapshot with the same root barriers. This extends no persisted WAL
+codec and introduces no second storage system. Existing formats remain readable
+by native file/query APIs. Tests interrupt each write/flush of both row-only WAL
+commit and catalog/data snapshot commit, accepting only complete old/new states.
+
+This API supplies single-owner transactions, not the complete native concurrent
+MVCC/savepoint surface. It rejects explicit isolation options, savepoints, other
+models, TTL/retention, AI/event effects, context indexes and encrypted writes.
+SELECT restrictions from the initial table surface remain. Transaction pending
+row actions and visible source tables are capped at 100,000 independently of
+query pagination. Compiled capabilities report read-write-tables, sqlWrites and
+transactions true; storage-independent and foreign-language handles remain scalar
+only. Published npm 0.1.0 and the public playground predate this source API.
+
+Cost sketch: autocommit scans O(N) candidates for uniqueness and emits O(changed
+row bytes) through the native WAL; BEGIN copies O(database snapshot bytes) once;
+DDL commits write O(database snapshot bytes). Ordinary transaction commits emit
+one O(pending row bytes) WAL batch. No measured performance improvement is claimed.
+
+Production package tests create databases and run CRUD, commit and rollback from
+installed TypeScript/Vite consumers in Chromium and Firefox. Two full offline
+browser restarts with the HTTP listener stopped verify both offline writes and
+their subsequent recovery. Public SDK tests also terminate a worker with an open
+transaction and verify that only committed rows survive, and preserve corrupt
+existing artifacts even with create enabled.

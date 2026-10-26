@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "RedDB browser persistence, scalar execution and read-only local table SELECT; SQL writes and sync remain pending.",
+  "description": "RedDB local browser table SQL, transactions and offline OPFS persistence through a shared Rust/WASM engine.",
   "exports": {
     ".": {
       "types": "./src/index.d.ts",

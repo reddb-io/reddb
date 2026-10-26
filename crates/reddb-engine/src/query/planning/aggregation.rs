@@ -614,6 +614,11 @@ pub fn visible_aggregate_output_name(projection: &Projection) -> Option<(String,
 
 const DEPTH_ERROR: &str = "aggregate query exceeds maximum nesting depth";
 
+/// Bound a source expression before a local mutation clones or evaluates it.
+pub fn validate_expression_depth(expression: &Expr) -> Result<(), &'static str> {
+    validate_nodes([Node::Expr(expression)])
+}
+
 /// Bound the AST paths this planner and native admission recursively lower,
 /// render or clone. Opaque subquery bodies and nested literal containers retain
 /// the existing host parser/value admission limits, as does source resolution.

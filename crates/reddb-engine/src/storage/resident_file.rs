@@ -182,6 +182,25 @@ impl<F: VfsFile> EmbeddedResidentStore<F> {
         Ok(())
     }
 
+    /// Publish an exclusively staged catalog/data image with the canonical
+    /// snapshot root barriers. The live resident changes only after durability.
+    pub fn publish_snapshot(&mut self, snapshot: &[u8]) -> Result<(), StoreError> {
+        self.check_healthy()?;
+        let resident = ResidentStore::from_snapshot(
+            snapshot,
+            &self.manager_config,
+            self.auto_index_refs,
+            self.max_cross_refs,
+        )
+        .map_err(StoreError::Serialization)?
+        .0;
+        self.failed = true;
+        self.file.write_snapshot(snapshot, 0).map_err(file_error)?;
+        self.resident = resident;
+        self.failed = false;
+        Ok(())
+    }
+
     /// Read a physical record; query visibility is supplied by the host.
     pub fn get(
         &self,

@@ -47,7 +47,7 @@ window.result = (async () => {
   const runtime = await createRuntime({ worker: new RedDBWorker() })
   try {
     const info = await runtime.info()
-    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-only-tables') throw new Error('Incorrect runtime capabilities')
+    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-write-tables') throw new Error('Incorrect runtime capabilities')
     const result = await runtime.executeScalar('SELECT 6 * 7 AS answer')
     if (result.rows[0][0] !== 42) throw new Error('Incorrect scalar result')
   } finally { await runtime.close() }
@@ -72,10 +72,34 @@ window.result = (async () => {
     await writer.close()
   }
   const database = await openDatabase({ name: 'packed-query', worker: new RedDBWorker() })
+  let stored
   try {
-    const stored = await database.query('SELECT rid, name, total FROM people WHERE rid IN (2, 9007199254740993) ORDER BY total DESC')
-    return { before, scalar, stored }
+    stored = await database.query('SELECT rid, name, total FROM people WHERE rid IN (2, 9007199254740993) ORDER BY total DESC')
   } finally { await database.close() }
+  const local = await openDatabase({ name: 'packed-local', create: true, worker: new RedDBWorker() })
+  let failure
+  const queryLocal = async (sql: string) => {
+    try { return await local.query(sql) }
+    catch (error) { throw new Error(sql + ': ' + String(error)) }
+  }
+  try {
+    await queryLocal('CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT NOT NULL, revision INTEGER DEFAULT = 0)')
+    const localBefore = await queryLocal('SELECT id, title, revision FROM todos ORDER BY id')
+    await queryLocal('BEGIN')
+    if (!localBefore.rows.length) await queryLocal("INSERT INTO todos (id, title) VALUES (1, 'Keep offline'), (2, 'Delete me')")
+    const updated = await queryLocal('UPDATE todos SET revision = revision + 1 WHERE id = 1')
+    if (updated.rows[0][0] !== 1) throw new Error('Incorrect SQL affected row count')
+    await queryLocal('DELETE FROM todos WHERE id = 2')
+    await queryLocal('COMMIT')
+    await queryLocal('BEGIN')
+    await queryLocal("INSERT INTO todos (id, title) VALUES (99, 'Rollback')")
+    await queryLocal('ROLLBACK')
+    const created = await queryLocal('SELECT id, title, revision FROM todos ORDER BY id')
+    await queryLocal('BEGIN')
+    await queryLocal("UPDATE todos SET title = 'must not survive close'")
+    return { before, scalar, stored, localBefore, created }
+  } catch (error) { failure = error; throw error }
+  finally { try { await local.close() } catch (error) { if (!failure) throw error } }
 })()
 `)
   const tsc = resolve(packageRoot, 'node_modules/typescript/bin/tsc')
@@ -114,13 +138,14 @@ after(async () => {
 })
 
 for (const [name, browser] of Object.entries({ chromium, firefox })) {
-  test(`${name}: installed npm tarball builds in TypeScript/Vite and reopens OPFS offline`, async () => {
+  test(`${name}: installed TS/Vite package creates, mutates, commits and recovers entirely offline`, async () => {
     const profile = resolve(temporary, `${name}-profile`)
     let context = await browser.launchPersistentContext(profile, { headless: true })
     try {
       let page = await context.newPage()
       await page.goto(origin)
-      assert.deepEqual(await page.evaluate(() => window.result), { before: [], scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] } })
+      const expected = (boot) => ({ before: Array.from({ length: boot - 1 }, (_, index) => [index + 1]), scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] }, localBefore: { columns: ['id', 'title', 'revision'], rows: boot === 1 ? [] : [[1, 'Keep offline', boot - 1]] }, created: { columns: ['id', 'title', 'revision'], rows: [[1, 'Keep offline', boot]] } })
+      assert.deepEqual(await page.evaluate(() => window.result), expected(1))
       await page.evaluate(() => navigator.serviceWorker.register('/offline.js'))
       await page.waitForFunction(() => navigator.serviceWorker.controller)
       await context.close()
@@ -128,10 +153,13 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
       await new Promise((resolve) => server.close(resolve))
       try {
         const before = requests
-        context = await browser.launchPersistentContext(profile, { headless: true, offline: true })
-        page = await context.newPage()
-        await page.goto(origin)
-        assert.deepEqual(await page.evaluate(() => window.result), { before: [[1]], scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] } })
+        for (const boot of [2, 3]) {
+          context = await browser.launchPersistentContext(profile, { headless: true, offline: true })
+          page = await context.newPage()
+          await page.goto(origin)
+          assert.deepEqual(await page.evaluate(() => window.result), expected(boot))
+          await context.close()
+        }
         assert.equal(requests, before, 'offline consumer must not reach the HTTP host')
       } finally {
         server.listen(port, '127.0.0.1')

@@ -18,7 +18,7 @@ use reddb_rql::ast::{Expr, FieldRef, Filter, Projection, TableQuery};
 use reddb_types::Value;
 use std::cell::RefCell;
 
-pub(super) struct ReadHost<'a> {
+pub(crate) struct ReadHost<'a> {
     query: &'a TableQuery,
     columns: &'a [ResolvedColumnRule],
     projections: &'a [Projection],
@@ -27,7 +27,7 @@ pub(super) struct ReadHost<'a> {
     error: RefCell<Option<EvalError>>,
 }
 impl<'a> ReadHost<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         query: &'a TableQuery,
         columns: &'a [ResolvedColumnRule],
         projections: &'a [Projection],
@@ -43,7 +43,11 @@ impl<'a> ReadHost<'a> {
             error: RefCell::new(None),
         }
     }
-    fn evaluate(&self, expression: &Expr, record: &UnifiedRecord) -> Result<Value, EvalError> {
+    pub(crate) fn evaluate(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Value, EvalError> {
         evaluator::evaluate(expression, &|field: &FieldRef| {
             resolve_filter_row_value(
                 record,

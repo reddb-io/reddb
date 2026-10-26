@@ -20,8 +20,8 @@ use super::{
     scalar::ScalarResult,
 };
 
-mod admission;
-mod host;
+pub(crate) mod admission;
+pub(crate) mod host;
 
 /// Bound materialization before cloning records, independently of SQL LIMIT.
 pub const LOCAL_READ_ROWS_MAX: usize = 100_000;
@@ -104,85 +104,90 @@ impl<F: VfsFile> LocalReadDatabase<F> {
     }
 
     pub fn query(&self, sql: &str) -> Result<ScalarResult, LocalReadError> {
-        let query = admission::query(sql)?;
-        let contract = self.contracts.get(&query.table).ok_or_else(|| {
-            LocalReadError::Catalog(format!(
-                "no persisted collection contract for {}",
-                query.table
-            ))
-        })?;
-        if contract.declared_model != CollectionModel::Table
-            || contract.default_ttl_ms.is_some()
-            || contract.retention_duration_ms.is_some()
-        {
+        query_resident(self.store.committed_resident()?, &self.contracts, sql)
+    }
+}
+
+pub(crate) fn query_resident(
+    resident: &crate::storage::resident_store::ResidentStore,
+    contracts: &HashMap<String, CollectionContract>,
+    sql: &str,
+) -> Result<ScalarResult, LocalReadError> {
+    let query = admission::query(sql)?;
+    let contract = contracts.get(&query.table).ok_or_else(|| {
+        LocalReadError::Catalog(format!(
+            "no persisted collection contract for {}",
+            query.table
+        ))
+    })?;
+    if contract.declared_model != CollectionModel::Table
+        || contract.default_ttl_ms.is_some()
+        || contract.retention_duration_ms.is_some()
+    {
+        return Err(LocalReadError::Unsupported(
+            "local SELECT currently requires a table without TTL or retention",
+        ));
+    }
+    let columns = crate::catalog::schema::resolved_contract_columns(contract)
+        .map_err(|error| LocalReadError::Catalog(error.to_string()))?;
+    admission::expressions(&query, &columns)?;
+    let manager = resident
+        .get_collection(&query.table)
+        .ok_or_else(|| LocalReadError::Catalog(format!("collection {} is missing", query.table)))?;
+    let mut entities = Vec::new();
+    let mut exceeded = false;
+    manager.scan_for_each(None, |entity| {
+        if entities.len() == LOCAL_READ_ROWS_MAX {
+            exceeded = true;
+            return false;
+        }
+        entities.push(entity.clone());
+        true
+    });
+    if exceeded {
+        return Err(LocalReadError::ResourceLimit);
+    }
+    let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
+    let mut records = Vec::with_capacity(entities.len());
+    for entity in entities {
+        if !matches!(entity.data, EntityData::Row(_)) {
             return Err(LocalReadError::Unsupported(
-                "local SELECT currently requires a table without TTL or retention",
+                "local table contains non-row entities",
             ));
         }
-        let columns = crate::catalog::schema::resolved_contract_columns(contract)
-            .map_err(|error| LocalReadError::Catalog(error.to_string()))?;
-        admission::expressions(&query, &columns)?;
-        let resident = self.store.committed_resident()?;
-        let manager = resident.get_collection(&query.table).ok_or_else(|| {
-            LocalReadError::Catalog(format!("collection {} is missing", query.table))
-        })?;
-        let mut entities = Vec::new();
-        let mut exceeded = false;
-        manager.scan_for_each(None, |entity| {
-            if entities.len() == LOCAL_READ_ROWS_MAX {
-                exceeded = true;
-                return false;
-            }
-            entities.push(entity.clone());
-            true
-        });
-        if exceeded {
-            return Err(LocalReadError::ResourceLimit);
+        if manager.get_metadata(entity.id).is_some_and(|metadata| {
+            metadata.has(INTERNAL_TTL_SECONDS_KEY)
+                || metadata.has(INTERNAL_TTL_MILLIS_KEY)
+                || metadata.has(INTERNAL_EXPIRES_AT_KEY)
+        }) {
+            return Err(LocalReadError::Unsupported(
+                "local SELECT does not yet admit row TTL metadata",
+            ));
         }
-        let schema =
-            std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
-        let mut records = Vec::with_capacity(entities.len());
-        for entity in entities {
-            if !matches!(entity.data, EntityData::Row(_)) {
-                return Err(LocalReadError::Unsupported(
-                    "local table contains non-row entities",
-                ));
-            }
-            if manager.get_metadata(entity.id).is_some_and(|metadata| {
-                metadata.has(INTERNAL_TTL_SECONDS_KEY)
-                    || metadata.has(INTERNAL_TTL_MILLIS_KEY)
-                    || metadata.has(INTERNAL_EXPIRES_AT_KEY)
-            }) {
-                return Err(LocalReadError::Unsupported(
-                    "local SELECT does not yet admit row TTL metadata",
-                ));
-            }
-            if let Some(record) = super::records::runtime_table_record_from_entity_ref_with_schema(
-                &entity,
-                Some(&schema),
-            ) {
-                records.push(record);
-            }
+        if let Some(record) =
+            super::records::runtime_table_record_from_entity_ref_with_schema(&entity, Some(&schema))
+        {
+            records.push(record);
         }
-        let projections = reddb_rql::sql_lowering::effective_table_projections(&query);
-        let host = host::ReadHost::new(&query, &columns, &projections, records);
-        let plan = build_table_plan_with_host(&host, &query);
-        let records = execute_table_plan_with_host(&host, &plan, &query)?;
-        let columns = projected_columns(&records, &projections);
-        let rows = records
-            .iter()
-            .map(|record| {
-                columns
-                    .iter()
-                    .map(|column| {
-                        record
-                            .get(column)
-                            .cloned()
-                            .unwrap_or(reddb_types::Value::Null)
-                    })
-                    .collect()
-            })
-            .collect();
-        Ok(ScalarResult { columns, rows })
     }
+    let projections = reddb_rql::sql_lowering::effective_table_projections(&query);
+    let host = host::ReadHost::new(&query, &columns, &projections, records);
+    let plan = build_table_plan_with_host(&host, &query);
+    let records = execute_table_plan_with_host(&host, &plan, &query)?;
+    let columns = projected_columns(&records, &projections);
+    let rows = records
+        .iter()
+        .map(|record| {
+            columns
+                .iter()
+                .map(|column| {
+                    record
+                        .get(column)
+                        .cloned()
+                        .unwrap_or(reddb_types::Value::Null)
+                })
+                .collect()
+        })
+        .collect();
+    Ok(ScalarResult { columns, rows })
 }

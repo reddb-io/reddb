@@ -1,4 +1,4 @@
-/** Persistence, scalar execution and read-only SELECT over local table artifacts. */
+/** Local table SQL, transactions and persistence in browser-owned OPFS artifacts. */
 export class BrowserError extends Error {
   readonly code: string
   constructor(code: string, message: string)
@@ -11,7 +11,8 @@ export interface RuntimeInfo {
     readonly queryValidation: boolean
     readonly scalarQueries: boolean
     readonly storedQueries: boolean
-    readonly storedQueryMode: 'read-only-tables'
+    readonly storedQueryMode: 'read-write-tables'
+    readonly sqlWrites: boolean
     readonly transactions: boolean
     readonly sync: boolean
   }
@@ -64,14 +65,16 @@ export function openArtifact(options: {
 }): Promise<Artifact>
 
 export interface Database extends Runtime {
-  /** Read-only table SELECT; unsupported clauses fail with QUERY_UNSUPPORTED. */
+  /** SELECT and table SQL mutations; mutations return an affectedRows column. */
   query(sql: string): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Release exclusive ownership of the local file and terminate its worker. */
   close(): Promise<void>
 }
 
-/** Recover an existing OPFS .rdb; does not create files or expose SQL mutations. */
+/** Recover an OPFS .rdb. Creation is explicit; corrupt existing files are preserved. */
 export function openDatabase(options: {
   name: string
+  /** Create a missing database. Defaults to false. */
+  create?: boolean
   worker?: Worker
 }): Promise<Database>

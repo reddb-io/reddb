@@ -126,7 +126,8 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-async function openFile({ name, worker } = {}, method = 'open') {
+async function openFile({ name, worker, create = false } = {}, method = 'open') {
+  if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
@@ -137,10 +138,10 @@ async function openFile({ name, worker } = {}, method = 'open') {
   try {
     const info = await client.ready
     if (method === 'openDatabase' && (info.capabilities.storedQueries !== true
-      || info.capabilities.storedQueryMode !== 'read-only-tables')) {
-      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SELECT')
+      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions)) {
+      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL and transactions')
     }
-    await client.call(method, { name })
+    await client.call(method, method === 'openDatabase' ? { name, create } : { name })
   }
   catch (error) { client.shutdown(error); throw error }
   return client
@@ -161,7 +162,7 @@ export async function openArtifact(options) {
   }
 }
 
-/** Read-only table SELECT over an existing local .rdb snapshot and committed WAL. */
+/** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
 export async function openDatabase(options) {
   const client = await openFile(options, 'openDatabase')
   return {

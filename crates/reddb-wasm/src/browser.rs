@@ -16,8 +16,9 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "queryValidation": true,
             "scalarQueries": true,
             "storedQueries": true,
-            "storedQueryMode": "read-only-tables",
-            "transactions": false,
+            "storedQueryMode": "read-write-tables",
+            "sqlWrites": true,
+            "transactions": true,
             "sync": false,
         })
     });
@@ -170,11 +171,11 @@ pub struct BrowserArtifact {
     file: EmbeddedRdbFile<BrowserFile>,
 }
 
-/// Read-only local SELECT over the same canonical snapshot/WAL recovery path.
+/// Local SQL over the same canonical snapshot/WAL publication and recovery path.
 /// The worker retains the exclusive OPFS handle until this wrapper is freed.
 #[wasm_bindgen]
 pub struct BrowserDatabase {
-    database: reddb_engine::query::local_read::LocalReadDatabase<BrowserFile>,
+    database: reddb_engine::query::local_database::LocalDatabase<BrowserFile>,
 }
 
 fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> JsValue {
@@ -188,7 +189,7 @@ fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> 
 #[wasm_bindgen]
 impl BrowserDatabase {
     pub fn open(handle: SyncFile, name: &str) -> Result<BrowserDatabase, JsValue> {
-        let database = reddb_engine::query::local_read::LocalReadDatabase::open(
+        let database = reddb_engine::query::local_database::LocalDatabase::open(
             BrowserFile::new(handle),
             name,
         )
@@ -196,8 +197,21 @@ impl BrowserDatabase {
         Ok(Self { database })
     }
 
-    pub fn query(&self, sql: &str) -> Result<JsValue, JsValue> {
-        let result = self.database.query(sql).map_err(local_query_error)?;
+    pub fn create(handle: SyncFile, name: &str, now_ms: f64) -> Result<BrowserDatabase, JsValue> {
+        let database = reddb_engine::query::local_database::LocalDatabase::create(
+            BrowserFile::new(handle),
+            name,
+            exact_integer(now_ms).map_err(js_error)?,
+        )
+        .map_err(local_query_error)?;
+        Ok(Self { database })
+    }
+
+    pub fn query(&mut self, sql: &str, now_ms: f64) -> Result<JsValue, JsValue> {
+        let result = self
+            .database
+            .query(sql, exact_integer(now_ms).map_err(js_error)?)
+            .map_err(local_query_error)?;
         js_sys::JSON::parse(&result.to_json().to_string_compact())
     }
 }
