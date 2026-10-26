@@ -108,18 +108,25 @@ pub fn runtime_partial_cmp(
 
 pub fn runtime_exact_integer_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
-        (Value::Integer(left), Value::Integer(right)) => Some(left.cmp(right)),
+        (
+            Value::Integer(left) | Value::BigInt(left),
+            Value::Integer(right) | Value::BigInt(right),
+        ) => Some(left.cmp(right)),
         (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => Some(left.cmp(right)),
-        (Value::Integer(left), Value::UnsignedInteger(right)) => Some(if *left < 0 {
-            Ordering::Less
-        } else {
-            (*left as u64).cmp(right)
-        }),
-        (Value::UnsignedInteger(left), Value::Integer(right)) => Some(if *right < 0 {
-            Ordering::Greater
-        } else {
-            left.cmp(&(*right as u64))
-        }),
+        (Value::Integer(left) | Value::BigInt(left), Value::UnsignedInteger(right)) => {
+            Some(if *left < 0 {
+                Ordering::Less
+            } else {
+                (*left as u64).cmp(right)
+            })
+        }
+        (Value::UnsignedInteger(left), Value::Integer(right) | Value::BigInt(right)) => {
+            Some(if *right < 0 {
+                Ordering::Greater
+            } else {
+                left.cmp(&(*right as u64))
+            })
+        }
         _ => None,
     }
 }

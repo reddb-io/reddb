@@ -62,6 +62,7 @@
 
 use std::sync::Arc;
 
+use super::runtime::values::runtime_exact_integer_cmp;
 use reddb_rql::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use reddb_types::coerce::coerce_via_catalog;
 use reddb_types::coercion_spine;
@@ -286,6 +287,25 @@ fn eval_binary(op: BinOp, lhs: &Expr, rhs: &Expr, row: &dyn Row) -> Result<Value
 
     if l.is_null() || r.is_null() {
         return Ok(Value::Null);
+    }
+
+    // Compare integer representations before numeric promotion can round large
+    // values or reject a u64 that exceeds the signed range.
+    if matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    ) {
+        if let Some(order) = runtime_exact_integer_cmp(&l, &r) {
+            return Ok(Value::Boolean(match op {
+                BinOp::Eq => order.is_eq(),
+                BinOp::Ne => !order.is_eq(),
+                BinOp::Lt => order.is_lt(),
+                BinOp::Le => !order.is_gt(),
+                BinOp::Gt => order.is_gt(),
+                BinOp::Ge => !order.is_lt(),
+                _ => unreachable!("integer comparison operator was admitted"),
+            }));
+        }
     }
 
     let lhs_dt = l.data_type();
@@ -532,6 +552,9 @@ where
 /// the values aren't comparable — callers surface this as
 /// [`EvalError::OperatorMismatch`].
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    if let Some(order) = runtime_exact_integer_cmp(a, b) {
+        return Some(order);
+    }
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => Some(x.cmp(y)),
         (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp(y)),
@@ -557,6 +580,9 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn values_equal(a: &Value, b: &Value) -> bool {
+    if let Some(order) = runtime_exact_integer_cmp(a, b) {
+        return order.is_eq();
+    }
     match (a, b) {
         (Value::Float(x), Value::Float(y)) => x == y,
         _ => a == b,
@@ -1306,6 +1332,76 @@ mod tests {
         );
         let v = evaluate(&expr, &empty_row()).unwrap();
         assert_eq!(v, Value::Float(40_000_000_005.0));
+    }
+
+    #[test]
+    fn integer_predicates_preserve_precision_across_signed_and_unsigned_boundaries() {
+        let mut values = Vec::new();
+        for number in [
+            i64::MIN,
+            -1,
+            0,
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+            i64::MAX,
+        ] {
+            values.push((Value::Integer(number), i128::from(number)));
+            values.push((Value::BigInt(number), i128::from(number)));
+        }
+        for number in [
+            0,
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+            i64::MAX as u64,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            values.push((Value::UnsignedInteger(number), i128::from(number)));
+        }
+        for (left, left_exact) in &values {
+            for (right, right_exact) in &values {
+                for (operator, expected) in [
+                    (BinOp::Eq, left_exact == right_exact),
+                    (BinOp::Ne, left_exact != right_exact),
+                    (BinOp::Lt, left_exact < right_exact),
+                    (BinOp::Le, left_exact <= right_exact),
+                    (BinOp::Gt, left_exact > right_exact),
+                    (BinOp::Ge, left_exact >= right_exact),
+                ] {
+                    let expression = binop(operator, lit(left.clone()), lit(right.clone()));
+                    assert_eq!(
+                        evaluate(&expression, &empty_row())
+                            .expect("integer comparison is supported"),
+                        Value::Boolean(expected),
+                        "{left:?} {operator:?} {right:?}"
+                    );
+                }
+                for negated in [false, true] {
+                    let expected = (*left_exact == *right_exact) != negated;
+                    let membership = Expr::InList {
+                        target: Box::new(lit(left.clone())),
+                        values: vec![lit(right.clone())],
+                        negated,
+                        span: Span::synthetic(),
+                    };
+                    let interval = Expr::Between {
+                        target: Box::new(lit(left.clone())),
+                        low: Box::new(lit(right.clone())),
+                        high: Box::new(lit(right.clone())),
+                        negated,
+                        span: Span::synthetic(),
+                    };
+                    for expression in [membership, interval] {
+                        assert_eq!(
+                            evaluate(&expression, &empty_row())
+                                .expect("integer predicate is supported"),
+                            Value::Boolean(expected),
+                            "{expression:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

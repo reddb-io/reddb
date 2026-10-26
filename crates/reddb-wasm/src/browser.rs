@@ -15,8 +15,10 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
         "capabilities": reddb_engine::json!({
             "queryValidation": true,
             "scalarQueries": true,
-            "storedQueries": false,
-            "transactions": false,
+            "storedQueries": true,
+            "storedQueryMode": "read-write-tables",
+            "sqlWrites": true,
+            "transactions": true,
             "sync": false,
         })
     });
@@ -167,6 +169,51 @@ impl VfsFile for BrowserFile {
 #[wasm_bindgen]
 pub struct BrowserArtifact {
     file: EmbeddedRdbFile<BrowserFile>,
+}
+
+/// Local SQL over the same canonical snapshot/WAL publication and recovery path.
+/// The worker retains the exclusive OPFS handle until this wrapper is freed.
+#[wasm_bindgen]
+pub struct BrowserDatabase {
+    database: reddb_engine::query::local_database::LocalDatabase<BrowserFile>,
+}
+
+fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> JsValue {
+    let result = Error::new(&error.to_string());
+    match js_sys::Reflect::set(&result, &"code".into(), &error.code().into()) {
+        Ok(_) => result.into(),
+        Err(error) => error,
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserDatabase {
+    pub fn open(handle: SyncFile, name: &str) -> Result<BrowserDatabase, JsValue> {
+        let database = reddb_engine::query::local_database::LocalDatabase::open(
+            BrowserFile::new(handle),
+            name,
+        )
+        .map_err(local_query_error)?;
+        Ok(Self { database })
+    }
+
+    pub fn create(handle: SyncFile, name: &str, now_ms: f64) -> Result<BrowserDatabase, JsValue> {
+        let database = reddb_engine::query::local_database::LocalDatabase::create(
+            BrowserFile::new(handle),
+            name,
+            exact_integer(now_ms).map_err(js_error)?,
+        )
+        .map_err(local_query_error)?;
+        Ok(Self { database })
+    }
+
+    pub fn query(&mut self, sql: &str, now_ms: f64) -> Result<JsValue, JsValue> {
+        let result = self
+            .database
+            .query(sql, exact_integer(now_ms).map_err(js_error)?)
+            .map_err(local_query_error)?;
+        js_sys::JSON::parse(&result.to_json().to_string_compact())
+    }
 }
 
 #[wasm_bindgen]

@@ -36,6 +36,11 @@ impl TableDef {
             .unwrap_or_default()
             .as_secs();
 
+        Self::new_at(name, now)
+    }
+
+    /// Create a definition with an explicit host clock (Unix seconds).
+    pub fn new_at(name: impl Into<String>, now: u64) -> Self {
         Self {
             name: name.into(),
             columns: Vec::new(),

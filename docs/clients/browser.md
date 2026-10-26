@@ -5,12 +5,65 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-The canonical `0.1.0` distribution exposes artifact
-persistence/recovery, RQL validation and storage-free scalar SELECT execution.
-Queries over stored collections, application transactions, observation and
-optional synchronization are still being integrated. `append` and `checkpoint`
-accept native binary WAL/snapshot payloads; they do not execute SQL or provide a
-save-game/CRUD API.
+The published `0.1.0` distribution exposes artifact persistence/recovery,
+RQL validation and storage-free scalar SELECT. Source builds additionally expose
+`openDatabase`, local table CRUD and single-owner SQL transactions. These additions
+are not yet published to npm. Other collection models, observation and optional
+synchronization remain pending. `append` and `checkpoint` retain their separate
+low-level binary API; applications use `database.query(sql)` for SQL.
+
+## Create and use a local database (source build)
+
+```ts
+import { openDatabase } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const database = await openDatabase({
+  name: 'my-app', create: true, worker: new RedDBWorker(),
+})
+try {
+  await database.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+  await database.query('BEGIN')
+  await database.query("INSERT INTO notes VALUES (1, 'Offline'), (2, 'Temporary')")
+  await database.query("UPDATE notes SET body = 'Saved offline' WHERE id = 1")
+  await database.query('DELETE FROM notes WHERE id = 2')
+  await database.query('COMMIT')
+  console.log(await database.query('SELECT id, body FROM notes ORDER BY id'))
+} finally { await database.close() }
+```
+
+This example inserts fixed IDs; later runs should update the records or use new
+IDs. `create: true` only initializes a missing file. Without it, a missing file
+returns `DATABASE_NOT_FOUND`. Existing files use canonical snapshot/WAL bytes
+and authoritative table contracts; corrupt files/catalogs are errors. SELECT
+never mutates the artifact. Native `.rdb` files can also be imported under the
+same Web Lock before opening. The handle owns its Worker and excludes other
+SQL/raw-artifact owners of the same database.
+
+Each mutation returns an `affectedRows` column. BEGIN stages changes privately,
+including table creation; reads on that handle see its own writes. COMMIT makes
+the batch durable, while ROLLBACK, close and worker termination discard staged
+changes. A statement error aborts an explicit transaction until ROLLBACK. An
+ambiguous I/O failure requires close/reopen to recover the committed state.
+This is one exclusively owned session, without concurrent connections, savepoints
+or explicit isolation options. BEGIN copies the committed resident image.
+
+This is local file-owner access. Apply server authorization and tenant/RLS
+filtering before exporting an authorized subset. The handle does not create a
+server identity or enforce server policies inside an untrusted origin.
+
+Table SELECT supports aliases, scalar projections, JSON paths, WHERE, source
+ORDER BY and literal LIMIT/OFFSET. Writes share native schema, defaults,
+generated columns, CHECK and uniqueness enforcement. Other collection models,
+TTL/retention, AI/events, context-index maintenance, encrypted writes, parameters,
+RETURNING/ON CONFLICT and advanced SELECT clauses remain unsupported. Each
+source table and transaction action list is bounded at 100,000 rows/actions.
+See the [source API reference](https://github.com/reddb-io/reddb/tree/main/packages/browser#local-table-sql-from-jsts)
+for admitted functions and exact-value/secret behavior.
+
+Cache the application, SDK, Worker and WASM together for offline startup.
+Installed TS/Vite package tests create and mutate tables across two complete
+offline browser restarts, with the HTTP listener stopped.
 
 ## Storage-independent runtime and other languages
 
@@ -19,7 +72,10 @@ For validation and scalar SELECTs without opening an OPFS file, use
 `validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
 Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
 `info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
-queries, transactions and sync currently report false.
+queries report true in source builds with `storedQueryMode: 'read-write-tables'`,
+`sqlWrites: true` and `transactions: true`; sync remains false. The published `0.1.0` runtime reports stored
+queries false. Capabilities describe the engine; storage-independent handles
+still expose only validation and scalar execution.
 
 The JSON-safe `createInteropRuntime` bridge is also used by source adapters for
 [Dart/Flutter Web](https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md)
@@ -126,7 +182,7 @@ and eviction policies apply. Applications can request persistent storage with
 
 | Package | Execution and storage |
 | --- | --- |
-| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; artifact/scalar surface |
+| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; source builds also expose local table CRUD and transactions |
 | `@reddb-io/client` | Remote RedDB connection, including its browser transport |
 | `@reddb-io/sdk` | Node.js/TS SDK with native embedded/runtime support |
 

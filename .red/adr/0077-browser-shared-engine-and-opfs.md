@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators, B-tree/pager, live MVCC and snapshot decoding shared; storage-backed runtime and sync pending
+Status: accepted architecture; shared native/WASM storage and query core; public local table SQL and single-owner transactions in source builds; other models and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -1242,3 +1242,130 @@ O(K*P), retaining O(K) bindings plus resolved expression trees; result insertion
 remains O(G*K). Structural admission and execution each prepare metadata once.
 There is no added network request, disk write or IPC, and no measured speedup
 is claimed.
+
+## Public read-only table SELECT
+
+Source JS/TS builds expose `openDatabase({ name, worker? })` and `query(sql)` over
+an existing OPFS artifact. `BrowserDatabase` delegates to
+`reddb-engine::query::local_read::LocalReadDatabase`, which owns the canonical
+`EmbeddedResidentStore` recovery controller and decodes its authoritative
+collection-contract blob once. Snapshot and committed WAL replay, entity scan
+visibility, record materialization, unary table planning/execution, projection,
+ordering and scalar evaluation retain their existing Rust authorities. There
+is no JavaScript evaluator, alternate snapshot or WAL codec. Native server
+hosts retain their current transaction, tenancy/RLS and secret policies.
+
+A canonical-expression callback in shared projection defaults to the original
+native lowering/fallback behavior. The local host supplies its admitted original
+SELECT expressions by projection index. This avoids reconstructing arithmetic
+as legacy MUL/ADD function calls while preserving checked evaluator failures.
+No native host opts into different evaluation behavior as part of this change.
+
+The first public stored-query surface is read-only, local file-owner access to
+one table: scalar projections, aliases/JSON paths, WHERE, source-expression
+ORDER BY, and literal LIMIT/OFFSET. Admission checks query shape and every
+expression before scanning, including empty tables. Unsupported statements,
+functions, parameters, grouping/windows/joins, DISTINCT, system/universal
+sources, other models and TTL/retention fail explicitly. Missing or corrupt
+catalogs are never inferred. Visible source materialization is bounded at
+100,000 rows independently of SQL LIMIT. Native committed scans hide superseded
+and moderated rows. Secret expressions are rejected; wildcard secret output
+retains canonical redaction. This API is not a server principal/tenant session:
+applications must export authorized subsets before offline file-owner access.
+
+Database and raw artifact handles share the exact same Web Lock and exclusive
+OPFS sync-handle lifetime. A missing database is not created; read-only open,
+SELECT and failed writes never append, checkpoint or alter file bytes. Mutation
+and transaction APIs are absent. Engine metadata reports storedQueries true
+with storedQueryMode read-only-tables; transactions and sync remain false.
+Storage-independent and foreign-language bridges retain their scalar-only
+operation lists. The published 0.1.0 package predates this source API; publishing
+another browser version is a separate release step.
+
+Native tests cover snapshot/WAL update/delete recovery, moderation/history,
+nullable and JSON fields, exact integers, data errors at each query phase,
+wide pages, unsupported empty-table queries and authoritative catalog errors.
+Real browser and installed TypeScript/Vite consumers import a native artifact
+and query it through production bindings after a full offline browser restart,
+with the HTTP listener stopped. Read-only bytes and exclusion of raw/SQL owners
+are checked through the public SDK; no test-only executor supplies the results.
+
+Cost sketch: open reconstructs O(snapshot + committed WAL) bytes once; each query
+walks physical source rows until exhaustion or its 100,001st visible candidate, retains
+O(N * row size + projection/order keys) memory and uses existing O(N log N) sort.
+Recovered resident state remains in the owning worker between queries. There
+is one worker request/response per query and no query-time file write, flush,
+network call or measured performance claim.
+
+The dependency audit for this integration exposed existing zstd advisories,
+including RUSTSEC-2026-0410 in the WebAssembly allocator shim. Direct RedDB
+compression users now require zstd 0.14.3 with zstd-safe 8.2.0 and zstd-sys
+2.1.2; workspace and standalone Node/Python locks retain that resolution.
+The bundled Zstandard library remains 1.5.7, with existing native
+compressed-frame/value/entity fixtures serving as compatibility gates.
+
+Published Tonic 0.14.6 still requires zstd 0.13. RedDB therefore ships MIT-licensed
+compatibility distributions of the unchanged Tonic/Prost Rust sources as
+reddb-io-tonic and reddb-io-tonic-prost, using zstd 0.14.3 and one shared runtime
+identity. Builders remain upstream; generated stubs retain their existing Rust
+aliases. The three lockfiles no longer retain the old zstd/safe binding. The
+workspace, Node and Python audits run with the existing deny-warnings policy.
+
+These packages track the RedDB release version and publish before grpc-proto.
+Registry-normalized manifests keep their package names and fixed dependency;
+the fix does not rely on a consumer's root-only Cargo patch. Upstream archive
+checksums, unmodified Rust source digests, original manifests and MIT licenses
+are retained in the compatibility packages.
+
+The protocol/compression contract is preserved, including zstd, gzip and identity
+negotiation. Existing low-level Rust callers using upstream Tonic types directly
+must import the matching types through reddb_grpc_proto::tonic or use the
+compatibility package alias. This is a source-level migration for that API;
+high-level client and non-Rust wire interfaces remain unchanged.
+
+
+## Local table SQL and single-owner transaction integration
+
+Source builds expose `openDatabase({ name, create?: boolean, worker? })` and
+`query(sql)` for CREATE TABLE, SELECT, INSERT, UPDATE, DELETE and plain
+BEGIN/COMMIT/ROLLBACK. Creation is explicit and never repairs a corrupt existing
+file. The parser, table contract builder, schema/default/generated/CHECK/unique
+rules, visible scans, expression evaluation and artifact formats are shared with
+native Rust. Native DDL calls the same table-contract builder with its host clock;
+portable table definitions accept an explicit Unix-seconds creation timestamp.
+
+The exclusively locked worker is the complete session boundary. Autocommit DML
+prepares every row and validates the final unique-key set before publishing one
+native WAL batch. BEGIN reconstructs a private resident snapshot. Transaction
+reads observe that private state, and all row actions publish together on COMMIT.
+A statement error aborts the transaction until ROLLBACK; close/worker death drops
+uncommitted state. Ambiguous I/O fences reads and writes until recovery.
+
+Catalog changes cannot be split from row publication: CREATE TABLE stages the
+collection and authoritative contract together, then publishes one complete
+canonical snapshot root. A transaction containing DDL commits its entire private
+catalog/data snapshot with the same root barriers. This extends no persisted WAL
+codec and introduces no second storage system. Existing formats remain readable
+by native file/query APIs. Tests interrupt each write/flush of both row-only WAL
+commit and catalog/data snapshot commit, accepting only complete old/new states.
+
+This API supplies single-owner transactions, not the complete native concurrent
+MVCC/savepoint surface. It rejects explicit isolation options, savepoints, other
+models, TTL/retention, AI/event effects, context indexes and encrypted writes.
+SELECT restrictions from the initial table surface remain. Transaction pending
+row actions and visible source tables are capped at 100,000 independently of
+query pagination. Compiled capabilities report read-write-tables, sqlWrites and
+transactions true; storage-independent and foreign-language handles remain scalar
+only. Published npm 0.1.0 and the public playground predate this source API.
+
+Cost sketch: autocommit scans O(N) candidates for uniqueness and emits O(changed
+row bytes) through the native WAL; BEGIN copies O(database snapshot bytes) once;
+DDL commits write O(database snapshot bytes). Ordinary transaction commits emit
+one O(pending row bytes) WAL batch. No measured performance improvement is claimed.
+
+Production package tests create databases and run CRUD, commit and rollback from
+installed TypeScript/Vite consumers in Chromium and Firefox. Two full offline
+browser restarts with the HTTP listener stopped verify both offline writes and
+their subsequent recovery. Public SDK tests also terminate a worker with an open
+transaction and verify that only committed rows survive, and preserve corrupt
+existing artifacts even with create enabled.

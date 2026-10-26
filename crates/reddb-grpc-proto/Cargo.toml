@@ -17,8 +17,8 @@ name = "reddb_grpc_proto"
 path = "src/lib.rs"
 
 [dependencies]
-tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel"] }
-tonic-prost = "0.14"
+tonic = { workspace = true, features = ["codegen", "router", "server", "channel"] }
+tonic-prost = { workspace = true }
 prost = "0.14"
 # Issue #166: re-export the canonical Topology Rust type from
 # reddb-wire so gRPC consumers (reddb-server, reddb-client) reach

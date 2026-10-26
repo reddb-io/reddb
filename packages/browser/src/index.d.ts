@@ -1,4 +1,4 @@
-/** Persistence and scalar execution; stored-data queries and sync remain pending. */
+/** Local table SQL, transactions and persistence in browser-owned OPFS artifacts. */
 export class BrowserError extends Error {
   readonly code: string
   constructor(code: string, message: string)
@@ -11,6 +11,8 @@ export interface RuntimeInfo {
     readonly queryValidation: boolean
     readonly scalarQueries: boolean
     readonly storedQueries: boolean
+    readonly storedQueryMode: 'read-write-tables'
+    readonly sqlWrites: boolean
     readonly transactions: boolean
     readonly sync: boolean
   }
@@ -61,3 +63,18 @@ export function openArtifact(options: {
   /** Fresh module Worker supplied by a bundler (e.g. Vite ?worker). The artifact owns its lifetime. */
   worker?: Worker
 }): Promise<Artifact>
+
+export interface Database extends Runtime {
+  /** SELECT and table SQL mutations; mutations return an affectedRows column. */
+  query(sql: string): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** Release exclusive ownership of the local file and terminate its worker. */
+  close(): Promise<void>
+}
+
+/** Recover an OPFS .rdb. Creation is explicit; corrupt existing files are preserved. */
+export function openDatabase(options: {
+  name: string
+  /** Create a missing database. Defaults to false. */
+  create?: boolean
+  worker?: Worker
+}): Promise<Database>

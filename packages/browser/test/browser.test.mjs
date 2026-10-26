@@ -19,6 +19,7 @@ let fixtures
 let nativeTreeFixture
 let nativeFixture
 let nativeSnapshot
+let nativeQueryFixture
 const networkRequests = []
 
 async function withHostOffline(run) {
@@ -170,6 +171,9 @@ before(async () => {
   const treePath = resolve(fixtures, 'native-tree.rdb')
   nativeTree('create', treePath)
   nativeTreeFixture = [...await readFile(treePath)]
+  const queryPath = resolve(fixtures, 'native-query.rdb')
+  execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-engine', '--example', 'browser_stored_query', '--', queryPath], { cwd: root, stdio: 'inherit' })
+  nativeQueryFixture = [...await readFile(queryPath)]
   server = createServer(async (request, response) => {
     networkRequests.push(request.url)
     try {
@@ -270,7 +274,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: false, transactions: false, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
@@ -301,6 +305,99 @@ for (const browser of browsers) {
           } finally { worker.terminate() }
         })
         assert.deepEqual(result, { code: 'VERSION_MISMATCH', created: false })
+      } finally { await current.close() }
+    })
+
+    storageTest('public table SELECT recovers native snapshot and WAL after an offline browser restart', async () => {
+      const current = await page()
+      const first = await current.evaluate(async (fixture) => {
+        const root = await navigator.storage.getDirectory()
+        const directory = await root.getDirectoryHandle('reddb-browser', { create: true })
+        const file = await directory.getFileHandle('public-sql.rdb', { create: true })
+        const writer = await file.createWritable()
+        await writer.write(Uint8Array.from(fixture))
+        await writer.close()
+        const database = await RedDBBrowser.openDatabase({ name: 'public-sql' })
+        const errors = []
+        let result
+        try {
+          result = await database.query('SELECT p.rid AS id, UPPER(name) AS label, total * 2 AS doubled FROM people AS p WHERE nickname IS NULL ORDER BY total DESC LIMIT 4294967296')
+          const exact = await database.query('SELECT name FROM people WHERE rid IN (9007199254740993)')
+          if (JSON.stringify(exact.rows) !== JSON.stringify([['Ana']])) throw new Error('Unsigned identity IN lost its exact SQL binding')
+          for (const sql of ['INSERT INTO people (name) VALUES (\'x\')', 'SELECT COUNT(*) FROM empty', 'SELECT missing FROM empty', 'SELECT total / 0 FROM people', null]) {
+            try { await database.query(sql) } catch (error) { errors.push(error.code) }
+          }
+          try { await RedDBBrowser.openArtifact({ name: 'public-sql' }) } catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.openDatabase({ name: 'public-sql' }) } catch (error) { errors.push(error.code) }
+        } finally { await database.close() }
+        try { await RedDBBrowser.openDatabase({ name: 'missing-public-sql' }) } catch (error) { errors.push(error.code) }
+        const bytes = [...new Uint8Array(await (await file.getFile()).arrayBuffer())]
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+        return { result, errors, unchanged: bytes.every((byte, index) => byte === fixture[index]) && bytes.length === fixture.length }
+      }, nativeQueryFixture)
+      const expected = { columns: ['id', 'label', 'doubled'], rows: [[2, 'BIA', 44], [{ $uint: '9007199254740993' }, 'ANA', 20]] }
+      assert.deepEqual(first.result, expected)
+      assert.deepEqual(first.errors, ['QUERY_UNSUPPORTED', 'QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_EVALUATION_ERROR', 'INVALID_ARGUMENT', 'FILE_BUSY', 'FILE_BUSY', 'DATABASE_NOT_FOUND'])
+      assert.equal(first.unchanged, true, 'public SELECT and failed mutations must leave native bytes intact')
+      await current.waitForFunction(() => navigator.serviceWorker.controller)
+      await current.close()
+      await context.close()
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          await launch({ offline: true })
+          const reopened = await page()
+          try {
+            const result = await reopened.evaluate(async () => {
+              const database = await RedDBBrowser.openDatabase({ name: 'public-sql' })
+              try { return await database.query('SELECT p.rid AS id, UPPER(name) AS label, total * 2 AS doubled FROM people AS p WHERE nickname IS NULL ORDER BY total DESC LIMIT 4294967296') }
+              finally { await database.close() }
+            })
+            assert.deepEqual(result, expected)
+            assert.equal(networkRequests.length, requestsBefore, 'public SQL must not reach the HTTP host')
+          } finally { await reopened.close() }
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('public SQL creates a database and worker termination rolls back uncommitted writes', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/src/worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'sql-crash', create: true, worker })
+          await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+          await database.query("INSERT INTO notes VALUES (1, 'committed')")
+          await database.query('BEGIN')
+          await database.query("UPDATE notes SET body = 'uncommitted'")
+          await database.query("INSERT INTO notes VALUES (2, 'also uncommitted')")
+          worker.terminate()
+          await navigator.locks.request('reddb-browser:sql-crash', () => {})
+          const reopened = await RedDBBrowser.openDatabase({ name: 'sql-crash' })
+          try {
+            return await reopened.query('SELECT id, body FROM notes ORDER BY id')
+          } finally { await reopened.close() }
+        })
+        assert.deepEqual(result, { columns: ['id', 'body'], rows: [[1, 'committed']] })
+      } finally { await current.close() }
+    })
+
+    storageTest('create option preserves an existing corrupt SQL database', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const root = await navigator.storage.getDirectory()
+          const directory = await root.getDirectoryHandle('reddb-browser', { create: true })
+          const file = await directory.getFileHandle('sql-corrupt.rdb', { create: true })
+          const writer = await file.createWritable()
+          await writer.write(new Uint8Array([9, 8, 7]))
+          await writer.close()
+          let code
+          try { await RedDBBrowser.openDatabase({ name: 'sql-corrupt', create: true }) }
+          catch (error) { code = error.code }
+          return { code, bytes: [...new Uint8Array(await (await file.getFile()).arrayBuffer())] }
+        })
+        assert.deepEqual(result, { code: 'DATABASE_ERROR', bytes: [9, 8, 7] })
       } finally { await current.close() }
     })
 

@@ -126,8 +126,8 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-/** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
-export async function openArtifact({ name, worker } = {}) {
+async function openFile({ name, worker, create = false } = {}, method = 'open') {
+  if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
@@ -135,8 +135,21 @@ export async function openArtifact({ name, worker } = {}) {
     throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
   }
   const client = createClient(worker)
-  try { await client.ready; await client.call('open', { name }) }
+  try {
+    const info = await client.ready
+    if (method === 'openDatabase' && (info.capabilities.storedQueries !== true
+      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions)) {
+      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL and transactions')
+    }
+    await client.call(method, method === 'openDatabase' ? { name, create } : { name })
+  }
   catch (error) { client.shutdown(error); throw error }
+  return client
+}
+
+/** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
+export async function openArtifact(options) {
+  const client = await openFile(options)
   const { call } = client
   return {
     ...runtimeMethods(client),
@@ -145,6 +158,18 @@ export async function openArtifact({ name, worker } = {}) {
     readSnapshot: () => call('readSnapshot'),
     append: (payloads) => call('append', { payloads }),
     checkpoint: (snapshot, minWalBytes = 0) => call('checkpoint', { snapshot, minWalBytes }),
+    close: client.closeFile,
+  }
+}
+
+/** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
+export async function openDatabase(options) {
+  const client = await openFile(options, 'openDatabase')
+  return {
+    ...runtimeMethods(client),
+    query: sql => typeof sql === 'string'
+      ? client.call('query', { sql })
+      : Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string')),
     close: client.closeFile,
   }
 }

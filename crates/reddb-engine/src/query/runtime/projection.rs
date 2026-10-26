@@ -9,6 +9,11 @@ use reddb_types::Value;
 /// must be enforced before projection; SELECT * retains native secret wrappers.
 pub trait ProjectionHost {
     type Error;
+    /// Retain canonical SELECT expressions instead of reconstructing legacy forms.
+    /// Each expression must describe the same indexed projection and sensitivity.
+    fn canonical_expression(&self, _projection_index: usize) -> Option<&Expr> {
+        None
+    }
     fn evaluate_expression(
         &self,
         expression: &Expr,
@@ -54,13 +59,25 @@ pub fn project_runtime_record_with_host<H: ProjectionHost>(
         }
     }
 
-    for projection in projections {
+    for (projection_index, projection) in projections.iter().enumerate() {
         if matches!(projection, Projection::All) {
             continue;
         }
 
         let label = projection_name(projection);
         let sensitive = projection_uses_secret(projection, source, table_name, table_alias);
+        if let Some(expression) = host.canonical_expression(projection_index) {
+            let value = host
+                .evaluate_expression(expression, source)
+                .map_err(|error| host.evaluation_error(error, sensitive))?;
+            let value = if sensitive {
+                host.secret_query_output(value)?
+            } else {
+                value
+            };
+            record.set_arc(std::sync::Arc::from(label), value);
+            continue;
+        }
         let value = match projection {
             Projection::Column(column) => resolve_runtime_projection_value(
                 host,
