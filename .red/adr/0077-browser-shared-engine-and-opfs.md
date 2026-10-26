@@ -1301,7 +1301,7 @@ The dependency audit for this integration exposed existing zstd advisories,
 including RUSTSEC-2026-0410 in the WebAssembly allocator shim. Direct RedDB
 compression users now require zstd 0.14.3 with zstd-safe 8.2.0 and zstd-sys
 2.1.2; workspace and standalone Node/Python locks retain that resolution.
-The underlying Zstandard frame version remains 1.5.7, with existing native
+The bundled Zstandard library remains 1.5.7, with existing native
 compressed-frame/value/entity fixtures serving as compatibility gates.
 
 Tonic 0.14.6 still requires zstd 0.13 and therefore keeps a second legacy
