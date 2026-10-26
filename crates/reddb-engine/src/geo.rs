@@ -8,6 +8,10 @@ use std::f64::consts::PI;
 use reddb_types::Value;
 
 const EARTH_RADIUS_KM: f64 = 6_371.0;
+#[expect(
+    dead_code,
+    reason = "Preserve the existing native geographic constants during extraction"
+)]
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 // WGS-84 ellipsoid parameters

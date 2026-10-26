@@ -175,7 +175,7 @@ pub(super) fn input_policy() {
 }
 
 pub(super) fn verify_recovered(host: &Host<'_>, records: &[UnifiedRecord], updated: bool) {
-    let columns = projections("SELECT GEO_DISTANCE(0, 0, 0, quantity) AS arc, VINCENTY(0, 0, 0, quantity) AS ellipsoid, GEO_BEARING(0, 0, 0, quantity) AS direction, GEO_MIDPOINT(0, 0, 0, quantity) AS center FROM orders");
+    let columns = projections("SELECT GEO_DISTANCE(0, 0, 0, quantity) AS arc, VINCENTY(0, 0, 0, quantity) AS ellipsoid, GEO_BEARING(0, 0, 0, quantity) AS bearing_value, GEO_MIDPOINT(0, 0, 0, quantity) AS center FROM orders");
     for (index, source) in records.iter().enumerate() {
         let record = project(host, source, &columns).expect("recovered geographic scalars");
         let quantities = if updated { [4, 3] } else { [3, 2] };
@@ -187,7 +187,7 @@ pub(super) fn verify_recovered(host: &Host<'_>, records: &[UnifiedRecord], updat
             record.get("ellipsoid").cloned(),
             f64::from(quantities[index]) * 111.3194907932264,
         );
-        close(record.get("direction").cloned(), 90.0);
+        close(record.get("bearing_value").cloned(), 90.0);
         assert_eq!(
             record.get("center"),
             Some(&Value::GeoPoint(0, quantities[index] * 500_000))
