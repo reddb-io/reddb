@@ -837,9 +837,9 @@ fn native_table_planning_keeps_catalog_estimates_and_shared_type_authority() {
     // The generated plan also executes through the production native adapter.
     let result = runtime
         .execute_query(
-            "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY total DESC LIMIT 1 OFFSET 1",
+            "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY CASE WHEN total >= 10 THEN -CAST(total AS BIGINT) ELSE 0 END ASC LIMIT 1 OFFSET 1",
         )
-        .expect("native shared plan execution");
+        .expect("native shared plan and runtime expression execution");
     assert_eq!(result.result.records.len(), 1);
     assert_eq!(
         result.result.records[0].get("total"),

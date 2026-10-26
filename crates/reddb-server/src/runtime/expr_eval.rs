@@ -16,12 +16,12 @@
 //! - `Projection::Expression` once the planner flips from Filter
 //!   to Expr for scalar projection bodies.
 
-use super::join_filter::{compare_runtime_values, resolve_runtime_field};
+use super::join_filter::resolve_runtime_field;
 use std::collections::{HashMap, HashSet};
 
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::RedDB;
-use reddb_rql::ast::{BinOp, Expr, FieldRef, UnaryOp};
+use reddb_rql::ast::{Expr, FieldRef};
 use reddb_types::Value;
 
 /// Evaluate typed scalar-subquery literals without changing the original AST.
@@ -140,274 +140,123 @@ pub(super) fn evaluate_runtime_expr_with_db(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> Option<Value> {
-    match expr {
-        Expr::Literal { value, .. } => super::execution_context::secret_query_input(value.clone()),
+    reddb_engine::query::runtime::expression::evaluate_runtime_expr_with_host(
+        &NativeExpressionHost {
+            db,
+            record,
+            table_name,
+            table_alias,
+        },
+        expr,
+    )
+}
 
-        Expr::Column { field, .. } => resolve_runtime_field(record, field, table_name, table_alias)
-            .and_then(super::execution_context::secret_query_input),
-
-        Expr::Parameter { .. } => {
-            // Parameter placeholders only appear in prepared-statement
-            // plans; they must be bound to concrete values before the
-            // runtime sees them. Hitting this arm means the bind phase
-            // skipped a slot, which is a bug further upstream.
-            None
-        }
-
-        Expr::UnaryOp {
-            op,
-            operand,
-            span: _,
-        } => {
-            let v = evaluate_runtime_expr_with_db(db, operand, record, table_name, table_alias)?;
-            match op {
-                UnaryOp::Neg => negate_value(&v),
-                UnaryOp::Not => match v {
-                    Value::Boolean(b) => Some(Value::Boolean(!b)),
-                    _ => None,
-                },
-            }
-        }
-
-        Expr::BinaryOp {
-            op,
-            lhs,
-            rhs,
-            span: _,
-        } => {
-            // Short-circuit AND/OR on boolean LHS first so expensive
-            // RHS subtrees (function calls, nested arithmetic) are
-            // skipped when the result is already determined.
-            match op {
-                BinOp::And => {
-                    let l =
-                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
-                    if let Value::Boolean(false) = l {
-                        return Some(Value::Boolean(false));
-                    }
-                    let r =
-                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
-                    match (l, r) {
-                        (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a && b)),
-                        _ => None,
-                    }
-                }
-                BinOp::Or => {
-                    let l =
-                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
-                    if let Value::Boolean(true) = l {
-                        return Some(Value::Boolean(true));
-                    }
-                    let r =
-                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
-                    match (l, r) {
-                        (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a || b)),
-                        _ => None,
-                    }
-                }
-                _ => {
-                    let l =
-                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
-                    let r =
-                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
-                    apply_binop(*op, l, r)
-                }
-            }
-        }
-
-        Expr::Cast {
-            inner,
-            target,
-            span: _,
-        } => {
-            let v = evaluate_runtime_expr_with_db(db, inner, record, table_name, table_alias)?;
-            Some(runtime_cast(&v, *target))
-        }
-
-        Expr::FunctionCall {
-            name,
-            args,
-            span: _,
-        } => {
-            let upper = name.to_uppercase();
-            if upper == "CONFIG" {
-                return evaluate_runtime_config_function(db, args, record, table_name, table_alias);
-            }
-            if upper == "KV" {
-                return evaluate_runtime_kv_function(db, args, record, table_name, table_alias);
-            }
-            if upper == "__SECRET_REF" {
+struct NativeExpressionHost<'a> {
+    db: Option<&'a RedDB>,
+    record: &'a UnifiedRecord,
+    table_name: Option<&'a str>,
+    table_alias: Option<&'a str>,
+}
+impl reddb_engine::query::runtime::expression::RuntimeExpressionHost for NativeExpressionHost<'_> {
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        super::execution_context::secret_query_input(value)
+    }
+    fn resolve_field(&self, field: &FieldRef) -> Option<Value> {
+        resolve_runtime_field(self.record, field, self.table_name, self.table_alias)
+    }
+    fn evaluate_special_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        evaluate: &dyn Fn(&Expr) -> Option<Value>,
+    ) -> Option<Value> {
+        match name {
+            "CONFIG" => evaluate_runtime_config_function(self.db, args, evaluate),
+            "KV" => evaluate_runtime_kv_function(self.db, args, evaluate),
+            "__SECRET_REF" => {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
-                return crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null));
+                crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null))
             }
-            if upper == "__KV_REF" {
+            "__KV_REF" => {
                 let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
-                return crate::runtime::impl_core::current_kv_value(&key)
+                crate::runtime::impl_core::current_kv_value(&key)
                     .map(Value::text)
-                    .or(Some(Value::Null));
+                    .or(Some(Value::Null))
             }
-            // For Week 3 we route through the existing evaluate_scalar_function
-            // dispatcher, which speaks the legacy Projection::Function
-            // argument convention (Column("LIT:…"), Column("TYPE:…"), etc.).
-            // Week 4 replaces this shim with a proper registry keyed on
-            // Expr arguments directly.
-            let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
-            for arg in args {
-                arg_values.push(
-                    evaluate_runtime_expr_with_db(db, arg, record, table_name, table_alias)
-                        .unwrap_or(Value::Null),
-                );
-            }
-            // ML and semantic-cache scalars live on the `RedDB` handle
-            // (model registry, shared cache). Route them before the
-            // db-less builtin dispatcher so the values land with full
-            // context.
-            if matches!(
-                upper.as_str(),
-                "ML_CLASSIFY"
-                    | "ML_PREDICT_PROBA"
-                    | "SEMANTIC_CACHE_GET"
-                    | "SEMANTIC_CACHE_PUT"
-                    | "EMBED"
-            ) {
-                if let Some(db) = db {
-                    return dispatch_ml_function(db, &upper, &arg_values);
-                }
-                return None;
-            }
-            if matches!(
-                upper.as_str(),
-                "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST" | "CA_REFRESH" | "CA_QUERY"
-            ) {
-                if let Some(db) = db {
-                    return dispatch_ca_function(db, &upper, &arg_values);
-                }
-                return None;
-            }
-            if matches!(
-                upper.as_str(),
-                "LIST_HYPERTABLES" | "LIST_MODELS" | "SHOW_HYPERTABLES" | "SHOW_MODELS"
-            ) {
-                if let Some(db) = db {
-                    return dispatch_introspection_function(db, &upper);
-                }
-                return None;
-            }
-            if upper.as_str() == "HYPERTABLE_PRUNE_CHUNKS" {
-                if let Some(db) = db {
-                    return dispatch_hypertable_prune(db, &arg_values);
-                }
-                return None;
-            }
-            if matches!(
-                upper.as_str(),
-                "HYPERTABLE_DROP_CHUNKS_BEFORE"
-                    | "HYPERTABLE_SWEEP_EXPIRED"
-                    | "HYPERTABLE_SHOW_CHUNKS"
-                    | "HYPERTABLE_SWEEP_ALL_EXPIRED"
-                    | "HYPERTABLE_SET_TTL"
-                    | "HYPERTABLE_GET_TTL"
-                    | "HYPERTABLE_CHUNKS_EXPIRING_WITHIN"
-            ) {
-                if let Some(db) = db {
-                    return dispatch_hypertable_retention(db, &upper, &arg_values);
-                }
-                return None;
-            }
-            if matches!(upper.as_str(), "MODEL_REGISTER" | "MODEL_DROP") {
-                if let Some(db) = db {
-                    return dispatch_model_function(db, &upper, &arg_values);
-                }
-                return None;
-            }
-            if upper == "RED.LCA" {
-                if let Some(db) = db {
-                    return dispatch_vcs_lca_function(db, &arg_values);
-                }
-                return None;
-            }
-            // Uppercase the function name so CASE-insensitive lookups
-            // match the legacy is_scalar_function table.
-            dispatch_builtin_function(&upper, &arg_values)
+            _ => None,
         }
-
-        Expr::Case {
-            branches,
-            else_,
-            span: _,
-        } => {
-            for (cond, then_val) in branches {
-                let cond_val =
-                    evaluate_runtime_expr_with_db(db, cond, record, table_name, table_alias);
-                if matches!(cond_val, Some(Value::Boolean(true))) {
-                    return evaluate_runtime_expr_with_db(
-                        db,
-                        then_val,
-                        record,
-                        table_name,
-                        table_alias,
-                    );
-                }
+    }
+    fn evaluate_function(&self, name: &str, args: &[Value]) -> Option<Value> {
+        // ML and semantic-cache scalars live on the `RedDB` handle
+        // (model registry, shared cache). Route them before the
+        // db-less builtin dispatcher so the values land with full
+        // context.
+        if matches!(
+            name,
+            "ML_CLASSIFY"
+                | "ML_PREDICT_PROBA"
+                | "SEMANTIC_CACHE_GET"
+                | "SEMANTIC_CACHE_PUT"
+                | "EMBED"
+        ) {
+            if let Some(db) = self.db {
+                return dispatch_ml_function(db, name, args);
             }
-            if let Some(else_expr) = else_ {
-                evaluate_runtime_expr_with_db(db, else_expr, record, table_name, table_alias)
-            } else {
-                Some(Value::Null)
+            return None;
+        }
+        if matches!(
+            name,
+            "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST" | "CA_REFRESH" | "CA_QUERY"
+        ) {
+            if let Some(db) = self.db {
+                return dispatch_ca_function(db, name, args);
             }
+            return None;
         }
-
-        Expr::IsNull {
-            operand,
-            negated,
-            span: _,
-        } => {
-            let v = evaluate_runtime_expr_with_db(db, operand, record, table_name, table_alias);
-            let is_null = matches!(v, None | Some(Value::Null));
-            Some(Value::Boolean(if *negated { !is_null } else { is_null }))
-        }
-
-        Expr::InList {
-            target,
-            values,
-            negated,
-            span: _,
-        } => {
-            let t = evaluate_runtime_expr_with_db(db, target, record, table_name, table_alias)?;
-            let mut hit = false;
-            for v in values {
-                if let Some(candidate) =
-                    evaluate_runtime_expr_with_db(db, v, record, table_name, table_alias)
-                {
-                    if compare_runtime_values(&t, &candidate, reddb_rql::ast::CompareOp::Eq) {
-                        hit = true;
-                        break;
-                    }
-                }
+        if matches!(
+            name,
+            "LIST_HYPERTABLES" | "LIST_MODELS" | "SHOW_HYPERTABLES" | "SHOW_MODELS"
+        ) {
+            if let Some(db) = self.db {
+                return dispatch_introspection_function(db, name);
             }
-            Some(Value::Boolean(if *negated { !hit } else { hit }))
+            return None;
         }
-
-        Expr::Between {
-            target,
-            low,
-            high,
-            negated,
-            span: _,
-        } => {
-            let t = evaluate_runtime_expr_with_db(db, target, record, table_name, table_alias)?;
-            let lo = evaluate_runtime_expr_with_db(db, low, record, table_name, table_alias)?;
-            let hi = evaluate_runtime_expr_with_db(db, high, record, table_name, table_alias)?;
-            let in_range = compare_runtime_values(&t, &lo, reddb_rql::ast::CompareOp::Ge)
-                && compare_runtime_values(&t, &hi, reddb_rql::ast::CompareOp::Le);
-            Some(Value::Boolean(if *negated { !in_range } else { in_range }))
+        if name == "HYPERTABLE_PRUNE_CHUNKS" {
+            if let Some(db) = self.db {
+                return dispatch_hypertable_prune(db, args);
+            }
+            return None;
         }
-
-        Expr::Subquery { .. } => None,
-        // Slice 7a (#589): window function calls are accepted by the
-        // parser but have no runtime executor yet. Returning None keeps
-        // the existing "expression not foldable" fast-path; the
-        // analytics executor will plug in here in a follow-up slice.
-        Expr::WindowFunctionCall { .. } => None,
+        if matches!(
+            name,
+            "HYPERTABLE_DROP_CHUNKS_BEFORE"
+                | "HYPERTABLE_SWEEP_EXPIRED"
+                | "HYPERTABLE_SHOW_CHUNKS"
+                | "HYPERTABLE_SWEEP_ALL_EXPIRED"
+                | "HYPERTABLE_SET_TTL"
+                | "HYPERTABLE_GET_TTL"
+                | "HYPERTABLE_CHUNKS_EXPIRING_WITHIN"
+        ) {
+            if let Some(db) = self.db {
+                return dispatch_hypertable_retention(db, name, args);
+            }
+            return None;
+        }
+        if matches!(name, "MODEL_REGISTER" | "MODEL_DROP") {
+            if let Some(db) = self.db {
+                return dispatch_model_function(db, name, args);
+            }
+            return None;
+        }
+        if name == "RED.LCA" {
+            if let Some(db) = self.db {
+                return dispatch_vcs_lca_function(db, args);
+            }
+            return None;
+        }
+        // The shared walk has already uppercased the function name.
+        dispatch_builtin_function(name, args)
     }
 }
 
@@ -447,9 +296,7 @@ pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) ->
 fn evaluate_runtime_config_function(
     db: Option<&RedDB>,
     args: &[Expr],
-    record: &UnifiedRecord,
-    table_name: Option<&str>,
-    table_alias: Option<&str>,
+    evaluate: &dyn Fn(&Expr) -> Option<Value>,
 ) -> Option<Value> {
     let key = expr_path_text(args.first()?)?;
     if let Some(value) = crate::runtime::impl_core::current_config_value(&key) {
@@ -472,16 +319,14 @@ fn evaluate_runtime_config_function(
         }
     }
     args.get(1)
-        .and_then(|expr| special_default_expr_value(db, expr, record, table_name, table_alias))
+        .and_then(|expr| special_default_expr_value(expr, evaluate))
         .or(Some(Value::Null))
 }
 
 fn evaluate_runtime_kv_function(
     db: Option<&RedDB>,
     args: &[Expr],
-    record: &UnifiedRecord,
-    table_name: Option<&str>,
-    table_alias: Option<&str>,
+    evaluate: &dyn Fn(&Expr) -> Option<Value>,
 ) -> Option<Value> {
     let collection = expr_path_text(args.first()?)?;
     let key = expr_path_text(args.get(1)?)?;
@@ -496,20 +341,17 @@ fn evaluate_runtime_kv_function(
         }
     }
     args.get(2)
-        .and_then(|expr| special_default_expr_value(db, expr, record, table_name, table_alias))
+        .and_then(|expr| special_default_expr_value(expr, evaluate))
         .or(Some(Value::Null))
 }
 
 fn special_default_expr_value(
-    db: Option<&RedDB>,
     expr: &Expr,
-    record: &UnifiedRecord,
-    table_name: Option<&str>,
-    table_alias: Option<&str>,
+    evaluate: &dyn Fn(&Expr) -> Option<Value>,
 ) -> Option<Value> {
     match expr {
         Expr::Column { field, .. } => field_ref_path_text(field).map(Value::text),
-        _ => evaluate_runtime_expr_with_db(db, expr, record, table_name, table_alias),
+        _ => evaluate(expr),
     }
 }
 
@@ -539,152 +381,6 @@ fn literal_path_text(value: &Value) -> Option<String> {
         Value::Null => None,
         Value::Text(text) => Some(text.to_string()),
         _ => Some(value.display_string()),
-    }
-}
-
-fn negate_value(v: &Value) -> Option<Value> {
-    match v {
-        Value::Integer(n) => Some(Value::Integer(-n)),
-        Value::BigInt(n) => Some(Value::BigInt(-n)),
-        Value::Float(f) => Some(Value::Float(-f)),
-        _ => None,
-    }
-}
-
-fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
-    use reddb_rql::ast::CompareOp;
-    match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(op, a, b),
-        BinOp::Concat => Some(Value::text(format!("{}{}", a.plain_text(), b.plain_text()))),
-        BinOp::Eq => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Eq,
-        ))),
-        BinOp::Ne => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Ne,
-        ))),
-        BinOp::Lt => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Lt,
-        ))),
-        BinOp::Le => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Le,
-        ))),
-        BinOp::Gt => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Gt,
-        ))),
-        BinOp::Ge => Some(Value::Boolean(compare_runtime_values(
-            &a,
-            &b,
-            CompareOp::Ge,
-        ))),
-        BinOp::And | BinOp::Or => None, // handled upstream (short-circuit)
-    }
-}
-
-fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {
-    if let Some(value) = timestamp_ms_arith(op, &a, &b) {
-        return Some(value);
-    }
-
-    let (la, lb) = (value_as_number(&a)?, value_as_number(&b)?);
-    let force_float = matches!(op, BinOp::Div) || la.1 || lb.1;
-    let out = match op {
-        BinOp::Add => la.0 + lb.0,
-        BinOp::Sub => la.0 - lb.0,
-        BinOp::Mul => la.0 * lb.0,
-        BinOp::Div => {
-            if lb.0 == 0.0 {
-                return None;
-            }
-            la.0 / lb.0
-        }
-        BinOp::Mod => {
-            if lb.0 == 0.0 {
-                return None;
-            }
-            la.0 % lb.0
-        }
-        _ => return None,
-    };
-    Some(if force_float {
-        Value::Float(out)
-    } else {
-        Value::Integer(out as i64)
-    })
-}
-
-fn timestamp_ms_arith(op: BinOp, a: &Value, b: &Value) -> Option<Value> {
-    match (op, a, b) {
-        (BinOp::Add, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
-            ts.checked_add(duration_ms_operand(rhs)?)?,
-        )),
-        (BinOp::Add, lhs, Value::TimestampMs(ts)) => Some(Value::TimestampMs(
-            ts.checked_add(duration_ms_operand(lhs)?)?,
-        )),
-        (BinOp::Sub, Value::TimestampMs(ts), rhs) => Some(Value::TimestampMs(
-            ts.checked_sub(duration_ms_operand(rhs)?)?,
-        )),
-        _ => None,
-    }
-}
-
-fn duration_ms_operand(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(value) | Value::BigInt(value) | Value::Duration(value) => Some(*value),
-        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
-/// Tuple `(f64 value, is_float_literally)`. The second element lets
-/// the caller decide whether to preserve integer type after the op.
-fn value_as_number(v: &Value) -> Option<(f64, bool)> {
-    match v {
-        Value::Integer(n) | Value::BigInt(n) => Some((*n as f64, false)),
-        Value::UnsignedInteger(n) => Some((*n as f64, false)),
-        Value::Float(f) => Some((*f, true)),
-        Value::Decimal(d) => Some((reddb_types::types::decimal_to_f64(*d), true)),
-        Value::Text(s) => s
-            .parse::<i64>()
-            .map(|n| (n as f64, false))
-            .or_else(|_| s.parse::<f64>().map(|f| (f, true)))
-            .ok(),
-        _ => None,
-    }
-}
-
-fn runtime_cast(src: &Value, target: reddb_types::DataType) -> Value {
-    use reddb_types::types::DataType as DT;
-    match (src, target) {
-        (v, DT::Text) => Value::text(v.display_string()),
-        (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
-        (Value::Integer(n), DT::BigInt) => Value::BigInt(*n),
-        (Value::Integer(n), DT::UnsignedInteger) if *n >= 0 => Value::UnsignedInteger(*n as u64),
-        (Value::UnsignedInteger(n), DT::Integer) if *n <= i64::MAX as u64 => {
-            Value::Integer(*n as i64)
-        }
-        (Value::UnsignedInteger(n), DT::Float) => Value::Float(*n as f64),
-        (Value::Float(f), DT::Integer) => Value::Integer(*f as i64),
-        (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
-        (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
-        (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
-        (Value::Text(s), t) => match reddb_types::coerce::coerce(s, t, None) {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        },
-        (v, t) => match reddb_types::coerce::coerce(&v.display_string(), t, None) {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        },
     }
 }
 
@@ -2329,6 +2025,58 @@ use reddb_engine::query::runtime::text::{
 mod tests {
     use super::dispatch_builtin_function;
     use reddb_types::Value;
+
+    #[test]
+    fn shared_runtime_expression_host_preserves_defaults_and_depth() {
+        use reddb_rql::ast::{BinOp, Expr, FieldRef, Span};
+        let mut record = crate::storage::query::unified::UnifiedRecord::new();
+        record.set("quantity", Value::Integer(3));
+        let quantity = Expr::Column {
+            field: FieldRef::TableColumn {
+                table: "o".into(),
+                column: "quantity".into(),
+            },
+            span: Span::synthetic(),
+        };
+        let call = |name: &str, args| Expr::FunctionCall {
+            name: name.into(),
+            args,
+            span: Span::synthetic(),
+        };
+        let missing = || Expr::lit(Value::text("__browser_expression_fixture_missing__"));
+        let expression = call("config", vec![missing(), quantity.clone()]);
+        assert_eq!(
+            super::evaluate_runtime_expr(&expression, &record, Some("orders"), Some("o")),
+            Some(Value::text("o.quantity")),
+            "a bare special default remains path text"
+        );
+        let expression = call(
+            "kv",
+            vec![
+                missing(),
+                missing(),
+                Expr::BinaryOp {
+                    op: BinOp::Add,
+                    lhs: Box::new(quantity),
+                    rhs: Box::new(Expr::lit(Value::Integer(2))),
+                    span: Span::synthetic(),
+                },
+            ],
+        );
+        assert_eq!(
+            super::evaluate_runtime_expr(&expression, &record, Some("orders"), Some("o")),
+            Some(Value::Integer(5))
+        );
+        let mut expression = Expr::lit(Value::Integer(7));
+        for _ in 0..=reddb_rql::limits::JSON_LITERAL_MAX_DEPTH {
+            expression = call("CONFIG", vec![missing(), expression]);
+        }
+        assert_eq!(
+            super::evaluate_runtime_expr(&expression, &record, Some("orders"), Some("o")),
+            Some(Value::Null),
+            "special defaults must not reset the visited depth"
+        );
+    }
 
     #[test]
     fn test_shared_time_bucket_conversion_and_overflow() {

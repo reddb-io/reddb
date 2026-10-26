@@ -966,3 +966,42 @@ Cost sketch: construction emits at most six table operators plus existing AST
 summary work; predicate summary recursion is capped at depth 128. No per-row
 planning, additional scan, file write, network request or IPC is introduced, and
 no measured speedup is claimed.
+
+## Shared runtime expression traversal
+
+`reddb-engine::query::runtime::expression` now owns the native optional-value
+Expr walk used by ORDER BY and the existing runtime expression fallback. This
+is the legacy runtime contract, distinct from the typed scalar evaluator:
+missing values remain `None`, legacy arithmetic/coercion/casts retain their
+behavior, boolean/CASE branches short-circuit, and ordinary function arguments
+are evaluated eagerly from left to right with misses supplied as SQL NULL.
+
+The native adapter retains record bindings, secret input policy, value-function
+dispatch, session identity, advisory locks, catalog/config/KV authorization and
+all database/AI/model effects. CONFIG/KV/internal reference calls receive raw AST
+arguments before ordinary argument evaluation. Evaluated special defaults use
+the callback supplied by the shared walk so they cannot reset its depth counter;
+bare-column defaults retain the existing native path-text interpretation.
+
+Visited expression depth is capped at the canonical RQL nesting limit, returning
+`None` before host effects on an over-depth node. Unvisited lazy branches remain
+unvisited. Negation of the signed minimum Integer/BigInt now returns `None`
+instead of panicking or wrapping. Existing optional-key ordering/error admission
+remains in the host; this does not replace the typed evaluator's diagnostic API.
+
+Native/WASM cases cover lazy branches, eager function callbacks, raw special
+arguments, missing values, casts, exact integer comparisons, secret admission,
+unsupported nodes, checked negation and depth boundaries including special
+defaults. The recovered-row ordering fixture now uses this same Expr walk; its
+function host remains test-only and deliberately supports only its COALESCE
+callback. Its generated canonical plan orders using CASE, negation and CAST after
+WAL recovery, update, checkpoint and a full offline browser restart. Native tests
+also exercise special-default semantics and that SQL ordering path.
+
+Public browser stored-query/transaction flags remain false. The production
+browser host and complete durable SQL dispatch are still pending; no new public
+JS/TS query surface or persistence format is introduced by this extraction.
+
+Cost sketch: E visited expressions keep O(E) traversal plus existing argument
+buffers and host work, with stack depth capped at 128. The move adds no scan,
+file write, network request or IPC and makes no measured speedup claim.

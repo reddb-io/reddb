@@ -136,6 +136,9 @@ async function sharedConformance(browserPage) {
     'table_plan_wide_bounds_and_topk', 'table_plan_depth_and_first_child',
     'table_planning_order_costs_and_metadata', 'table_planning_document_and_universal_routes',
     'table_planning_effective_sql_and_zero_bounds', 'table_planning_bounded_metadata_and_secrets',
+    'runtime_expression_native_values_and_casts', 'runtime_expression_lazy_boolean_and_case',
+    'runtime_expression_eager_functions_and_raw_specials', 'runtime_expression_predicates_and_unsupported',
+    'runtime_expression_secret_policy_and_depth',
   ])
 }
 

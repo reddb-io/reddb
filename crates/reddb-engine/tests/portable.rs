@@ -298,3 +298,14 @@ fn portable_table_planning_conformance() {
         run();
     }
 }
+
+#[path = "support/runtime_expressions.rs"]
+mod runtime_expressions;
+
+#[test]
+fn portable_runtime_expression_conformance() {
+    for (name, run) in runtime_expressions::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
