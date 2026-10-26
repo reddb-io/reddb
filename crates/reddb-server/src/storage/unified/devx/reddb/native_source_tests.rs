@@ -302,6 +302,137 @@ fn native_artifacts_reuse_after_clean_cold_reopen() {
 }
 
 #[test]
+fn updated_columnar_rows_keep_native_sources_stable_across_reopen() {
+    let directory = tempfile::tempdir().expect("temporary updated source");
+    let options = paged_options(&directory.path().join("updated-source.rdb"));
+    let runtime = crate::RedDBRuntime::with_options(options.clone()).expect("runtime");
+    for sql in [
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+        "CREATE TABLE cold_rows (id INT,payload TEXT)",
+        "CREATE UNIQUE INDEX cold_rows_id ON cold_rows (id)",
+        "INSERT INTO cold_rows (id,payload) VALUES (1,'alpha beta'),(2,'untouched gamma')",
+    ] {
+        runtime.execute_query(sql).expect("columnar fixture");
+    }
+    runtime
+        .db()
+        .store
+        .get_collection("cold_rows")
+        .expect("source")
+        .force_seal()
+        .expect("seal source");
+    runtime.checkpoint().expect("baseline");
+    for payload in ["delta epsilon", "zeta theta", "iota kappa"] {
+        runtime
+            .execute_query(&format!(
+                "UPDATE cold_rows SET payload='{payload}' WHERE id=1"
+            ))
+            .expect("update");
+        runtime.checkpoint().expect("publish update");
+        runtime
+            .db()
+            .store
+            .get_collection("cold_rows")
+            .expect("source")
+            .for_each_entity(|entity| {
+                let EntityData::Row(row) = &entity.data else {
+                    panic!("row source");
+                };
+                assert!(
+                    row.get_field("key").is_none(),
+                    "table updates must not invent KV identity"
+                );
+                true
+            });
+    }
+    let before = runtime
+        .db()
+        .native_vector_artifact_records(&["cold_rows".into()]);
+    drop(runtime);
+    let db = RedDB::open_with_options(&options).expect("cold reopen");
+    let after = db.native_vector_artifact_records(&["cold_rows".into()]);
+    assert_eq!(
+        before, after,
+        "durable row representation must preserve derived bytes"
+    );
+    let existing = descriptors(&db);
+    let publication = db.prepare_native_artifact_publication(&existing);
+    assert!(
+        publication
+            .records
+            .iter()
+            .all(|(summary, _)| summary.collection != "cold_rows"),
+        "unchanged updated rows must retain their native caches"
+    );
+    assert_eq!(
+        publication
+            .retained
+            .iter()
+            .filter(|page| page.collection == "cold_rows")
+            .collect::<Vec<_>>(),
+        existing
+            .iter()
+            .filter(|page| page.collection == "cold_rows")
+            .collect::<Vec<_>>(),
+        "reuse must retain the exact published physical references"
+    );
+    assert_artifact_matches_source(&db);
+    drop(db);
+    let reopened = crate::RedDBRuntime::with_options(options).expect("runtime reopen");
+    let rows = reopened
+        .execute_query("SELECT id,payload FROM cold_rows ORDER BY id")
+        .expect("recovered rows");
+    assert_eq!(rows.result.records.len(), 2);
+    assert_eq!(
+        rows.result.records[0].get("payload"),
+        Some(&Value::text("iota kappa"))
+    );
+    assert_eq!(
+        rows.result.records[1].get("payload"),
+        Some(&Value::text("untouched gamma"))
+    );
+    assert!(reopened
+        .execute_query("SELECT id FROM cold_rows WHERE payload='delta epsilon'")
+        .expect("historical visibility")
+        .result
+        .records
+        .is_empty());
+}
+
+#[test]
+fn sql_updates_preserve_only_catalog_kv_identity() {
+    let directory = tempfile::tempdir().expect("temporary model store");
+    let runtime =
+        crate::RedDBRuntime::with_options(paged_options(&directory.path().join("models.rdb")))
+            .expect("runtime");
+    for sql in [
+        r#"CREATE TABLE business_rows ("key" TEXT,"value" TEXT)"#,
+        r#"INSERT INTO business_rows ("key","value") VALUES ('original','before'),('untouched','other')"#,
+        r#"UPDATE business_rows SET "key"='changed',"value"='after' WHERE "key"='original'"#,
+        "CREATE KV sessions",
+        "KV PUT sessions.alpha = 'before'",
+        "UPDATE sessions SET value='after' WHERE key='alpha'",
+    ] {
+        runtime.execute_query(sql).expect("model-specific mutation");
+    }
+    let rows = runtime
+        .execute_query(r#"SELECT "key","value" FROM business_rows WHERE "key"='changed'"#)
+        .expect("table identity may change");
+    assert_eq!(rows.result.records.len(), 1);
+    assert_eq!(
+        rows.result.records[0].get("value"),
+        Some(&Value::text("after"))
+    );
+    let kv = runtime
+        .execute_query("KV GET sessions.alpha")
+        .expect("KV identity is preserved");
+    assert_eq!(
+        kv.result.records[0].get("value"),
+        Some(&Value::text("after"))
+    );
+}
+
+#[test]
 fn native_artifacts_runtime_reopen_rebuilds_only_changed_boot_configuration() {
     let directory = tempfile::tempdir().expect("temporary runtime store");
     let options = paged_options(&directory.path().join("runtime-reuse.rdb"));

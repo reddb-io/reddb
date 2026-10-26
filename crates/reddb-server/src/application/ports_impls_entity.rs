@@ -1200,11 +1200,15 @@ impl RedDBRuntime {
         // keeps `body` as the single source of truth. Reflect non-body SET
         // assignments into `body` as patch operations so dotted paths update
         // nested JSON instead of becoming literal top-level keys.
-        let is_document_collection = db
+        let collection_model = db
             .collection_contract(&collection)
-            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
-            .unwrap_or(false);
-        let kv_key = if row.get_field("value").is_some() || row.columns.len() >= 2 {
+            .map(|contract| contract.declared_model);
+        let is_document_collection =
+            collection_model == Some(crate::catalog::CollectionModel::Document);
+        // Row width and field names cannot identify a KV collection. Otherwise
+        // an ordinary columnar UPDATE invents a key and retains stale columns
+        // beside the named post-image, invalidating native proofs on reopen.
+        let kv_key = if collection_model == Some(crate::catalog::CollectionModel::Kv) {
             row.get_field("key")
                 .cloned()
                 .or_else(|| row.columns.first().cloned())

@@ -75,13 +75,16 @@ impl<'a> KvReadResolver<'a> {
     fn project<T>(&self, key: &str, projection: impl FnMut(&UnifiedEntity) -> T) -> Option<T> {
         let store = self.runtime.db().store();
         let manager = store.get_collection(self.collection)?;
-        let versioned = is_versioned(self.runtime, self.model, self.collection);
-        let snapshot = if versioned {
+        // SQL UPDATE creates MVCC versions even when KV PUT history is disabled.
+        // Select the visible version for plain KV as well; this does not enable
+        // versioned PUTs or change the config/vault read policy.
+        let mvcc = self.model == CollectionModel::Kv;
+        let snapshot = if mvcc {
             super::impl_core::capture_current_snapshot()
         } else {
             None
         };
-        manager.project_key_entity(key, snapshot.as_ref(), versioned, projection)
+        manager.project_key_entity(key, snapshot.as_ref(), mvcc, projection)
     }
 }
 
@@ -96,6 +99,47 @@ pub(super) fn is_versioned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_kv_reads_follow_sql_commit_and_rollback() {
+        let directory = tempfile::tempdir().expect("temporary KV store");
+        let options = crate::RedDBOptions::persistent(directory.path().join("kv-visibility.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        runtime
+            .execute_query("KV PUT shared.item = 'before'")
+            .expect("seed");
+        for (sql, expected) in [
+            ("BEGIN", "before"),
+            (
+                "UPDATE shared SET value='pending' WHERE key='item'",
+                "pending",
+            ),
+            ("ROLLBACK", "before"),
+            ("BEGIN", "before"),
+            ("UPDATE shared SET value='after' WHERE key='item'", "after"),
+            ("COMMIT", "after"),
+        ] {
+            runtime.execute_query(sql).expect("SQL transaction");
+            let result = runtime
+                .execute_query("KV GET shared.item")
+                .expect("keyed read");
+            assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text(expected)),
+                "after {sql}"
+            );
+        }
+        runtime.checkpoint().expect("checkpoint");
+        drop(runtime);
+        let reopened = RedDBRuntime::with_options(options).expect("reopen");
+        let result = reopened
+            .execute_query("KV GET shared.item")
+            .expect("recovered keyed read");
+        assert_eq!(
+            result.result.records[0].get("value"),
+            Some(&Value::text("after"))
+        );
+    }
 
     #[test]
     fn kv_read_resolver_requires_validation_and_preserves_legacy_policy_difference() {
