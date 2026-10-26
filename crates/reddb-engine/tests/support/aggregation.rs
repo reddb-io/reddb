@@ -9,7 +9,26 @@ use reddb_types::Value;
 #[path = "aggregate_planning.rs"]
 mod aggregate_planning;
 
+#[path = "aggregate_result_cases.rs"]
+mod aggregate_result_cases;
+
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "aggregate_results_grouped_columns_and_hidden",
+        aggregate_result_cases::grouped_columns_and_hidden_values,
+    ),
+    (
+        "aggregate_results_empty_input_semantics",
+        aggregate_result_cases::empty_input_semantics,
+    ),
+    (
+        "aggregate_results_wide_pagination",
+        aggregate_result_cases::wide_pagination,
+    ),
+    (
+        "aggregate_results_admission_and_secret_policy",
+        aggregate_result_cases::admission_and_secret_policy_order,
+    ),
     (
         "aggregate_planning_aliases_and_hidden_reuse",
         aggregate_planning::aliases_and_hidden_reuse,
@@ -396,7 +415,9 @@ pub fn verify_recovered(
     let query = super::record_filters::table_query("SELECT o.meta.tenant AS tenant, COUNT(*) AS n, SUM(total) AS amount, AVG(total) AS mean, MEDIAN(total) AS middle FROM orders AS o WHERE quantity > 0 GROUP BY o.meta.tenant HAVING MAX(total) >= 15 ORDER BY MAX(quantity) DESC, tenant ASC LIMIT 1 OFFSET 1");
     let runtime =
         prepare_aggregate_runtime_plan(&query).expect("recovered native aggregate planning");
-    let visible_projections: Vec<_> = effective_table_projections(&query)
+    let all_visible_projections = effective_table_projections(&query);
+    let visible_projections: Vec<_> = all_visible_projections
+        .clone()
         .into_iter()
         .filter(|projection| has_aggregate_projections(std::slice::from_ref(projection)))
         .collect();
@@ -425,9 +446,9 @@ pub fn verify_recovered(
         };
         let group_values: Vec<_> = group_by.iter().map(evaluate).collect();
         let key = build_aggregate_group_key(&group_values);
-        let state = groups
+        let (_, state) = groups
             .entry(key)
-            .or_insert_with(|| SlottedAggState::new(&plan));
+            .or_insert_with(|| (group_values, SlottedAggState::new(&plan)));
         state.count += 1;
         for (projection, slot) in projections.iter().zip(&plan.proj_slots) {
             if matches!(slot, ProjSlot::CountStar | ProjSlot::Shared) {
@@ -441,7 +462,6 @@ pub fn verify_recovered(
         }
     }
     assert_eq!(groups.len(), 2);
-    let mut outputs = Vec::new();
     for (tenant, amount, mean) in [
         (
             "red",
@@ -451,7 +471,7 @@ pub fn verify_recovered(
         ("blue", 25, 12.5),
     ] {
         let key = build_aggregate_group_key(&[Value::text(tenant)]);
-        let state = groups.get(&key).expect("recovered tenant group");
+        let (_, state) = groups.get(&key).expect("recovered tenant group");
         for (projection, expected) in visible_projections.iter().zip([
             Value::Integer(2),
             Value::Integer(amount),
@@ -460,17 +480,26 @@ pub fn verify_recovered(
         ]) {
             assert_eq!(result(projection, &plan, state), expected);
         }
-        let mut output = reddb_engine::query::unified::UnifiedRecord::new();
-        output.set("tenant", Value::text(tenant));
-        for projection in visible_projections.iter().chain(&runtime.hidden_aggregates) {
-            let (label, value) =
-                aggregate_projection_result_with_host(&Host, projection, state, &plan)
-                    .expect("recovered aggregate output");
-            output.set(&label, value);
-        }
-        outputs.push(output);
     }
-    let selected = aggregate_planning::finish(&query, &runtime, outputs);
+    use reddb_engine::query::runtime::aggregate_results::*;
+    let result = finish_aggregate_results_with_host(
+        &aggregate_result_cases::ResultHost::default(),
+        AggregateResultContext {
+            query: &query,
+            visible_projections: &all_visible_projections,
+            group_by: &group_by,
+            runtime_plan: &runtime,
+            slots: &plan,
+            sensitivity_source: None,
+        },
+        groups.values().map(|(values, state)| AggregateGroupRef {
+            group_values: values,
+            state,
+        }),
+    )
+    .expect("recovered canonical aggregate result phase");
+    assert_eq!(result.columns, ["tenant", "n", "amount", "mean", "middle"]);
+    let selected = result.records;
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].get("tenant"), Some(&Value::text("blue")));
     assert_eq!(selected[0].get("amount"), Some(&Value::Integer(25)));

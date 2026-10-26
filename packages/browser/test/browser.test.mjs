@@ -146,6 +146,8 @@ async function sharedConformance(browserPage) {
     'window_aggregate_frames_and_peers', 'window_wide_offsets_and_bounds',
     'window_errors_and_publication_order', 'window_materialization_admission',
     'window_cross_row_secret_policy', 'window_projection_depth_and_subtraction',
+    'aggregate_results_grouped_columns_and_hidden', 'aggregate_results_empty_input_semantics',
+    'aggregate_results_wide_pagination', 'aggregate_results_admission_and_secret_policy',
     'aggregate_planning_aliases_and_hidden_reuse', 'aggregate_planning_dedup_and_legacy_inputs',
     'aggregate_planning_nested_expressions_and_ordering', 'aggregate_planning_parameters_and_pagination',
     'aggregate_planning_signatures_and_unsupported', 'aggregate_planning_depth_bounds',

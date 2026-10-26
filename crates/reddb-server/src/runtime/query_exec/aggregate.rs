@@ -13,7 +13,7 @@
 
 use reddb_engine::query::planning::aggregation::{
     prepare_aggregate_runtime_plan, render_expr_signature, render_projection_signature,
-    validate_aggregate_planning_depth, visible_aggregate_output_name,
+    validate_aggregate_planning_depth,
 };
 use reddb_engine::query::runtime::aggregation::{
     aggregate_argument_key, aggregate_output_name, build_aggregate_group_key, sum_f64_to_value,
@@ -32,7 +32,7 @@ use crate::runtime::join_filter::{
 use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::RedDB;
-use reddb_rql::ast::{Expr, FieldRef, Filter, Projection};
+use reddb_rql::ast::{Expr, FieldRef, Filter, OrderByClause, Projection};
 use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
@@ -51,17 +51,39 @@ impl AggregateHost for NativeAggregateHost {
         eval_projection_value_with_db(None, projection, &UnifiedRecord::new())
     }
 }
-fn aggregate_projection_result_slotted(
-    projection: &Projection,
-    state: &SlottedAggState,
-    plan: &CompiledAggPlan,
-) -> Option<(String, Value)> {
-    reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
-        &NativeAggregateHost,
-        projection,
-        state,
-        plan,
-    )
+struct NativeAggregateResultHost<'a> {
+    db: &'a RedDB,
+}
+impl AggregateHost for NativeAggregateResultHost<'_> {
+    fn compare_values(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        NativeAggregateHost.compare_values(left, right)
+    }
+    fn evaluate_static_projection(&self, projection: &Projection) -> Option<Value> {
+        NativeAggregateHost.evaluate_static_projection(projection)
+    }
+}
+impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
+    for NativeAggregateResultHost<'_>
+{
+    type Error = RedDBError;
+    fn guard_materialization(&self, groups: usize) -> RedDBResult<()> {
+        crate::runtime::materialization_limit::guard(self.db, "aggregation", groups)
+    }
+    fn group_output_label(&self, query: &TableQuery, expression: &Expr) -> String {
+        group_output_label(query, expression)
+    }
+    fn group_expression_key(&self, expression: &Expr) -> Option<String> {
+        group_expr_key(expression)
+    }
+    fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter_with_db(Some(self.db), record, filter, None, None)
+    }
+    fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
+        sort_records_by_order_by_with_db(Some(self.db), records, clauses, None, None)
+    }
+    fn secret_query_output(&self, value: Value) -> RedDBResult<Value> {
+        crate::runtime::execution_context::secret_query_output(value)
+    }
 }
 
 struct QueryTempDir {
@@ -599,182 +621,27 @@ pub(crate) fn execute_aggregate_query(
             .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?
     };
 
-    // Issue #769 — cap the materialized in-memory state. `groups` is the
-    // full distinct-group set (in-memory + spilled, merged) so its
-    // cardinality is exactly the aggregation's materialized row count.
-    // A GROUP BY whose distinct-key count blows the ceiling terminates
-    // here rather than continuing to project a runaway result.
-    crate::runtime::materialization_limit::guard(db, "aggregation", groups.len())?;
-
-    // Build result records from accumulated groups
-    let mut records = Vec::with_capacity(groups.len().max(1));
-    let mut columns = Vec::new();
-
-    for group in groups.values() {
-        let mut record = UnifiedRecord::new();
-
-        // Add GROUP BY columns
-        if has_group_by {
-            for (index, group_expr) in effective_group_by.iter().enumerate() {
-                let Some(value) = group.group_values.get(index).cloned() else {
-                    continue;
-                };
-                let label = group_output_label(query, group_expr);
-                if !columns.contains(&label) {
-                    columns.push(label.clone());
-                }
-                record.set(
-                    &group_expr_key(group_expr).unwrap_or_else(|| label.clone()),
-                    value.clone(),
-                );
-                record.set(&label, value);
+    reddb_engine::query::runtime::aggregate_results::finish_aggregate_results_with_host(
+        &NativeAggregateResultHost { db },
+        reddb_engine::query::runtime::aggregate_results::AggregateResultContext {
+            query,
+            visible_projections: &effective_projections,
+            group_by: &effective_group_by,
+            runtime_plan: &runtime_plan,
+            slots: &agg_plan,
+            sensitivity_source: sensitive_query.then_some(&sensitivity_source),
+        },
+        groups.values().map(|group| {
+            reddb_engine::query::runtime::aggregate_results::AggregateGroupRef {
+                group_values: &group.group_values,
+                state: &group.state,
             }
-        }
-
-        // Add visible aggregate results
-        for proj in &effective_projections {
-            if let Some((result_name, result_val)) =
-                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
-            {
-                if !columns.contains(&result_name) {
-                    columns.push(result_name.clone());
-                }
-                record.set(&result_name, result_val);
-            }
-        }
-
-        for proj in &runtime_plan.hidden_aggregates {
-            if let Some((result_name, result_val)) =
-                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
-            {
-                record.set(&result_name, result_val);
-            }
-        }
-
-        if having_matches(db, runtime_plan.having.as_ref(), &record) {
-            records.push(record);
-        }
-    }
-
-    // If no input rows matched, return a single aggregate row.
-    let empty_state = SlottedAggState::new(&agg_plan);
-    if groups.is_empty() && !has_group_by {
-        let mut record = UnifiedRecord::new();
-        for proj in &effective_projections {
-            if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
-            {
-                if !columns.contains(&result_name) {
-                    columns.push(result_name.clone());
-                }
-                record.set(&result_name, result_val);
-            }
-        }
-        for proj in &runtime_plan.hidden_aggregates {
-            if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
-            {
-                record.set(&result_name, result_val);
-            }
-        }
-        if having_matches(db, runtime_plan.having.as_ref(), &record) {
-            records.push(record);
-        }
-    }
-
-    if !runtime_plan.order_by.is_empty() {
-        sort_records_by_order_by_with_db(
-            Some(db),
-            &mut records,
-            &runtime_plan.order_by,
-            None,
-            None,
-        );
-    }
-
-    if let Some(offset) = query.offset {
-        let offset = offset as usize;
-        if offset < records.len() {
-            records = records.into_iter().skip(offset).collect();
-        } else {
-            records.clear();
-        }
-    }
-
-    if let Some(limit) = query.limit {
-        records.truncate(limit as usize);
-    }
-
-    if sensitive_query {
-        for record in &mut records {
-            for projection in effective_projections
-                .iter()
-                .chain(&runtime_plan.hidden_aggregates)
-            {
-                if crate::runtime::join_filter::projection_uses_secret(
-                    projection,
-                    &sensitivity_source,
-                    Some(table_name),
-                    Some(table_alias),
-                ) {
-                    let label = visible_aggregate_output_name(projection)
-                        .map(|(_, label)| label)
-                        .unwrap_or_else(|| projection_name(projection));
-                    if let Some(value) = record.get(&label).cloned() {
-                        record.set(
-                            &label,
-                            crate::runtime::execution_context::secret_query_output(value)?,
-                        );
-                    }
-                }
-            }
-            for expression in &effective_group_by {
-                if crate::runtime::join_filter::expression_uses_secret(
-                    expression,
-                    &sensitivity_source,
-                    Some(table_name),
-                    Some(table_alias),
-                ) {
-                    let label = group_output_label(query, expression);
-                    if let Some(value) = record.get(&label).cloned() {
-                        record.set(
-                            &label,
-                            crate::runtime::execution_context::secret_query_output(value)?,
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(UnifiedResult {
-        columns,
-        records,
-        stats: Default::default(),
-        pre_serialized_json: None,
-    })
+        }),
+    )
 }
 
 fn projection_from_expr(expr: &Expr) -> Option<Projection> {
     lower_expr_to_projection(expr)
-}
-
-fn empty_aggregate_projection_result_slotted(
-    projection: &Projection,
-    state: &SlottedAggState,
-    plan: &CompiledAggPlan,
-) -> Option<(String, Value)> {
-    aggregate_projection_result_slotted(projection, state, plan)
-}
-
-fn having_matches(
-    db: &RedDB,
-    having: Option<&reddb_rql::ast::Filter>,
-    record: &UnifiedRecord,
-) -> bool {
-    match having {
-        Some(filter) => evaluate_runtime_filter_with_db(Some(db), record, filter, None, None),
-        None => true,
-    }
 }
 
 fn resolve_aggregate_argument_value(
@@ -2737,6 +2604,37 @@ mod aggregate_numeric_route_parity_tests {
     }
 
     #[test]
+    fn shared_result_phase_preserves_empty_aggregates_and_wide_pages() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, value) in [("red", 10), ("red", 20), ("blue", 5), ("blue", 10)] {
+            insert(&runtime, bucket, Value::BigInt(value));
+        }
+        for limit in [1u64 << 32, (1u64 << 32) + 1, i64::MAX as u64] {
+            let sql = format!("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING MAX(value) > 0 ORDER BY SUM(value) DESC LIMIT {limit}");
+            let result = runtime.execute_query(&sql).expect("wide aggregate page");
+            assert_eq!(result.result.columns, vec!["bucket", "amount"]);
+            assert_eq!(result.result.records.len(), 2);
+            assert_eq!(
+                result.result.records[0].get("bucket"),
+                Some(&Value::text("red"))
+            );
+        }
+        let result = runtime.execute_query("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING MAX(value) > 0 ORDER BY SUM(value) DESC LIMIT 1 OFFSET 4294967296").expect("wide aggregate offset");
+        assert!(result.result.records.is_empty());
+        // MEDIAN keeps this outside the basic count/sum pushdown envelope.
+        let empty = runtime.execute_query("SELECT COUNT(*) AS n, SUM(value) AS amount, MEDIAN(value) AS middle FROM samples WHERE value > 1000").expect("empty scalar aggregate result");
+        assert_eq!(empty.result.records.len(), 1);
+        assert_eq!(
+            number(empty.result.records[0].get("n").expect("empty count")),
+            0.0
+        );
+        assert_eq!(empty.result.records[0].get("amount"), Some(&Value::Null));
+        assert_eq!(empty.result.records[0].get("middle"), Some(&Value::Null));
+        let empty = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples WHERE value > 1000 GROUP BY bucket HAVING MAX(value) > 0").expect("empty grouped aggregate result");
+        assert!(empty.result.records.is_empty());
+    }
+
+    #[test]
     fn shared_planning_reuses_aliases_and_hidden_aggregates() {
         let runtime = runtime_with_table("BIGINT");
         for (bucket, value) in [("red", 10), ("red", 20), ("blue", 5), ("blue", 10)] {
@@ -3063,8 +2961,18 @@ mod shared_kernel_spill_tests {
         assert_eq!(decoded.state.count, expected.state.count);
         for projection in &projections {
             assert_eq!(
-                aggregate_projection_result_slotted(projection, &decoded.state, &plan),
-                aggregate_projection_result_slotted(projection, &expected.state, &plan)
+                reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
+                    &NativeAggregateHost,
+                    projection,
+                    &decoded.state,
+                    &plan
+                ),
+                reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
+                    &NativeAggregateHost,
+                    projection,
+                    &expected.state,
+                    &plan
+                )
             );
         }
     }
