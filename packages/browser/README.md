@@ -12,10 +12,9 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-The source SDK exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
-and explicit BEGIN/COMMIT/ROLLBACK transactions. The published `0.1.0` package
-predates `openDatabase` and these SQL operations; use a source-built tarball
-until the next browser release. Other models, synchronization, conflict
+Version `0.2.0` exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
+Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
 does not replace the remote `@reddb-io/client`.
 
@@ -29,14 +28,15 @@ npm add @reddb-io/browser
 ```
 
 ```ts
-import { openArtifact } from '@reddb-io/browser'
+import { openDatabase } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 
-const artifact = await openArtifact({ name: 'my-app', worker: new RedDBWorker() })
+const database = await openDatabase({ name: 'my-app', create: true, worker: new RedDBWorker() })
 try {
-  console.log(await artifact.executeScalar('SELECT 42 AS answer'))
+  await database.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+  console.log(await database.query('SELECT id, body FROM notes'))
 } finally {
-  await artifact.close()
+  await database.close()
 }
 ```
 
@@ -124,7 +124,7 @@ try {
 
 The versioned Worker/WASM contract reports `abiVersion: 1`,
 `valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
-and `scalarQueries` are true. Source builds also report `storedQueries: true`
+and `scalarQueries` are true. Version `0.2.0` also reports `storedQueries: true`
 with `storedQueryMode: 'read-write-tables'`, `sqlWrites: true` and
 `transactions: true`; `sync` remains false.
 Capabilities describe the engine, not the operations exposed by a particular handle. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
@@ -318,9 +318,9 @@ HTTP host stopped, and exports for native verification. It retains opaque
 metadata bytes without interpreting native metadata policy. A separate native
 dump test checks the complete entity corpus and actual native metadata. These
 remain test-only records without application collection schemas or transactional
-publication. Storage-backed execution and durable runtime transaction/WAL
-integration are still needed before JS/TS can query collections. No file bytes,
-format versions or public application APIs change.
+publication. The public table SQL API uses these shared codecs with the durable
+query/transaction paths described above. Other collection models remain pending;
+the canonical file format is unchanged.
 
 ## Shared query records and materialization
 
@@ -362,10 +362,9 @@ Four shared conformance cases exercise all original record-oracle entity shapes,
 key-version lookup and raw mutation, bounded/cancelled scans, metadata and sealing;
 the browser worker repeats them after the existing offline restart.
 
-These are canonical resident storage operations, not durable application
-transactions. WAL publication, catalog dispatch and the application SDK still
-need integration before JS/TS can query and mutate persisted collections. The
-production artifact/scalar API and all file formats remain unchanged.
+These fixtures exercise canonical resident storage independently of the public
+table SQL and durable transaction API described above. Other collection models
+remain pending; the artifact/scalar API and all file formats remain compatible.
 
 ## Shared snapshot recovery
 
@@ -390,8 +389,8 @@ internal fixtures remain separate from application entrypoints.
 1. Extract the remaining storage-coupled executor/runtime into the shared portable engine and
    preserve native query/transaction semantics for tables, documents, KV, graph
    and vectors. Port clocks, crypto randomness and task scheduling.
-2. Build the application-facing SDK, local transaction/outbox atomicity, change
-   observation, and one-owner request forwarding between tabs.
+2. Add a transactional outbox, change observation, and one-owner request forwarding
+   between tabs to the application-facing SDK.
 3. Implement versioned, policy-filtered snapshot and resumable change protocols
    in `reddb-wire` and the server. Revalidate normal authorization/RLS on upload;
    preserve transaction grouping, idempotency, stable graph references and deletes.

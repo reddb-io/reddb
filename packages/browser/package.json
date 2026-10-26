@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "RedDB local browser table SQL, transactions and offline OPFS persistence through a shared Rust/WASM engine.",
