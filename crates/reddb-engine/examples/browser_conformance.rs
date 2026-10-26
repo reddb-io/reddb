@@ -30,6 +30,10 @@ mod record_ordering;
 mod record_projection;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/geographic.rs"]
+mod geographic;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/temporal_scalars.rs"]
 mod temporal_scalars;
 
@@ -140,7 +144,8 @@ pub fn run_conformance() -> String {
         .chain(record_projection::CASES.iter())
         .chain(numeric_scalars::CASES.iter())
         .chain(text_scalars::CASES.iter())
-        .chain(temporal_scalars::CASES.iter());
+        .chain(temporal_scalars::CASES.iter())
+        .chain(geographic::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

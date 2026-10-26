@@ -18,7 +18,22 @@ use std::{
     sync::Arc,
 };
 
+#[path = "geographic_projection.rs"]
+mod geographic_projection;
+
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "scalar_geo_aliases_and_operations",
+        geographic_projection::aliases_and_operations,
+    ),
+    (
+        "scalar_geo_argument_forms",
+        geographic_projection::argument_forms,
+    ),
+    (
+        "scalar_geo_input_policy",
+        geographic_projection::input_policy,
+    ),
     ("scalar_dispatch_clock_values", scalar_clock_values),
     (
         "scalar_dispatch_time_bucket_inputs",
@@ -1707,4 +1722,5 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         assert_eq!(projected.get("today"), Some(&Value::Date(2)));
         assert_eq!(projected.get("utc_time"), Some(&Value::Time(123)));
     }
+    geographic_projection::verify_recovered(&host, &selected, updated);
 }
