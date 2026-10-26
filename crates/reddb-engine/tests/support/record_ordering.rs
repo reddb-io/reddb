@@ -1,9 +1,9 @@
 //! Native runtime ORDER BY semantics exercised unchanged in native and WASM.
 use reddb_engine::catalog::CollectionContract;
 use reddb_engine::query::{
-    evaluator,
     runtime::{
-        filter::resolve_filter_row_value,
+        expression::{evaluate_runtime_expr_with_host, RuntimeExpressionHost},
+        field_resolution::resolve_runtime_field,
         ordering::{
             compare_runtime_optional_values, compare_runtime_order_with_host,
             sort_or_top_k_records_with_host, sort_records_by_order_by_with_host,
@@ -41,17 +41,15 @@ pub const CASES: &[(&str, fn())] = &[
 
 struct Host<'a> {
     query: &'a TableQuery,
-    contract: Option<&'a CollectionContract>,
     evaluations: Cell<usize>,
     identities: Cell<usize>,
     topk_disabled: bool,
 }
 
 impl<'a> Host<'a> {
-    fn new(query: &'a TableQuery, contract: Option<&'a CollectionContract>) -> Self {
+    fn new(query: &'a TableQuery, _contract: Option<&'a CollectionContract>) -> Self {
         Self {
             query,
-            contract,
             evaluations: Cell::new(0),
             identities: Cell::new(0),
             topk_disabled: false,
@@ -62,25 +60,13 @@ impl<'a> Host<'a> {
 impl OrderingHost for Host<'_> {
     fn evaluate_expression(&self, expression: &Expr, record: &UnifiedRecord) -> Option<Value> {
         self.evaluations.set(self.evaluations.get() + 1);
-        evaluator::evaluate(expression, &|field: &FieldRef| {
-            resolve_filter_row_value(
+        evaluate_runtime_expr_with_host(
+            &RecordExpressionHost {
+                query: self.query,
                 record,
-                field,
-                Some(&self.query.table),
-                self.query.alias.as_deref(),
-                &super::record_filters::plaintext,
-                |collection, name| {
-                    self.contract.is_some_and(|contract| {
-                        contract.name == collection
-                            && contract
-                                .declared_columns
-                                .iter()
-                                .any(|column| column.name == name && !column.not_null)
-                    })
-                },
-            )
-        })
-        .ok()
+            },
+            expression,
+        )
     }
     fn secret_query_input(&self, value: Value) -> Option<Value> {
         super::record_filters::plaintext(value)
@@ -509,5 +495,44 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
                 "recovered {suffix}"
             );
         }
+    }
+}
+
+/// Partial test-only function host; the native production host retains all
+/// builtins and effects. The recovered fixture only admits COALESCE here.
+struct RecordExpressionHost<'a> {
+    query: &'a TableQuery,
+    record: &'a UnifiedRecord,
+}
+impl RuntimeExpressionHost for RecordExpressionHost<'_> {
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        super::record_filters::plaintext(value)
+    }
+    fn resolve_field(&self, field: &FieldRef) -> Option<Value> {
+        resolve_runtime_field(
+            self.record,
+            field,
+            Some(&self.query.table),
+            self.query.alias.as_deref(),
+        )
+    }
+    fn evaluate_special_function(
+        &self,
+        _: &str,
+        _: &[Expr],
+        _: &dyn Fn(&Expr) -> Option<Value>,
+    ) -> Option<Value> {
+        panic!("fixture does not admit context effects")
+    }
+    fn evaluate_function(&self, name: &str, arguments: &[Value]) -> Option<Value> {
+        assert_eq!(
+            name, "COALESCE",
+            "fixture only admits its COALESCE callback"
+        );
+        arguments
+            .iter()
+            .find(|value| !matches!(value, Value::Null))
+            .cloned()
+            .or(Some(Value::Null))
     }
 }
