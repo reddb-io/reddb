@@ -85,8 +85,11 @@ second-resolution start timestamp. This includes cold loading and is separate
 from a later diagnostic pause. Login returned 503 around its 30 s handler
 deadline during the 50.782 s automatic checkpoint. Source inspection shows a
 shared publication barrier across the checkpoint and auth persistence paths;
-a small deterministic concurrency reproduction is still required to attribute
-the exact wait. Increasing the timeout is not an accepted correction.
+the later [small concurrency reproduction](checkpoint-auth-contention-2026-10-26.md)
+confirms that this fence alone can produce the same HTTP deadline failure,
+without CPU-intensive construction or a request queue. It does not exclude
+additional historical latency contributors. Increasing the timeout is not an
+accepted correction.
 
 ## Instrumentation limitation
 
