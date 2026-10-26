@@ -786,7 +786,11 @@ pub fn pager_orchestration_allocation_fence() {
 #[path = "pager_eviction.rs"]
 mod eviction;
 
-pub const CASES: [(&str, fn()); 18] = [
+pub const CASES: [(&str, fn()); 19] = [
+    (
+        "pager_eviction_batch_stays_within_one_frame",
+        eviction::pager_eviction_batch_stays_within_one_frame,
+    ),
     (
         "pager_sparse_dirty_pages_share_a_protected_batch",
         eviction::pager_sparse_dirty_pages_share_a_protected_batch,

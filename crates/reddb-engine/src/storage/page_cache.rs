@@ -811,7 +811,7 @@ impl PageCacheShard {
     }
 
     /// Snapshot IDs without cloning images or clearing their dirty flags.
-    fn dirty_page_ids(&self) -> Vec<u32> {
+    fn dirty_page_ids(&self, max: usize) -> Vec<u32> {
         let index = cache_read(&self.index);
         let entries = cache_read(&self.entries);
         index
@@ -820,6 +820,7 @@ impl PageCacheShard {
                 let entry = entries.get(slot)?.as_ref()?;
                 entry.dirty.then_some(page_id)
             })
+            .take(max)
             .collect()
     }
 }
@@ -992,10 +993,13 @@ impl PageCache {
     }
 
     /// Clean entries must not split a small dirty set into many I/O batches.
-    pub fn dirty_page_ids(&self) -> Vec<u32> {
+    pub fn dirty_page_ids(&self, max: usize) -> Vec<u32> {
         let mut ids = Vec::new();
         for shard in self.shards.iter() {
-            ids.extend(shard.dirty_page_ids());
+            if ids.len() == max {
+                break;
+            }
+            ids.extend(shard.dirty_page_ids(max - ids.len()));
         }
         ids
     }

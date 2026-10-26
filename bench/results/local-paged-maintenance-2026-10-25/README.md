@@ -310,3 +310,20 @@ reduces that fixture to 3 barriers (one protected frame), with exactly the
 16 changed home pages written in ascending physical order. No barrier is
 removed from an individual protected frame. This is an I/O-count improvement,
 not yet a measured latency improvement on the historical Platform copy.
+
+RC372 (`dfcf8bbf7`) is rejected for runtime admission. Although its source
+passed the portable/native pager suites and its public binary/image provenance
+was verified, the constrained 60,000-row fixture returned HTTP 503 while
+creating an unrelated table. Its automatic checkpoint took 39.550 s; native
+header publication alone took 25.001 s. There was no OOM kill and shutdown
+exited zero. The failed fixture is retained and was not reopened or mutated.
+Protecting each eviction separately exposes three fsync barriers per victim,
+which is too expensive for this workload.
+
+The follow-up batches each evicted image with at most one DWB frame of resident
+dirty images. WAL-first ordering and all stage/home/clear barriers remain.
+Dirty-ID selection is bounded before image copies, and homes are ordered within
+the frame. A dedicated pressure test verifies exactly one full frame, three
+barriers, and the expected residual dirty count. The six-admission failure and
+recovery tests also verify multi-page bounded eviction. The published candidate
+must be tested again on a fresh fixture; RC371/RC372 results cannot qualify it.

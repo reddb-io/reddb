@@ -514,6 +514,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    /// Amortize protected eviction over one bounded DWB frame. Keeping the
+    /// remaining cache dirty would otherwise pay three fsyncs per victim.
+    fn write_evicted_dirty_page(&self, page: Page) -> Result<(), PagerError> {
+        let mut ids = self
+            .cache
+            .dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME.saturating_sub(1));
+        ids.sort_unstable();
+        let mut pages = self.cache.flush_dirty_pages(&ids);
+        pages.push((page.page_id(), page));
+        pages.sort_unstable_by_key(|(id, _)| *id);
+        self.write_dirty_page_batch(&pages)
+    }
+
     /// Write a page to disk (bypassing cache)
     fn write_page_raw(&self, page_id: u32, page: &Page) -> Result<(), PagerError> {
         self.ensure_writeback_available()?;
@@ -538,8 +551,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
 
         Ok(page)
@@ -563,8 +575,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache (no checksum verification)
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
 
         Ok(page)
@@ -585,8 +596,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // page will never be flushed otherwise (same bug fixed in
         // `allocate_page`).
         if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -606,8 +616,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
         if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -685,8 +694,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // handling: write the evicted page through immediately so
         // the on-disk image stays consistent.
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            let evicted_id = dirty_page.page_id();
-            self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -719,8 +727,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             let mut page = Page::new(PageType::Vector, page_id);
             page.update_checksum();
             if let Some(dirty_page) = self.cache.insert(page_id, page) {
-                let evicted_id = dirty_page.page_id();
-                self.write_dirty_page_batch(&[(evicted_id, dirty_page)])?;
+                self.write_evicted_dirty_page(dirty_page)?;
             }
             self.cache.mark_dirty(page_id);
         }
@@ -930,7 +937,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Batch dirty IDs, not every resident ID: otherwise a few edits in
         // a mostly clean cache pay a protected write per cache-sized slice.
         // Physical order also avoids arbitrary seeks among each batch's homes.
-        let mut page_ids = self.cache.dirty_page_ids();
+        let mut page_ids = self.cache.dirty_page_ids(usize::MAX);
         page_ids.sort_unstable();
         for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
             let pages = self.cache.flush_dirty_pages(ids);

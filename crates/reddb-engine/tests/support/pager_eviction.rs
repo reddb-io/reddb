@@ -210,7 +210,20 @@ pub fn pager_dirty_eviction_obeys_wal_barrier() {
                 assert!(
                     matches!(operations[2], Operation::Write(offset, PAGE_SIZE) if offset >= u64::from(ids[0]) * PAGE_SIZE as u64)
                 );
-                assert_eq!(operations[3], Operation::Sync);
+                let barriers = operations
+                    .iter()
+                    .filter(|operation| **operation == Operation::Sync)
+                    .count();
+                assert_eq!(
+                    barriers, 3,
+                    "one bounded eviction frame retains every barrier"
+                );
+                let homes = operations.iter().filter(|operation| matches!(operation,
+                    Operation::Write(offset, PAGE_SIZE) if *offset >= u64::from(ids[0]) * PAGE_SIZE as u64)).count();
+                assert!(
+                    homes > 1 && homes <= pager_io::DWB_MAX_PAGES_PER_FRAME,
+                    "amortize barriers over a bounded batch, got {homes} images"
+                );
                 assert_eq!(operations.last(), Some(&Operation::Sync));
             }
         }
@@ -269,4 +282,67 @@ pub fn pager_sparse_dirty_pages_share_a_protected_batch() {
             .expect("valid home page");
         assert_eq!(actual.read_cell(0).expect("updated cell").1, b"updated");
     }
+}
+
+pub fn pager_eviction_batch_stays_within_one_frame() {
+    let pager = Pager::open_owned(
+        MemoryFile::default(),
+        "eviction-frame.rdb".into(),
+        PagerConfig {
+            cache_size: 128,
+            ..PagerConfig::default()
+        },
+        NoWal,
+        true,
+    )
+    .expect("create bounded eviction fixture");
+    let mut ids = Vec::new();
+    for _ in 0..pager.cache_capacity() {
+        ids.push(
+            pager
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate baseline")
+                .page_id(),
+        );
+    }
+    pager.sync().expect("publish baseline");
+    for &id in &ids {
+        pager
+            .write_page(id, page(id, b"updated", 0))
+            .expect("dirty resident page");
+    }
+    pager
+        .with_file(|file| file.operations.borrow_mut().clear())
+        .expect("observe eviction batch");
+    pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("protected bounded eviction");
+    pager
+        .with_file(|file| {
+            let operations = file.operations.borrow();
+            assert_eq!(
+                operations
+                    .iter()
+                    .filter(|operation| **operation == Operation::Sync)
+                    .count(),
+                3
+            );
+            let homes = operations
+                .iter()
+                .filter(|operation| {
+                    matches!(operation,
+            Operation::Write(offset, PAGE_SIZE) if *offset >= u64::from(ids[0]) * PAGE_SIZE as u64)
+                })
+                .count();
+            assert_eq!(
+                homes,
+                pager_io::DWB_MAX_PAGES_PER_FRAME,
+                "one victim plus a bounded resident batch"
+            );
+        })
+        .expect("verify bounded frame");
+    assert_eq!(
+        pager.dirty_page_count(),
+        ids.len() - pager_io::DWB_MAX_PAGES_PER_FRAME + 1
+    );
 }
