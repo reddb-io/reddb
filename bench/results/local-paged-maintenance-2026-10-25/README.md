@@ -337,3 +337,8 @@ and physical-growth gates. The temporary QA worker has been retired; rejected
 database copies and their PVCs remain preserved. No current-source historical
 Auth/Platform qualification, live fleet rollout or database-volume downscale
 is established by the miniature cold-reuse results.
+
+[Native blob allocation/write amplification](native-blob-growth-2026-10-26.md)
+records the subsequent blank-generation reproduction, bounded lookahead fix
+and expansion-failure recovery test. Its local I/O counts do not qualify cloud
+latency or the original historical-store growth gate.

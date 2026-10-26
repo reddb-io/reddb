@@ -109,16 +109,26 @@ impl UnifiedStore {
             .transpose()?
             .unwrap_or_default();
         let existing_pages = page_ids.len();
-        while page_ids.len() < page_count as usize {
-            page_ids.push(
-                pager
-                    .allocate_page(crate::storage::engine::PageType::NativeMeta)
-                    .map_err(|err| StoreError::Serialization(err.to_string()))?
-                    .page_id(),
-            );
-        }
 
-        for (index, chunk) in payload.chunks(chunk_capacity).enumerate() {
+        // Complete allocation of the new tail before changing any published
+        // prefix. An allocation/writeback failure must leave that prefix
+        // intact, as it did when allocation preceded every payload write.
+        let prefix_pages = existing_pages.min(page_count as usize);
+        for index in (prefix_pages..page_count as usize).chain(0..prefix_pages) {
+            let start = index * chunk_capacity;
+            let chunk = &payload[start..payload.len().min(start + chunk_capacity)];
+            // Allocation admits a dirty blank page. Reserving the entire blob
+            // first evicts a blank generation before writing its real payload.
+            // One-page lookahead supplies the next link without that extra pass.
+            let required = (index + 2).min(page_count as usize);
+            while page_ids.len() < required {
+                page_ids.push(
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::NativeMeta)
+                        .map_err(|err| StoreError::Serialization(err.to_string()))?
+                        .page_id(),
+                );
+            }
             let page_id = page_ids[index];
             let next_page = if index + 1 < page_count as usize {
                 page_ids[index + 1]
@@ -434,6 +444,92 @@ impl UnifiedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_blob_growth_failure_preserves_the_published_payload() {
+        use crate::storage::engine::pager::FAIL_NATIVE_HOME_WRITE;
+
+        let directory = tempfile::tempdir().expect("blob failure fixture");
+        let path = directory.path().join("blob-failure.rdb");
+        let store = UnifiedStore::open_with_config(
+            &path,
+            UnifiedStoreConfig::default().with_page_cache_slots(32),
+        )
+        .expect("small-cache store");
+        let capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
+        let original = vec![7; capacity * 4];
+        let (root, _, _) = store
+            .write_native_blob_chain(&original, None)
+            .expect("original blob");
+        store.persist().expect("publish original");
+        FAIL_NATIVE_HOME_WRITE.set(true);
+        let error = store
+            .write_native_blob_chain(&vec![9; capacity * 512], Some(root))
+            .expect_err("interrupt growth");
+        assert!(error
+            .to_string()
+            .contains("injected native home write failure"));
+        assert!(
+            !FAIL_NATIVE_HOME_WRITE.get(),
+            "the failure must reach native home I/O"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("recover staged growth frame");
+        assert_eq!(
+            reopened
+                .read_native_blob_chain(root)
+                .expect("old published blob"),
+            original,
+            "allocation failure must not replace the published prefix"
+        );
+    }
+
+    #[test]
+    fn native_blob_growth_does_not_flush_an_entire_blank_generation() {
+        use crate::storage::engine::pager::NATIVE_PAGE_IO_COUNTS;
+
+        let directory = tempfile::tempdir().expect("blob I/O fixture");
+        let path = directory.path().join("blob-growth.rdb");
+        let store = UnifiedStore::open_with_config(
+            &path,
+            UnifiedStoreConfig::default().with_page_cache_slots(32),
+        )
+        .expect("small-cache store");
+        let capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
+        let payload = vec![7; capacity * 512];
+        NATIVE_PAGE_IO_COUNTS.set(Default::default());
+        let (root, pages, _) = store
+            .write_native_blob_chain(&payload, None)
+            .expect("new blob");
+        store.persist().expect("durable blob");
+        let counts = NATIVE_PAGE_IO_COUNTS.get();
+        assert_eq!(pages, 512);
+        assert_eq!(
+            store.read_native_blob_chain(root).expect("read blob"),
+            payload
+        );
+        eprintln!("native blob pages={pages} I/O={counts:?}");
+        // A bounded eviction frame may include the one-page lookahead. It
+        // must not write a complete blank copy before the payload generation.
+        let frame_pages = reddb_engine::storage::pager_io::DWB_MAX_PAGES_PER_FRAME;
+        let blank_limit = (pages as usize).div_ceil(frame_pages) * 2 + 2;
+        assert!(
+            counts.blank_native_home_writes <= blank_limit,
+            "preallocated blank pages amplified protected I/O: {counts:?}, limit={blank_limit}"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open(&path).expect("cold reopen");
+        assert_eq!(
+            reopened.read_native_blob_chain(root).expect("cold blob"),
+            payload
+        );
+    }
 
     #[test]
     fn native_source_proof_blob_reuses_space_and_retires_removed_pages() {

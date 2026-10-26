@@ -185,6 +185,10 @@ unpublished allocations remain conservative recovery garbage; this mechanism
 does not claim a general orphan-page vacuum of pre-upgrade files.
 
 Native index blob replacement terminates the chain at the new payload boundary.
+Growing blobs allocate and fill the new tail with one-page lookahead before
+changing the published prefix. This avoids evicting a complete blank generation
+under cache pressure and preserves that prefix if tail allocation/writeback
+fails. Protected page-write barriers and final native publication are unchanged.
 Shrunk tails, empty blobs and removed artifacts remain outside the allocator
 until the native summary and physical header have been synced. They then enter
 the existing `RDF1` quarantine and become reusable after a later durable catalog
