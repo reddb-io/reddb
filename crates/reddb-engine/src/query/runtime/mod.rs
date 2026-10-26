@@ -3,6 +3,7 @@ pub mod expression;
 pub mod field_resolution;
 pub mod filter;
 pub mod geographic;
+mod json_functions;
 pub mod numeric;
 pub mod ordering;
 pub mod projection;
@@ -11,6 +12,7 @@ pub mod scalar_functions;
 pub mod table_plan;
 pub mod temporal;
 pub mod text;
+pub mod value_functions;
 pub mod values;
 
 pub fn is_universal_entity_source(table: &str) -> bool {

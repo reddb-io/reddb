@@ -83,7 +83,7 @@ pub(super) fn verify_recovered(
     contract: &CollectionContract,
     updated: bool,
 ) {
-    let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled FROM orders AS o WHERE total >= 10 ORDER BY CASE WHEN quantity >= 2 THEN -CAST(quantity AS BIGINT) ELSE 0 END ASC LIMIT 2 OFFSET 1");
+    let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled FROM orders AS o WHERE total >= 10 ORDER BY CASE WHEN JSON_EXTRACT_TEXT(payload, '$.score') IS NOT NULL THEN -CAST(quantity AS BIGINT) ELSE 0 END ASC LIMIT 2 OFFSET 1");
     let host = TableHost {
         records,
         query: &query,

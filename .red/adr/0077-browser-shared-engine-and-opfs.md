@@ -1005,3 +1005,45 @@ JS/TS query surface or persistence format is introduced by this extraction.
 Cost sketch: E visited expressions keep O(E) traversal plus existing argument
 buffers and host work, with stack depth capped at 128. The move adds no scan,
 file write, network request or IPC and makes no measured speedup claim.
+
+## Shared resolved-value scalar dispatch
+
+`reddb-engine::query::runtime::value_functions` now owns the native builtin
+function dispatcher over already-resolved Value arguments. The native Expr host
+and its existing scalar shim delegate to this implementation; the recovered-row
+ordering fixture also uses it instead of its handwritten COALESCE callback.
+Existing missing/NULL behavior, case-sensitive dispatcher names, value coercion,
+JSON result representations and text/time/money/geo algorithms are retained.
+
+The host supplies Unix milliseconds and retains session identity/tenancy,
+advisory locks, H3, password verification and unknown functions. Native model,
+AI, configuration/KV authorization and raw special references remain in their
+existing expression callbacks. No crypto/auth/server dependency enters WASM.
+The shared JSON helpers decode binary document bodies through the canonical
+keystone codec; no alternate JSON/storage format is introduced.
+
+Recursive CONTAINS walks and JSON paths/updates use the canonical RQL depth cap.
+JSON path indices parse as u64 and convert explicitly at array access, so a
+valid out-of-range read is SQL NULL on native and wasm32. JSON_SET rejects
+oversized growth before reserving memory or adding one to an unchecked index.
+One call shares a padding budget of JSON_LITERAL_MAX_BYTES / 5 new array slots,
+using the existing 16 MiB literal-byte budget and the serialized ",null" cost;
+nested arrays cannot reset that budget. Reservations are fallible and exact.
+Rejected growth returns SQL NULL without mutating the input. Too-deep or invalid
+paths keep the existing unresolved-result convention. Integer ABS at the signed
+minimum now returns None instead of panicking/wrapping; bit lengths multiply
+a checked i64 count rather than a target-width usize.
+
+Native/WASM cases cover pure function results, missing arguments, Unicode and
+wide text bounds, deterministic clock values, money and geo inputs, binary JSON
+reads, JSON construction/update, depth/wide-index bounds and host fallback.
+The recovered canonical plan additionally calls JSON_EXTRACT_TEXT on the binary
+body in its CASE sort key after WAL recovery, update, checkpoint and a full
+offline browser restart. Native SQL composes JSON_OBJECT/extraction/casts through
+the same dispatch. The fixture still rejects native-only effects; public browser
+stored-query/transaction flags remain false pending complete production wiring.
+
+Cost sketch: value dispatch is constant-size selection plus existing argument,
+text/JSON and geometry work; JSON_SET growth is O(new slots) under one bounded
+padding budget and recursion is capped at 128. No new scan, persistence write,
+network request or IPC is added. No measured speedup is claimed.
