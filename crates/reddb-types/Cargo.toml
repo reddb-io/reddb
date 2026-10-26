@@ -20,7 +20,7 @@ name = "measure_value_layout"
 path = "src/bin/measure_value_layout.rs"
 
 [dependencies]
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [dev-dependencies]
 proptest = "1"

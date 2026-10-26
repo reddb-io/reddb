@@ -2234,7 +2234,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -2325,14 +2325,14 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "x509-parser",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "reddb-io-types"
 version = "1.26.8"
 dependencies = [
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -2345,7 +2345,7 @@ dependencies = [
  "sha2",
  "tokio",
  "url",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -3044,7 +3044,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3758,7 +3758,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.3.0",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -3771,10 +3780,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.1.0+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

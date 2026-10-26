@@ -1296,3 +1296,18 @@ O(N * row size + projection/order keys) memory and uses existing O(N log N) sort
 Recovered resident state remains in the owning worker between queries. There
 is one worker request/response per query and no query-time file write, flush,
 network call or measured performance claim.
+
+The dependency audit for this integration exposed existing zstd advisories,
+including RUSTSEC-2026-0410 in the WebAssembly allocator shim. Direct RedDB
+compression users now require zstd 0.14.3 with zstd-safe 8.2.0 and zstd-sys
+2.1.2; workspace and standalone Node/Python locks retain that resolution.
+The underlying Zstandard frame version remains 1.5.7, with existing native
+compressed-frame/value/entity fixtures serving as compatibility gates.
+
+Tonic 0.14.6 still requires zstd 0.13 and therefore keeps a second legacy
+binding in native gRPC graphs. It is absent from the WASM dependency graph.
+The workspace/driver audits remain blocked by RUSTSEC-2026-0391, 0398 and 0403
+plus unsafe-API warnings on that transitive binding. The audit configuration
+and gRPC compression contract are unchanged. Landing this integration requires
+an upstream Tonic update or a separately reviewed compatibility patch/fork;
+the source API and browser tests do not imply that this dependency gate passed.
