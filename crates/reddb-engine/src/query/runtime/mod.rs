@@ -1,6 +1,7 @@
 //! Canonical record-level runtime semantics. Hosts retain read admission and secret policy.
 pub mod field_resolution;
 pub mod filter;
+pub mod geographic;
 pub mod numeric;
 pub mod ordering;
 pub mod projection;

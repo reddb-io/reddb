@@ -864,3 +864,38 @@ Cost sketch: each temporal scalar retains constant-size conversion/arithmetic,
 O(B) parsing for a B-byte duration and at most three raw fallback field probes;
 clock scalars perform one host clock read. No scan, storage write, network call
 or new dependency is added, and no measured speedup is claimed.
+
+
+## Shared geographic computation and projection scalars
+
+`reddb-engine::geo` owns the existing native geographic recognition, WGS-84 and
+spherical distance/bearing/midpoint/destination helpers, bounding boxes and
+polygon algorithms. The native `geo` module re-exports these same implementations;
+its H3 child remains native. Existing native property/unit tests move with the
+pure code, while portable native/WASM assertions exercise the same algorithms.
+No new dependency or JavaScript geographic implementation is introduced.
+
+The common scalar dispatcher owns GEO_DISTANCE/HAVERSINE,
+GEO_DISTANCE_VINCENTY/VINCENTY, GEO_BEARING and GEO_MIDPOINT. Shared legacy
+argument resolution retains 2/3/4-argument forms, POINT sentinel parsing,
+column/document lookup, legacy longitude-sibling priority and existing numeric
+coercion. Direct column/sentinel reads retain native admission behavior; other
+projections and numeric arguments use the host resolver. Raw secret wrappers
+are not recognized as coordinates. No new point validation policy is imposed.
+The native H3_CELL wrapper delegates argument resolution to this same helper.
+
+GeoJSON coordinate order, exact decimal coordinate recognition, range checks,
+polygon boundary inclusion and bounded Vincenty iteration/fallback are preserved.
+Geographic JSON uses the existing canonical parser and its depth-128 cap.
+Comparisons in browser fixtures allow floating-point tolerances appropriate to
+native/WASM transcendental implementations; no bitwise float parity is claimed.
+
+The offline OPFS fixture now projects distances, bearings and midpoints from
+recovered quantities after filtering/ordering, WAL recovery, update and checkpoint,
+with full browser restarts and the HTTP listener stopped. Its scalar host is
+still partial; public stored-query and application-transaction flags stay false.
+
+Cost sketch: each distance/bearing call keeps constant-size numeric work;
+Vincenty retains at most 100 iterations, JSON point recognition parses its
+existing B-byte input and polygon operations remain O(V) in vertices. The move
+adds no storage scan/write, network call or IPC; no speedup or size gain is claimed.

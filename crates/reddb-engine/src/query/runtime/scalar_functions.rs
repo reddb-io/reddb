@@ -1,4 +1,5 @@
 //! Native legacy scalar dispatch shared by server and WASM hosts.
+use super::geographic::resolve_two_geo_points;
 use super::numeric::{arith_binop, cast_value_to};
 use super::temporal::*;
 use super::text::*;
@@ -307,6 +308,38 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
         "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(host.current_unix_ms())),
         "CURRENT_DATE" => Some(Value::Date((host.current_unix_ms() / 86_400_000) as i32)),
         "CURRENT_TIME" => Some(Value::Time(time_ms_since_midnight(host.current_unix_ms()))),
+        "GEO_DISTANCE" | "HAVERSINE" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source, &|argument| {
+                host.resolve_argument(argument, source)
+            })?;
+            Some(Value::Float(crate::geo::haversine_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source, &|argument| {
+                host.resolve_argument(argument, source)
+            })?;
+            Some(Value::Float(crate::geo::vincenty_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "GEO_BEARING" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source, &|argument| {
+                host.resolve_argument(argument, source)
+            })?;
+            Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
+        }
+        "GEO_MIDPOINT" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source, &|argument| {
+                host.resolve_argument(argument, source)
+            })?;
+            let (lat, lon) = crate::geo::midpoint(lat1, lon1, lat2, lon2);
+            Some(Value::GeoPoint(
+                crate::geo::deg_to_micro(lat),
+                crate::geo::deg_to_micro(lon),
+            ))
+        }
         _ => host.fallback_function(name, args, source),
     }
 }

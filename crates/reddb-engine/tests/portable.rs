@@ -265,3 +265,14 @@ fn portable_temporal_scalar_conformance() {
         run();
     }
 }
+
+#[path = "support/geographic.rs"]
+mod geographic;
+
+#[test]
+fn portable_geographic_conformance() {
+    for (name, run) in geographic::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
