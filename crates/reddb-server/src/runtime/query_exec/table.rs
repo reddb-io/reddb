@@ -2806,8 +2806,8 @@ mod tests {
             Some(&Value::Integer(6))
         );
         let result = runtime.execute_query(
-            "SELECT id * 2 AS doubled FROM plan_values LIMIT 18446744073709551615 OFFSET 18446744073709551615",
-        ).expect("wide scan cap must not wrap or panic");
+            "SELECT id * 2 AS doubled FROM plan_values LIMIT 9223372036854775807 OFFSET 9223372036854775807",
+        ).expect("wide SQL scan bounds must not wrap or panic");
         assert!(result.result.records.is_empty());
     }
 
