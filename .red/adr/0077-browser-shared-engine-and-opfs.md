@@ -1168,3 +1168,42 @@ O(E) AST/metadata space plus the existing rendered signatures; nested signature
 construction retains its existing bounded rendering cost. New label reservation
 uses O(A + visible/group labels) metadata and adds no per-row work, persistent
 write, network call or IPC. No measured speedup is claimed.
+
+## Shared aggregate result assembly
+
+`reddb-engine::query::runtime::aggregate_results` now owns the active native
+post-group result phase: group/aggregate columns, hidden values, empty-input
+behavior, HAVING, sort dispatch, pagination and sensitivity traversal before
+secret output. The native generic executor delegates to it. The host retains
+materialization limits, group label/key policy, typed/legacy HAVING and ORDER BY
+effects, comparison/static-expression callbacks and secret output policy. The
+phase consumes borrowed group views and prepared metadata; callers must supply
+admitted query trees and states belonging to the same compiled slot plan.
+
+The original ordering is retained: guard the full merged group cardinality,
+materialize/evaluate HAVING, sort, apply OFFSET/LIMIT, then protect secret output
+for retained rows. Errors propagate without conversion or a partial returned
+result. Hidden values stay outside the visible column vector. Native column
+ordering and empty grouped schemas are preserved, as is the scalar empty-input
+row (COUNT 0, other aggregates using their existing NULL rules), including its
+HAVING evaluation. No new SQL admission, spill or persistence format is added.
+
+LIMIT/OFFSET now use checked target-width conversion with saturation instead of
+`as usize`. A 2^32 limit must retain a small result on wasm32, while a 2^32 offset
+must exhaust it. Native and WASM cases cover those bounds, i64::MAX literals and
+u64::MAX AST metadata; the SQL literal grammar is unchanged. Four case groups
+cover grouped/hidden columns, empty-input semantics, pagination and resource/
+secret callback order and failures. Native SQL adds empty and wide-page
+regressions; existing native secret/transaction/persistence checks remain gates.
+
+The recovered OPFS fixture replaces its manual output-row construction and
+post-group processing with the shared phase, using actual recovered group
+values/states after WAL recovery, updates, checkpoint and offline restart.
+The fixture's host admits its fixed tenant labels and pure predicates only;
+production browser catalog/admission and query/transaction dispatch remain
+pending, with public storedQueries/transactions flags still false.
+
+Cost sketch: G groups with P projections retain the existing O(G*P) result walk
+plus existing finalization/sort costs and result memory. Borrowed group views
+add no aggregate-buffer copies. No extra scan, persistent write, network call
+or IPC is introduced; no measured speedup is claimed.
