@@ -40,3 +40,21 @@ tests are being run on this patch before a new candidate is admitted.
 Private local results: `stg-outage-20261026-2002/cold-ledger-fix-prep1399.private.log`
 under the existing qualification root. Local Rust uses the accepted one-at-a-time
 8 GiB RAM, 4 GiB swap and two-CPU scope.
+
+## Full-CI coverage correction
+
+Full CI `40398377913` on `83ccd0887` failed the tokenless SQL-history test:
+it unconditionally expected cold fallback, even for the first edit whose
+complete source is now admitted before runtime startup. The existing warm
+physical-edit control already allows that first sparse edit to produce an
+incomplete document-coverage flag. Reproducing the exact failure locally takes
+0.6 seconds. No historical/cloud engine test was admitted from this CI result.
+
+The test now expects that first sparse edit, still requires incomplete coverage,
+and still requires the next edit to use full reconstruction while the tokenless
+historical row remains. Both persisted frames must equal complete derivation.
+An additional cold reopen verifies the final visible SQL payload and row count.
+All 29 tests in the native-source module pass after this test-only correction.
+The production source is unchanged from `83ccd0887`; the 41 recovery integrations
+and locked lib/tests check on that runtime already passed. This totals 70 relevant
+local tests, not a new historical qualification or a waived acceptance criterion.

@@ -340,7 +340,7 @@ mod tests {
         }
         drop(db);
         drop(runtime);
-        let reopened = crate::RedDBRuntime::with_options(options).expect("cold reopen");
+        let reopened = crate::RedDBRuntime::with_options(options.clone()).expect("cold reopen");
         let rows = reopened
             .execute_query("SELECT payload FROM tokenless_rows")
             .expect("recovered row");
@@ -348,7 +348,10 @@ mod tests {
             rows.result.records[0].get("payload"),
             Some(&Value::text("omega"))
         );
-        for text in ["a", "theta"] {
+        // The recovered complete proof permits the first sparse edit. Its
+        // tokenless document makes coverage incomplete, so the following edit
+        // must still use the full builder while that historical row remains.
+        for (text, incremental) in [("a", true), ("theta", false)] {
             APPLIED_ROWS.with(|counts| counts.borrow_mut().clear());
             reopened
                 .execute_query(&format!("UPDATE tokenless_rows SET payload='{text}'"))
@@ -361,7 +364,11 @@ mod tests {
                 "tokenless historical documents still count after SQL edit {text:?}"
             );
             APPLIED_ROWS.with(|counts| {
-                assert!(!counts.borrow().contains_key("tokenless_rows"));
+                assert_eq!(
+                    counts.borrow().contains_key("tokenless_rows"),
+                    incremental,
+                    "cold SQL history admission for {text:?}"
+                );
             });
             let header = db.store.physical_file_header().expect("history header");
             let (_, persisted) = db
@@ -376,5 +383,15 @@ mod tests {
             let reference = db.native_vector_artifact_records(&["tokenless_rows".to_owned()]);
             assert_eq!(persisted, reference[0].1);
         }
+        drop(reopened);
+        let recovered = crate::RedDBRuntime::with_options(options).expect("SQL history recovery");
+        let rows = recovered
+            .execute_query("SELECT payload FROM tokenless_rows")
+            .expect("visible SQL payload after recovery");
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("payload"),
+            Some(&Value::text("theta"))
+        );
     }
 }
