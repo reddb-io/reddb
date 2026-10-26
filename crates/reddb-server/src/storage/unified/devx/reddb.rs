@@ -484,7 +484,21 @@ fn fnv1a_hash_bytes(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
-    let rendered = format!("{value:?}");
-    fnv1a_hash_bytes(hash, rendered.as_bytes());
+struct Fnv1aWriter<'a>(&'a mut u64);
+
+impl std::fmt::Write for Fnv1aWriter<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        fnv1a_hash_bytes(self.0, text.as_bytes());
+        Ok(())
+    }
 }
+
+fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
+    // Keep the exact Debug byte stream used by persisted fingerprints without
+    // allocating a rendered copy of every field or large row payload.
+    std::fmt::write(&mut Fnv1aWriter(hash), format_args!("{value:?}"))
+        .expect("metadata fingerprint formatting");
+}
+
+#[cfg(test)]
+mod metadata_fingerprint_tests;
