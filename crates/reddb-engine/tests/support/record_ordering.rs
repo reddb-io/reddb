@@ -9,6 +9,7 @@ use reddb_engine::query::{
             sort_or_top_k_records_with_host, sort_records_by_order_by_with_host,
             top_k_records_by_order_by_with_host, OrderingHost,
         },
+        value_functions::{evaluate_value_function_with_host, ValueFunctionHost},
     },
     unified::UnifiedRecord,
 };
@@ -479,6 +480,14 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
             vec![second, fourth, third, first],
         ),
         (
+            "ORDER BY LENGTH(COALESCE(nickname, 'none')) ASC, rid ASC",
+            vec![second, third, first, fourth],
+        ),
+        (
+            "ORDER BY CAST(JSON_EXTRACT_TEXT(payload, '$.score') AS INT) DESC, rid ASC LIMIT 2",
+            vec![third, second],
+        ),
+        (
             "ORDER BY nickname ASC NULLS FIRST, rid DESC",
             vec![first, third, second, fourth],
         ),
@@ -498,8 +507,8 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
     }
 }
 
-/// Partial test-only function host; the native production host retains all
-/// builtins and effects. The recovered fixture only admits COALESCE here.
+/// Test-only record/context adapter. Pure functions use the canonical native
+/// value dispatcher; native effects are deliberately rejected by this fixture.
 struct RecordExpressionHost<'a> {
     query: &'a TableQuery,
     record: &'a UnifiedRecord,
@@ -525,14 +534,14 @@ impl RuntimeExpressionHost for RecordExpressionHost<'_> {
         panic!("fixture does not admit context effects")
     }
     fn evaluate_function(&self, name: &str, arguments: &[Value]) -> Option<Value> {
-        assert_eq!(
-            name, "COALESCE",
-            "fixture only admits its COALESCE callback"
-        );
-        arguments
-            .iter()
-            .find(|value| !matches!(value, Value::Null))
-            .cloned()
-            .or(Some(Value::Null))
+        evaluate_value_function_with_host(self, name, arguments)
+    }
+}
+impl ValueFunctionHost for RecordExpressionHost<'_> {
+    fn current_unix_ms(&self) -> i64 {
+        reddb_engine::query::runtime::temporal::current_unix_ms()
+    }
+    fn fallback_function(&self, _: &str, _: &[Value]) -> Option<Value> {
+        panic!("fixture does not admit native scalar effects")
     }
 }

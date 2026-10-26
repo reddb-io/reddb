@@ -1224,807 +1224,174 @@ fn row_string_list_field(
 }
 
 fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
-    match name {
-        "UPPER" => match args.first()? {
-            Value::Text(s) => Some(Value::text(s.to_uppercase())),
-            other => Some(other.clone()),
-        },
-        "LOWER" => match args.first()? {
-            Value::Text(s) => Some(Value::text(s.to_lowercase())),
-            other => Some(other.clone()),
-        },
-        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => match args.first()? {
-            Value::Text(s) => Some(Value::Integer(s.chars().count() as i64)),
-            Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
-            Value::Array(a) => Some(Value::Integer(a.len() as i64)),
-            _ => Some(Value::Null),
-        },
-        "CONTAINS" => {
-            let haystack = args.first()?;
-            let needle = match args.get(1)? {
-                Value::Text(text) => text.as_ref(),
-                _ => return Some(Value::Null),
-            };
-            Some(Value::Boolean(value_contains(haystack, needle)))
-        }
-        "OCTET_LENGTH" => match args.first()? {
-            Value::Text(s) => Some(Value::Integer(s.len() as i64)),
-            Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
-            _ => Some(Value::Null),
-        },
-        "BIT_LENGTH" => match args.first()? {
-            Value::Text(s) => Some(Value::Integer((s.len() * 8) as i64)),
-            Value::Blob(b) => Some(Value::Integer((b.len() * 8) as i64)),
-            _ => Some(Value::Null),
-        },
-        "SUBSTRING" | "SUBSTR" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            match args.get(1)? {
-                Value::Text(pattern) if name == "SUBSTRING" && args.len() == 2 => {
-                    Some(match substring_pattern_text(text, pattern) {
-                        Some(matched) => Value::text(matched),
-                        None => Value::Null,
-                    })
-                }
-                start_value => {
-                    let start = value_as_i64(start_value)?;
-                    let count = args.get(2).and_then(value_as_i64);
-                    Some(Value::text(substring_text(text, start, count)?))
-                }
-            }
-        }
-        "POSITION" => {
-            let needle = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let haystack = match args.get(1)? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            Some(Value::Integer(position_text(needle, haystack)))
-        }
-        "TRIM" | "BTRIM" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let chars = match args.get(1) {
-                None => None,
-                Some(Value::Text(chars)) => Some(chars.as_ref()),
-                Some(_) => return Some(Value::Null),
-            };
-            Some(Value::text(trim_text(text, chars, true, true)))
-        }
-        "LTRIM" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let chars = match args.get(1) {
-                None => None,
-                Some(Value::Text(chars)) => Some(chars.as_ref()),
-                Some(_) => return Some(Value::Null),
-            };
-            Some(Value::text(trim_text(text, chars, true, false)))
-        }
-        "RTRIM" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let chars = match args.get(1) {
-                None => None,
-                Some(Value::Text(chars)) => Some(chars.as_ref()),
-                Some(_) => return Some(Value::Null),
-            };
-            Some(Value::text(trim_text(text, chars, false, true)))
-        }
-        "CONCAT" => Some(Value::text(
-            args.iter()
-                .filter(|value| !matches!(value, Value::Null))
-                .map(Value::plain_text)
-                .collect::<String>(),
-        )),
-        "CONCAT_WS" => {
-            let separator = match args.first()? {
-                Value::Null => return Some(Value::Null),
-                Value::Text(text) => text.as_ref(),
-                other => {
-                    return Some(Value::text(
-                        args.iter()
-                            .skip(1)
-                            .filter(|value| !matches!(value, Value::Null))
-                            .map(Value::display_string)
-                            .collect::<Vec<_>>()
-                            .join(&other.display_string()),
-                    ))
-                }
-            };
-            Some(Value::text(
-                args.iter()
-                    .skip(1)
-                    .filter(|value| !matches!(value, Value::Null))
-                    .map(Value::display_string)
-                    .collect::<Vec<_>>()
-                    .join(separator),
-            ))
-        }
-        "REVERSE" => match args.first()? {
-            Value::Text(text) => Some(Value::text(text.chars().rev().collect::<String>())),
-            _ => Some(Value::Null),
-        },
-        "LEFT" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let count = value_as_i64(args.get(1)?)?;
-            Some(Value::text(slice_left_text(text, count)))
-        }
-        "RIGHT" => {
-            let text = match args.first()? {
-                Value::Text(text) => text,
-                _ => return Some(Value::Null),
-            };
-            let count = value_as_i64(args.get(1)?)?;
-            Some(Value::text(slice_right_text(text, count)))
-        }
-        "QUOTE_LITERAL" => match args.first()? {
-            Value::Null => Some(Value::Null),
-            Value::Text(text) => Some(Value::text(quote_literal_text(text))),
-            other => Some(Value::text(quote_literal_text(&other.display_string()))),
-        },
-        "ABS" => match args.first()? {
-            Value::Integer(n) => Some(Value::Integer(n.abs())),
-            Value::Float(f) => Some(Value::Float(f.abs())),
-            _ => Some(Value::Null),
-        },
-        "ROUND" => match args.first()? {
-            Value::Float(f) => Some(Value::Float(f.round())),
-            other => Some(other.clone()),
-        },
-        "FLOOR" => match args.first()? {
-            Value::Float(f) => Some(Value::Float(f.floor())),
-            other => Some(other.clone()),
-        },
-        "CEIL" => match args.first()? {
-            Value::Float(f) => Some(Value::Float(f.ceil())),
-            other => Some(other.clone()),
-        },
-        "COALESCE" => args
-            .iter()
-            .find(|v| !matches!(v, Value::Null))
-            .cloned()
-            .or(Some(Value::Null)),
-        "PG_ADVISORY_LOCK" => {
-            let key = value_as_i64(args.first()?)?;
-            crate::auth::locks::global()
-                .acquire(key, crate::runtime::impl_core::current_connection_id());
-            Some(Value::Null)
-        }
-        "PG_TRY_ADVISORY_LOCK" => {
-            let key = value_as_i64(args.first()?)?;
-            Some(Value::Boolean(crate::auth::locks::global().try_acquire(
-                key,
-                crate::runtime::impl_core::current_connection_id(),
-            )))
-        }
-        "PG_ADVISORY_UNLOCK" => {
-            let key = value_as_i64(args.first()?)?;
-            Some(Value::Boolean(crate::auth::locks::global().release(
-                key,
-                crate::runtime::impl_core::current_connection_id(),
-            )))
-        }
-        "PG_ADVISORY_UNLOCK_ALL" => {
-            let dropped = crate::auth::locks::global()
-                .release_all(crate::runtime::impl_core::current_connection_id());
-            Some(Value::Integer(dropped as i64))
-        }
-        "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(current_unix_ms())),
-        "CURRENT_DATE" => Some(Value::Date((current_unix_ms() / 86_400_000) as i32)),
-        "CURRENT_TIME" => Some(Value::Time(time_ms_since_midnight(current_unix_ms()))),
-        // Phase 2.5.3 multi-tenancy: reads the thread-local session
-        // tenant installed by `SET TENANT 'id'` or transport
-        // middleware. Returns NULL when no tenant is bound so RLS
-        // policies like `USING (tenant_id = CURRENT_TENANT())` deny
-        // every row for unauthenticated / unscoped sessions.
-        "CURRENT_TENANT" => Some(
-            crate::runtime::impl_core::current_tenant()
-                .map(Value::text)
-                .unwrap_or(Value::Null),
-        ),
-        // Session identity scalars — `WITHIN ... USER '<u>' AS ROLE '<r>'`
-        // overrides win over the transport-installed thread-local.
-        // Anonymous callers with no override get NULL.
-        "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
-            crate::runtime::impl_core::current_user_projected()
-                .map(Value::text)
-                .unwrap_or(Value::Null),
-        ),
-        "CURRENT_ROLE" => Some(
-            crate::runtime::impl_core::current_role_projected()
-                .map(Value::text)
-                .unwrap_or(Value::Null),
-        ),
-        "TIME_BUCKET" => {
-            let bucket_ns = time_bucket_duration(args.first()?)?;
-            let timestamp_ns = args.get(1).and_then(value_to_bucket_timestamp_ns)?;
-            Some(Value::UnsignedInteger(bucket_start_ns(
-                bucket_ns,
-                timestamp_ns,
-            )))
-        }
-        "GEO_DISTANCE" | "HAVERSINE" => {
-            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
-            Some(Value::Float(crate::geo::haversine_km(
-                lat1, lon1, lat2, lon2,
-            )))
-        }
-        "VINCENTY" => {
-            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
-            Some(Value::Float(crate::geo::vincenty_km(
-                lat1, lon1, lat2, lon2,
-            )))
-        }
-        "GEO_BEARING" => {
-            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
-            Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
-        }
-        // `POLYGON((lat lon), …)` — a flat `[lat0, lon0, lat1, lon1, …]`
-        // array. The parser guarantees an even argument count of at least
-        // three pairs; a coordinate that does not evaluate to a number
-        // collapses the whole polygon to NULL.
-        "POLYGON" => {
-            let coords = args
-                .iter()
-                .map(|value| value_as_f64(value).map(Value::Float))
-                .collect::<Option<Vec<_>>>()?;
-            Some(Value::Array(coords))
-        }
-        // `GEO_WITHIN(col, POLYGON(...))` — the composable form of the
-        // `SEARCH SPATIAL WITHIN POLYGON` verb, sharing its exact even-odd
-        // inside-test. A row whose column holds no recognizable geo value
-        // is outside every polygon, exactly as the verb skips it.
-        "GEO_WITHIN" => {
-            let vertices = polygon_vertices(args.get(1)?)?;
-            let Some((lat, lon)) = geo_point(args.first()?) else {
-                return Some(Value::Boolean(false));
-            };
-            Some(Value::Boolean(crate::geo::point_in_polygon_even_odd(
-                lat, lon, &vertices,
-            )))
-        }
-        // ── H3 hexagonal index scalars (PRD #1574 slice 1, #1575) ──
-        // Pure wrappers over `crate::geo::h3`; the engine stays
-        // h3o-agnostic. Cell ids are u64 → Value::UnsignedInteger.
-        "H3_INDEX" => {
-            let lat = value_as_f64(args.first()?)?;
-            let lon = value_as_f64(args.get(1)?)?;
-            let res = value_as_i64(args.get(2)?)?.clamp(0, 15) as u8;
-            Some(Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(
-                lat, lon, res,
-            )))
-        }
-        "H3_CELL" => {
-            let Some((lat, lon)) = geo_point(args.first()?) else {
-                return Some(Value::Null);
-            };
-            let res_value = value_as_i64(args.get(1)?)?;
-            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
-                return Some(Value::Null);
-            };
-            let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, res);
-            if cell == 0 {
+    reddb_engine::query::runtime::value_functions::evaluate_value_function_with_host(
+        &NativeValueFunctionHost,
+        name,
+        args,
+    )
+}
+
+struct NativeValueFunctionHost;
+impl reddb_engine::query::runtime::value_functions::ValueFunctionHost for NativeValueFunctionHost {
+    fn current_unix_ms(&self) -> i64 {
+        reddb_engine::query::runtime::temporal::current_unix_ms()
+    }
+    fn fallback_function(&self, name: &str, args: &[Value]) -> Option<Value> {
+        match name {
+            "PG_ADVISORY_LOCK" => {
+                let key = value_as_i64(args.first()?)?;
+                crate::auth::locks::global()
+                    .acquire(key, crate::runtime::impl_core::current_connection_id());
                 Some(Value::Null)
-            } else {
-                Some(Value::UnsignedInteger(cell))
             }
-        }
-        "H3_PARENT" => {
-            let cell = value_as_u64(args.first()?)?;
-            let res_value = value_as_i64(args.get(1)?)?;
-            let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
-                return Some(Value::Null);
-            };
-            let parent = crate::geo::h3::cell_to_parent(cell, res);
-            if parent == 0 {
-                Some(Value::Null)
-            } else {
-                Some(Value::UnsignedInteger(parent))
+            "PG_TRY_ADVISORY_LOCK" => {
+                let key = value_as_i64(args.first()?)?;
+                Some(Value::Boolean(crate::auth::locks::global().try_acquire(
+                    key,
+                    crate::runtime::impl_core::current_connection_id(),
+                )))
             }
-        }
-        "H3_TO_LATLNG" => {
-            let cell = value_as_u64(args.first()?)?;
-            let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);
-            Some(Value::Array(vec![Value::Float(lat), Value::Float(lon)]))
-        }
-        "H3_RING" => {
-            let cell = value_as_u64(args.first()?)?;
-            let k = value_as_i64(args.get(1)?)?.max(0) as u32;
-            Some(Value::Array(
-                crate::geo::h3::grid_disk(cell, k)
-                    .into_iter()
-                    .map(Value::UnsignedInteger)
-                    .collect(),
-            ))
-        }
-        "POWER" => {
-            let base = value_as_f64(args.first()?)?;
-            let exp = value_as_f64(args.get(1)?)?;
-            Some(Value::Float(base.powf(exp)))
-        }
-        "VERIFY_PASSWORD" => {
-            let stored = args.first()?;
-            let candidate = args.get(1)?;
-            let hash: &str = match stored {
-                Value::Password(hash) => hash.as_str(),
-                Value::Text(hash) => hash.as_ref(),
-                _ => return Some(Value::Boolean(false)),
-            };
-            let plain: &str = match candidate {
-                Value::Text(plain) => plain.as_ref(),
-                _ => return Some(Value::Boolean(false)),
-            };
-            Some(Value::Boolean(crate::auth::store::verify_password(
-                plain, hash,
-            )))
-        }
-        "MONEY" => money_from_args(args),
-        "MONEY_ASSET" => match args.first()? {
-            Value::Money { asset_code, .. } => Some(Value::AssetCode(asset_code.clone())),
-            _ => Some(Value::Null),
-        },
-        "MONEY_MINOR" => match args.first()? {
-            Value::Money { minor_units, .. } => Some(Value::BigInt(*minor_units)),
-            _ => Some(Value::Null),
-        },
-        "MONEY_SCALE" => match args.first()? {
-            Value::Money { scale, .. } => Some(Value::Integer(i64::from(*scale))),
-            _ => Some(Value::Null),
-        },
-        // ─────────────────────────────────────────────────────────────
-        // JSON functions (Phase 1.4 PG parity).
-        //
-        // Accepts Value::Json, Value::Text (parsed as JSON), or returns
-        // Value::Null when the input is not valid JSON.
-        // ─────────────────────────────────────────────────────────────
-        "JSON_EXTRACT" => json_extract_impl(args.first()?, args.get(1)?, /*as_text=*/ false),
-        "JSON_EXTRACT_TEXT" => {
-            json_extract_impl(args.first()?, args.get(1)?, /*as_text=*/ true)
-        }
-        "JSON_PARSE" => json_parse_impl(args.first()?),
-        "JSON_SET" => json_set_impl(args.first()?, args.get(1)?, args.get(2)?),
-        "JSON_ARRAY_LENGTH" => {
-            let v = value_to_json(args.first()?)?;
-            match v {
-                crate::serde_json::Value::Array(a) => Some(Value::Integer(a.len() as i64)),
-                _ => Some(Value::Null),
+            "PG_ADVISORY_UNLOCK" => {
+                let key = value_as_i64(args.first()?)?;
+                Some(Value::Boolean(crate::auth::locks::global().release(
+                    key,
+                    crate::runtime::impl_core::current_connection_id(),
+                )))
             }
-        }
-        "JSON_TYPEOF" => {
-            let v = value_to_json(args.first()?)?;
-            let name = match v {
-                crate::serde_json::Value::Null => "null",
-                crate::serde_json::Value::Bool(_) => "boolean",
-                crate::serde_json::Value::Integer(_) => "number",
-                crate::serde_json::Value::Number(_) => "number",
-                crate::serde_json::Value::Decimal(_) => "number",
-                crate::serde_json::Value::String(_) => "string",
-                crate::serde_json::Value::Array(_) => "array",
-                crate::serde_json::Value::Object(_) => "object",
-            };
-            Some(Value::text(name.to_string()))
-        }
-        "JSON_VALID" => {
-            let text: String = match args.first()? {
-                Value::Text(s) => s.to_string(),
-                Value::Json(b) => String::from_utf8_lossy(b).to_string(),
-                _ => return Some(Value::Boolean(false)),
-            };
-            Some(Value::Boolean(
-                crate::serde_json::from_str::<crate::serde_json::Value>(&text).is_ok(),
-            ))
-        }
-        "JSON_ARRAY" => {
-            let arr: Vec<crate::serde_json::Value> = args.iter().map(value_as_json).collect();
-            let json = crate::serde_json::Value::Array(arr);
-            Some(Value::Json(json.to_string_compact().into_bytes()))
-        }
-        "JSON_OBJECT" => {
-            // Args come as interleaved (key, value, key, value, ...).
-            if !args.len().is_multiple_of(2) {
-                return Some(Value::Null);
+            "PG_ADVISORY_UNLOCK_ALL" => {
+                let dropped = crate::auth::locks::global()
+                    .release_all(crate::runtime::impl_core::current_connection_id());
+                Some(Value::Integer(dropped as i64))
             }
-            let mut map = crate::serde_json::Map::new();
-            for pair in args.chunks_exact(2) {
-                let key: String = match &pair[0] {
-                    Value::Text(s) => s.to_string(),
-                    other => other.display_string(),
+            // Phase 2.5.3 multi-tenancy: reads the thread-local session
+            // tenant installed by `SET TENANT 'id'` or transport
+            // middleware. Returns NULL when no tenant is bound so RLS
+            // policies like `USING (tenant_id = CURRENT_TENANT())` deny
+            // every row for unauthenticated / unscoped sessions.
+            "CURRENT_TENANT" => Some(
+                crate::runtime::impl_core::current_tenant()
+                    .map(Value::text)
+                    .unwrap_or(Value::Null),
+            ),
+            // Session identity scalars — `WITHIN ... USER '<u>' AS ROLE '<r>'`
+            // overrides win over the transport-installed thread-local.
+            // Anonymous callers with no override get NULL.
+            "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
+                crate::runtime::impl_core::current_user_projected()
+                    .map(Value::text)
+                    .unwrap_or(Value::Null),
+            ),
+            "CURRENT_ROLE" => Some(
+                crate::runtime::impl_core::current_role_projected()
+                    .map(Value::text)
+                    .unwrap_or(Value::Null),
+            ),
+            // ── H3 hexagonal index scalars (PRD #1574 slice 1, #1575) ──
+            // Pure wrappers over `crate::geo::h3`; the engine stays
+            // h3o-agnostic. Cell ids are u64 → Value::UnsignedInteger.
+            "H3_INDEX" => {
+                let lat = value_as_f64(args.first()?)?;
+                let lon = value_as_f64(args.get(1)?)?;
+                let res = value_as_i64(args.get(2)?)?.clamp(0, 15) as u8;
+                Some(Value::UnsignedInteger(crate::geo::h3::lat_lng_to_cell(
+                    lat, lon, res,
+                )))
+            }
+            "H3_CELL" => {
+                let Some((lat, lon)) = geo_point(args.first()?) else {
+                    return Some(Value::Null);
                 };
-                map.insert(key, value_as_json(&pair[1]));
-            }
-            let json = crate::serde_json::Value::Object(map);
-            Some(Value::Json(json.to_string_compact().into_bytes()))
-        }
-        _ => None,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// JSON scalar helpers (Phase 1.4 PG parity)
-// ─────────────────────────────────────────────────────────────────────
-
-/// Parse a scalar argument into a JSON value. `Value::Json` bytes are
-/// decoded; `Value::Text` is parsed. Anything else returns None so
-/// callers propagate Null.
-fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
-    match value {
-        Value::Null => Some(crate::serde_json::Value::Null),
-        // A document body may be the native binary container (PRD-1398); decode
-        // it to JSON so json builtins see the same shape as a plain JSON body.
-        Value::Json(bytes) => {
-            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
-                return Some(body);
-            }
-            let text = String::from_utf8_lossy(bytes);
-            crate::serde_json::from_str(&text).ok()
-        }
-        Value::Text(s) => crate::serde_json::from_str(s).ok(),
-        _ => None,
-    }
-}
-
-fn json_parse_impl(input: &Value) -> Option<Value> {
-    let Value::Text(text) = input else {
-        return Some(Value::Null);
-    };
-    crate::serde_json::from_str::<crate::serde_json::Value>(text)
-        .ok()
-        .map(|json| Value::Json(json.to_string_compact().into_bytes()))
-        .or(Some(Value::Null))
-}
-
-fn value_contains(value: &Value, needle: &str) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(|value| value_contains(value, needle)),
-        Value::Json(_) => value_to_json(value)
-            .as_ref()
-            .is_some_and(|json| json_value_contains(json, needle)),
-        Value::Text(text) => text.contains(needle),
-        other => other.display_string().contains(needle),
-    }
-}
-
-fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
-    match value {
-        crate::serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| json_value_contains(value, needle)),
-        // Recurse into object *values* so a needle nested inside a JSON
-        // object matches — e.g. `CONTAINS(vision_detections, 'person')`
-        // over a derived `[{"label":"person",...}]` array (#1275). Keys
-        // are deliberately not matched: containment is about the data, not
-        // the field names. Mirrors the same rule in the scalar evaluator.
-        crate::serde_json::Value::Object(map) => {
-            map.values().any(|value| json_value_contains(value, needle))
-        }
-        crate::serde_json::Value::String(value) => value == needle,
-        crate::serde_json::Value::Integer(value) => value.to_string() == needle,
-        crate::serde_json::Value::Number(value) => value.to_string() == needle,
-        crate::serde_json::Value::Decimal(value) => value == needle,
-        crate::serde_json::Value::Bool(value) => value.to_string() == needle,
-        crate::serde_json::Value::Null => false,
-    }
-}
-
-/// Convert any scalar to the JSON representation used by JSON_ARRAY /
-/// JSON_OBJECT / JSON_SET. Non-JSON-native types fall back to their
-/// display string.
-fn value_as_json(value: &Value) -> crate::serde_json::Value {
-    match value {
-        Value::Null => crate::serde_json::Value::Null,
-        Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
-        Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
-        Value::UnsignedInteger(n) => crate::serde_json::Value::Number(*n as f64),
-        Value::BigInt(n) => crate::serde_json::Value::Number(*n as f64),
-        Value::Float(n) => crate::serde_json::Value::Number(*n),
-        Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
-        Value::Json(bytes) => {
-            // Decode the native binary container (PRD-1398) if present.
-            if let Some(body) = crate::document_body::decode_container_to_json(bytes) {
-                return body;
-            }
-            let text = String::from_utf8_lossy(bytes);
-            crate::serde_json::from_str(&text)
-                .unwrap_or_else(|_| crate::serde_json::Value::String(text.into_owned()))
-        }
-        other => crate::serde_json::Value::String(other.display_string()),
-    }
-}
-
-/// Parse a `$.a.b[0]` path into a sequence of (field | index) steps.
-/// Returns None on unrecognised syntax.
-enum JsonPathStep<'a> {
-    Field(&'a str),
-    Index(usize),
-}
-
-fn parse_json_path(path: &str) -> Option<Vec<JsonPathStep<'_>>> {
-    let path = path.trim();
-    let rest = path.strip_prefix('$').unwrap_or(path);
-    let mut steps = Vec::new();
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'.' => {
-                i += 1;
-                let start = i;
-                while i < bytes.len() && bytes[i] != b'.' && bytes[i] != b'[' {
-                    i += 1;
-                }
-                if start == i {
-                    return None;
-                }
-                let field = std::str::from_utf8(&bytes[start..i]).ok()?;
-                steps.push(JsonPathStep::Field(field));
-            }
-            b'[' => {
-                i += 1;
-                let start = i;
-                while i < bytes.len() && bytes[i] != b']' {
-                    i += 1;
-                }
-                if i >= bytes.len() {
-                    return None;
-                }
-                let idx: usize = std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok()?;
-                i += 1; // skip ']'
-                steps.push(JsonPathStep::Index(idx));
-            }
-            _ => return None,
-        }
-    }
-    Some(steps)
-}
-
-/// Traverse a JSON value along the path. Returns None if any step misses.
-fn json_path_get<'a>(
-    root: &'a crate::serde_json::Value,
-    steps: &[JsonPathStep<'_>],
-) -> Option<&'a crate::serde_json::Value> {
-    let mut cur = root;
-    for step in steps {
-        match (step, cur) {
-            (JsonPathStep::Field(name), crate::serde_json::Value::Object(map)) => {
-                cur = map.get(*name)?;
-            }
-            (JsonPathStep::Index(idx), crate::serde_json::Value::Array(arr)) => {
-                cur = arr.get(*idx)?;
-            }
-            _ => return None,
-        }
-    }
-    Some(cur)
-}
-
-fn json_extract_impl(input: &Value, path: &Value, as_text: bool) -> Option<Value> {
-    let path_str = match path {
-        Value::Text(s) => s.clone(),
-        _ => return Some(Value::Null),
-    };
-    let json = value_to_json(input)?;
-    let steps = parse_json_path(&path_str)?;
-    let Some(target) = json_path_get(&json, &steps) else {
-        // Missing path → SQL NULL, not function failure.
-        return Some(Value::Null);
-    };
-    if as_text {
-        // Unquoted scalar text, JSON for containers.
-        match target {
-            crate::serde_json::Value::String(s) => Some(Value::text(s.clone())),
-            crate::serde_json::Value::Null => Some(Value::Null),
-            crate::serde_json::Value::Bool(b) => Some(Value::text(b.to_string())),
-            crate::serde_json::Value::Integer(n) => Some(Value::text(n.to_string())),
-            crate::serde_json::Value::Number(n) => Some(Value::text(n.to_string())),
-            other => Some(Value::text(other.to_string_compact())),
-        }
-    } else {
-        // JSON-serialised representation (strings come back quoted).
-        Some(Value::text(target.to_string_compact()))
-    }
-}
-
-/// Walk along a JSON path, mutably creating missing container nodes. The
-/// final step writes `new_value` into its parent (object field or array
-/// slot). Arrays grow with nulls when the index exceeds the current length.
-fn json_set_impl(input: &Value, path: &Value, new_value: &Value) -> Option<Value> {
-    let path_str = match path {
-        Value::Text(s) => s.clone(),
-        _ => return Some(Value::Null),
-    };
-    let mut json = value_to_json(input).unwrap_or(crate::serde_json::Value::Null);
-    let steps = parse_json_path(&path_str)?;
-    if steps.is_empty() {
-        // Root replacement.
-        let replaced = value_as_json(new_value);
-        return Some(Value::Json(replaced.to_string_compact().into_bytes()));
-    }
-    // Walk + insert; use a simple recursive helper so we can own the mutation path.
-    fn walk(
-        node: &mut crate::serde_json::Value,
-        steps: &[JsonPathStep<'_>],
-        idx: usize,
-        new_value: &crate::serde_json::Value,
-    ) -> bool {
-        if idx == steps.len() {
-            *node = new_value.clone();
-            return true;
-        }
-        match (&steps[idx], node) {
-            (JsonPathStep::Field(name), crate::serde_json::Value::Object(map)) => {
-                let entry = map
-                    .entry(name.to_string())
-                    .or_insert(crate::serde_json::Value::Null);
-                walk(entry, steps, idx + 1, new_value)
-            }
-            (JsonPathStep::Field(name), other) => {
-                // Coerce non-object into object to keep the path alive.
-                let mut new_map = crate::serde_json::Map::new();
-                new_map.insert(name.to_string(), crate::serde_json::Value::Null);
-                *other = crate::serde_json::Value::Object(new_map);
-                if let crate::serde_json::Value::Object(map) = other {
-                    let entry = map.get_mut(*name).unwrap();
-                    walk(entry, steps, idx + 1, new_value)
+                let res_value = value_as_i64(args.get(1)?)?;
+                let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                    return Some(Value::Null);
+                };
+                let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, res);
+                if cell == 0 {
+                    Some(Value::Null)
                 } else {
-                    false
+                    Some(Value::UnsignedInteger(cell))
                 }
             }
-            (JsonPathStep::Index(i), crate::serde_json::Value::Array(arr)) => {
-                while arr.len() <= *i {
-                    arr.push(crate::serde_json::Value::Null);
-                }
-                walk(&mut arr[*i], steps, idx + 1, new_value)
-            }
-            (JsonPathStep::Index(i), other) => {
-                let mut arr = Vec::with_capacity(i + 1);
-                arr.resize(*i + 1, crate::serde_json::Value::Null);
-                *other = crate::serde_json::Value::Array(arr);
-                if let crate::serde_json::Value::Array(arr) = other {
-                    walk(&mut arr[*i], steps, idx + 1, new_value)
+            "H3_PARENT" => {
+                let cell = value_as_u64(args.first()?)?;
+                let res_value = value_as_i64(args.get(1)?)?;
+                let Some(res) = crate::geo::h3::valid_resolution(res_value) else {
+                    return Some(Value::Null);
+                };
+                let parent = crate::geo::h3::cell_to_parent(cell, res);
+                if parent == 0 {
+                    Some(Value::Null)
                 } else {
-                    false
+                    Some(Value::UnsignedInteger(parent))
                 }
             }
+            "H3_TO_LATLNG" => {
+                let cell = value_as_u64(args.first()?)?;
+                let (lat, lon) = crate::geo::h3::cell_to_lat_lng(cell);
+                Some(Value::Array(vec![Value::Float(lat), Value::Float(lon)]))
+            }
+            "H3_RING" => {
+                let cell = value_as_u64(args.first()?)?;
+                let k = value_as_i64(args.get(1)?)?.max(0) as u32;
+                Some(Value::Array(
+                    crate::geo::h3::grid_disk(cell, k)
+                        .into_iter()
+                        .map(Value::UnsignedInteger)
+                        .collect(),
+                ))
+            }
+            "VERIFY_PASSWORD" => {
+                let stored = args.first()?;
+                let candidate = args.get(1)?;
+                let hash: &str = match stored {
+                    Value::Password(hash) => hash.as_str(),
+                    Value::Text(hash) => hash.as_ref(),
+                    _ => return Some(Value::Boolean(false)),
+                };
+                let plain: &str = match candidate {
+                    Value::Text(plain) => plain.as_ref(),
+                    _ => return Some(Value::Boolean(false)),
+                };
+                Some(Value::Boolean(crate::auth::store::verify_password(
+                    plain, hash,
+                )))
+            }
+            _ => None,
         }
     }
-    let new_json = value_as_json(new_value);
-    if !walk(&mut json, &steps, 0, &new_json) {
-        return Some(Value::Null);
-    }
-    Some(Value::Json(json.to_string_compact().into_bytes()))
 }
 
-fn money_from_args(args: &[Value]) -> Option<Value> {
-    let input = match args {
-        [single] => money_arg_text(single)?,
-        [left, right] => format!("{} {}", money_arg_text(left)?, money_arg_text(right)?),
-        _ => return Some(Value::Null),
-    };
-    match reddb_types::coerce::coerce(&input, reddb_types::DataType::Money, None) {
-        Ok(value) => Some(value),
-        Err(_) if args.len() == 2 => {
-            let reversed = format!(
-                "{} {}",
-                money_arg_text(&args[1])?,
-                money_arg_text(&args[0])?
-            );
-            reddb_types::coerce::coerce(&reversed, reddb_types::DataType::Money, None).ok()
-        }
-        Err(_) => Some(Value::Null),
-    }
-}
-
-fn money_arg_text(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Text(text) => Some(text.to_string()),
-        Value::AssetCode(code) => Some(code.clone()),
-        Value::Currency(code) => Some(String::from_utf8_lossy(code).to_string()),
-        other => Some(other.display_string()),
-    }
-}
-
-use reddb_engine::query::runtime::temporal::{
-    bucket_start_ns, current_unix_ms, time_bucket_duration, time_ms_since_midnight,
-    value_to_bucket_timestamp_ns,
-};
-
-fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
-    match args {
-        [left, right] => {
-            let (lat1, lon1) = geo_point(left)?;
-            let (lat2, lon2) = geo_point(right)?;
-            Some((lat1, lon1, lat2, lon2))
-        }
-        [left, lat2, lon2] => {
-            let (lat1, lon1) = geo_point(left)?;
-            Some((lat1, lon1, value_as_f64(lat2)?, value_as_f64(lon2)?))
-        }
-        [lat1, lon1, lat2, lon2] => Some((
-            value_as_f64(lat1)?,
-            value_as_f64(lon1)?,
-            value_as_f64(lat2)?,
-            value_as_f64(lon2)?,
-        )),
-        _ => None,
-    }
-}
-
-fn geo_point(value: &Value) -> Option<(f64, f64)> {
-    crate::geo::recognize_geo_value(value)
-}
-
-/// Read a `POLYGON(...)` result back into `(lat, lon)` vertices. `None`
-/// for anything that is not a flat array of at least three coordinate
-/// pairs — the caller then yields NULL rather than guessing a shape.
-fn polygon_vertices(value: &Value) -> Option<Vec<(f64, f64)>> {
-    let Value::Array(coords) = value else {
-        return None;
-    };
-    if coords.len() < 6 || coords.len() % 2 != 0 {
-        return None;
-    }
-    coords
-        .chunks_exact(2)
-        .map(|pair| Some((value_as_f64(&pair[0])?, value_as_f64(&pair[1])?)))
-        .collect()
-}
-
-fn value_as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Float(value) => Some(*value),
-        Value::Integer(value) => Some(*value as f64),
-        Value::UnsignedInteger(value) => Some(*value as f64),
-        Value::BigInt(value) => Some(*value as f64),
-        _ => None,
-    }
-}
-
-fn value_as_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(value) | Value::BigInt(value) => Some(*value),
-        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
-/// Coerce a value to a `u64` — used by the H3 scalars whose cell ids
-/// are full 64-bit unsigned. Accepts the native `UnsignedInteger`
-/// produced by `H3_INDEX` as well as non-negative signed integers
-/// supplied as literals.
-fn value_as_u64(value: &Value) -> Option<u64> {
-    match value {
-        Value::UnsignedInteger(value) => Some(*value),
-        Value::Integer(value) | Value::BigInt(value) => u64::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
-use reddb_engine::query::runtime::text::{
-    position_text, quote_literal_text, slice_left_text, slice_right_text, substring_pattern_text,
-    substring_text, trim_text,
+use reddb_engine::query::runtime::{
+    value_functions::{geo_point, value_as_f64},
+    values::{value_as_i64, value_as_u64},
 };
 
 #[cfg(test)]
 mod tests {
     use super::dispatch_builtin_function;
     use reddb_types::Value;
+
+    #[test]
+    fn shared_value_functions_bound_json_growth_and_signed_abs() {
+        assert_eq!(
+            dispatch_builtin_function("ABS", &[Value::Integer(i64::MIN)]),
+            None
+        );
+        for path in ["$[4294967296]", "$[18446744073709551615]"] {
+            let json = Value::Json(b"[]".to_vec());
+            assert_eq!(
+                dispatch_builtin_function("JSON_EXTRACT", &[json.clone(), Value::text(path)]),
+                Some(Value::Null)
+            );
+            assert_eq!(
+                dispatch_builtin_function(
+                    "JSON_SET",
+                    &[json, Value::text(path), Value::Integer(1)]
+                ),
+                Some(Value::Null)
+            );
+        }
+    }
 
     #[test]
     fn shared_runtime_expression_host_preserves_defaults_and_depth() {

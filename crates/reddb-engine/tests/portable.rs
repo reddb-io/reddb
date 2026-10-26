@@ -309,3 +309,14 @@ fn portable_runtime_expression_conformance() {
         run();
     }
 }
+
+#[path = "support/value_functions.rs"]
+mod value_functions;
+
+#[test]
+fn portable_value_function_conformance() {
+    for (name, run) in value_functions::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
