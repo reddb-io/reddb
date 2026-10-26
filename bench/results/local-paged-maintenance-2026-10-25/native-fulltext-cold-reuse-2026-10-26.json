@@ -1,0 +1,808 @@
+{
+  "runtime_source": "bae760f43730ac419832fe6723f07f0b7290af18",
+  "harness_sha256": "b4259793d1586dec0f4eac28e311d5d7643d11c71ed660bf0a524554f3429c2a",
+  "binary_sha256": "8d6b096f04effd32ad8fc63918ba60cc82e853559c6b0eda9578349fc2045947",
+  "engine_memory_bytes": 536870912,
+  "scope_memory_bytes": 8589934592,
+  "scope_swap_bytes": 4294967296,
+  "cpu_limit": 2,
+  "limitations": [
+    "shared-host diagnostic",
+    "unoptimized engine library",
+    "small synthetic dataset",
+    "no production changes"
+  ],
+  "cold_preparation": [
+    {
+      "rows": 256,
+      "duration_ms": 2,
+      "artifacts": 1,
+      "retained_artifacts": 4,
+      "payload_bytes": 9731
+    },
+    {
+      "rows": 2048,
+      "duration_ms": 9,
+      "artifacts": 1,
+      "retained_artifacts": 4,
+      "payload_bytes": 9731
+    },
+    {
+      "rows": 8192,
+      "duration_ms": 25,
+      "artifacts": 1,
+      "retained_artifacts": 4,
+      "payload_bytes": 9731
+    }
+  ],
+  "observations": [
+    {
+      "changed_payload_bytes": 0,
+      "changed_rows": 0,
+      "checkpoint_seconds": 0.052300978,
+      "cycle": 0,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/.audit.log"
+        },
+        {
+          "allocated_bytes": 1474560,
+          "logical_bytes": 1474560,
+          "path": "256/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "256/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 42596,
+          "path": "256/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "256/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "256/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 32300,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 32300,
+        "checksum": 1528951861,
+        "collection": "scaling_rows",
+        "page_count": 2,
+        "root_page": 87
+      },
+      "page_count": 90,
+      "pager_accesses": 802,
+      "rows": 256
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.049940957,
+      "cycle": 1,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/.audit.log"
+        },
+        {
+          "allocated_bytes": 1490944,
+          "logical_bytes": 1490944,
+          "path": "256/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "256/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43097,
+          "path": "256/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "256/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "256/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 32938,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 32938,
+        "checksum": 3685567996,
+        "collection": "scaling_rows",
+        "page_count": 3,
+        "root_page": 87
+      },
+      "page_count": 91,
+      "pager_accesses": 126,
+      "rows": 256
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.046295602,
+      "cycle": 2,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/.audit.log"
+        },
+        {
+          "allocated_bytes": 1490944,
+          "logical_bytes": 1490944,
+          "path": "256/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "256/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43597,
+          "path": "256/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "256/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "256/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 33462,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 33462,
+        "checksum": 1126616859,
+        "collection": "scaling_rows",
+        "page_count": 3,
+        "root_page": 87
+      },
+      "page_count": 91,
+      "pager_accesses": 124,
+      "rows": 256
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.043741721,
+      "cycle": 3,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/.audit.log"
+        },
+        {
+          "allocated_bytes": 1490944,
+          "logical_bytes": 1490944,
+          "path": "256/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "256/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 44101,
+          "path": "256/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "256/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "256/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 33986,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 33986,
+        "checksum": 504683687,
+        "collection": "scaling_rows",
+        "page_count": 3,
+        "root_page": 87
+      },
+      "page_count": 91,
+      "pager_accesses": 124,
+      "rows": 256
+    },
+    {
+      "cold_checkpoint_seconds": 0.043226901,
+      "cold_exact_references_retained": true,
+      "cold_frame_equal_before_publication": true,
+      "cold_recovery": true,
+      "full_derivation_equal": true,
+      "rows": 256
+    },
+    {
+      "changed_payload_bytes": 0,
+      "changed_rows": 0,
+      "checkpoint_seconds": 0.127635678,
+      "cycle": 0,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/.audit.log"
+        },
+        {
+          "allocated_bytes": 1916928,
+          "logical_bytes": 1916928,
+          "path": "2048/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "2048/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 42605,
+          "path": "2048/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "2048/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "2048/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 260932,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 260932,
+        "checksum": 2204985399,
+        "collection": "scaling_rows",
+        "page_count": 1,
+        "root_page": 116
+      },
+      "page_count": 117,
+      "pager_accesses": 6178,
+      "rows": 2048
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.073896285,
+      "cycle": 1,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/.audit.log"
+        },
+        {
+          "allocated_bytes": 1916928,
+          "logical_bytes": 1916928,
+          "path": "2048/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "2048/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43108,
+          "path": "2048/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "2048/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "2048/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 261570,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 261570,
+        "checksum": 2049576416,
+        "collection": "scaling_rows",
+        "page_count": 1,
+        "root_page": 116
+      },
+      "page_count": 117,
+      "pager_accesses": 123,
+      "rows": 2048
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.063407056,
+      "cycle": 2,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/.audit.log"
+        },
+        {
+          "allocated_bytes": 1916928,
+          "logical_bytes": 1916928,
+          "path": "2048/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "2048/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43615,
+          "path": "2048/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "2048/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "2048/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 262094,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 262094,
+        "checksum": 1493663006,
+        "collection": "scaling_rows",
+        "page_count": 1,
+        "root_page": 116
+      },
+      "page_count": 117,
+      "pager_accesses": 118,
+      "rows": 2048
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.062195718,
+      "cycle": 3,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/.audit.log"
+        },
+        {
+          "allocated_bytes": 1933312,
+          "logical_bytes": 1933312,
+          "path": "2048/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "2048/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 44121,
+          "path": "2048/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "2048/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "2048/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 262618,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 262618,
+        "checksum": 1677157000,
+        "collection": "scaling_rows",
+        "page_count": 2,
+        "root_page": 116
+      },
+      "page_count": 118,
+      "pager_accesses": 118,
+      "rows": 2048
+    },
+    {
+      "cold_checkpoint_seconds": 0.04925305,
+      "cold_exact_references_retained": true,
+      "cold_frame_equal_before_publication": true,
+      "cold_recovery": true,
+      "full_derivation_equal": true,
+      "rows": 2048
+    },
+    {
+      "changed_payload_bytes": 0,
+      "changed_rows": 0,
+      "checkpoint_seconds": 0.410804172,
+      "cycle": 0,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/.audit.log"
+        },
+        {
+          "allocated_bytes": 3538944,
+          "logical_bytes": 3538944,
+          "path": "8192/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "8192/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 42607,
+          "path": "8192/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "8192/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "8192/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 1047364,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 1047364,
+        "checksum": 3253912614,
+        "collection": "scaling_rows",
+        "page_count": 4,
+        "root_page": 212
+      },
+      "page_count": 216,
+      "pager_accesses": 24610,
+      "rows": 8192
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.148494662,
+      "cycle": 1,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/.audit.log"
+        },
+        {
+          "allocated_bytes": 3538944,
+          "logical_bytes": 3538944,
+          "path": "8192/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "8192/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43110,
+          "path": "8192/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "8192/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "8192/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 1048002,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 1048002,
+        "checksum": 1638164113,
+        "collection": "scaling_rows",
+        "page_count": 4,
+        "root_page": 212
+      },
+      "page_count": 216,
+      "pager_accesses": 132,
+      "rows": 8192
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.12729845,
+      "cycle": 2,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/.audit.log"
+        },
+        {
+          "allocated_bytes": 3538944,
+          "logical_bytes": 3538944,
+          "path": "8192/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "8192/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 43614,
+          "path": "8192/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "8192/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "8192/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 1048526,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 1048526,
+        "checksum": 3912096405,
+        "collection": "scaling_rows",
+        "page_count": 4,
+        "root_page": 212
+      },
+      "page_count": 216,
+      "pager_accesses": 127,
+      "rows": 8192
+    },
+    {
+      "changed_payload_bytes": 324,
+      "changed_rows": 6,
+      "checkpoint_seconds": 0.126279096,
+      "cycle": 3,
+      "files": [
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/.audit.log"
+        },
+        {
+          "allocated_bytes": 3538944,
+          "logical_bytes": 3538944,
+          "path": "8192/database.rdb"
+        },
+        {
+          "allocated_bytes": 16777216,
+          "logical_bytes": 8,
+          "path": "8192/database.rdb-uwal"
+        },
+        {
+          "allocated_bytes": 45056,
+          "logical_bytes": 44121,
+          "path": "8192/database.rdb.meta.rdbx"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+        },
+        {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+        },
+        {
+          "allocated_bytes": 4096,
+          "logical_bytes": 285,
+          "path": "8192/database.rdb.ops/manifest.json"
+        },
+        {
+          "allocated_bytes": 1097728,
+          "logical_bytes": 1097728,
+          "path": "8192/database.result-cache.l2"
+        }
+      ],
+      "free_page_count": 0,
+      "full_derivation_equal": true,
+      "fulltext_logical_bytes": 1049050,
+      "fulltext_reference": {
+        "artifact_kind": "text.fulltext",
+        "byte_len": 1049050,
+        "checksum": 2056744197,
+        "collection": "scaling_rows",
+        "page_count": 4,
+        "root_page": 212
+      },
+      "page_count": 216,
+      "pager_accesses": 127,
+      "rows": 8192
+    },
+    {
+      "cold_checkpoint_seconds": 0.084397539,
+      "cold_exact_references_retained": true,
+      "cold_frame_equal_before_publication": true,
+      "cold_recovery": true,
+      "full_derivation_equal": true,
+      "rows": 8192
+    }
+  ]
+}

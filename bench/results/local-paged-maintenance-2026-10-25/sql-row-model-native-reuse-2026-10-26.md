@@ -63,8 +63,12 @@ work proportional to six edits. Full-frame text serialization and collection
 source hashing still perform global work. They also do not qualify the rejected
 RC377, whose first historical Platform checkpoint took 13.828 seconds.
 
-Expanded KV, SQL update, storage recovery and compile/format qualification is
-tracked separately before another signed candidate. The same final artifact
+Expanded local qualification passed: 30 focal native/keyed-read tests, 30
+additional KV tests, 31 storage recovery tests, 17 SQL update conformance tests,
+eight document/KV update tests and five snapshot-retention tests (121 total),
+plus locked server/test checking and workspace formatting. Full CI on the exact
+runtime source is [40382040196](https://github.com/reddb-io/reddb/actions/runs/40382040196);
+its final result and a signed candidate are tracked separately. The same final artifact
 must still pass historical Auth and Platform, held snapshots and reuse after
 release, acknowledged-write crash recovery and the unchanged 10-second/64 MiB
 gates. No live database or cloud workload was modified by these reproductions.
