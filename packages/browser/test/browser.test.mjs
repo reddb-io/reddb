@@ -134,6 +134,8 @@ async function sharedConformance(browserPage) {
     'geo_values_and_coordinate_forms', 'geo_spherical_and_ellipsoidal_math', 'geo_polygon_and_bounds',
     'table_plan_callback_order_and_aliases', 'table_plan_fast_lookup_and_errors',
     'table_plan_wide_bounds_and_topk', 'table_plan_depth_and_first_child',
+    'table_planning_order_costs_and_metadata', 'table_planning_document_and_universal_routes',
+    'table_planning_effective_sql_and_zero_bounds', 'table_planning_bounded_metadata_and_secrets',
   ])
 }
 

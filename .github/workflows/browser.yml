@@ -144,6 +144,7 @@ jobs:
           cargo test --locked -p reddb-io-server --lib runtime::expr_eval
           cargo test --locked -p reddb-io-server --lib runtime::join_filter
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::table
+          cargo test --locked -p reddb-io-server --lib storage::query::planner
           cargo test --locked -p reddb-io-server --lib runtime::evaluator_differential
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::aggregate
           cargo test --locked -p reddb-io-server --lib runtime::window_phase

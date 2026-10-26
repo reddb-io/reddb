@@ -1,7 +1,8 @@
-//! Test-only host over supplied recovered records; not a browser planner/dispatcher.
+//! Test-only host over recovered records using the canonical planner and executor.
 use super::*;
 use reddb_engine::query::{
-    logical_plan::CanonicalLogicalNode,
+    logical_plan::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate},
+    planning::{build_table_plan_with_host, TablePlanningHost},
     runtime::table_plan::{execute_table_plan_with_host, TablePlanHost},
 };
 use reddb_rql::ast::TableQuery;
@@ -83,26 +84,13 @@ pub(super) fn verify_recovered(
     updated: bool,
 ) {
     let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1");
-    // This fixed canonical fixture uses the same native operator names and node
-    // authority. It is not a second production logical-plan builder.
-    let mut plan = CanonicalLogicalNode {
-        operator: "table_scan".into(),
-        source: Some("orders".into()),
-        ..Default::default()
-    };
-    for operator in ["filter", "sort", "offset", "limit", "projection"] {
-        plan = CanonicalLogicalNode {
-            operator: operator.into(),
-            children: vec![plan],
-            ..Default::default()
-        };
-    }
     let host = TableHost {
         records,
         query: &query,
         contract,
         projections: Host::new(Some(contract)),
     };
+    let plan = build_table_plan_with_host(&host, &query);
     let projected =
         execute_table_plan_with_host(&host, &plan, &query).expect("recovered canonical table plan");
     let expected = if updated {
@@ -115,5 +103,33 @@ pub(super) fn verify_recovered(
         assert_eq!(record.get("identity"), Some(&Value::UnsignedInteger(id)));
         assert_eq!(record.get("amount"), Some(&Value::Integer(amount)));
         assert_eq!(record.get("doubled"), Some(&Value::Integer(doubled)));
+    }
+}
+
+impl TablePlanningHost for TableHost<'_> {
+    fn access_path(&self, query: &TableQuery) -> AccessPathDecision {
+        assert_eq!(
+            query.table, "orders",
+            "fixture admits its recovered table only"
+        );
+        AccessPathDecision {
+            path: "table_scan",
+            index_hint: None,
+            reason: "fixture scans recovered records".into(),
+            warning: None,
+        }
+    }
+    fn scan_cardinality(&self, _: &TableQuery, _: &AccessPathDecision) -> CardinalityEstimate {
+        CardinalityEstimate::full_scan(self.records.len() as f64)
+    }
+    fn uses_document_path_filter(&self, _: &TableQuery) -> bool {
+        false
+    }
+    fn filter_cardinality(&self, _: &TableQuery, document_path: bool) -> CardinalityEstimate {
+        assert!(!document_path, "fixture admits plain table plans only");
+        CardinalityEstimate::full_scan(self.records.len() as f64)
+    }
+    fn is_document_projection(&self, _: &TableQuery) -> bool {
+        false
     }
 }

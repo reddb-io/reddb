@@ -287,3 +287,14 @@ fn portable_table_plan_conformance() {
         run();
     }
 }
+
+#[path = "support/table_planning.rs"]
+mod table_planning;
+
+#[test]
+fn portable_table_planning_conformance() {
+    for (name, run) in table_planning::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
