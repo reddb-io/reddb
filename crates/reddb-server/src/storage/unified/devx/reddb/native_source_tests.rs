@@ -115,6 +115,36 @@ fn native_artifacts_reject_stale_sources_after_crash() {
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let runtime = seed_runtime(paged_options(Path::new(&path)));
         let phase = std::env::var(CHILD_PHASE).expect("crash phase");
+        if phase.starts_with("compressed-") {
+            for batch in 0..16 {
+                let rows = (10 + batch * 128..10 + (batch + 1) * 128)
+                    .map(|id| format!("({id},'alpha beta gamma delta epsilon theta shared text')"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                runtime
+                    .execute_query(&format!("INSERT INTO cold_rows (id,payload) VALUES {rows}"))
+                    .expect("indexed corpus");
+            }
+            runtime.checkpoint().expect("publish compressed source");
+            let db = runtime.db();
+            let reference = descriptors(&db)
+                .into_iter()
+                .find(|page| page.collection == "cold_rows")
+                .expect("compressed reference");
+            let page = db
+                .store
+                .pager()
+                .expect("pager")
+                .read_page(reference.root_page)
+                .expect("compressed root");
+            assert!(
+                reddb_file::native_blob_compression::native_blob_compression_header(
+                    &page.as_bytes()[crate::storage::engine::HEADER_SIZE..]
+                )
+                .expect("codec header")
+                .is_some()
+            );
+        }
         if phase == "active" || phase == "aborted" {
             runtime.execute_query("BEGIN").expect("transaction");
             runtime
@@ -130,7 +160,7 @@ fn native_artifacts_reject_stale_sources_after_crash() {
             runtime
                 .execute_query("UPDATE cold_rows SET payload='omega delta' WHERE id=1")
                 .expect("acknowledged update");
-            if phase == "primary" {
+            if phase.ends_with("primary") {
                 // Crash between primary durability and native publication.
                 runtime.db().store.persist().expect("durable primary only");
             } else {
@@ -144,7 +174,14 @@ fn native_artifacts_reject_stale_sources_after_crash() {
         }
         std::process::exit(0); // No destructor may repair this fixture.
     }
-    for phase in ["wal", "primary", "active", "aborted"] {
+    for phase in [
+        "wal",
+        "primary",
+        "active",
+        "aborted",
+        "compressed-wal",
+        "compressed-primary",
+    ] {
         let directory = tempfile::tempdir().expect("crash fixture");
         let path = directory.path().join("crash.rdb");
         let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
@@ -155,7 +192,8 @@ fn native_artifacts_reject_stale_sources_after_crash() {
         let result = runtime
             .execute_query("SELECT payload FROM cold_rows WHERE id=1")
             .expect("recovered value");
-        let expected = if phase == "wal" || phase == "primary" {
+        let expected = if phase == "wal" || phase.ends_with("primary") || phase == "compressed-wal"
+        {
             "omega delta"
         } else {
             "alpha beta"
@@ -185,6 +223,16 @@ fn native_artifacts_reject_stale_sources_after_crash() {
         );
         runtime.checkpoint().expect("publish recovered artifacts");
         assert_artifact_matches_source(&db);
+        if phase.starts_with("compressed-") {
+            drop(db);
+            drop(runtime);
+            let cold = RedDB::open_with_options(&paged_options(&path)).expect("cold packed source");
+            assert!(cold
+                .prepare_native_artifact_publication(&descriptors(&cold))
+                .records
+                .iter()
+                .all(|(summary, _)| summary.collection != "cold_rows"));
+        }
     }
 }
 

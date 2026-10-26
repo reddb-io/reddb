@@ -86,7 +86,7 @@ impl RedDB {
         }
         let bytes = self
             .store
-            .read_native_blob_chain(previous.pages[0].root_page)
+            .read_native_artifact_payload(&previous.pages[0])
             .ok()?;
         if bytes.len() as u64 != summary.serialized_bytes
             || crate::storage::engine::crc32(&bytes) as u64 != summary.checksum

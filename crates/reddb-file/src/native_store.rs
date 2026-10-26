@@ -1625,21 +1625,28 @@ pub fn encode_native_blob_page(next_page: u32, chunk: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_native_blob_page(content: &[u8]) -> RdbFileResult<(u32, Vec<u8>)> {
-    if content.len() < NATIVE_BLOB_PAGE_HEADER_BYTES || &content[0..4] != NATIVE_BLOB_MAGIC {
+    let compressed = crate::native_blob_compression::native_blob_compression_header(content)?;
+    let header_bytes = if compressed.is_some() {
+        crate::native_blob_compression::NATIVE_COMPRESSED_BLOB_HEADER_BYTES
+    } else {
+        NATIVE_BLOB_PAGE_HEADER_BYTES
+    };
+    if content.len() < header_bytes || (compressed.is_none() && &content[0..4] != NATIVE_BLOB_MAGIC)
+    {
         return Err(RdbFileError::InvalidOperation(
             "invalid native blob page".to_string(),
         ));
     }
     let next_page = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
     let chunk_len = u32::from_le_bytes([content[8], content[9], content[10], content[11]]) as usize;
-    if NATIVE_BLOB_PAGE_HEADER_BYTES + chunk_len > content.len() {
+    if header_bytes + chunk_len > content.len() {
         return Err(RdbFileError::InvalidOperation(
             "truncated native blob page".to_string(),
         ));
     }
     Ok((
         next_page,
-        content[NATIVE_BLOB_PAGE_HEADER_BYTES..NATIVE_BLOB_PAGE_HEADER_BYTES + chunk_len].to_vec(),
+        content[header_bytes..header_bytes + chunk_len].to_vec(),
     ))
 }
 

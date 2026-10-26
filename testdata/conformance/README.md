@@ -13,6 +13,12 @@ them.
 
 Current shared fixtures:
 
+- `native-blob-compression/manifest.json` — native compressed index blob page,
+  owned by `reddb-file`. Rust validates its exact decoded full-text frame;
+  `node testdata/conformance/native-blob-compression/verify.mjs` independently
+  checks the page layout, Zstd decoding, SHA-256, CRC32 and decoded-byte budget.
+  The verifier requires Node with native Zstd and CRC32 support and fails
+  explicitly when those capabilities are unavailable.
 - `redwire/params/manifest.json` — RedWire query-parameter value and query
   encoding fixtures. `reddb-wire` validates the canonical RedWire bytes,
   `reddb-grpc-proto` consumers validate the gRPC bytes, and language drivers

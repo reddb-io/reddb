@@ -43,7 +43,9 @@ fn qualify_shrink(reopen_with_default_profile: bool) {
         .execute_query("CREATE TABLE artifact_rows (id INT, payload TEXT)")
         .expect("table");
     let payload = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
-    for batch in 0..16 {
+    // Compressed postings need a larger corpus to keep exercising physical
+    // tail retirement, rather than shrinking entirely within one page.
+    for batch in 0..64 {
         let rows = (batch * 128..(batch + 1) * 128)
             .map(|id| format!("({id},'{payload}')"))
             .collect::<Vec<_>>()

@@ -185,6 +185,20 @@ unpublished allocations remain conservative recovery garbage; this mechanism
 does not claim a general orphan-page vacuum of pre-upgrade files.
 
 Native index blob replacement terminates the chain at the new payload boundary.
+Large full-text (`RDFT`) blobs may use a lossless Zstd level-1 physical encoding
+owned by `reddb-file`. Their first page uses `RDBZ` with decoded length and CRC32;
+continuations use `RDBL`. Artifact descriptors retain logical length/checksum,
+but page counts describe actual physical pages, independently of decoded length.
+Inputs below 64 KiB, beyond the configured decode workspace or saving less than
+12.5% remain raw. Readers enforce the decoded budget before allocation, a bounded
+decoder window, one complete frame, exact decoded length and CRC32. Runtime
+workspace limits derive from one eighth of the resolved memory budget; direct
+store callers default to 64 MiB. Opening compressed artifacts with a smaller
+workspace can reject their reads; lowering memory requires qualification too.
+Legacy raw blobs remain readable. Older engines do not understand `RDBZ`;
+rollback must use a compatible engine or restore a verified pre-upgrade copy,
+never assume that an old writer can open the upgraded file safely. Compression
+changes neither source proof semantics nor publication/reclamation barriers.
 Growing blobs allocate and fill the new tail with one-page lookahead before
 changing the published prefix. This avoids evicting a complete blank generation
 under cache pressure and preserves that prefix if tail allocation/writeback

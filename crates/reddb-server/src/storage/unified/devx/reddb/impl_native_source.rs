@@ -102,14 +102,11 @@ impl RedDB {
             }
             // Page checksums detect physical corruption; the persisted payload
             // checksum additionally binds these exact bytes to the source proof.
-            if proof.pages.iter().any(|page| {
-                self.store
-                    .read_native_blob_chain(page.root_page)
-                    .map_or(true, |bytes| {
-                        bytes.len() as u64 != page.byte_len
-                            || reddb_file::native_store_page_checksum(&bytes) != page.checksum
-                    })
-            }) || manager.checkpoint_revisions() != segments
+            if proof
+                .pages
+                .iter()
+                .any(|page| self.store.read_native_artifact_payload(page).is_err())
+                || manager.checkpoint_revisions() != segments
             {
                 continue;
             }

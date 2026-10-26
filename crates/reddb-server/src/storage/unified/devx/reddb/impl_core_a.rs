@@ -34,6 +34,8 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
+    config.native_blob_decode_limit_bytes =
+        usize::try_from(budget.resolved_bytes / 8).unwrap_or(usize::MAX);
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {

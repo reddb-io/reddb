@@ -67,6 +67,12 @@
       "type": "directory",
       "path": "crates/reddb-file/tests/layout_authority",
       "owns": "file layout authority module tests"
+    },
+    {
+      "id": "native-compressed-blob-fixtures",
+      "type": "directory",
+      "path": "testdata/conformance/native-blob-compression",
+      "owns": "reddb-file native compressed blob page layout and independent reader fixture"
     }
   ]
 }

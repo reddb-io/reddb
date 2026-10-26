@@ -128,6 +128,9 @@ pub struct UnifiedStoreConfig {
     /// supplies a count derived from the page-cache budget share, so the
     /// default is reached only by direct library callers.
     pub page_cache_slots: Option<usize>,
+    /// Maximum decoded workspace for a compressed native index blob. Larger
+    /// inputs stay raw; legacy raw blobs retain their existing read contract.
+    pub native_blob_decode_limit_bytes: usize,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -145,6 +148,7 @@ impl Default for UnifiedStoreConfig {
             data_dir: None,
             embedded_wal_path: None,
             page_cache_slots: None,
+            native_blob_decode_limit_bytes: 64 * 1024 * 1024,
         }
     }
 }
