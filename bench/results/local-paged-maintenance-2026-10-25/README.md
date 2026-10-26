@@ -257,3 +257,56 @@ whichever is smaller; changed text is capped at one eighth of that limit or
 8 MiB. Source-row estimates are checked before payload copies. Cache proofs
 still advance only after durable publication; the first cold publication is
 conservative. Native Auth and Platform acceptance remain open.
+
+
+## RC371 qualification and dirty-eviction fault reproduction
+
+Source `0038f09d5` passed all 33 CI jobs in run 40245162771. RC371's
+image signature, release attestation and exact image/public binary equality
+were checked. Its 60,000-row constrained test passed crash recovery, two cold
+opens and exit-zero shutdown; main-file allocation remained 131,190,784 bytes.
+
+A fresh rehashed historical Auth copy passed with 2 GiB cgroup / 1 GiB budget
+and one CPU: 37 collections, writer maximum 7.781 s, automatic checkpoints
+7.808/7.769 s, and cold-reopen checkpoint 9.454 s. This is a finite result with
+little margin below the retained strict 10 s limit.
+
+A separate fresh historical Platform copy **failed** with 4 GiB cgroup /
+2 GiB budget and one CPU: 170 collections, writer maximum 13.288 s and
+automatic checkpoints 13.565/10.337 s. Explicit checkpoints were at most
+7.394 s. Its 472 concurrent reads had no errors (maximum 23.32 ms); no OOM
+occurred. The automatic checkpoint profiles spent 5.889/5.951 s in primary
+and native-header publication on the first pass, and 8.967/0.580 s on the
+second. Native artifacts took 0.656/0.312 s. The remaining measured bottleneck
+is publication/flush. Reopen qualification stopped after the failed writer
+gate. The rejected copy is preserved and its temporary quota was restored.
+
+A subsequent deterministic shared-pager fault injection confirmed a separate
+integrity defect. Dirty cache evictions in six admission paths called raw
+home-page writes, bypassing both WAL durability and the in-file DWB. A cache
+filled across all shards, an update to every resident page, and a half-page
+write failure during allocation produced `ChecksumMismatch` after reopen.
+This reproduces a real torn-write vulnerability, not the historical STG
+corruption itself. It does not establish the cause of unbounded storage.
+
+The correction routes dirty evictions through the existing WAL-first protected
+batch path. A failed protected writeback blocks subsequent writes/publications
+until reopen, preserving any complete recovery frame instead of overwriting
+it with another batch. The disk format and durability barriers remain intact.
+This adds protected-write cost to a path that previously omitted protection;
+Platform timing must be measured again before release or fleet activation.
+
+The expanded shared-pager conformance suite now exercises all six admission
+paths with a torn home write, both retained and lost pending bytes, and
+successful/failed WAL barriers. It verifies that failed writeback cannot be
+followed by another home or superblock publication and that reopen restores
+normal writes. All 18 pager conformance cases pass locally.
+
+A second deterministic reproduction found sparse-flush amplification:
+16 dirty pages distributed over a 1,024-page otherwise clean cache incurred
+12 fsync barriers because batches were split by all resident IDs. Snapshotting
+only dirty IDs and sorting them before the existing bounded image batches
+reduces that fixture to 3 barriers (one protected frame), with exactly the
+16 changed home pages written in ascending physical order. No barrier is
+removed from an individual protected frame. This is an I/O-count improvement,
+not yet a measured latency improvement on the historical Platform copy.
