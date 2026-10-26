@@ -12,8 +12,8 @@
 //! function.
 
 use reddb_engine::query::planning::aggregation::{
-    prepare_aggregate_runtime_plan, render_expr_signature, render_projection_signature,
-    validate_aggregate_planning_depth,
+    prepare_aggregate_runtime_plan, validate_aggregate_projection_shape_with_host,
+    AggregateGroupBinding, AggregateShapeHost,
 };
 use reddb_engine::query::runtime::aggregation::{
     aggregate_argument_key, aggregate_output_name, build_aggregate_group_key, sum_f64_to_value,
@@ -36,11 +36,24 @@ use reddb_rql::ast::{Expr, FieldRef, Filter, OrderByClause, Projection};
 use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
-    projection_to_expr,
 };
 use reddb_types::Value;
 
 use super::TableQuery;
+
+struct NativeAggregateShapeHost;
+impl AggregateShapeHost for NativeAggregateShapeHost {
+    type Error = RedDBError;
+    fn validate_projection(&self, projection: &Projection) -> RedDBResult<()> {
+        validate_h3_projection_resolutions(projection)
+    }
+    fn validate_group_expression(&self, expression: &Expr) -> RedDBResult<()> {
+        validate_h3_expr_resolutions(expression)
+    }
+    fn query_error(&self, message: String) -> RedDBError {
+        RedDBError::Query(message)
+    }
+}
 
 struct NativeAggregateHost;
 impl AggregateHost for NativeAggregateHost {
@@ -68,12 +81,6 @@ impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
     type Error = RedDBError;
     fn guard_materialization(&self, groups: usize) -> RedDBResult<()> {
         crate::runtime::materialization_limit::guard(self.db, "aggregation", groups)
-    }
-    fn group_output_label(&self, query: &TableQuery, expression: &Expr) -> String {
-        group_output_label(query, expression)
-    }
-    fn group_expression_key(&self, expression: &Expr) -> Option<String> {
-        group_expr_key(expression)
     }
     fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool {
         evaluate_runtime_filter_with_db(Some(self.db), record, filter, None, None)
@@ -148,9 +155,7 @@ pub(crate) fn execute_aggregate_query(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
-    validate_aggregate_planning_depth(query)
-        .map_err(|message| RedDBError::Query(message.into()))?;
-    validate_aggregate_projection_shape(query)?;
+    validate_aggregate_projection_shape_with_host(&NativeAggregateShapeHost, query)?;
     let mut sensitivity_source = UnifiedRecord::new();
     let contract = db.collection_contract(&query.table);
     let declared_schema = contract
@@ -254,10 +259,10 @@ pub(crate) fn execute_aggregate_query(
 
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
-    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
     let runtime_plan = prepare_aggregate_runtime_plan(query)
         .map_err(|message| RedDBError::Query(message.into()))?;
     let all_aggregate_projections = &runtime_plan.aggregate_projections;
+    let effective_group_by = &runtime_plan.group_bindings;
 
     let manager = db
         .store()
@@ -295,11 +300,10 @@ pub(crate) fn execute_aggregate_query(
             .iter()
             .map(|expr| {
                 // TIME_BUCKET grouping requires a record (timestamp arithmetic).
-                if parse_time_bucket_group_expr(&group_expr_key(expr).unwrap_or_default()).is_some()
-                {
+                if parse_time_bucket_group_expr(expr.key.as_deref().unwrap_or_default()).is_some() {
                     return None;
                 }
-                match expr {
+                match &expr.expression {
                     Expr::Column { field, .. } => {
                         let col_name = field_ref_name(field);
                         let kind = classify_field(field, table_name, table_alias);
@@ -459,7 +463,7 @@ pub(crate) fn execute_aggregate_query(
                 if group_by_all_fast {
                     // Fast path: all GROUP BY are simple columns → read from entity.
                     let mut values = Vec::with_capacity(effective_group_by.len());
-                    for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
+                    for (resolver_opt, expr) in group_by_kinds.iter().zip(effective_group_by) {
                         let value = if let Some(resolver) = resolver_opt {
                             resolver
                                 .get_value(0, entity)
@@ -489,7 +493,7 @@ pub(crate) fn execute_aggregate_query(
                         return true;
                     };
                     let mut values = Vec::with_capacity(effective_group_by.len());
-                    for group_expr in &effective_group_by {
+                    for group_expr in effective_group_by {
                         let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
                             return true;
                         };
@@ -626,7 +630,6 @@ pub(crate) fn execute_aggregate_query(
         reddb_engine::query::runtime::aggregate_results::AggregateResultContext {
             query,
             visible_projections: &effective_projections,
-            group_by: &effective_group_by,
             runtime_plan: &runtime_plan,
             slots: &agg_plan,
             sensitivity_source: sensitive_query.then_some(&sensitivity_source),
@@ -654,75 +657,6 @@ fn resolve_aggregate_argument_value(
         Some(arg) => eval_projection_value_with_db(Some(db), arg, record),
         _ => None,
     }
-}
-
-fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
-    let effective_projections = effective_table_projections(query);
-    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
-    let has_group_by = !effective_group_by.is_empty();
-
-    for projection in &effective_projections {
-        validate_h3_projection_resolutions(projection)?;
-
-        if matches!(
-            projection,
-            Projection::Function(name, _)
-                if is_aggregate_function(base_function_name(name))
-        ) {
-            continue;
-        }
-
-        if has_group_by
-            && projection_group_key(projection).is_some_and(|group_key| {
-                effective_group_by
-                    .iter()
-                    .filter_map(group_expr_key)
-                    .any(|entry| entry.eq_ignore_ascii_case(&group_key))
-            })
-        {
-            continue;
-        }
-
-        let label = projection_name(projection);
-        let message = if has_group_by {
-            format!("projection `{label}` must appear in GROUP BY or be an aggregate")
-        } else {
-            format!(
-                "projection `{label}` must be an aggregate because the query contains aggregate functions"
-            )
-        };
-        return Err(RedDBError::Query(message));
-    }
-
-    for group_expr in &effective_group_by {
-        validate_h3_expr_resolutions(group_expr)?;
-    }
-
-    Ok(())
-}
-
-fn resolve_group_by_aliases(query: &TableQuery, group_by: Vec<Expr>) -> Vec<Expr> {
-    let projections = effective_table_projections(query);
-    group_by
-        .into_iter()
-        .map(|expr| {
-            let Expr::Column {
-                field: FieldRef::TableColumn { table, column },
-                ..
-            } = &expr
-            else {
-                return expr;
-            };
-            if !table.is_empty() {
-                return expr;
-            }
-            projections
-                .iter()
-                .find(|projection| projection_name(projection).eq_ignore_ascii_case(column))
-                .and_then(|projection| projection_to_expr(projection).map(|(expr, _)| expr))
-                .unwrap_or(expr)
-        })
-        .collect()
 }
 
 fn validate_h3_projection_resolutions(projection: &Projection) -> RedDBResult<()> {
@@ -858,61 +792,14 @@ fn validate_h3_resolution_value(function_name: &str, resolution: i64) -> RedDBRe
     )))
 }
 
-fn group_output_label(query: &TableQuery, group_expr: &Expr) -> String {
-    effective_table_projections(query)
-        .iter()
-        .find_map(|projection| {
-            let key = projection_group_key(projection)?;
-            if group_expr_key(group_expr)
-                .is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key))
-            {
-                Some(projection_name(projection))
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| group_expr_key(group_expr).unwrap_or_else(|| "group".to_string()))
-}
-
-fn projection_group_key(projection: &Projection) -> Option<String> {
-    match projection {
-        Projection::Column(column) => Some(column.clone()),
-        Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
-            Some(column.clone())
-        }
-        Projection::Field(field, _) => Some(field_ref_name(field)),
-        Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
-            render_time_bucket_group_expr(args)
-        }
-        Projection::Function(_, _) => render_projection_signature(projection),
-        _ => None,
-    }
-}
-
-fn render_time_bucket_group_expr(args: &[Projection]) -> Option<String> {
-    let rendered = args
-        .iter()
-        .map(render_group_by_argument)
-        .collect::<Option<Vec<_>>>()?;
-    Some(format!("TIME_BUCKET({})", rendered.join(",")))
-}
-
-fn render_group_by_argument(arg: &Projection) -> Option<String> {
-    match arg {
-        Projection::Column(column) => Some(
-            column
-                .strip_prefix("LIT:")
-                .map(str::to_string)
-                .unwrap_or_else(|| column.clone()),
-        ),
-        Projection::All => Some("*".to_string()),
-        _ => None,
-    }
-}
-
-fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
+fn resolve_group_by_value(
+    db: &RedDB,
+    binding: &AggregateGroupBinding,
+    record: &UnifiedRecord,
+) -> Option<Value> {
+    let group_expr = &binding.expression;
     if let Some((bucket_ns, timestamp_column)) =
-        parse_time_bucket_group_expr(&group_expr_key(group_expr).unwrap_or_default())
+        parse_time_bucket_group_expr(binding.key.as_deref().unwrap_or_default())
     {
         let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
         let bucket_start = timestamp_ns
@@ -943,13 +830,6 @@ fn h3_group_expr_yields_null_drop(group_expr: &Expr) -> bool {
         Expr::FunctionCall { name, .. }
             if matches!(name.to_ascii_uppercase().as_str(), "H3_CELL" | "H3_PARENT")
     )
-}
-
-fn group_expr_key(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Column { field, .. } => Some(field_ref_name(field)),
-        _ => render_expr_signature(expr),
-    }
 }
 
 fn parse_time_bucket_group_expr(expr: &str) -> Option<(u64, Option<String>)> {
@@ -2560,6 +2440,61 @@ mod aggregate_numeric_route_parity_tests {
             Value::BigInt(value) => *value as f64,
             Value::Float(value) => *value,
             other => panic!("expected numeric aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_group_bindings_preserve_aliases_and_output_columns() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, value) in [("red", -10), ("red", 10), ("blue", 20)] {
+            insert(&runtime, bucket, Value::BigInt(value));
+        }
+        let grouped = runtime.execute_query("SELECT bucket AS tenant, SUM(value) AS amount FROM samples GROUP BY TENANT HAVING COUNT(*) > 0 ORDER BY tenant ASC").expect("case-insensitive SELECT alias grouping");
+        assert_eq!(grouped.result.columns, ["tenant", "amount"]);
+        assert_eq!(grouped.result.records.len(), 2);
+        for (record, (tenant, amount)) in grouped
+            .result
+            .records
+            .iter()
+            .zip([("blue", 20.0), ("red", 0.0)])
+        {
+            assert_eq!(record.get("tenant"), Some(&Value::text(tenant)));
+            assert_eq!(record.get("bucket"), Some(&Value::text(tenant)));
+            assert_eq!(number(record.get("amount").expect("sum alias")), amount);
+        }
+        let grouped = runtime.execute_query("SELECT SUM(value) AS amount, bucket AS tenant, ABS(value) AS magnitude FROM samples GROUP BY tenant, magnitude HAVING COUNT(*) > 0 ORDER BY tenant ASC").expect("multiple group aliases including a function");
+        assert_eq!(grouped.result.columns, ["tenant", "magnitude", "amount"]);
+        assert_eq!(grouped.result.records.len(), 2);
+        for (record, (tenant, magnitude, amount)) in grouped
+            .result
+            .records
+            .iter()
+            .zip([("blue", 20.0, 20.0), ("red", 10.0, 0.0)])
+        {
+            assert_eq!(record.get("tenant"), Some(&Value::text(tenant)));
+            assert_eq!(
+                number(record.get("magnitude").expect("function alias")),
+                magnitude
+            );
+            assert_eq!(number(record.get("amount").expect("sum alias")), amount);
+        }
+        let error = runtime.execute_query("SELECT bucket AS tenant, SUM(value) FROM samples AS s GROUP BY s.tenant HAVING COUNT(*) > 0").expect_err("qualified name cannot resolve to SELECT alias");
+        assert!(error.to_string().contains("must appear in GROUP BY"));
+    }
+
+    #[test]
+    fn shared_shape_validation_retains_native_h3_admission() {
+        let runtime = runtime_with_table("BIGINT");
+        for sql in [
+            "SELECT H3_PARENT(bucket, 16) AS cell, COUNT(*) FROM samples GROUP BY cell",
+            "SELECT COUNT(*) FROM samples GROUP BY H3_PARENT(bucket, 16)",
+        ] {
+            let error = runtime
+                .execute_query(sql)
+                .expect_err("invalid native H3 resolution");
+            assert!(error
+                .to_string()
+                .contains("H3_PARENT H3 resolution 16 is invalid"));
         }
     }
 

@@ -1,13 +1,13 @@
-//! Native result assembly with an explicit test-only group-label and effect policy.
+//! Native result assembly with canonical group bindings and a test-only effect policy.
 use super::*;
 use reddb_engine::query::{
-    planning::aggregation::{prepare_aggregate_runtime_plan, render_expr_signature},
+    planning::aggregation::prepare_aggregate_runtime_plan,
     runtime::{aggregate_results::*, ordering::sort_records_by_order_by_with_host},
     unified::{UnifiedRecord, UnifiedResult},
 };
 use reddb_rql::{
     ast::{Expr, FieldRef, Filter, OrderByClause, TableQuery},
-    sql_lowering::{effective_table_group_by_exprs, effective_table_projections},
+    sql_lowering::effective_table_projections,
 };
 use std::cell::RefCell;
 
@@ -36,12 +36,6 @@ impl AggregateResultHost for ResultHost {
         } else {
             Ok(())
         }
-    }
-    fn group_output_label(&self, _: &TableQuery, _: &Expr) -> String {
-        "tenant".into()
-    }
-    fn group_expression_key(&self, expression: &Expr) -> Option<String> {
-        render_expr_signature(expression)
     }
     fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool {
         self.events.borrow_mut().push("having");
@@ -89,7 +83,6 @@ fn run_query(
     let runtime = prepare_aggregate_runtime_plan(query).expect("fixture aggregate planning");
     let slots = CompiledAggPlan::compile(&runtime.aggregate_projections).expect("fixture slots");
     let projections = effective_table_projections(query);
-    let group_by = effective_table_group_by_exprs(query);
     let groups: Vec<_> = inputs
         .iter()
         .map(|(tenant, input)| {
@@ -106,7 +99,6 @@ fn run_query(
         AggregateResultContext {
             query,
             visible_projections: &projections,
-            group_by: &group_by,
             runtime_plan: &runtime,
             slots: &slots,
             sensitivity_source: sensitive,

@@ -1207,3 +1207,38 @@ Cost sketch: G groups with P projections retain the existing O(G*P) result walk
 plus existing finalization/sort costs and result memory. Borrowed group views
 add no aggregate-buffer copies. No extra scan, persistent write, network call
 or IPC is introduced; no measured speedup is claimed.
+
+## Shared aggregate group bindings and shape validation
+
+`reddb-engine::query::planning::aggregation` owns native GROUP BY alias
+resolution, structural projection validation and prepared group bindings. Each
+binding retains the resolved expression, raw record key and visible output
+label. Generic native grouping and shared result assembly reuse these bindings;
+result construction and secret sensitivity traversal no longer call the host to
+lower projections or render group names per output group. The original native
+helpers moved into the engine; there is no separate JavaScript implementation.
+
+Only unqualified group names resolve SELECT aliases, with the existing
+case-insensitive match. Qualified fields, canonical/legacy AST precedence,
+function/JSON keys, TIME_BUCKET rendering and structural diagnostics retain
+native behavior. Source, lowered and alias-resolved trees are depth-checked
+before recursive rendering. Native H3 admission remains a host callback, in its
+original projection-before-group order; expression effects, resource admission,
+secrets, tenancy and persistence stay with their existing hosts. No H3 runtime
+or dependency is added to WASM.
+
+Five native/WASM case groups cover aliases, qualified names, expression labels,
+legacy metadata, depth limits, structural/host errors and multiple result
+bindings. Native SQL regressions force the generic path for alias/function
+binding and check H3 admission. The recovered OPFS fixture now groups by the
+SELECT alias of its JSON tenant expression and consumes canonical labels without
+hardcoded host naming callbacks. These fixtures do not publish SQL/catalog or
+durable transactions through the public browser SDK; storedQueries and
+transactions remain false.
+
+Cost sketch: for G groups, K group expressions and P projections, group naming
+moves its projection matching/rendering from O(G*K*P) to query preparation
+O(K*P), retaining O(K) bindings plus resolved expression trees; result insertion
+remains O(G*K). Structural admission and execution each prepare metadata once.
+There is no added network request, disk write or IPC, and no measured speedup
+is claimed.
