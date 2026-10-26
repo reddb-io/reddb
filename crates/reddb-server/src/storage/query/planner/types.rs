@@ -39,13 +39,7 @@ impl QueryPlan {
 
 pub use reddb_engine::query::logical_plan::{CanonicalLogicalNode, CanonicalLogicalPlan};
 
-#[derive(Debug, Clone)]
-pub struct AccessPathDecision {
-    pub path: &'static str,
-    pub index_hint: Option<String>,
-    pub reason: String,
-    pub warning: Option<String>,
-}
+pub use reddb_engine::query::logical_plan::AccessPathDecision;
 
 /// Query planner that combines rewriting, caching, and cost estimation
 pub struct QueryPlanner {

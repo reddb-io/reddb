@@ -785,3 +785,64 @@ fn native_store_read_indexes_keep_the_shared_types() {
     assert!(index.search("alice", 10, None).is_empty());
     assert_eq!(store.entity_cache_stats().entries, 0);
 }
+
+#[test]
+fn native_table_planning_keeps_catalog_estimates_and_shared_type_authority() {
+    use reddb_engine::query::logical_plan::{CanonicalLogicalPlan, CardinalityEstimate};
+    use reddb_server::storage::query::planner::build_canonical_plan;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
+    for sql in [
+        "CREATE TABLE shared_plan (id INT, total INT)",
+        "INSERT INTO shared_plan (id, total) VALUES (1, 10), (2, 20), (3, 30)",
+    ] {
+        runtime.execute_query(sql).expect(sql);
+    }
+    let expression = reddb_rql::parse_frontend(
+        "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY total DESC LIMIT 1 OFFSET 1",
+    )
+    .expect("canonical frontend")
+    .into_query_expr();
+    let plan: CanonicalLogicalPlan = build_canonical_plan(&runtime.db(), &expression);
+    let mut node = &plan.root;
+    let mut operators = Vec::new();
+    loop {
+        operators.push(node.operator.as_str());
+        let Some(child) = node.children.first() else {
+            break;
+        };
+        node = child;
+    }
+    assert_eq!(
+        operators,
+        [
+            "projection",
+            "limit",
+            "offset",
+            "sort",
+            "filter",
+            "table_scan"
+        ]
+    );
+    assert_eq!(
+        node.estimated_rows, 3.0,
+        "native host reads the live collection count"
+    );
+    assert_eq!(node.estimated_confidence, 0.85);
+    assert_eq!(node.source.as_deref(), Some("shared_plan"));
+    assert_eq!(node.details["access_path"], "table_scan");
+    assert_eq!(node.details["universal"], "false");
+    let native: reddb_server::storage::query::planner::CardinalityEstimate =
+        CardinalityEstimate::full_scan(3.0);
+    assert_eq!(native.rows, 3.0);
+    // The generated plan also executes through the production native adapter.
+    let result = runtime
+        .execute_query(
+            "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY total DESC LIMIT 1 OFFSET 1",
+        )
+        .expect("native shared plan execution");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("total"),
+        Some(&Value::Integer(20))
+    );
+}

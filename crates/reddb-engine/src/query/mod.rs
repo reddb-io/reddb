@@ -10,6 +10,8 @@ pub(crate) use reddb_types::value_compare;
 pub mod labels;
 #[doc(hidden)]
 pub mod logical_plan;
+#[doc(hidden)]
+pub mod planning;
 pub mod records;
 #[doc(hidden)]
 pub mod runtime;

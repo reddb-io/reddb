@@ -30,6 +30,10 @@ mod record_ordering;
 mod record_projection;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/table_planning.rs"]
+mod table_planning;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/table_plan.rs"]
 mod table_plan;
 
@@ -150,7 +154,8 @@ pub fn run_conformance() -> String {
         .chain(text_scalars::CASES.iter())
         .chain(temporal_scalars::CASES.iter())
         .chain(geographic::CASES.iter())
-        .chain(table_plan::CASES.iter());
+        .chain(table_plan::CASES.iter())
+        .chain(table_planning::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

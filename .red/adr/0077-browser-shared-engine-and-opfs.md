@@ -935,3 +935,34 @@ Cost sketch: D visited operators retain O(D) dispatch plus existing host scan,
 filter, sort, projection/window work and record buffers. The visited stack is
 bounded at depth 128; no new scan, file write, network request or IPC is added.
 The extraction makes no measured performance claim.
+
+## Shared canonical table-plan construction
+
+`reddb-engine::query::planning` now constructs the native canonical table plan
+from the canonical TableQuery AST. The native planner delegates its table arm to
+this implementation. AccessPathDecision and CardinalityEstimate retain their
+native import paths through re-exports of the shared types. The host still owns
+index availability/lifecycle, catalog document admission and live/statistical
+cardinality decisions; no native optimizer, index selection or RLS rule is replaced.
+
+The same construction preserves scan metadata, filter/sort/offset/limit/projection
+order, universal entity access and implicit ranked sorting, document operator
+precedence, effective SQL projections/predicates, row estimates and operator costs.
+Shared metadata helpers keep their existing summaries, including secret/password
+redaction. The recursive predicate summary is capped at the canonical RQL nesting
+limit; deeper descriptive metadata uses `<maximum filter depth>` without changing
+the query or its execution predicates.
+
+The offline OPFS test host now supplies recovered rows and scan statistics to this
+canonical planner and executes its generated tree through the shared table runtime,
+replacing the hand-built operator chain. Native/WASM cases verify metadata, host
+callback ordering, estimates/costs, document/universal routes, zero pagination and
+the metadata depth boundary. Native integration additionally checks the live
+collection count and SQL results. The fixture remains test-only: the public browser
+stored-query/transaction capabilities remain false until the complete production
+host, dispatch and durable transaction boundary are wired and qualified.
+
+Cost sketch: construction emits at most six table operators plus existing AST
+summary work; predicate summary recursion is capped at depth 128. No per-row
+planning, additional scan, file write, network request or IPC is introduced, and
+no measured speedup is claimed.
