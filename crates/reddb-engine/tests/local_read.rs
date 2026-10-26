@@ -290,7 +290,7 @@ fn materialization_cap_cannot_be_bypassed_by_limit_or_where() {
     let database = open_resident(&resident);
     assert_eq!(
         database
-            .query("SELECT name FROM people WHERE FALSE LIMIT 0")
+            .query("SELECT name FROM people WHERE name = 'absent' LIMIT 0")
             .expect_err("bound source materialization before LIMIT")
             .code(),
         "QUERY_RESOURCE_LIMIT"
