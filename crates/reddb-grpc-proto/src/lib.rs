@@ -30,6 +30,31 @@ tonic::include_proto!("reddb.v1");
 /// The exact Tonic runtime used by the generated stubs and their public types.
 pub use tonic;
 
+#[cfg(test)]
+mod runtime_type_tests {
+    #[test]
+    fn public_runtime_rejects_metadata_header_injection() {
+        for input in [
+            "ok\r\nauthorization: injected",
+            "ok\nheader: injected",
+            "bad\0value",
+        ] {
+            assert!(super::tonic::metadata::MetadataValue::try_from(input).is_err());
+        }
+        let value = super::tonic::metadata::MetadataValue::try_from("Bearer example-test-token")
+            .expect("valid authorization metadata");
+        let mut request = super::tonic::Request::new(super::Empty {});
+        request.metadata_mut().insert("authorization", value);
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .expect("metadata preserved"),
+            "Bearer example-test-token"
+        );
+    }
+}
+
 mod client;
 pub use client::RedDBClient;
 
