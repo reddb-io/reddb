@@ -149,6 +149,136 @@ fn overlapping_preparation_does_not_wait_under_publication() {
 }
 
 #[test]
+fn cold_concurrent_checkpoints_wait_before_publication_and_retain_caches() {
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+
+    struct Message(bool);
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message"
+                && format!("{value:?}") == "native artifact snapshots started"
+            {
+                self.0 = true;
+            }
+        }
+    }
+    struct Pause {
+        reached: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl<S: Subscriber> Layer<S> for Pause {
+        fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+            if event.metadata().target() != "reddb::checkpoint" {
+                return;
+            }
+            let mut message = Message(false);
+            event.record(&mut message);
+            if message.0 {
+                self.reached.send(()).expect("preparation observer");
+                self.release
+                    .lock()
+                    .expect("pause receiver")
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .expect("release preparation");
+            }
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("temporary native store");
+    let options = paged_options(&directory.path().join("cold-concurrent.rdb"));
+    let runtime = seed_runtime(options.clone());
+    runtime.execute_query("INSERT INTO cold_rows (id,payload) VALUES (2,'alpha beta'),(3,'alpha beta'),(4,'alpha beta'),(5,'alpha beta'),(6,'alpha beta')").expect("six source rows");
+    runtime.checkpoint().expect("publish source rows");
+    drop(runtime);
+    let db = Arc::new(RedDB::open_with_options(&options).expect("cold engine"));
+    assert!(
+        db.native_artifact_versions.lock().is_empty(),
+        "cold in-memory proofs"
+    );
+    let canonical = |mut pages: Vec<NativeVectorArtifactPageSummary>| {
+        pages.sort_by(|left, right| {
+            (&left.collection, &left.artifact_kind).cmp(&(&right.collection, &right.artifact_kind))
+        });
+        pages
+    };
+    let before = canonical(descriptors(&db));
+    assert!(!before.is_empty());
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release_tx, release) = std::sync::mpsc::channel();
+    let first = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let subscriber = tracing_subscriber::registry().with(Pause {
+                reached: entered_tx,
+                release: std::sync::Mutex::new(release),
+            });
+            tracing::subscriber::with_default(subscriber, || {
+                db.flush_local_only().map_err(|error| error.to_string())
+            })
+        })
+    };
+    entered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("first preparation");
+    let (completed_tx, completed) = std::sync::mpsc::channel();
+    let second = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            completed_tx
+                .send(db.flush_local_only().map_err(|error| error.to_string()))
+                .expect("second checkpoint observer");
+        })
+    };
+    let waiting = matches!(
+        completed.recv_timeout(std::time::Duration::from_secs(5)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+    let publication_available = db.store.vault_publication_lock.try_lock().is_some();
+    let during = canonical(descriptors(&db));
+    release_tx.send(()).expect("release first checkpoint");
+    first
+        .join()
+        .expect("first checkpoint worker")
+        .expect("first checkpoint");
+    second.join().expect("second checkpoint worker");
+    if waiting {
+        completed
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("second checkpoint completion")
+            .expect("second checkpoint");
+    }
+    assert!(
+        waiting,
+        "ordinary checkpoint must wait outside publication for the admitted preparation"
+    );
+    assert!(
+        publication_available,
+        "waiting for preparation must not hold row/WAL publication"
+    );
+    assert_eq!(
+        during, before,
+        "overlap must not evict unchanged cold caches"
+    );
+    assert_eq!(
+        canonical(descriptors(&db)),
+        before,
+        "both checkpoints must retain the same physical references"
+    );
+    assert_eq!(
+        db.store
+            .get_collection("cold_rows")
+            .expect("source rows")
+            .query_all(|_| true)
+            .len(),
+        6
+    );
+    assert_artifact_matches_source(&db);
+}
+
+#[test]
 fn native_artifacts_reuse_after_clean_cold_reopen() {
     let directory = tempfile::tempdir().expect("temporary native store");
     let path = directory.path().join("cold-reuse.rdb");

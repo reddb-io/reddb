@@ -5,6 +5,16 @@ reproduction at `e5048b52e933d94c6872e8a8dc48ce3e90c09a3d`.
 No signed container or historical Auth/Platform acceptance is established
 by the local results in this report. RC375 remains rejected.
 
+The subsequent signed RC376 and its full CI are verified, but its
+[historical warm recurrence diagnostic](platform-preparation-rc376-2026-10-26.md)
+is also rejected: first checkpoint 15.724 s, despite only 57,344 additional
+allocated main-file bytes across fixture setup and five stable drained cycles.
+A new six-row cold-open overlap probe exposes cache eviction/reconstruction
+that the original local tests did not cover.
+The subsequent [admission correction](cold-preparation-admission-2026-10-26.md)
+serializes ordinary checkpoint preparation before publication, preserving the
+nonblocking fallback for callers that already own publication.
+
 ## Question and correction
 
 Can native artifact construction run before taking the row/WAL publication

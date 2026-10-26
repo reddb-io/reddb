@@ -627,11 +627,19 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Never wait for a preparation gate while holding the publication
-        // fence. An overlapping publisher retains only proven unchanged
-        // artifacts; ordinary row/WAL persistence still proceeds.
+        // Ordinary checkpoints serialize preparation before taking publication,
+        // preserving cold caches while another preparation admits their proofs.
+        // Nested publishers must never wait here while owning the row/WAL fence.
         let _preparation = if self.paged_mode {
-            self.native_artifact_preparation.try_lock()
+            if self
+                .store
+                .vault_publication_lock
+                .is_owned_by_current_thread()
+            {
+                self.native_artifact_preparation.try_lock()
+            } else {
+                Some(self.native_artifact_preparation.lock())
+            }
         } else {
             None
         };
