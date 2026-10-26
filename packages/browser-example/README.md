@@ -3,14 +3,16 @@
 [Open the deployed example](https://reddb-io.github.io/reddb/browser/).
 
 This is a real Svelte 5/TypeScript/Vite application using the **published**
-`@reddb-io/browser@0.1.0` package, including its Worker and WASM.
+`@reddb-io/browser@0.2.0` package, including its Worker and WASM.
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
 
 The interface demonstrates scalar SELECTs, explicit unsupported stored-data queries,
 exclusive artifact ownership and an opaque binary test marker persisted in OPFS.
 The marker exercises `.rdb` artifact publication; it is not a collection record,
-SQL command or application transaction. Full stored-data execution remains pending.
+SQL command or application transaction. For local table CRUD and transactions,
+use `openDatabase` as shown in the [JS/TS guide](https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md).
+This page exercises the artifact and scalar APIs.
 
 ## Run locally
 

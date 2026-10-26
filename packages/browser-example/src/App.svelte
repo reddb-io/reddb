@@ -241,7 +241,7 @@
               </Stack>
             </Stack>
             <CodeField id="sql" label="Consulta RQL" bind:value={sql} grammar={sqlGrammar} gutter rows={6} class="browser-code-field [&>label]:sr-only" />
-            <Text role="caption" class="browser-editor-note">SELECTs escalares no Worker. Coleções salvas e transações ainda estão em desenvolvimento.</Text>
+            <Text role="caption" class="browser-editor-note">Este exemplo executa SELECTs escalares. Para tabelas e transações, use openDatabase no Guia JS/TS.</Text>
           </form>
           <Alert id="error" tone="danger" hidden={!error}>{error}</Alert>
           <section class="min-h-0 min-w-0 flex-1" aria-label="Resultado da consulta" id="query-result">
