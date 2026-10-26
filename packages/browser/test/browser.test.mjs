@@ -142,6 +142,10 @@ async function sharedConformance(browserPage) {
     'value_functions_text_and_missing', 'value_functions_clock_money_and_geo',
     'value_functions_json_and_binary_documents', 'value_functions_json_mutation',
     'value_functions_depth_and_wide_indices', 'value_functions_host_routing',
+    'window_ranks_partition_order_and_ties', 'window_lag_lead_values_and_defaults',
+    'window_aggregate_frames_and_peers', 'window_wide_offsets_and_bounds',
+    'window_errors_and_publication_order', 'window_materialization_admission',
+    'window_cross_row_secret_policy', 'window_projection_depth_and_subtraction',
   ])
 }
 

@@ -1047,3 +1047,34 @@ Cost sketch: value dispatch is constant-size selection plus existing argument,
 text/JSON and geometry work; JSON_SET growth is O(new slots) under one bounded
 padding budget and recursion is capped at 128. No new scan, persistence write,
 network request or IPC is added. No measured speedup is claimed.
+
+## Shared window phase
+
+`reddb-engine::query::runtime::window_phase` owns the active native algorithm for
+ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD and SUM/COUNT/AVG/MIN/MAX OVER. The native
+adapter delegates to it and keeps materialization admission, typed expression
+execution with secret-aware inputs, the existing db-less legacy fallback, error
+conversion and secret output policy. The shared phase retains canonical keys,
+stable partition ordering, native Value variants, supported frame diagnostics,
+per-column publication and cross-row secret sensitivity. Its position in the
+native table plan is unchanged, including existing LIMIT/OFFSET placement.
+
+LAG/LEAD offsets remain nonnegative u64 until checked index arithmetic; a target
+outside the partition uses the default on native and wasm32. ROWS PRECEDING
+saturates offsets beyond usize instead of truncating on wasm32. Lowered constant
+subtraction is checked. Projection argument recursion is capped at the canonical
+128-level limit before sensitivity/lowering; embedded Expr/Filter trees and
+window specs retain their parser/AST admission limits. No new query parser,
+JavaScript evaluator or storage format is introduced.
+
+Eight native/WASM case groups cover partitions/ties, retained rich values,
+aggregate peers/frames, wide offsets, errors/publication, admission and cross-row
+secret policy. The recovered table-plan fixture exercises ROW_NUMBER, LAG and
+SUM OVER after WAL recovery, update, checkpoint and an offline OPFS restart.
+Public browser storedQueries and transactions remain false until production
+catalog/admission/SQL dispatch and complete durable transaction wiring land.
+
+Cost sketch: for N rows and K key dimensions, each window keeps O(N*K) key memory
+plus O(N) indices/results and O(N log N) sorting; existing aggregate frame walks
+can cost O(N^2). The extraction adds no network request, disk write or IPC and
+makes no measured speedup claim.
