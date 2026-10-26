@@ -2445,9 +2445,9 @@ mod aggregate_numeric_route_parity_tests {
 
     #[test]
     fn shared_group_bindings_preserve_aliases_and_output_columns() {
-        let runtime = runtime_with_table("BIGINT");
+        let runtime = runtime_with_table("INTEGER");
         for (bucket, value) in [("red", -10), ("red", 10), ("blue", 20)] {
-            insert(&runtime, bucket, Value::BigInt(value));
+            insert(&runtime, bucket, Value::Integer(value));
         }
         let grouped = runtime.execute_query("SELECT bucket AS tenant, SUM(value) AS amount FROM samples GROUP BY TENANT HAVING COUNT(*) > 0 ORDER BY tenant ASC").expect("case-insensitive SELECT alias grouping");
         assert_eq!(grouped.result.columns, ["tenant", "amount"]);
