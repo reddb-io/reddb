@@ -55,19 +55,20 @@ impl TablePlanHost for TableHost<'_> {
     fn project_records(
         &self,
         node: &CanonicalLogicalNode,
-        records: Vec<UnifiedRecord>,
+        mut records: Vec<UnifiedRecord>,
     ) -> Result<Vec<UnifiedRecord>, String> {
         assert_eq!(
             node.operator, "projection",
             "fixture admits plain table plans only"
         );
         let columns = reddb_rql::sql_lowering::effective_table_projections(self.query);
-        assert!(
-            !columns
-                .iter()
-                .any(|column| matches!(column, Projection::Window { .. })),
-            "fixture does not admit window effects"
-        );
+        reddb_engine::query::runtime::window_phase::apply_with_host(
+            &self.projections,
+            &mut records,
+            &columns,
+            Some("orders"),
+            Some("o"),
+        )?;
         records
             .iter()
             .map(|record| project(&self.projections, record, &columns))
@@ -83,7 +84,7 @@ pub(super) fn verify_recovered(
     contract: &CollectionContract,
     updated: bool,
 ) {
-    let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled FROM orders AS o WHERE total >= 10 ORDER BY CASE WHEN JSON_EXTRACT_TEXT(payload, '$.score') IS NOT NULL THEN -CAST(quantity AS BIGINT) ELSE 0 END ASC LIMIT 2 OFFSET 1");
+    let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled, ROW_NUMBER() OVER (ORDER BY quantity DESC) AS position, LAG(total, 1, -1) OVER (ORDER BY quantity DESC) AS previous, SUM(total) OVER () AS selected_sum FROM orders AS o WHERE total >= 10 ORDER BY CASE WHEN JSON_EXTRACT_TEXT(payload, '$.score') IS NOT NULL THEN -CAST(quantity AS BIGINT) ELSE 0 END ASC LIMIT 2 OFFSET 1");
     let host = TableHost {
         records,
         query: &query,
@@ -99,10 +100,22 @@ pub(super) fn verify_recovered(
         [(2, 15, 6), (9_007_199_254_740_992, 10, 4)]
     };
     assert_eq!(projected.len(), expected.len());
-    for (record, (id, amount, doubled)) in projected.iter().zip(expected) {
+    for (index, (record, (id, amount, doubled))) in projected.iter().zip(expected).enumerate() {
         assert_eq!(record.get("identity"), Some(&Value::UnsignedInteger(id)));
         assert_eq!(record.get("amount"), Some(&Value::Integer(amount)));
         assert_eq!(record.get("doubled"), Some(&Value::Integer(doubled)));
+        assert_eq!(
+            record.get("position"),
+            Some(&Value::Integer(index as i64 + 1))
+        );
+        assert_eq!(
+            record.get("previous"),
+            Some(&Value::Integer(if index == 0 { -1 } else { expected[0].1 }))
+        );
+        assert_eq!(
+            record.get("selected_sum"),
+            Some(&Value::Integer(if updated { 35 } else { 25 }))
+        );
     }
 }
 

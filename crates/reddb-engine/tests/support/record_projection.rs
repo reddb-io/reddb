@@ -1728,3 +1728,20 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
     }
     geographic_projection::verify_recovered(&host, &selected, updated);
 }
+
+impl reddb_engine::query::runtime::window_phase::WindowHost for Host<'_> {
+    type Error = String;
+    fn guard_materialization(&self, rows: usize) -> Result<(), String> {
+        assert!(rows <= 4, "recovered fixture row bound");
+        Ok(())
+    }
+    fn evaluate_expression(&self, expression: &Expr, source: &UnifiedRecord) -> Option<Value> {
+        ProjectionHost::evaluate_expression(self, expression, source).ok()
+    }
+    fn secret_query_output(&self, value: Value) -> Result<Value, String> {
+        ProjectionHost::secret_query_output(self, value)
+    }
+    fn query_error(&self, message: String) -> String {
+        message
+    }
+}

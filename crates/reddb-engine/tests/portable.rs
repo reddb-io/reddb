@@ -320,3 +320,14 @@ fn portable_value_function_conformance() {
         run();
     }
 }
+
+#[path = "support/window_phase.rs"]
+mod window_phase;
+
+#[test]
+fn portable_window_phase_conformance() {
+    for (name, run) in window_phase::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
