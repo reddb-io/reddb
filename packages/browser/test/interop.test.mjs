@@ -108,7 +108,7 @@ for (const name of browsers) {
         const outcome = await page.evaluate(() => window.probeOutcome)
         assert.equal(outcome.error, undefined, outcome.error)
         assert.deepEqual(outcome.result, {
-          language, abi: 1, storedQueries: false, answer: 42, exact: '9007199254740993',
+          language, abi: 1, storedQueries: true, answer: 42, exact: '9007199254740993',
           unsupported: 'QUERY_UNSUPPORTED', closed: 'CLOSED',
         })
         return page

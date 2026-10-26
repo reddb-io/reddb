@@ -225,6 +225,12 @@ impl<F: VfsFile> EmbeddedResidentStore<F> {
         }
         Ok(())
     }
+
+    /// Internal read-only orchestration over the recovered committed image.
+    pub(crate) fn committed_resident(&self) -> Result<&ResidentStore, StoreError> {
+        self.check_healthy()?;
+        Ok(&self.resident)
+    }
 }
 
 fn file_error(error: reddb_file::RdbFileError) -> StoreError {

@@ -1,4 +1,4 @@
-/** Persistence and scalar execution; stored-data queries and sync remain pending. */
+/** Persistence, scalar execution and read-only SELECT over local table artifacts. */
 export class BrowserError extends Error {
   readonly code: string
   constructor(code: string, message: string)
@@ -11,6 +11,7 @@ export interface RuntimeInfo {
     readonly queryValidation: boolean
     readonly scalarQueries: boolean
     readonly storedQueries: boolean
+    readonly storedQueryMode: 'read-only-tables'
     readonly transactions: boolean
     readonly sync: boolean
   }
@@ -61,3 +62,16 @@ export function openArtifact(options: {
   /** Fresh module Worker supplied by a bundler (e.g. Vite ?worker). The artifact owns its lifetime. */
   worker?: Worker
 }): Promise<Artifact>
+
+export interface Database extends Runtime {
+  /** Read-only table SELECT; unsupported clauses fail with QUERY_UNSUPPORTED. */
+  query(sql: string): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** Release exclusive ownership of the local file and terminate its worker. */
+  close(): Promise<void>
+}
+
+/** Recover an existing OPFS .rdb; does not create files or expose SQL mutations. */
+export function openDatabase(options: {
+  name: string
+  worker?: Worker
+}): Promise<Database>

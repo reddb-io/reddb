@@ -7,10 +7,46 @@ CDN or network service. Rust is needed to develop the engine, not to use the pac
 
 The canonical `0.1.0` distribution exposes artifact
 persistence/recovery, RQL validation and storage-free scalar SELECT execution.
-Queries over stored collections, application transactions, observation and
-optional synchronization are still being integrated. `append` and `checkpoint`
+The source API on `main` additionally exposes `openDatabase({ name })` and
+`database.query(sql)` for read-only SELECT over existing local table artifacts.
+This addition is not yet in the published `0.1.0` package. SQL writes, application
+transactions, other collection models, observation and optional synchronization
+are still being integrated. `append` and `checkpoint`
 accept native binary WAL/snapshot payloads; they do not execute SQL or provide a
 save-game/CRUD API.
+
+## Read a persisted local table (source build)
+
+```ts
+import { openDatabase } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const database = await openDatabase({ name: 'my-app', worker: new RedDBWorker() })
+try {
+  console.log(await database.query(
+    'SELECT rid, name, total FROM people WHERE total >= 10 ORDER BY total DESC LIMIT 20'
+  ))
+} finally { await database.close() }
+```
+
+The file must already exist in the application's OPFS namespace, with canonical
+snapshot/WAL bytes and persisted table contracts. The application can import its
+native `.rdb` under the same Web Lock before opening it. Opening and querying do
+not mutate the artifact. Missing files return `DATABASE_NOT_FOUND`; a missing or
+invalid catalog is an error, never inferred from rows. The handle owns its Worker
+and excludes both database and raw-artifact owners of the same name.
+
+This is a local file-owner read API. Server authorization and tenant/RLS filtering
+must be applied before exporting an authorized subset for offline use. It does
+not create a server identity or enforce server policies inside an untrusted origin.
+
+The first read surface supports one named table, aliases, scalar projections,
+JSON paths, WHERE, ORDER BY source fields/expressions and literal LIMIT/OFFSET.
+It rejects writes, parameters, DISTINCT, aggregates/windows, joins/subqueries,
+other models and TTL/retention. The [source API reference](https://github.com/reddb-io/reddb/tree/main/packages/browser#read-local-tables-from-jsts)
+lists admitted functions, the materialization cap and exact-value/secret behavior.
+Cache the application, SDK, Worker and WASM together to reopen and query after a
+complete offline browser restart.
 
 ## Storage-independent runtime and other languages
 
@@ -19,7 +55,10 @@ For validation and scalar SELECTs without opening an OPFS file, use
 `validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
 Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
 `info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
-queries, transactions and sync currently report false.
+queries report true in source builds with `storedQueryMode: 'read-only-tables'`;
+transactions and sync remain false. The published `0.1.0` runtime reports stored
+queries false. Capabilities describe the engine; storage-independent handles
+still expose only validation and scalar execution.
 
 The JSON-safe `createInteropRuntime` bridge is also used by source adapters for
 [Dart/Flutter Web](https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md)
@@ -126,7 +165,7 @@ and eviction policies apply. Applications can request persistent storage with
 
 | Package | Execution and storage |
 | --- | --- |
-| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; artifact/scalar surface |
+| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; source builds also expose read-only table SELECT |
 | `@reddb-io/client` | Remote RedDB connection, including its browser transport |
 | `@reddb-io/sdk` | Node.js/TS SDK with native embedded/runtime support |
 

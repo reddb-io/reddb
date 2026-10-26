@@ -1,6 +1,6 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators, B-tree/pager, live MVCC and snapshot decoding shared; storage-backed runtime and sync pending
+Status: accepted architecture; shared native/WASM storage and query core; public read-only table SELECT in source builds; SQL writes, application transactions and sync pending
 Date: 2026-10-22
 
 ## Decision
@@ -1242,3 +1242,57 @@ O(K*P), retaining O(K) bindings plus resolved expression trees; result insertion
 remains O(G*K). Structural admission and execution each prepare metadata once.
 There is no added network request, disk write or IPC, and no measured speedup
 is claimed.
+
+## Public read-only table SELECT
+
+Source JS/TS builds expose `openDatabase({ name, worker? })` and `query(sql)` over
+an existing OPFS artifact. `BrowserDatabase` delegates to
+`reddb-engine::query::local_read::LocalReadDatabase`, which owns the canonical
+`EmbeddedResidentStore` recovery controller and decodes its authoritative
+collection-contract blob once. Snapshot and committed WAL replay, entity scan
+visibility, record materialization, unary table planning/execution, projection,
+ordering and scalar evaluation retain their existing Rust authorities. There
+is no JavaScript evaluator, alternate snapshot or WAL codec. Native server
+hosts retain their current transaction, tenancy/RLS and secret policies.
+
+A canonical-expression callback in shared projection defaults to the original
+native lowering/fallback behavior. The local host supplies its admitted original
+SELECT expressions by projection index. This avoids reconstructing arithmetic
+as legacy MUL/ADD function calls while preserving checked evaluator failures.
+No native host opts into different evaluation behavior as part of this change.
+
+The first public stored-query surface is read-only, local file-owner access to
+one table: scalar projections, aliases/JSON paths, WHERE, source-expression
+ORDER BY, and literal LIMIT/OFFSET. Admission checks query shape and every
+expression before scanning, including empty tables. Unsupported statements,
+functions, parameters, grouping/windows/joins, DISTINCT, system/universal
+sources, other models and TTL/retention fail explicitly. Missing or corrupt
+catalogs are never inferred. Visible source materialization is bounded at
+100,000 rows independently of SQL LIMIT. Native committed scans hide superseded
+and moderated rows. Secret expressions are rejected; wildcard secret output
+retains canonical redaction. This API is not a server principal/tenant session:
+applications must export authorized subsets before offline file-owner access.
+
+Database and raw artifact handles share the exact same Web Lock and exclusive
+OPFS sync-handle lifetime. A missing database is not created; read-only open,
+SELECT and failed writes never append, checkpoint or alter file bytes. Mutation
+and transaction APIs are absent. Engine metadata reports storedQueries true
+with storedQueryMode read-only-tables; transactions and sync remain false.
+Storage-independent and foreign-language bridges retain their scalar-only
+operation lists. The published 0.1.0 package predates this source API; publishing
+another browser version is a separate release step.
+
+Native tests cover snapshot/WAL update/delete recovery, moderation/history,
+nullable and JSON fields, exact integers, data errors at each query phase,
+wide pages, unsupported empty-table queries and authoritative catalog errors.
+Real browser and installed TypeScript/Vite consumers import a native artifact
+and query it through production bindings after a full offline browser restart,
+with the HTTP listener stopped. Read-only bytes and exclusion of raw/SQL owners
+are checked through the public SDK; no test-only executor supplies the results.
+
+Cost sketch: open reconstructs O(snapshot + committed WAL) bytes once; each query
+walks physical source rows until exhaustion or its 100,001st visible candidate, retains
+O(N * row size + projection/order keys) memory and uses existing O(N log N) sort.
+Recovered resident state remains in the owning worker between queries. There
+is one worker request/response per query and no query-time file write, flush,
+network call or measured performance claim.

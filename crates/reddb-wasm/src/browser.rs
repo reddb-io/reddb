@@ -15,7 +15,8 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
         "capabilities": reddb_engine::json!({
             "queryValidation": true,
             "scalarQueries": true,
-            "storedQueries": false,
+            "storedQueries": true,
+            "storedQueryMode": "read-only-tables",
             "transactions": false,
             "sync": false,
         })
@@ -167,6 +168,38 @@ impl VfsFile for BrowserFile {
 #[wasm_bindgen]
 pub struct BrowserArtifact {
     file: EmbeddedRdbFile<BrowserFile>,
+}
+
+/// Read-only local SELECT over the same canonical snapshot/WAL recovery path.
+/// The worker retains the exclusive OPFS handle until this wrapper is freed.
+#[wasm_bindgen]
+pub struct BrowserDatabase {
+    database: reddb_engine::query::local_read::LocalReadDatabase<BrowserFile>,
+}
+
+fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> JsValue {
+    let result = Error::new(&error.to_string());
+    match js_sys::Reflect::set(&result, &"code".into(), &error.code().into()) {
+        Ok(_) => result.into(),
+        Err(error) => error,
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserDatabase {
+    pub fn open(handle: SyncFile, name: &str) -> Result<BrowserDatabase, JsValue> {
+        let database = reddb_engine::query::local_read::LocalReadDatabase::open(
+            BrowserFile::new(handle),
+            name,
+        )
+        .map_err(local_query_error)?;
+        Ok(Self { database })
+    }
+
+    pub fn query(&self, sql: &str) -> Result<JsValue, JsValue> {
+        let result = self.database.query(sql).map_err(local_query_error)?;
+        js_sys::JSON::parse(&result.to_json().to_string_compact())
+    }
 }
 
 #[wasm_bindgen]

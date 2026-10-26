@@ -11,6 +11,7 @@ import { build } from 'vite'
 import { chromium, firefox } from 'playwright'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const root = resolve(packageRoot, '../..')
 let temporary
 let server
 let origin
@@ -39,14 +40,14 @@ before(async () => {
   await writeFile(resolve(temporary, 'index.html'), '<!doctype html><meta charset="utf-8"><title>RedDB package consumer</title><script type="module" src="/main.ts"></script>')
   await writeFile(resolve(temporary, 'worker.d.ts'), "declare module '*?worker' { const Constructor: { new(): Worker }; export default Constructor }")
   await writeFile(resolve(temporary, 'main.ts'), `
-import { createRuntime, createInteropRuntime, openArtifact } from '@reddb-io/browser'
+import { createRuntime, createInteropRuntime, openArtifact, openDatabase } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 declare global { interface Window { result: Promise<unknown> } }
 window.result = (async () => {
   const runtime = await createRuntime({ worker: new RedDBWorker() })
   try {
     const info = await runtime.info()
-    if (info.abiVersion !== 1 || info.capabilities.storedQueries) throw new Error('Incorrect runtime capabilities')
+    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-only-tables') throw new Error('Incorrect runtime capabilities')
     const result = await runtime.executeScalar('SELECT 6 * 7 AS answer')
     if (result.rows[0][0] !== 42) throw new Error('Incorrect scalar result')
   } finally { await runtime.close() }
@@ -56,18 +57,33 @@ window.result = (async () => {
     if (result.ok || result.error.code !== 'QUERY_UNSUPPORTED') throw new Error('Incorrect interop error')
   } finally { bridge.close() }
   const artifact = await openArtifact({ name: 'packed-consumer', worker: new RedDBWorker() })
+  let before, scalar
   try {
-    const before = (await artifact.readWal()).map((bytes) => [...bytes])
-    const scalar = await artifact.executeScalar('SELECT 6 * 7 AS answer')
+    before = (await artifact.readWal()).map((bytes) => [...bytes])
+    scalar = await artifact.executeScalar('SELECT 6 * 7 AS answer')
     await artifact.append([new Uint8Array([before.length + 1])])
-    return { before, scalar }
   } finally { await artifact.close() }
+  const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser')
+  try { await directory.getFileHandle('packed-query.rdb') }
+  catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'NotFoundError') throw error
+    const writer = await (await directory.getFileHandle('packed-query.rdb', { create: true })).createWritable()
+    await writer.write(await (await fetch('/native.rdb')).arrayBuffer())
+    await writer.close()
+  }
+  const database = await openDatabase({ name: 'packed-query', worker: new RedDBWorker() })
+  try {
+    const stored = await database.query('SELECT rid, name, total FROM people WHERE total >= 10 ORDER BY total DESC')
+    return { before, scalar, stored }
+  } finally { await database.close() }
 })()
 `)
   const tsc = resolve(packageRoot, 'node_modules/typescript/bin/tsc')
   execFileSync(process.execPath, [tsc, '--noEmit', '--strict', '--module', 'ESNext', '--moduleResolution', 'Bundler', '--target', 'ES2022', '--lib', 'ES2022,DOM', resolve(temporary, 'worker.d.ts'), resolve(temporary, 'main.ts')], { cwd: temporary, stdio: 'pipe' })
   distribution = resolve(temporary, 'dist')
   await build({ configFile: false, root: temporary, logLevel: 'warn', build: { outDir: distribution } })
+  const toolchain = (await readFile(resolve(root, 'rust-toolchain.toml'), 'utf8')).match(/channel\s*=\s*"([^"]+)"/)[1]
+  execFileSync('cargo', ['+' + toolchain, 'run', '--quiet', '--locked', '-p', 'reddb-io-engine', '--example', 'browser_stored_query', '--', resolve(distribution, 'native.rdb')], { cwd: root, stdio: 'inherit' })
   const assets = ['/', ...await files(distribution)].map((path) => path.startsWith('/') ? path : `/${path}`)
   assert.ok(assets.some((path) => path.endsWith('.wasm')), 'bundler must emit the WASM asset')
   await writeFile(resolve(distribution, 'offline.js'), `
@@ -104,7 +120,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     try {
       let page = await context.newPage()
       await page.goto(origin)
-      assert.deepEqual(await page.evaluate(() => window.result), { before: [], scalar: { columns: ['answer'], rows: [[42]] } })
+      assert.deepEqual(await page.evaluate(() => window.result), { before: [], scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] } })
       await page.evaluate(() => navigator.serviceWorker.register('/offline.js'))
       await page.waitForFunction(() => navigator.serviceWorker.controller)
       await context.close()
@@ -115,7 +131,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
         context = await browser.launchPersistentContext(profile, { headless: true, offline: true })
         page = await context.newPage()
         await page.goto(origin)
-        assert.deepEqual(await page.evaluate(() => window.result), { before: [[1]], scalar: { columns: ['answer'], rows: [[42]] } })
+        assert.deepEqual(await page.evaluate(() => window.result), { before: [[1]], scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] } })
         assert.equal(requests, before, 'offline consumer must not reach the HTTP host')
       } finally {
         server.listen(port, '127.0.0.1')

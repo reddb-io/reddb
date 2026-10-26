@@ -12,9 +12,10 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-**It is not a database SDK yet.** It executes storage-free scalar SELECTs;
-queries over stored data, five-model local transactions, synchronization,
-conflict resolution and forwarding between tabs remain pending. It is published on the `latest` npm channel and does not replace the remote `@reddb-io/client`.
+The source SDK now also exposes read-only SELECT over existing local table artifacts.
+SQL writes, five-model local transactions, synchronization, conflict resolution
+and forwarding between tabs remain pending. The published `0.1.0` package predates
+`openDatabase`; this API is available from the source build until the next browser release. It is published on the `latest` npm channel and does not replace the remote `@reddb-io/client`.
 
 ## Use from JS/TS
 
@@ -40,6 +41,50 @@ try {
 Consumers receive built JS/Worker/WASM assets and TypeScript declarations; they
 need no Rust toolchain. The commands below are for engine/package contributors.
 
+## Read local tables from JS/TS
+
+The source API opens an **existing**, application-owned OPFS `.rdb` with its
+persisted collection contracts, snapshot and committed WAL:
+
+```ts
+import { openDatabase } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const database = await openDatabase({ name: 'my-app', worker: new RedDBWorker() })
+try {
+  const result = await database.query(
+    'SELECT rid, name, total FROM people WHERE total >= 10 ORDER BY total DESC LIMIT 20'
+  )
+  console.log(result.columns, result.rows)
+} finally { await database.close() }
+```
+
+This handle is read-only. It uses the same exclusive Web Lock/OPFS handle as
+`openArtifact`; a second owner receives `FILE_BUSY`. It does not create a missing
+file (`DATABASE_NOT_FOUND`), infer a missing catalog, append SQL to the WAL or
+checkpoint on close. `openArtifact` retains its separate low-level binary API.
+
+Supported: one named table, aliases, `*`, literals, columns and JSON paths,
+arithmetic/casts/CASE, nullable predicates, source-expression ORDER BY with native
+NULL ordering, and literal LIMIT/OFFSET. Admitted scalar calls are UPPER, LOWER,
+LENGTH/CHAR_LENGTH/CHARACTER_LENGTH/OCTET_LENGTH, TRIM/LTRIM/RTRIM, CONCAT,
+COALESCE, ABS, JSON_PARSE, JSON_EXTRACT/JSON_EXTRACT_TEXT and CONTAINS. Unknown
+fields/functions are rejected even on empty tables. Functions and operators use
+the canonical Rust evaluators; exact values retain `reddb-json-v1` tags.
+
+Writes, parameters, DISTINCT, grouping/aggregates, windows, joins/subqueries,
+universal/system sources, other collection models, TTL and retention are rejected
+explicitly. Materialization is capped at 100,000 visible source rows, independently
+of LIMIT. Superseded and moderated rows use the shared committed-scan visibility;
+secret values in `SELECT *` keep the canonical redacted JSON representation.
+
+The embedding application owns this local file and its origin. This API does not
+establish a server user/tenant session or replay server RLS policies: export only
+the authorized subset into an application-owned file. Import a native `.rdb` into
+`navigator.storage.getDirectory()/reddb-browser/<name>.rdb` under the same
+`reddb-browser:<name>` Web Lock before opening it. Keep native binary bytes intact;
+no format translation is needed. SQL creation/writes through JS/TS are a later step.
+
 ## Shared runtime and language interop
 
 `createRuntime({ worker? })` opens no file and requires neither OPFS nor Web
@@ -57,8 +102,9 @@ try {
 
 The versioned Worker/WASM contract reports `abiVersion: 1`,
 `valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
-and `scalarQueries` are true; `storedQueries`, `transactions` and `sync` are
-false. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
+and `scalarQueries` are true. Source builds also report `storedQueries: true`
+with `storedQueryMode: 'read-only-tables'`; `transactions` and `sync` remain false.
+Capabilities describe the engine, not the operations exposed by a particular handle. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
 opening storage. Cache the JS, Worker and WASM as one versioned unit.
 
 `createInteropRuntime({ worker? })` returns a synchronous bridge object with
