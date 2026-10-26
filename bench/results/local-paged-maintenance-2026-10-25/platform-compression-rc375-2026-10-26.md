@@ -37,7 +37,8 @@ the source-proof blob against the frozen post-shutdown file.
 | --- | ---: |
 | Logical native artifact payload, 113 artifacts | 419,621,183 |
 | Stored artifact payload, 14 compressed and 99 raw | 82,162,689 |
-| Physical artifact pages | 83,722,240 |
+| Chain capacity, 5,110 pages of 16 KiB | 83,722,240 |
+| Allocated bytes attributed to artifact pages by FIEMAP | 83,697,664 |
 | Net main-file allocated growth | 22,175,744 |
 
 The descriptor lengths/checksums continue to describe logical bytes. Page
@@ -100,7 +101,13 @@ the subsequent login failure stopped the planned five write cycles.
 The rejected frozen database remains preserved. Temporary warm-copy attempts
 stopped at filesystem capacity/allocation guards before starting another
 engine. They are not RedDB growth observations. A separate synthetic copy
-probe investigates append allocation, presizing and a seeded final extent.
+probe on the same XFS filesystem reproduced append allocation exceeding a
+1.5 GiB ceiling before completing a file with 256 MiB of planned nonzero
+content. Presizing a 4 GiB logical file first held its peak allocated footprint
+to 269,516,800 bytes, including allocation bookkeeping, with the expected
+SHA-256. Seeding a final extent was unnecessary. The corrected copier now
+presizes before sparse writes; no engine change or relaxed growth gate is
+inferred from that diagnostic fix.
 
 An extracted 166,866-row synthetic construction probe retained identical
 75,131,328-byte frames: baseline build/total 4.023/4.902 s, borrowed-key B-tree
