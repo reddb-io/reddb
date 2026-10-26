@@ -2,6 +2,11 @@
 
 #[cfg(target_arch = "wasm32")]
 #[allow(dead_code)]
+#[path = "../../reddb-engine/tests/support/aggregation.rs"]
+mod aggregation;
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 #[path = "../../reddb-engine/tests/support/record_projection.rs"]
 mod record_projection;
 

@@ -24,4 +24,5 @@ pub fn is_universal_entity_source(table: &str) -> bool {
         || table.eq_ignore_ascii_case("mixed")
         || table == "*"
 }
+pub mod aggregation;
 pub mod window_phase;

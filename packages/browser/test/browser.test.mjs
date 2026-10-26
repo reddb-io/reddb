@@ -146,6 +146,10 @@ async function sharedConformance(browserPage) {
     'window_aggregate_frames_and_peers', 'window_wide_offsets_and_bounds',
     'window_errors_and_publication_order', 'window_materialization_admission',
     'window_cross_row_secret_policy', 'window_projection_depth_and_subtraction',
+    'aggregate_shared_numeric_slots', 'aggregate_counts_nulls_and_empty',
+    'aggregate_ordered_values_and_distinct', 'aggregate_parameters_and_aliases',
+    'aggregate_merge_batches', 'aggregate_numeric_coercion',
+    'aggregate_typed_group_keys', 'aggregate_depth_and_host_policy',
   ])
 }
 

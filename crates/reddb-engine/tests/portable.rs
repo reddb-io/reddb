@@ -331,3 +331,13 @@ fn portable_window_phase_conformance() {
         run();
     }
 }
+
+#[path = "support/aggregation.rs"]
+mod aggregation;
+#[test]
+fn portable_aggregation_conformance() {
+    for (name, run) in aggregation::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
