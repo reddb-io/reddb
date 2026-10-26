@@ -108,7 +108,11 @@ artifact descriptors. It names an in-file blob of versioned `RASP` source
 proofs, owned by `reddb-file`. Each proof binds a BLAKE3 digest of the raw
 collection source to its exact artifact descriptors and summaries. Cold
 admission checks that digest, the descriptor set and every payload checksum
-before seeding volatile manager/revision proofs. Replay, omitted or normalized
+before seeding volatile manager/revision proofs. Writable paged opens perform
+this admission after recovery and before runtime boot observations or audited
+requests can mutate the source. Later changes still require the mutation journal;
+opening plus first publication must be measured together because cold admission
+continues to scan source and artifact bytes. Replay, omitted or normalized
 transaction rows, replaced source content, corrupt payloads and unsupported
 proof versions retain full derivation. Legacy files lack the reference and
 derive their first proof; older writers drop it and cannot reclaim an unknown

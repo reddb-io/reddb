@@ -422,6 +422,24 @@ impl RedDB {
         // Pending deliveries retain their persisted lock deadlines on recovery
         // (ADR 0020). The lifecycle lazily reclaims expired locks on delivery;
         // deleting every pending row here would redeliver still-owned work.
+        // Admit the unchanged recovered source before runtime boot/auditing can
+        // mutate it. A later checkpoint can then use the bounded mutation
+        // journal rather than losing the cold proof and rebuilding every term.
+        // Recovery has already replayed WAL; mismatching sources/payloads stay
+        // unproved and retain the ordinary conservative derivation path.
+        if self.paged_mode && !self.options.read_only {
+            let started = std::time::Instant::now();
+            if let Ok(existing) = self.current_native_artifact_pages() {
+                let recovered = self.recovered_native_artifact_versions(&existing);
+                tracing::debug!(
+                    target: "reddb::checkpoint",
+                    duration_ms = started.elapsed().as_millis(),
+                    sources = recovered.len(),
+                    "recovered native artifact sources admitted before runtime boot"
+                );
+                *self.native_artifact_versions.lock() = recovered;
+            }
+        }
         Ok(self)
     }
 
