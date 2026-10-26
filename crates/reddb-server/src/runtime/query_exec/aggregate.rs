@@ -11,6 +11,10 @@
 //! `execute_runtime_table_query` when any projection is an aggregate
 //! function.
 
+use reddb_engine::query::planning::aggregation::{
+    prepare_aggregate_runtime_plan, render_expr_signature, render_projection_signature,
+    validate_aggregate_planning_depth, visible_aggregate_output_name,
+};
 use reddb_engine::query::runtime::aggregation::{
     aggregate_argument_key, aggregate_output_name, build_aggregate_group_key, sum_f64_to_value,
     AggregateGroupKey, AggregateHost, CompiledAggPlan, GroupKeyPart, ProjSlot, SlottedAggState,
@@ -28,9 +32,7 @@ use crate::runtime::join_filter::{
 use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::RedDB;
-use reddb_rql::ast::{
-    BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
-};
+use reddb_rql::ast::{Expr, FieldRef, Filter, Projection};
 use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
@@ -119,14 +121,13 @@ mod query_temp_dir_tests {
     }
 }
 
-/// Return `true` when any projection in the query is a known aggregate
-/// function. Used by the executor to decide whether to dispatch to
-/// [`execute_aggregate_query`].
 /// Execute a query with aggregate functions (COUNT, AVG, SUM, MIN, MAX, GROUP BY).
 pub(crate) fn execute_aggregate_query(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
+    validate_aggregate_planning_depth(query)
+        .map_err(|message| RedDBError::Query(message.into()))?;
     validate_aggregate_projection_shape(query)?;
     let mut sensitivity_source = UnifiedRecord::new();
     let contract = db.collection_contract(&query.table);
@@ -232,30 +233,9 @@ pub(crate) fn execute_aggregate_query(
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
     let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
-    let runtime_plan = prepare_aggregate_runtime_plan(query);
-    let mut all_aggregate_projections = effective_projections
-        .iter()
-        .filter(|projection| {
-            matches!(
-                projection,
-                Projection::Function(name, _)
-                    if is_aggregate_function(base_function_name(name))
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    all_aggregate_projections.extend(runtime_plan.hidden_aggregates.iter().cloned());
-    let mut seen_aggregate_signatures = std::collections::HashSet::new();
-    all_aggregate_projections.retain(|projection| {
-        let Projection::Function(name, args) = projection else {
-            return false;
-        };
-        let func_name = base_function_name(name).to_uppercase();
-        if !is_aggregate_function(&func_name) {
-            return false;
-        }
-        seen_aggregate_signatures.insert(aggregate_projection_signature(&func_name, args))
-    });
+    let runtime_plan = prepare_aggregate_runtime_plan(query)
+        .map_err(|message| RedDBError::Query(message.into()))?;
+    let all_aggregate_projections = &runtime_plan.aggregate_projections;
 
     let manager = db
         .store()
@@ -369,7 +349,7 @@ pub(crate) fn execute_aggregate_query(
     // ── Compile the aggregation plan ─────────────────────────────────────────
     // Assigns a slot index to every projection in `all_aggregate_projections`
     // so the hot loop can use O(1) array writes instead of HashMap lookups.
-    let agg_plan = CompiledAggPlan::compile(&all_aggregate_projections)
+    let agg_plan = CompiledAggPlan::compile(all_aggregate_projections)
         .ok_or_else(|| RedDBError::Query("aggregate projection exceeds nesting limit".into()))?;
 
     // Work-mem cap: 64 MB mirrors PostgreSQL's work_mem GUC default.
@@ -774,510 +754,6 @@ pub(crate) fn execute_aggregate_query(
     })
 }
 
-#[derive(Default)]
-struct AggregateRuntimePlan {
-    hidden_aggregates: Vec<Projection>,
-    having: Option<Filter>,
-    order_by: Vec<OrderByClause>,
-}
-
-#[derive(Default)]
-struct HiddenAggregateRegistry {
-    projections: Vec<Projection>,
-    outputs_by_signature: std::collections::HashMap<String, String>,
-}
-
-impl HiddenAggregateRegistry {
-    fn ensure_output_name(&mut self, func_name: &str, args: &[Expr]) -> Option<String> {
-        let signature = aggregate_expr_signature(func_name, args)?;
-        if let Some(output_name) = self.outputs_by_signature.get(&signature) {
-            return Some(output_name.clone());
-        }
-
-        let projection_args = args
-            .iter()
-            .map(projection_from_expr)
-            .collect::<Option<Vec<_>>>()?;
-        let col_name = aggregate_argument_key(&projection_args)?;
-        let projection = Projection::Function(func_name.to_string(), projection_args);
-        let output_name = aggregate_output_name(&projection, func_name, &col_name);
-
-        self.outputs_by_signature
-            .insert(signature, output_name.clone());
-        self.projections.push(projection);
-        Some(output_name)
-    }
-}
-
-fn prepare_aggregate_runtime_plan(query: &TableQuery) -> AggregateRuntimePlan {
-    let effective_projections = effective_table_projections(query);
-    let visible_outputs = effective_projections
-        .iter()
-        .filter_map(visible_aggregate_output_name)
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut hidden = HiddenAggregateRegistry::default();
-
-    let having = effective_table_having_filter(query)
-        .as_ref()
-        .map(|filter| rewrite_aggregate_filter_refs(filter, &visible_outputs, &mut hidden));
-    let order_by = query
-        .order_by
-        .iter()
-        .map(|clause| rewrite_aggregate_order_by_refs(clause, &visible_outputs, &mut hidden))
-        .collect();
-
-    AggregateRuntimePlan {
-        hidden_aggregates: hidden.projections,
-        having,
-        order_by,
-    }
-}
-
-fn visible_aggregate_output_name(projection: &Projection) -> Option<(String, String)> {
-    let Projection::Function(name, args) = projection else {
-        return None;
-    };
-    let func_name = base_function_name(name).to_uppercase();
-    if !is_aggregate_function(&func_name) {
-        return None;
-    }
-
-    let signature = aggregate_projection_signature(&func_name, args);
-    let col_name = aggregate_argument_key(args)?;
-    Some((
-        signature,
-        aggregate_output_name(projection, &func_name, &col_name),
-    ))
-}
-
-fn rewrite_aggregate_order_by_refs(
-    clause: &OrderByClause,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> OrderByClause {
-    OrderByClause {
-        field: clause.field.clone(),
-        expr: clause
-            .expr
-            .as_ref()
-            .map(|expr| rewrite_aggregate_expr_refs(expr, visible_outputs, hidden)),
-        ascending: clause.ascending,
-        nulls_first: clause.nulls_first,
-    }
-}
-
-fn rewrite_aggregate_filter_refs(
-    filter: &Filter,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> Filter {
-    match filter {
-        Filter::CompareExpr { lhs, op, rhs } => Filter::CompareExpr {
-            lhs: rewrite_aggregate_expr_refs(lhs, visible_outputs, hidden),
-            op: *op,
-            rhs: rewrite_aggregate_expr_refs(rhs, visible_outputs, hidden),
-        },
-        Filter::And(left, right) => Filter::And(
-            Box::new(rewrite_aggregate_filter_refs(left, visible_outputs, hidden)),
-            Box::new(rewrite_aggregate_filter_refs(
-                right,
-                visible_outputs,
-                hidden,
-            )),
-        ),
-        Filter::Or(left, right) => Filter::Or(
-            Box::new(rewrite_aggregate_filter_refs(left, visible_outputs, hidden)),
-            Box::new(rewrite_aggregate_filter_refs(
-                right,
-                visible_outputs,
-                hidden,
-            )),
-        ),
-        Filter::Not(inner) => Filter::Not(Box::new(rewrite_aggregate_filter_refs(
-            inner,
-            visible_outputs,
-            hidden,
-        ))),
-        other => other.clone(),
-    }
-}
-
-fn rewrite_aggregate_expr_refs(
-    expr: &Expr,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> Expr {
-    match expr {
-        Expr::FunctionCall { name, args, span } => {
-            let func_name = name.to_uppercase();
-            if is_aggregate_function(&func_name) {
-                if let Some(signature) = aggregate_expr_signature(&func_name, args) {
-                    if let Some(output_name) = visible_outputs.get(&signature) {
-                        return aggregate_output_expr(output_name.clone(), *span);
-                    }
-                }
-                if let Some(output_name) = hidden.ensure_output_name(&func_name, args) {
-                    return aggregate_output_expr(output_name, *span);
-                }
-            }
-
-            Expr::FunctionCall {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|arg| rewrite_aggregate_expr_refs(arg, visible_outputs, hidden))
-                    .collect(),
-                span: *span,
-            }
-        }
-        Expr::BinaryOp { op, lhs, rhs, span } => Expr::BinaryOp {
-            op: *op,
-            lhs: Box::new(rewrite_aggregate_expr_refs(lhs, visible_outputs, hidden)),
-            rhs: Box::new(rewrite_aggregate_expr_refs(rhs, visible_outputs, hidden)),
-            span: *span,
-        },
-        Expr::UnaryOp { op, operand, span } => Expr::UnaryOp {
-            op: *op,
-            operand: Box::new(rewrite_aggregate_expr_refs(
-                operand,
-                visible_outputs,
-                hidden,
-            )),
-            span: *span,
-        },
-        Expr::Cast {
-            inner,
-            target,
-            span,
-        } => Expr::Cast {
-            inner: Box::new(rewrite_aggregate_expr_refs(inner, visible_outputs, hidden)),
-            target: *target,
-            span: *span,
-        },
-        Expr::Case {
-            branches,
-            else_,
-            span,
-        } => Expr::Case {
-            branches: branches
-                .iter()
-                .map(|(cond, value)| {
-                    (
-                        rewrite_aggregate_expr_refs(cond, visible_outputs, hidden),
-                        rewrite_aggregate_expr_refs(value, visible_outputs, hidden),
-                    )
-                })
-                .collect(),
-            else_: else_
-                .as_ref()
-                .map(|expr| Box::new(rewrite_aggregate_expr_refs(expr, visible_outputs, hidden))),
-            span: *span,
-        },
-        Expr::IsNull {
-            operand,
-            negated,
-            span,
-        } => Expr::IsNull {
-            operand: Box::new(rewrite_aggregate_expr_refs(
-                operand,
-                visible_outputs,
-                hidden,
-            )),
-            negated: *negated,
-            span: *span,
-        },
-        Expr::InList {
-            target,
-            values,
-            negated,
-            span,
-        } => Expr::InList {
-            target: Box::new(rewrite_aggregate_expr_refs(target, visible_outputs, hidden)),
-            values: values
-                .iter()
-                .map(|value| rewrite_aggregate_expr_refs(value, visible_outputs, hidden))
-                .collect(),
-            negated: *negated,
-            span: *span,
-        },
-        Expr::Between {
-            target,
-            low,
-            high,
-            negated,
-            span,
-        } => Expr::Between {
-            target: Box::new(rewrite_aggregate_expr_refs(target, visible_outputs, hidden)),
-            low: Box::new(rewrite_aggregate_expr_refs(low, visible_outputs, hidden)),
-            high: Box::new(rewrite_aggregate_expr_refs(high, visible_outputs, hidden)),
-            negated: *negated,
-            span: *span,
-        },
-        other => other.clone(),
-    }
-}
-
-fn aggregate_output_expr(output_name: String, span: Span) -> Expr {
-    Expr::Column {
-        field: FieldRef::TableColumn {
-            table: String::new(),
-            column: output_name,
-        },
-        span,
-    }
-}
-
-fn aggregate_projection_signature(func_name: &str, args: &[Projection]) -> String {
-    let rendered = args
-        .iter()
-        .map(render_projection_signature)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{func_name}({rendered})")
-}
-
-fn aggregate_expr_signature(func_name: &str, args: &[Expr]) -> Option<String> {
-    let rendered = args
-        .iter()
-        .map(render_expr_signature)
-        .collect::<Option<Vec<_>>>()?
-        .join(",");
-    Some(format!("{func_name}({rendered})"))
-}
-
-fn render_projection_signature(projection: &Projection) -> String {
-    match projection {
-        Projection::All => "*".to_string(),
-        Projection::Column(column) => column
-            .strip_prefix("LIT:")
-            .map(str::to_string)
-            .unwrap_or_else(|| column.clone()),
-        Projection::Alias(_, alias) => alias.clone(),
-        Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
-        Projection::Function(name, args) => format!(
-            "{}({})",
-            base_function_name(name),
-            args.iter()
-                .map(render_projection_signature)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Projection::Expression(filter, alias) => alias
-            .clone()
-            .unwrap_or_else(|| render_filter_signature(filter)),
-        Projection::Window {
-            name, args, alias, ..
-        } => alias.clone().unwrap_or_else(|| {
-            format!(
-                "{}({}) OVER (...)",
-                name,
-                args.iter()
-                    .map(render_projection_signature)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        }),
-    }
-}
-
-fn render_filter_signature(filter: &Filter) -> String {
-    match filter {
-        Filter::Compare { field, op, value } => format!(
-            "({}{}{})",
-            field_ref_name(field),
-            op,
-            render_value_signature(value)
-        ),
-        Filter::CompareFields { left, op, right } => {
-            format!("({}{}{})", field_ref_name(left), op, field_ref_name(right))
-        }
-        Filter::CompareExpr { lhs, op, rhs } => format!(
-            "({}{}{})",
-            render_expr_signature(lhs).unwrap_or_else(|| "expr".to_string()),
-            op,
-            render_expr_signature(rhs).unwrap_or_else(|| "expr".to_string())
-        ),
-        Filter::And(left, right) => format!(
-            "({}AND{})",
-            render_filter_signature(left),
-            render_filter_signature(right)
-        ),
-        Filter::Or(left, right) => format!(
-            "({}OR{})",
-            render_filter_signature(left),
-            render_filter_signature(right)
-        ),
-        Filter::Not(inner) => format!("(NOT{})", render_filter_signature(inner)),
-        Filter::IsNull(field) => format!("({}ISNULL)", field_ref_name(field)),
-        Filter::IsNotNull(field) => format!("({}ISNOTNULL)", field_ref_name(field)),
-        Filter::In { field, values } => format!(
-            "{}IN({})",
-            field_ref_name(field),
-            values
-                .iter()
-                .map(render_value_signature)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Filter::Between { field, low, high } => format!(
-            "{}BETWEEN({},{})",
-            field_ref_name(field),
-            render_value_signature(low),
-            render_value_signature(high)
-        ),
-        Filter::Like { field, pattern } => format!("{}LIKE({pattern})", field_ref_name(field)),
-        Filter::StartsWith { field, prefix } => {
-            format!("{}STARTSWITH({prefix})", field_ref_name(field))
-        }
-        Filter::EndsWith { field, suffix } => {
-            format!("{}ENDSWITH({suffix})", field_ref_name(field))
-        }
-        Filter::Contains { field, substring } => {
-            format!("{}CONTAINS({substring})", field_ref_name(field))
-        }
-    }
-}
-
-fn render_expr_signature(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Literal { value, .. } => Some(render_value_signature(value)),
-        Expr::Column { field, .. } => Some(field_ref_name(field)),
-        Expr::Parameter { index, .. } => Some(format!("${index}")),
-        Expr::BinaryOp { op, lhs, rhs, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
-                Some(format!(
-                    "{}({},{})",
-                    render_binop_signature_name(*op),
-                    render_expr_signature(lhs)?,
-                    render_expr_signature(rhs)?
-                ))
-            }
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(format!(
-                "({}{}{})",
-                render_expr_signature(lhs)?,
-                render_binop_compare_symbol(*op),
-                render_expr_signature(rhs)?
-            )),
-            BinOp::And => Some(format!(
-                "({}AND{})",
-                render_expr_signature(lhs)?,
-                render_expr_signature(rhs)?
-            )),
-            BinOp::Or => Some(format!(
-                "({}OR{})",
-                render_expr_signature(lhs)?,
-                render_expr_signature(rhs)?
-            )),
-        },
-        Expr::UnaryOp { op, operand, .. } => match op {
-            UnaryOp::Neg => Some(format!("NEG({})", render_expr_signature(operand)?)),
-            UnaryOp::Not => Some(format!("NOT({})", render_expr_signature(operand)?)),
-        },
-        Expr::Cast { inner, target, .. } => Some(format!(
-            "CAST({},TYPE:{target})",
-            render_expr_signature(inner)?
-        )),
-        Expr::FunctionCall { name, args, .. } => Some(format!(
-            "{}({})",
-            name.to_uppercase(),
-            args.iter()
-                .map(render_expr_signature)
-                .collect::<Option<Vec<_>>>()?
-                .join(",")
-        )),
-        Expr::Case {
-            branches, else_, ..
-        } => {
-            let mut parts = Vec::with_capacity(branches.len() * 2 + usize::from(else_.is_some()));
-            for (cond, value) in branches {
-                parts.push(render_expr_signature(cond)?);
-                parts.push(render_expr_signature(value)?);
-            }
-            if let Some(else_expr) = else_ {
-                parts.push(render_expr_signature(else_expr)?);
-            }
-            Some(format!("CASE({})", parts.join(",")))
-        }
-        Expr::IsNull {
-            operand, negated, ..
-        } => Some(format!(
-            "{}({})",
-            if *negated { "IS_NOT_NULL" } else { "IS_NULL" },
-            render_expr_signature(operand)?
-        )),
-        Expr::InList {
-            target,
-            values,
-            negated,
-            ..
-        } => Some(format!(
-            "{}({},{})",
-            if *negated { "NOT_IN" } else { "IN" },
-            render_expr_signature(target)?,
-            values
-                .iter()
-                .map(render_expr_signature)
-                .collect::<Option<Vec<_>>>()?
-                .join(",")
-        )),
-        Expr::Between {
-            target,
-            low,
-            high,
-            negated,
-            ..
-        } => Some(format!(
-            "{}({},{},{})",
-            if *negated { "NOT_BETWEEN" } else { "BETWEEN" },
-            render_expr_signature(target)?,
-            render_expr_signature(low)?,
-            render_expr_signature(high)?
-        )),
-        Expr::Subquery { .. } => None,
-        Expr::WindowFunctionCall { .. } => None,
-    }
-}
-
-fn render_binop_signature_name(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "ADD",
-        BinOp::Sub => "SUB",
-        BinOp::Mul => "MUL",
-        BinOp::Div => "DIV",
-        BinOp::Mod => "MOD",
-        BinOp::Concat => "CONCAT",
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "CMP",
-        BinOp::And => "AND",
-        BinOp::Or => "OR",
-    }
-}
-
-fn render_binop_compare_symbol(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Eq => "=",
-        BinOp::Ne => "<>",
-        BinOp::Lt => "<",
-        BinOp::Le => "<=",
-        BinOp::Gt => ">",
-        BinOp::Ge => ">=",
-        _ => "?",
-    }
-}
-
-fn render_value_signature(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::UnsignedInteger(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::BigInt(value) => value.to_string(),
-        Value::Decimal(value) => value.to_string(),
-        Value::Text(value) => value.to_string(),
-        other => other.display_string(),
-    }
-}
-
 fn projection_from_expr(expr: &Expr) -> Option<Projection> {
     lower_expr_to_projection(expr)
 }
@@ -1541,7 +1017,7 @@ fn projection_group_key(projection: &Projection) -> Option<String> {
         Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
             render_time_bucket_group_expr(args)
         }
-        Projection::Function(_, _) => Some(render_projection_signature(projection)),
+        Projection::Function(_, _) => render_projection_signature(projection),
         _ => None,
     }
 }
@@ -3218,6 +2694,80 @@ mod aggregate_numeric_route_parity_tests {
             Value::Float(value) => *value,
             other => panic!("expected numeric aggregate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hidden_aggregate_parameters_and_visible_aliases_do_not_collide() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, values) in [("red", [10, 10, 20, 90]), ("blue", [10, 10, 50, 60])] {
+            for value in values {
+                insert(&runtime, bucket, Value::BigInt(value));
+            }
+        }
+        let percentiles = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples GROUP BY bucket HAVING PERCENTILE(value, 0.25) = 10 ORDER BY PERCENTILE(value, 0.75) DESC, bucket ASC LIMIT 1 OFFSET 1").expect("independent hidden percentile outputs");
+        assert_eq!(percentiles.result.columns, vec!["bucket", "n"]);
+        assert_eq!(percentiles.result.records.len(), 1);
+        assert_eq!(
+            percentiles.result.records[0].get("bucket"),
+            Some(&Value::text("red"))
+        );
+        assert_eq!(
+            number(
+                percentiles.result.records[0]
+                    .get("n")
+                    .expect("visible count")
+            ),
+            4.0
+        );
+        let alias = runtime.execute_query(r#"SELECT bucket, COUNT(*) AS "sum(value)" FROM samples GROUP BY bucket HAVING SUM(value) >= 15 ORDER BY SUM(value) DESC, bucket ASC LIMIT 1 OFFSET 1"#).expect("hidden sum must not overwrite visible count alias");
+        assert_eq!(alias.result.columns, vec!["bucket", "sum(value)"]);
+        assert_eq!(alias.result.records.len(), 1);
+        assert_eq!(
+            alias.result.records[0].get("bucket"),
+            Some(&Value::text("red"))
+        );
+        assert_eq!(
+            number(
+                alias.result.records[0]
+                    .get("sum(value)")
+                    .expect("visible count alias")
+            ),
+            4.0
+        );
+    }
+
+    #[test]
+    fn shared_planning_reuses_aliases_and_hidden_aggregates() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, value) in [("red", 10), ("red", 20), ("blue", 5), ("blue", 10)] {
+            insert(&runtime, bucket, Value::BigInt(value));
+        }
+        let visible = runtime.execute_query("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING SUM(value) >= 10 ORDER BY SUM(value) DESC, bucket ASC").expect("visible aggregate alias references");
+        assert_eq!(visible.result.columns, vec!["bucket", "amount"]);
+        assert_eq!(visible.result.records.len(), 2);
+        for (record, (bucket, amount)) in visible
+            .result
+            .records
+            .iter()
+            .zip([("red", 30.0), ("blue", 15.0)])
+        {
+            assert_eq!(record.get("bucket"), Some(&Value::text(bucket)));
+            assert_eq!(
+                number(record.get("amount").expect("aggregate alias")),
+                amount
+            );
+        }
+        let hidden = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples GROUP BY bucket HAVING SUM(value) >= 10 ORDER BY SUM(value) DESC, bucket ASC LIMIT 1 OFFSET 1").expect("hidden HAVING/ORDER BY aggregate references");
+        assert_eq!(hidden.result.columns, vec!["bucket", "n"]);
+        assert_eq!(hidden.result.records.len(), 1);
+        assert_eq!(
+            hidden.result.records[0].get("bucket"),
+            Some(&Value::text("blue"))
+        );
+        assert_eq!(
+            number(hidden.result.records[0].get("n").expect("count")),
+            2.0
+        );
     }
 
     #[test]
