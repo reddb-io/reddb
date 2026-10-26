@@ -8,28 +8,29 @@
   import CodeField from '@reddb-io/design-system/data/CodeField'
   import Table from '@reddb-io/design-system/data/Table'
   import { sqlGrammar } from './sql-grammar'
-  import { BrowserError, openArtifact, type Artifact } from '@reddb-io/browser'
+  import { BrowserError, openDatabase, type Database } from '@reddb-io/browser'
   import RedDBWorker from '@reddb-io/browser/worker?worker'
   import { version as browserVersion } from '@reddb-io/browser/package.json'
 
   let darkScheme = $state(true)
-  let sql = $state('SELECT\n  6 * 7 AS resposta')
+  const databaseName = 'reddb-browser-sql-playground-v1'
+  const createNotes = 'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)'
+  const selectNotes = 'SELECT id, body FROM notes ORDER BY id'
+  let sql = $state(selectNotes)
   let result = $state('Aguardando o engine…')
-  let scalar = $state<{ columns: string[]; rows: unknown[][] }>()
+  let queryResult = $state<{ columns: string[]; rows: unknown[][] }>()
   let resultView = $state('table')
-  const columns = $derived(scalar?.columns.map((header, index) => ({
+  const columns = $derived(queryResult?.columns.map((header, index) => ({
     key: String(index), header,
     format: (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value) ?? String(value),
   })) ?? [])
-  const rows = $derived(scalar?.rows.map(row => Object.fromEntries(row.map((value, index) => [String(index), value]))) ?? [])
+  const rows = $derived(queryResult?.rows.map(row => Object.fromEntries(row.map((value, index) => [String(index), value]))) ?? [])
   let error = $state('')
-  let artifact: Artifact | undefined = $state()
+  let database: Database | undefined = $state()
   let busy = $state(true)
   let engineState = $state('Abrindo o arquivo local…')
   let engineTone = $state<'info' | 'success' | 'danger'>('info')
-  let recordCount = $state('…')
-  let generation = $state('…')
-  let storageStatus = $state('Os bytes ficam no OPFS deste navegador e desta origem.')
+  let storageStatus = $state('O banco fica no OPFS deste navegador e desta origem.')
   let networkState = $state('')
   let offlineState = $state('Preparando o cache da aplicação…')
   let offlineReady = $state(false)
@@ -51,63 +52,64 @@
     } finally { busy = false }
   }
 
-  async function refreshFile() {
-    if (!artifact) return
-    const [payloads, current] = await Promise.all([artifact.readWal(), artifact.generation()])
-    recordCount = String(payloads.length)
-    generation = current
-  }
-
   async function query() {
-    if (!artifact) return
-    scalar = undefined
+    if (!database) return
+    queryResult = undefined
     result = 'Executando no Worker…'
     try {
       if (sql.length > 10000) throw new Error('A consulta deve ter no máximo 10.000 caracteres.')
-      scalar = await artifact.executeScalar(sql)
-      result = JSON.stringify(scalar, null, 2)
+      queryResult = await database.query(sql)
+      result = JSON.stringify(queryResult, null, 2)
+      storageStatus = 'Comando concluído. Dentro de BEGIN, use COMMIT para persistir as alterações.'
     }
-    catch (failure) { result = 'A consulta não foi executada.'; throw failure }
+    catch (failure) { result = 'Não foi possível confirmar a execução. Consulte o erro abaixo do editor.'; throw failure }
   }
 
   async function connect() {
-    const previous = artifact
-    artifact = undefined
+    const previous = database
+    database = undefined
     if (previous) await previous.close()
     engineState = 'Abrindo o arquivo local…'
     engineTone = 'info'
     const worker = new RedDBWorker()
     try {
-      artifact = await openArtifact({ name: 'reddb-browser-playground-v1', worker })
-      await refreshFile()
-      engineState = 'WASM ativo · arquivo OPFS aberto'
+      const opened = await openDatabase({ name: databaseName, create: true, worker })
+      try { await opened.query(createNotes) }
+      catch (failure) { await opened.close(); throw failure }
+      database = opened
+      engineState = 'WASM ativo · banco OPFS aberto'
       engineTone = 'success'
     } catch (failure) {
       worker.terminate()
-      artifact = undefined
-      engineState = 'Não foi possível abrir o arquivo'
+      database = undefined
+      engineState = 'Não foi possível abrir o banco'
       engineTone = 'danger'
       throw failure
     }
   }
 
-  async function appendMarker() {
-    // Opaque fixture bytes demonstrate artifact publication, not an engine WAL command.
-    await artifact!.append([new Uint8Array([0x52, 0x44, 0x42, 0x01])])
-    await refreshFile()
-    storageStatus = 'Marcador gravado no OPFS. Reabra o arquivo ou recarregue a página para conferir.'
+  async function transaction(command: 'BEGIN' | 'COMMIT' | 'ROLLBACK') {
+    sql = command
+    await query()
+    storageStatus = command === 'BEGIN'
+      ? 'BEGIN concluído. Use COMMIT ou ROLLBACK para encerrar a transação.'
+      : command === 'COMMIT'
+        ? 'COMMIT concluído. Alterações confirmadas no OPFS.'
+        : 'ROLLBACK concluído. Alterações pendentes descartadas.'
   }
 
   async function reopen() {
     await connect()
-    storageStatus = 'Arquivo reaberto por um novo Worker. Contador lido dos bytes persistidos.'
+    sql = selectNotes
+    await query()
+    storageStatus = 'Banco reaberto por um novo Worker. Alterações sem COMMIT foram descartadas.'
   }
 
   async function activateUpdate() {
     const worker = pendingUpdate
     if (!worker) return
-    await artifact?.close()
-    artifact = undefined
+    await database?.close()
+    database = undefined
     if (navigator.serviceWorker.controller !== worker) {
       await new Promise<void>(resolve => {
         navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true })
@@ -171,9 +173,11 @@
   }
 
   const examples = [
-    { label: 'Cálculo', sql: 'SELECT 6 * 7 AS resposta' },
-    { label: 'Texto', sql: "SELECT 'sem rede' AS modo, 42 AS resposta" },
-    { label: 'Limite atual', sql: 'SELECT * FROM saves' },
+    { label: 'Ler', sql: selectNotes },
+    { label: 'Inserir', sql: "INSERT INTO notes (id, body) VALUES (1, 'Minha nota offline')" },
+    { label: 'Alterar', sql: "UPDATE notes SET body = 'Nota atualizada offline' WHERE id = 1" },
+    { label: 'Excluir', sql: 'DELETE FROM notes WHERE id = 1' },
+    { label: 'Criar tabela', sql: createNotes },
   ]
 
   onMount(() => {
@@ -187,14 +191,12 @@
     return () => {
       window.removeEventListener('online', network)
       window.removeEventListener('offline', network)
-      void artifact?.close()
+      void database?.close()
     }
   })
 </script>
 
-{#snippet fileName()}<code class="font-mono text-caption break-all">reddb-browser-playground-v1</code>{/snippet}
-{#snippet countValue()}<span id="record-count">{recordCount}</span>{/snippet}
-{#snippet generationValue()}<span id="generation">{generation}</span>{/snippet}
+{#snippet fileName()}<code class="font-mono text-caption break-all">{databaseName}</code>{/snippet}
 
 
 <ApplicationShell fullWidth class="md:h-dvh md:overflow-hidden">
@@ -225,7 +227,7 @@
         }}>
           <Alert id="app-update" tone="info" hidden={!pendingUpdate}>
             <Stack direction="row" align="center" justify="between" gap="sm" wrap>
-              <Text>Nova versão disponível. Atualize a aplicação para carregar a revisão publicada.</Text>
+              <Text>Nova versão disponível. Execute COMMIT antes de atualizar; alterações pendentes serão descartadas.</Text>
               <Button id="update-app" disabled={busy || !pendingUpdate} onclick={() => void action(activateUpdate)}>Atualizar aplicação</Button>
             </Stack>
           </Alert>
@@ -233,15 +235,15 @@
             <Stack direction="row" align="center" justify="between" gap="sm" wrap class="browser-toolbar">
               <h2 class="text-body font-medium">Consulta RQL</h2>
               <Stack direction="row" align="center" gap="sm" wrap>
-                <Toolbar label="Exemplos de consulta" size="sm" items={examples.map(example => ({
+                <Toolbar label="Exemplos de consulta" size="sm" class="min-w-0 max-w-full flex-wrap" items={examples.map(example => ({
                   id: example.label, label: example.label, onselect: () => { sql = example.sql },
                 }))} />
                 <Kbd keys={['Ctrl', 'Enter']} size="sm" />
-                <Button id="execute" variant="primary" size="sm" type="submit" disabled={busy || !artifact || sql.length > 10000}>Executar consulta</Button>
+                <Button id="execute" variant="primary" size="sm" type="submit" disabled={busy || !database || sql.length > 10000}>Executar consulta</Button>
               </Stack>
             </Stack>
             <CodeField id="sql" label="Consulta RQL" bind:value={sql} grammar={sqlGrammar} gutter rows={6} class="browser-code-field [&>label]:sr-only" />
-            <Text role="caption" class="browser-editor-note">Este exemplo executa SELECTs escalares. Para tabelas e transações, use openDatabase no Guia JS/TS.</Text>
+            <Text role="caption" class="browser-editor-note">SQL local no WASM. Os exemplos preenchem o editor; execute um comando por vez. A tabela notes começa vazia.</Text>
           </form>
           <Alert id="error" tone="danger" hidden={!error}>{error}</Alert>
           <section class="min-h-0 min-w-0 flex-1" aria-label="Resultado da consulta" id="query-result">
@@ -252,12 +254,12 @@
               {#snippet children({ value })}
                 <div class="browser-result-summary" role="status">
                   {#if busy}<LoadingIndicator label="Executando no Worker" size="sm" />
-                  {:else if scalar}<StatusIndicator tone="success" label={`${scalar.rows.length} linha · execução local`} />
+                  {:else if queryResult}<StatusIndicator tone="success" label={`${queryResult.rows.length} linha(s) no resultado · execução local`} />
                   {:else}<Text role="caption">{result}</Text>{/if}
                 </div>
                 {#if value === 'table'}
-                  {#if scalar}
-                    <Table caption="Resultado da consulta RQL" captionHidden columnVisibility={false} {columns} {rows} />
+                  {#if queryResult}
+                    <Table caption="Resultado da consulta RQL" captionHidden columnVisibility={false} emptyMessage="Sem linhas. Use Inserir para criar uma nota." {columns} {rows} />
                   {/if}
                 {:else}
                   <div class="browser-json"><CodeBlock code={result} language="JSON" copyLabel="Copiar resultado" copiedLabel="Copiado" copyErrorLabel="Falha ao copiar. Tente novamente." regionLabel="Resultado da consulta em JSON" /></div>
@@ -269,19 +271,21 @@
       </section>
 
       <aside aria-label="Persistência local e uso offline" class="min-h-0 min-w-0 @3xl/browser:col-start-1 @3xl/browser:row-start-1">
-        <SidebarPanel title="Arquivo local" class="h-full">
+        <SidebarPanel title="Banco local" class="h-full">
           <Stack gap="layout-sm" class="browser-file-content">
             <DescriptionList gap="sm" items={[
-              { term: 'Artefato OPFS', detail: fileName },
-              { term: 'Marcadores persistidos', detail: countValue },
-              { term: 'Geração do artefato', detail: generationValue },
+              { term: 'Banco OPFS', detail: fileName },
+              { term: 'Acesso', detail: 'Exclusivo desta aba' },
             ]} />
             <Stack gap="sm">
-              <Button id="append" size="sm" disabled={busy || !artifact} onclick={() => void action(appendMarker)}>Gravar marcador</Button>
-              <Button id="reopen" variant="ghost" size="sm" disabled={busy} onclick={() => void action(reopen)}>Reabrir arquivo</Button>
+              <Toolbar label="Transação SQL" size="sm" class="min-w-0 max-w-full flex-wrap" items={(['BEGIN', 'COMMIT', 'ROLLBACK'] as const).map(command => ({
+                id: command, label: command, disabled: busy || !database, onselect: () => void action(() => transaction(command)),
+              }))} />
+              <Button id="reopen" variant="ghost" size="sm" disabled={busy} onclick={() => void action(reopen)}>Reabrir banco</Button>
             </Stack>
             <div id="storage-status" role="status"><Text role="caption">{storageStatus}</Text></div>
-            <Text role="caption">Marcador binário de teste; não é um registro ou transação.</Text>
+            <Text role="caption">Após um erro em BEGIN, execute ROLLBACK. Reabrir, atualizar ou fechar a página descarta alterações sem COMMIT.</Text>
+            <Text role="caption">O arquivo de marcadores do exemplo anterior é preservado.</Text>
             <Divider />
             <section aria-labelledby="offline-heading">
               <Stack gap="layout-sm">
@@ -291,9 +295,10 @@
                 <Accordion label="Instruções para teste offline" items={[{ value: 'offline', label: 'Como testar offline' }]}>
                   <Prose>
                     <ol>
-                      <li>Grave um marcador e aguarde o cache.</li>
+                      <li>Execute Inserir e confirme com COMMIT se iniciou BEGIN.</li>
+                      <li>Aguarde o cache ficar pronto.</li>
                       <li>Desligue a rede do navegador.</li>
-                      <li>Recarregue e confira o contador.</li>
+                      <li>Recarregue e use Ler para conferir suas notas.</li>
                     </ol>
                   </Prose>
                   <Text role="caption">Limpar os dados do site remove o arquivo e o cache. As políticas de quota do navegador se aplicam.</Text>
