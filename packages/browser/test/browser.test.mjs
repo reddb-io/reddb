@@ -322,6 +322,8 @@ for (const browser of browsers) {
         let result
         try {
           result = await database.query('SELECT p.rid AS id, UPPER(name) AS label, total * 2 AS doubled FROM people AS p WHERE nickname IS NULL ORDER BY total DESC LIMIT 4294967296')
+          const exact = await database.query('SELECT name FROM people WHERE rid IN (9007199254740993)')
+          if (JSON.stringify(exact.rows) !== JSON.stringify([['Ana']])) throw new Error('Unsigned identity IN lost its exact SQL binding')
           for (const sql of ['INSERT INTO people (name) VALUES (\'x\')', 'SELECT COUNT(*) FROM empty', 'SELECT missing FROM empty', 'SELECT total / 0 FROM people', null]) {
             try { await database.query(sql) } catch (error) { errors.push(error.code) }
           }

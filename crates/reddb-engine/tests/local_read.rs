@@ -101,6 +101,37 @@ fn nullable_json_secret_and_wide_page_semantics() {
 }
 
 #[test]
+fn unsigned_identity_predicates_preserve_adjacent_large_integers() {
+    let database = database();
+    for predicate in [
+        "rid = 9007199254740993",
+        "rid > 9007199254740992",
+        "rid IN (9007199254740993)",
+        "rid BETWEEN 9007199254740993 AND 9007199254740993",
+    ] {
+        let result = database
+            .query(&format!("SELECT name FROM people WHERE {predicate}"))
+            .expect(predicate);
+        assert_eq!(result.rows, [vec![Value::text("Ana")]], "{predicate}");
+    }
+    for predicate in [
+        "rid = 9007199254740992",
+        "rid IN (9007199254740992)",
+        "rid BETWEEN 9007199254740992 AND 9007199254740992",
+        "rid < -1",
+    ] {
+        assert!(
+            database
+                .query(&format!("SELECT name FROM people WHERE {predicate}"))
+                .expect(predicate)
+                .rows
+                .is_empty(),
+            "{predicate}"
+        );
+    }
+}
+
+#[test]
 fn admission_rejects_unsupported_shapes_even_on_empty_tables() {
     let database = database();
     for sql in [

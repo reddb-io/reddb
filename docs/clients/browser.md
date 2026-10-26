@@ -7,7 +7,7 @@ CDN or network service. Rust is needed to develop the engine, not to use the pac
 
 The canonical `0.1.0` distribution exposes artifact
 persistence/recovery, RQL validation and storage-free scalar SELECT execution.
-The source API on `main` additionally exposes `openDatabase({ name })` and
+The source build additionally exposes `openDatabase({ name })` and
 `database.query(sql)` for read-only SELECT over existing local table artifacts.
 This addition is not yet in the published `0.1.0` package. SQL writes, application
 transactions, other collection models, observation and optional synchronization

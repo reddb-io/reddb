@@ -73,7 +73,7 @@ window.result = (async () => {
   }
   const database = await openDatabase({ name: 'packed-query', worker: new RedDBWorker() })
   try {
-    const stored = await database.query('SELECT rid, name, total FROM people WHERE total >= 10 ORDER BY total DESC')
+    const stored = await database.query('SELECT rid, name, total FROM people WHERE rid IN (2, 9007199254740993) ORDER BY total DESC')
     return { before, scalar, stored }
   } finally { await database.close() }
 })()
