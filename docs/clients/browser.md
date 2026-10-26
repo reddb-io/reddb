@@ -5,14 +5,13 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-The published `0.1.0` distribution exposes artifact persistence/recovery,
-RQL validation and storage-free scalar SELECT. Source builds additionally expose
-`openDatabase`, local table CRUD and single-owner SQL transactions. These additions
-are not yet published to npm. Other collection models, observation and optional
+Version `0.2.0` exposes `openDatabase`, local table CRUD and single-owner SQL
+transactions, alongside artifact persistence/recovery, RQL validation and
+storage-free scalar SELECT. Other collection models, observation and optional
 synchronization remain pending. `append` and `checkpoint` retain their separate
 low-level binary API; applications use `database.query(sql)` for SQL.
 
-## Create and use a local database (source build)
+## Create and use a local database
 
 ```ts
 import { openDatabase } from '@reddb-io/browser'
@@ -72,9 +71,9 @@ For validation and scalar SELECTs without opening an OPFS file, use
 `validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
 Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
 `info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
-queries report true in source builds with `storedQueryMode: 'read-write-tables'`,
-`sqlWrites: true` and `transactions: true`; sync remains false. The published `0.1.0` runtime reports stored
-queries false. Capabilities describe the engine; storage-independent handles
+queries report true in version `0.2.0` with `storedQueryMode: 'read-write-tables'`,
+`sqlWrites: true` and `transactions: true`; sync remains false.
+Capabilities describe the engine; storage-independent handles
 still expose only validation and scalar execution.
 
 The JSON-safe `createInteropRuntime` bridge is also used by source adapters for
@@ -182,7 +181,7 @@ and eviction policies apply. Applications can request persistent storage with
 
 | Package | Execution and storage |
 | --- | --- |
-| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS; source builds also expose local table CRUD and transactions |
+| `@reddb-io/browser` | Local Rust/WASM Worker + OPFS, table CRUD and single-owner SQL transactions |
 | `@reddb-io/client` | Remote RedDB connection, including its browser transport |
 | `@reddb-io/sdk` | Node.js/TS SDK with native embedded/runtime support |
 
