@@ -1,10 +1,9 @@
 //! Canonical table query executor.
 //!
 //! Houses the path for plain `FROM table` queries: the
-//! [`RuntimeTableExecutionContext`] struct and the three dispatch
-//! functions (`execute_runtime_canonical_table_query_indexed`,
-//! `execute_runtime_canonical_table_node`,
-//! `execute_runtime_canonical_table_child`) that walk the canonical
+//! [`RuntimeTableExecutionContext`] struct and the dispatch
+//! functions (`execute_runtime_canonical_table_query_indexed` and
+//! `execute_runtime_canonical_table_node`) that walk the canonical
 //! plan and produce `UnifiedRecord`s.
 //!
 //! Split out of `query_exec.rs` to isolate the ~400 lines of table
@@ -1965,44 +1964,61 @@ pub(crate) fn execute_runtime_canonical_table_node(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     context: &RuntimeTableExecutionContext<'_>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let effective_filter = effective_table_filter(context.query);
-    let effective_projections = effective_table_projections(context.query);
-    let uses_document_projection =
-        runtime_projections_use_document_path(&effective_projections, context.query);
-    match node.operator.as_str() {
-        "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
-            // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
-            if !projections_require_runtime_projection(&effective_projections)
-                && !uses_document_projection
-            {
-                if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                    let entity = resolve_table_row_by_logical_id(
-                        db,
-                        &context.query.table,
-                        EntityId::new(entity_id),
-                    );
-                    if let Some(entity) = entity {
-                        if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
-                            return Ok(Vec::new());
-                        }
-                        return Ok(
-                            super::super::record_search::runtime_table_record_lean_in_collection(
-                                entity,
-                                &context.query.table,
-                            )
-                            .into_iter()
-                            .collect(),
-                        );
-                    }
-                    return Ok(Vec::new());
-                }
-            }
+    reddb_engine::query::runtime::table_plan::execute_table_plan_with_host(
+        &RuntimeTablePlanHost { db, context },
+        node,
+        context.query,
+    )
+}
 
-            // ── FAST PATH 2: Filtered scan with entity-level pre-filter ──
-            // Evaluates the WHERE clause directly on raw entity data, only
-            // creating UnifiedRecord for entities that match the filter.
-            // Skip for universal sources ("any") which need cross-collection scanning.
-            if effective_filter.is_some()
+struct RuntimeTablePlanHost<'a, 'b> {
+    db: &'a RedDB,
+    context: &'a RuntimeTableExecutionContext<'b>,
+}
+impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePlanHost<'_, '_> {
+    type Error = RedDBError;
+    fn scan(
+        &self,
+        _node: &crate::storage::query::planner::CanonicalLogicalNode,
+    ) -> RedDBResult<Vec<UnifiedRecord>> {
+        let db = self.db;
+        let context = self.context;
+        let effective_filter = effective_table_filter(context.query);
+        let effective_projections = effective_table_projections(context.query);
+        let uses_document_projection =
+            runtime_projections_use_document_path(&effective_projections, context.query);
+        // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
+        if !projections_require_runtime_projection(&effective_projections)
+            && !uses_document_projection
+        {
+            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
+                let entity = resolve_table_row_by_logical_id(
+                    db,
+                    &context.query.table,
+                    EntityId::new(entity_id),
+                );
+                if let Some(entity) = entity {
+                    if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
+                        return Ok(Vec::new());
+                    }
+                    return Ok(
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity,
+                            &context.query.table,
+                        )
+                        .into_iter()
+                        .collect(),
+                    );
+                }
+                return Ok(Vec::new());
+            }
+        }
+
+        // ── FAST PATH 2: Filtered scan with entity-level pre-filter ──
+        // Evaluates the WHERE clause directly on raw entity data, only
+        // creating UnifiedRecord for entities that match the filter.
+        // Skip for universal sources ("any") which need cross-collection scanning.
+        if effective_filter.is_some()
                 && !effective_filter
                     .as_ref()
                     .is_some_and(runtime_filter_contains_compare_expr)
@@ -2028,7 +2044,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 })?;
                 let table_name = context.table_name;
                 let table_alias = context.table_alias;
-                let limit = context.query.limit.unwrap_or(10000) as usize;
+                let limit = usize::try_from(context.query.limit.unwrap_or(10000)).unwrap_or(usize::MAX);
 
                 // The canonical parent still evaluates WHERE and ORDER BY
                 // before applying aliases. Keep its source fields available.
@@ -2130,202 +2146,154 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 return Ok(records);
             }
 
-            // ── DEFAULT: Full scan with LIMIT pushdown ──
-            let scan_cap = match (context.query.offset, context.query.limit) {
-                _ if !context.query.order_by.is_empty() => None,
-                (Some(off), Some(lim)) => Some(off as usize + lim as usize),
-                (None, Some(lim)) => Some(lim as usize),
-                _ => None,
-            };
-            scan_runtime_table_source_records_limited(db, context.query.table.as_str(), scan_cap)
-        }
-        "filter" | "entity_filter" => {
-            // ── FAST PATH: Direct entity_id lookup (O(1)) ──
-            if !projections_require_runtime_projection(&effective_projections)
-                && !uses_document_projection
-            {
-                if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
-                    let entity = resolve_table_row_by_logical_id(
-                        db,
-                        &context.query.table,
-                        EntityId::new(entity_id),
-                    );
-                    if let Some(entity) = entity {
-                        return Ok(
-                            super::super::record_search::runtime_table_record_lean_in_collection(
-                                entity,
-                                &context.query.table,
-                            )
-                            .into_iter()
-                            .collect(),
-                        );
-                    }
-                    return Ok(Vec::new());
-                }
-            }
-
-            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            if let Some(filter) = effective_filter.as_ref() {
-                records = filter_records_result(records, |record| {
-                    super::super::join_filter::evaluate_runtime_filter_result_with_db(
-                        Some(db),
-                        record,
-                        filter,
-                        Some(context.table_name),
-                        Some(context.table_alias),
-                    )
-                })?;
-            }
-            Ok(records)
-        }
-        "document_path_filter" => {
-            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            if let Some(filter) = effective_filter.as_ref() {
-                // The capability gate exists so non-document rows in a
-                // document collection don't survive a `body.field`
-                // predicate (#551). But a dotted *tenant* path like
-                // `meta.tenant` on a plain table targets a real JSON
-                // column the row actually carries — those rows have no
-                // "document" capability, so the bare gate would drop
-                // every one of them and the tenant policy would match
-                // nothing (#638). Let a row through when it owns the
-                // root column the document path traverses; the resolver
-                // already parses JSON-in-TEXT, and an unresolvable path
-                // is excluded by the predicate itself.
-                records = filter_records_result(records, |record| {
-                    if !(runtime_record_has_document_capability(record)
-                        || runtime_record_carries_filter_document_roots(
-                            record,
-                            filter,
-                            context.query,
-                        ))
-                    {
-                        return Ok(false);
-                    }
-                    evaluate_runtime_filter_result_with_db(
-                        Some(db),
-                        record,
-                        filter,
-                        Some(context.table_name),
-                        Some(context.table_alias),
-                    )
-                })?;
-            }
-            Ok(records)
-        }
-        "sort" | "entity_sort" | "document_sort" => {
-            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            if !context.query.order_by.is_empty() {
-                // Issue #769 — cap the materialized sort buffer.
-                crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                // #1982 — materialize computed SELECT aliases referenced by
-                // ORDER BY before sorting, so the sort finds the column instead
-                // of resolving it to None and leaving rows unordered.
-                let effective_projections = effective_table_projections(context.query);
-                let document_projection = node.operator == "document_sort"
-                    || runtime_projections_use_document_path(&effective_projections, context.query);
-                let entity_projection = node.operator == "entity_sort";
-                materialize_order_by_computed_keys(
+        // ── DEFAULT: Full scan with LIMIT pushdown ──
+        let scan_cap = reddb_engine::query::runtime::table_plan::table_scan_cap(context.query);
+        scan_runtime_table_source_records_limited(db, context.query.table.as_str(), scan_cap)
+    }
+    fn try_filter_lookup(&self) -> RedDBResult<Option<Vec<UnifiedRecord>>> {
+        let db = self.db;
+        let context = self.context;
+        let effective_filter = effective_table_filter(context.query);
+        let effective_projections = effective_table_projections(context.query);
+        let uses_document_projection =
+            runtime_projections_use_document_path(&effective_projections, context.query);
+        // ── FAST PATH: Direct entity_id lookup (O(1)) ──
+        if !projections_require_runtime_projection(&effective_projections)
+            && !uses_document_projection
+        {
+            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
+                let entity = resolve_table_row_by_logical_id(
                     db,
-                    &mut records,
-                    &context.query.order_by,
-                    &effective_projections,
-                    context.table_name,
-                    context.table_alias,
-                    document_projection,
-                    entity_projection,
+                    &context.query.table,
+                    EntityId::new(entity_id),
                 );
-                super::super::join_filter::sort_records_by_order_by_with_db(
-                    Some(db),
-                    &mut records,
-                    &context.query.order_by,
-                    Some(context.table_name),
-                    Some(context.table_alias),
-                );
-            } else if node.operator == "entity_sort" {
-                records.sort_by(compare_runtime_ranked_records);
+                if let Some(entity) = entity {
+                    return Ok(Some(
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            entity,
+                            &context.query.table,
+                        )
+                        .into_iter()
+                        .collect(),
+                    ));
+                }
+                return Ok(Some(Vec::new()));
             }
-            Ok(records)
         }
-        "offset" | "entity_offset" => {
-            let records = execute_runtime_canonical_table_child(db, node, context)?;
-            let offset = context.query.offset.unwrap_or(0) as usize;
-            Ok(records.into_iter().skip(offset).collect())
-        }
-        "limit" | "entity_limit" => {
-            let records = execute_runtime_canonical_table_child(db, node, context)?;
-            let limit = context.query.limit.map(|value| value as usize);
-            Ok(match limit {
-                Some(limit) => records.into_iter().take(limit).collect(),
-                None => records,
-            })
-        }
-        "entity_search" => execute_runtime_canonical_table_child(db, node, context),
-        "entity_topk" => {
-            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            records.sort_by(compare_runtime_ranked_records);
-            let limit = node
-                .details
-                .get("k")
-                .and_then(|value| value.parse::<usize>().ok())
-                .or_else(|| context.query.limit.map(|value| value as usize));
-            Ok(match limit {
-                Some(limit) => records.into_iter().take(limit).collect(),
-                None => records,
-            })
-        }
-        "projection" | "document_projection" | "entity_projection" => {
-            let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            let document_projection = node.operator == "document_projection";
-            let entity_projection = node.operator == "entity_projection";
-            let effective_projections = effective_table_projections(context.query);
-            // Issue #590 slice 7b — apply the window phase (ROW_NUMBER,
-            // RANK, DENSE_RANK, LAG, LEAD) between filter/sort and the
-            // final per-row projection. The window phase materialises a
-            // virtual column on each record under the projection's
-            // alias; the `Projection::Window` arm in
-            // `project_runtime_record_with_db` then reads that column
-            // back like any other field.
-            crate::runtime::window_phase::apply(
+
+        Ok(None)
+    }
+    fn filter_records(
+        &self,
+        records: Vec<UnifiedRecord>,
+        document_gate: bool,
+    ) -> RedDBResult<Vec<UnifiedRecord>> {
+        let db = self.db;
+        let context = self.context;
+        let Some(filter) = effective_table_filter(context.query) else {
+            return Ok(records);
+        };
+        filter_records_result(records, |record| {
+            // Preserve the document capability/root gate for JSON-column tenant paths.
+            if document_gate
+                && !(runtime_record_has_document_capability(record)
+                    || runtime_record_carries_filter_document_roots(record, &filter, context.query))
+            {
+                return Ok(false);
+            }
+            evaluate_runtime_filter_result_with_db(
                 Some(db),
-                &mut records,
-                &effective_projections,
+                record,
+                &filter,
                 Some(context.table_name),
                 Some(context.table_alias),
-            )?;
-            records
-                .iter()
-                .map(|record| {
-                    project_runtime_record_with_db(
-                        Some(db),
-                        record,
-                        &effective_projections,
-                        Some(context.table_name),
-                        Some(context.table_alias),
-                        document_projection,
-                        entity_projection,
-                    )
-                })
-                .collect()
-        }
-        other => Err(RedDBError::Query(format!(
-            "unsupported canonical table operator {other}"
-        ))),
+            )
+        })
     }
-}
-
-pub(crate) fn execute_runtime_canonical_table_child(
-    db: &RedDB,
-    node: &crate::storage::query::planner::CanonicalLogicalNode,
-    context: &RuntimeTableExecutionContext<'_>,
-) -> RedDBResult<Vec<UnifiedRecord>> {
-    let child = node.children.first().ok_or_else(|| {
-        RedDBError::Query(format!(
-            "canonical table operator {} is missing its child plan",
-            node.operator
-        ))
-    })?;
-    execute_runtime_canonical_table_node(db, child, context)
+    fn sort_records(
+        &self,
+        node: &crate::storage::query::planner::CanonicalLogicalNode,
+        records: &mut Vec<UnifiedRecord>,
+    ) -> RedDBResult<()> {
+        let db = self.db;
+        let context = self.context;
+        if !context.query.order_by.is_empty() {
+            // Issue #769 — cap the materialized sort buffer.
+            crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
+            // #1982 — materialize computed SELECT aliases referenced by
+            // ORDER BY before sorting, so the sort finds the column instead
+            // of resolving it to None and leaving rows unordered.
+            let effective_projections = effective_table_projections(context.query);
+            let document_projection = node.operator == "document_sort"
+                || runtime_projections_use_document_path(&effective_projections, context.query);
+            let entity_projection = node.operator == "entity_sort";
+            materialize_order_by_computed_keys(
+                db,
+                records,
+                &context.query.order_by,
+                &effective_projections,
+                context.table_name,
+                context.table_alias,
+                document_projection,
+                entity_projection,
+            );
+            super::super::join_filter::sort_records_by_order_by_with_db(
+                Some(db),
+                records,
+                &context.query.order_by,
+                Some(context.table_name),
+                Some(context.table_alias),
+            );
+        } else if node.operator == "entity_sort" {
+            records.sort_by(compare_runtime_ranked_records);
+        }
+        Ok(())
+    }
+    fn rank_records(&self, records: &mut Vec<UnifiedRecord>) {
+        records.sort_by(compare_runtime_ranked_records);
+    }
+    fn project_records(
+        &self,
+        node: &crate::storage::query::planner::CanonicalLogicalNode,
+        mut records: Vec<UnifiedRecord>,
+    ) -> RedDBResult<Vec<UnifiedRecord>> {
+        let db = self.db;
+        let context = self.context;
+        let document_projection = node.operator == "document_projection";
+        let entity_projection = node.operator == "entity_projection";
+        let effective_projections = effective_table_projections(context.query);
+        // Issue #590 slice 7b — apply the window phase (ROW_NUMBER,
+        // RANK, DENSE_RANK, LAG, LEAD) between filter/sort and the
+        // final per-row projection. The window phase materialises a
+        // virtual column on each record under the projection's
+        // alias; the `Projection::Window` arm in
+        // `project_runtime_record_with_db` then reads that column
+        // back like any other field.
+        crate::runtime::window_phase::apply(
+            Some(db),
+            &mut records,
+            &effective_projections,
+            Some(context.table_name),
+            Some(context.table_alias),
+        )?;
+        records
+            .iter()
+            .map(|record| {
+                project_runtime_record_with_db(
+                    Some(db),
+                    record,
+                    &effective_projections,
+                    Some(context.table_name),
+                    Some(context.table_alias),
+                    document_projection,
+                    entity_projection,
+                )
+            })
+            .collect()
+    }
+    fn query_error(&self, message: String) -> RedDBError {
+        RedDBError::Query(message)
+    }
 }
 
 /// Does `record` carry the root column of every document path the
@@ -2819,6 +2787,28 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn canonical_table_plan_keeps_ordering_projection_and_wide_bounds() {
+        let runtime = rt();
+        exec(&runtime, "CREATE TABLE plan_values (id INT)");
+        exec(
+            &runtime,
+            "INSERT INTO plan_values (id) VALUES (1), (2), (3), (4)",
+        );
+        let result = runtime.execute_query(
+            "SELECT id * 2 AS doubled FROM plan_values WHERE id >= 2 ORDER BY id DESC LIMIT 1 OFFSET 1",
+        ).expect("canonical read plan");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("doubled"),
+            Some(&Value::Integer(6))
+        );
+        let result = runtime.execute_query(
+            "SELECT id * 2 AS doubled FROM plan_values LIMIT 9223372036854775807 OFFSET 9223372036854775807",
+        ).expect("wide SQL scan bounds must not wrap or panic");
+        assert!(result.result.records.is_empty());
     }
 
     #[test]

@@ -119,6 +119,21 @@ fn query(suffix: &str) -> TableQuery {
     super::record_filters::table_query(&format!("SELECT * FROM orders AS o {suffix}"))
 }
 
+pub fn sort_records(
+    records: &mut Vec<UnifiedRecord>,
+    query: &TableQuery,
+    contract: Option<&CollectionContract>,
+) {
+    let host = Host::new(query, contract);
+    sort_records_by_order_by_with_host(
+        &host,
+        records,
+        &query.order_by,
+        Some(&query.table),
+        query.alias.as_deref(),
+    );
+}
+
 /// Test-only composition over supplied/admitted rows, not a public SQL dispatcher.
 pub fn ordered_records(
     records: &[UnifiedRecord],

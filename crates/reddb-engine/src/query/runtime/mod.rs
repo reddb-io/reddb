@@ -7,6 +7,7 @@ pub mod ordering;
 pub mod projection;
 pub mod projection_value;
 pub mod scalar_functions;
+pub mod table_plan;
 pub mod temporal;
 pub mod text;
 pub mod values;

@@ -899,3 +899,39 @@ Cost sketch: each distance/bearing call keeps constant-size numeric work;
 Vincenty retains at most 100 iterations, JSON point recognition parses its
 existing B-byte input and polygon operations remain O(V) in vertices. The move
 adds no storage scan/write, network call or IPC; no speedup or size gain is claimed.
+
+
+## Shared canonical table-plan traversal
+
+`reddb-engine::query::logical_plan` owns the existing CanonicalLogicalNode and
+CanonicalLogicalPlan data types; the native planner retains re-export shims and
+its existing construction/cost/access-path logic. The shared table-plan runtime
+walks the same scan/filter/document-filter/sort/offset/limit/search/top-K/projection
+operator names used by the native canonical executor. The native executor now
+delegates to that walk rather than maintaining another operator dispatcher.
+
+The host retains physical scans and entity-ID shortcuts, MVCC/replica visibility,
+tenancy/RLS and document-root admission, resource guards, computed ordering keys,
+ranking, window evaluation and output policy. Filter lookup still precedes child
+execution and may bypass a missing child; document filters never take that shortcut.
+Callbacks preserve their native ordering, first-child behavior, errors and effects.
+Unsupported/missing-child diagnostics keep their native text and query-error kind.
+
+Visited plan depth is bounded by the canonical RQL nesting cap (root at zero).
+OFFSET/LIMIT and explicit top-K bounds saturate on wasm32 rather than truncating
+or falling back to a smaller query limit. Native scan-cap pushdown uses the same
+shared saturated offset-plus-limit helper, preventing an overflowing sum while
+retaining the rule that ORDER BY scans cannot push down a finite row cap.
+
+Native/WASM cases cover callback order, operator aliases, fast lookup, empty
+results, error propagation, wide bounds/top-K and depth boundaries. The offline
+OPFS fixture additionally runs a fixed canonical plan through shared filtering,
+ordering and projection over recovered rows after WAL recovery, update and
+checkpoint with full browser restarts and the HTTP listener stopped. The fixture
+host and fixed plan are test-only; there is no new browser planner or complete
+public stored-query dispatcher here. Stored-query/transaction flags remain false.
+
+Cost sketch: D visited operators retain O(D) dispatch plus existing host scan,
+filter, sort, projection/window work and record buffers. The visited stack is
+bounded at depth 128; no new scan, file write, network request or IPC is added.
+The extraction makes no measured performance claim.

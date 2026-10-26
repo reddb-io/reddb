@@ -8,6 +8,8 @@ pub mod filter_compiled;
 pub mod sort;
 pub(crate) use reddb_types::value_compare;
 pub mod labels;
+#[doc(hidden)]
+pub mod logical_plan;
 pub mod records;
 #[doc(hidden)]
 pub mod runtime;
