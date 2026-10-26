@@ -7,12 +7,24 @@ This is a real Svelte 5/TypeScript/Vite application using the **published**
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
 
-The interface demonstrates scalar SELECTs, explicit unsupported stored-data queries,
-exclusive artifact ownership and an opaque binary test marker persisted in OPFS.
-The marker exercises `.rdb` artifact publication; it is not a collection record,
-SQL command or application transaction. For local table CRUD and transactions,
-use `openDatabase` as shown in the [JS/TS guide](https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md).
-This page exercises the artifact and scalar APIs.
+The interface opens a local SQL database with `openDatabase`, creates an empty
+`notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)` table if missing, and executes
+CREATE TABLE, INSERT, UPDATE, DELETE and SELECT through the published `query` API.
+Examples fill the editor; use **Executar consulta** or Ctrl/Command+Enter to run
+one statement at a time. The INSERT example uses ID 1; update/delete it or supply
+a new ID before inserting again.
+
+BEGIN, COMMIT and ROLLBACK controls send real SQL to the engine. Reads within a
+transaction see staged writes; a successful COMMIT makes them durable. Statement
+errors abort an active transaction until ROLLBACK. The UI displays the engine's
+responses rather than inferring transaction state from SQL text. Reopening,
+reloading, closing or updating the application discards changes without COMMIT.
+
+The SQL database uses `reddb-browser-sql-playground-v1`, exclusively owned by one
+tab. The previous example's `reddb-browser-playground-v1` marker file is preserved
+and is not converted or overwritten. See the
+[JS/TS guide](https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md)
+for integration, supported table SQL and current engine limits.
 
 ## Run locally
 
@@ -30,8 +42,10 @@ pnpm --filter @reddb-io/browser-example build
 pnpm --filter @reddb-io/browser-example exec vite preview --host 127.0.0.1
 ```
 
-Open the printed localhost URL. After the cache-ready message, write a marker,
-disable networking and reload. The count and scalar execution should survive.
+Open the printed localhost URL. Run **Inserir**, then **Ler**. After the
+cache-ready message, disable networking and reload. The committed note and SQL
+execution should survive. Use BEGIN, edit a note and ROLLBACK to discard it, or
+COMMIT to persist it. Reopen the database to recover only committed rows.
 The development server intentionally does not register an offline service worker.
 Close other tabs using this example if `FILE_BUSY` appears. Clearing this origin's
 site data removes the test file and its cached application assets.
@@ -46,7 +60,9 @@ pnpm --filter @reddb-io/browser-example test
 
 The tests serve the production build under `/reddb/browser/`, exercise query errors,
 file ownership and mobile layout, then shut down the complete browser and HTTP
-listener before reopening offline. They also write and reopen another marker offline.
+listener before two offline browser restarts. They verify CRUD, commit/rollback,
+aborted transactions, own-write visibility, offline write recovery and discard
+of uncommitted changes on reopen, close and service-worker activation.
 Storage-unsupported hosts must show an error and keep query/write controls disabled.
 
 The same tests can target the deployed application:
@@ -61,7 +77,8 @@ these sources into `docs/browser/` for the upload; generated output is not commi
 The example's versioned offline cache is restricted to its own path and never clears
 other applications' caches. Service worker updates are offered through an explicit
 "Atualizar aplicação" action. The control waits for current work to finish, closes
-the local artifact, activates the cached update and reloads. The normal browser
+the local database, discards uncommitted changes, activates the cached update
+and reloads. The update notice asks users to COMMIT first. The normal browser
 lifecycle also activates an update after existing tabs close. Version parameters
 on the page URL still support offline reload after the current worker is active.
 
@@ -79,11 +96,12 @@ results under the editor, and a runtime status bar. ApplicationShell owns the ma
 landmark and skip navigation; Navbar owns product navigation. On narrow containers,
 artifact controls follow the query/result regions. Page chrome follows the viewport.
 
-Results are the actual scalar engine response, rendered by the Data Table with
+Results are the actual SQL engine response, rendered by the Data Table with
 columns mapped by position (including repeated aliases). A JSON tab preserves the
 original response. Ctrl/Command+Enter runs the focused query workspace. The local
 SQL tokenizer comes from the pinned DS reference and only controls highlighting;
-query semantics still belong to the WASM engine. Query source remains bounded at
+query semantics still belong to the WASM engine. Local highlighting extends the
+reference keyword set for table DDL/DML and transactions. Query source remains bounded at
 10,000 characters.
 
 The initial appearance is Application, dark and compact, matching the canonical
@@ -114,5 +132,6 @@ Rendered examples of the application composition:
 [Desktop, dark](docs/playground-desktop-dark.png) · [Desktop, light](docs/playground-desktop.png) · [Mobile, dark](docs/playground-mobile-dark.png).
 
 The local browser suite also installs a changed worker revision, verifies that it
-waits for explicit activation, updates through the real UI, retains a persisted
-marker and reloads a versioned page URL without any HTTP request.
+waits for explicit activation, updates through the real UI, retains a committed
+note, discards a pending transaction and reloads a versioned page URL without
+any HTTP request.

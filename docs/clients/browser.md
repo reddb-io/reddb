@@ -88,9 +88,12 @@ for the version check, structured error envelopes and offline asset requirements
 
 Open the [interactive playground](https://reddb-io.github.io/reddb/browser/).
 It installs the published npm package and bundles JS, Worker and WASM with the page.
-Run a scalar SELECT, append an opaque binary test marker, reopen the OPFS artifact,
-then disable networking and reload once the offline cache is ready. The marker is
-artifact I/O evidence, not a collection record or application transaction.
+The page creates an empty local `notes` table. Choose Inserir and execute the
+statement, then use Ler, Alterar or Excluir. BEGIN/COMMIT/ROLLBACK controls operate
+on the same real database. Disable networking after the offline cache is ready,
+reload and query your committed notes again. Reopening or updating the page
+discards changes without COMMIT. The older binary-marker artifact is preserved
+under its separate filename.
 
 [Example source and local commands](https://github.com/reddb-io/reddb/tree/main/packages/browser-example).
 
