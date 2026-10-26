@@ -1122,3 +1122,49 @@ without re-evaluating shared projections; compiler metadata is O(total argument
 AST size). Existing list/statistic aggregates retain O(N) values per group and
 sort on result construction; host memory/spill policy remains required. No extra
 network request, persistent write or IPC is added; no measured speedup is claimed.
+
+## Shared aggregate reference planning
+
+`reddb-engine::query::planning::aggregation` owns the active native preparation
+of aggregate references in HAVING and ORDER BY. It reuses visible output aliases,
+registers hidden aggregates, rewrites nested expression references and deduplicates
+the complete aggregate projection list before slot compilation. The native
+executor delegates to this plan; its grouping/scan, H3 admission, authorization,
+secret policies, spill, result construction, pagination and resource admission
+remain in the native host. Legacy signature rendering and canonical/legacy AST
+field precedence are retained.
+
+A new regression reproduced hidden-result label aliasing: PERCENTILE(x, 0.25)
+in HAVING and PERCENTILE(x, 0.75) in ORDER BY both wrote `percentile(x)`, causing
+otherwise qualifying groups to disappear. Hidden results now keep the existing
+label when available and receive distinct private aliases on collision. The
+allocator reserves visible labels, source-column/group labels and previously
+registered hidden labels; user aliases that already resemble generated names
+are skipped. Native visible result columns are unchanged. Colliding hidden
+materialization names are intentionally different; no storage/wire format or
+public JS/TS binding depends on this compiler metadata.
+
+An iterative guard bounds the planning paths across Expr, Filter, Projection,
+window keys and frame expressions before recursive lowering/rendering/cloning.
+Lowered projections/filters and newly materialized hidden arguments are checked
+again to catch expansion. Native admission invokes the source guard before its
+own recursive shape/H3 work. Limits use the canonical 128-level RQL constant;
+opaque subquery bodies, literal-container contents and source resolution retain
+the host's existing parser/value admission bounds. Oversized planning trees fail
+with a query error, without publishing a partially prepared plan.
+
+Six native/WASM case groups cover aliases and hidden reuse, legacy AST authority,
+projection deduplication, CASE/casts/predicates, aggregate parameters, pagination,
+label collisions, signatures, unsupported outer functions and depth bounds.
+Native SQL covers alias reuse and hidden references as well as parameter/alias
+collisions. The recovered-row fixture now compiles the shared plan and evaluates
+hidden MAX references in HAVING/ORDER BY with LIMIT/OFFSET after WAL recovery,
+updates, checkpoint and an offline OPFS restart. Public storedQueries and
+transactions remain false until production SQL/catalog/admission and durable
+transaction integration are wired.
+
+Cost sketch: for E visited AST nodes and A aggregate references, planning retains
+O(E) AST/metadata space plus the existing rendered signatures; nested signature
+construction retains its existing bounded rendering cost. New label reservation
+uses O(A + visible/group labels) metadata and adds no per-row work, persistent
+write, network call or IPC. No measured speedup is claimed.

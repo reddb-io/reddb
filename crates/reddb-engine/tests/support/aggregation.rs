@@ -6,7 +6,34 @@ use reddb_engine::query::{
 use reddb_rql::{ast::Projection, sql_lowering::projection_to_expr};
 use reddb_types::Value;
 
+#[path = "aggregate_planning.rs"]
+mod aggregate_planning;
+
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "aggregate_planning_aliases_and_hidden_reuse",
+        aggregate_planning::aliases_and_hidden_reuse,
+    ),
+    (
+        "aggregate_planning_dedup_and_legacy_inputs",
+        aggregate_planning::projection_dedup_and_legacy_inputs,
+    ),
+    (
+        "aggregate_planning_nested_expressions_and_ordering",
+        aggregate_planning::nested_expressions_and_ordering,
+    ),
+    (
+        "aggregate_planning_parameters_and_pagination",
+        aggregate_planning::hidden_parameters_and_pagination,
+    ),
+    (
+        "aggregate_planning_signatures_and_unsupported",
+        aggregate_planning::signatures_and_unsupported_shapes,
+    ),
+    (
+        "aggregate_planning_depth_bounds",
+        aggregate_planning::depth_before_lowering_and_clone,
+    ),
     ("aggregate_shared_numeric_slots", shared_numeric_slots),
     ("aggregate_counts_nulls_and_empty", counts_and_empty),
     ("aggregate_ordered_values_and_distinct", ordered_values),
@@ -362,15 +389,19 @@ pub fn verify_recovered(
     contract: &reddb_engine::catalog::CollectionContract,
     updated: bool,
 ) {
+    use reddb_engine::query::planning::aggregation::prepare_aggregate_runtime_plan;
     use reddb_engine::query::runtime::filter::resolve_filter_row_value;
     use reddb_rql::sql_lowering::{effective_table_group_by_exprs, effective_table_projections};
     use std::collections::HashMap;
-    let query = super::record_filters::table_query("SELECT o.meta.tenant AS tenant, COUNT(*) AS n, SUM(total) AS amount, AVG(total) AS mean, MEDIAN(total) AS middle FROM orders AS o WHERE quantity > 0 GROUP BY o.meta.tenant");
-    let projections: Vec<_> = effective_table_projections(&query)
+    let query = super::record_filters::table_query("SELECT o.meta.tenant AS tenant, COUNT(*) AS n, SUM(total) AS amount, AVG(total) AS mean, MEDIAN(total) AS middle FROM orders AS o WHERE quantity > 0 GROUP BY o.meta.tenant HAVING MAX(total) >= 15 ORDER BY MAX(quantity) DESC, tenant ASC LIMIT 1 OFFSET 1");
+    let runtime =
+        prepare_aggregate_runtime_plan(&query).expect("recovered native aggregate planning");
+    let visible_projections: Vec<_> = effective_table_projections(&query)
         .into_iter()
         .filter(|projection| has_aggregate_projections(std::slice::from_ref(projection)))
         .collect();
-    let plan = CompiledAggPlan::compile(&projections).expect("recovered aggregate plan");
+    let projections = &runtime.aggregate_projections;
+    let plan = CompiledAggPlan::compile(projections).expect("recovered aggregate plan");
     let group_by = effective_table_group_by_exprs(&query);
     let mut groups = HashMap::new();
     for record in records {
@@ -410,6 +441,7 @@ pub fn verify_recovered(
         }
     }
     assert_eq!(groups.len(), 2);
+    let mut outputs = Vec::new();
     for (tenant, amount, mean) in [
         (
             "red",
@@ -420,7 +452,7 @@ pub fn verify_recovered(
     ] {
         let key = build_aggregate_group_key(&[Value::text(tenant)]);
         let state = groups.get(&key).expect("recovered tenant group");
-        for (projection, expected) in projections.iter().zip([
+        for (projection, expected) in visible_projections.iter().zip([
             Value::Integer(2),
             Value::Integer(amount),
             Value::Float(mean),
@@ -428,5 +460,20 @@ pub fn verify_recovered(
         ]) {
             assert_eq!(result(projection, &plan, state), expected);
         }
+        let mut output = reddb_engine::query::unified::UnifiedRecord::new();
+        output.set("tenant", Value::text(tenant));
+        for projection in visible_projections.iter().chain(&runtime.hidden_aggregates) {
+            let (label, value) =
+                aggregate_projection_result_with_host(&Host, projection, state, &plan)
+                    .expect("recovered aggregate output");
+            output.set(&label, value);
+        }
+        outputs.push(output);
     }
+    let selected = aggregate_planning::finish(&query, &runtime, outputs);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].get("tenant"), Some(&Value::text("blue")));
+    assert_eq!(selected[0].get("amount"), Some(&Value::Integer(25)));
+    assert_eq!(selected[0].get("max(total)"), Some(&Value::Integer(15)));
+    assert_eq!(selected[0].get("max(quantity)"), Some(&Value::Integer(3)));
 }
