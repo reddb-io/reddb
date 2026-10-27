@@ -5,7 +5,7 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-Version `0.2.0` exposes `openDatabase`, local table CRUD and single-owner SQL
+Version `0.3.0` exposes `openDatabase`, local table CRUD and single-owner SQL
 transactions, alongside artifact persistence/recovery, RQL validation and
 storage-free scalar SELECT. Other collection models, observation and optional
 synchronization remain pending. `append` and `checkpoint` retain their separate
@@ -54,7 +54,7 @@ server identity or enforce server policies inside an untrusted origin.
 Table SELECT supports aliases, scalar projections, JSON paths, WHERE, source
 ORDER BY and literal LIMIT/OFFSET. Writes share native schema, defaults,
 generated columns, CHECK and uniqueness enforcement. Other collection models,
-TTL/retention, AI/events, context-index maintenance, encrypted writes, parameters,
+TTL/retention, AI/events, context-index maintenance, encrypted writes,
 RETURNING/ON CONFLICT and advanced SELECT clauses remain unsupported. Each
 source table and transaction action list is bounded at 100,000 rows/actions.
 See the [source API reference](https://github.com/reddb-io/reddb/tree/main/packages/browser#local-table-sql-from-jsts)
@@ -64,6 +64,29 @@ Cache the application, SDK, Worker and WASM together for offline startup.
 Installed TS/Vite package tests create and mutate tables across two complete
 offline browser restarts, with the HTTP listener stopped.
 
+## Bind JavaScript/TypeScript values
+
+Version 0.3.0 adds positional parameters to the same local database handle:
+
+```ts
+const body = "O'Reilly's offline note"
+await database.query('INSERT INTO notes (id, body) VALUES ($1, $2)', [1, body])
+console.log(await database.query('SELECT id, body FROM notes WHERE id = $1', [1]))
+```
+
+The shared native binder substitutes typed AST literals, without interpolating
+values into SQL text. `$1`/`?1` indexes start at 1 and must be contiguous; repeated
+indexes reuse a value. Missing, extra or skipped positions raise `INVALID_PARAMS`
+and abort an active SQL transaction until ROLLBACK. JavaScript argument validation
+occurs before statement execution.
+
+Pass `null`, boolean, string, finite fractional numbers, safe integer numbers or
+`bigint` within i64/u64 bounds. Use `bigint` for integers outside JavaScript's safe
+range; result values still use `reddb-json-v1` exact-number tags. Objects, arrays,
+dates, binary values, named parameters and SQL identifiers are not admitted as
+parameters. The count is capped at 65,536. LIMIT parameters must be positive and
+OFFSET parameters nonnegative. See the [parameter contract](https://github.com/reddb-io/reddb/tree/main/packages/browser#positional-parameters).
+
 ## Storage-independent runtime and other languages
 
 For validation and scalar SELECTs without opening an OPFS file, use
@@ -71,8 +94,8 @@ For validation and scalar SELECTs without opening an OPFS file, use
 `validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
 Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
 `info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
-queries report true in version `0.2.0` with `storedQueryMode: 'read-write-tables'`,
-`sqlWrites: true` and `transactions: true`; sync remains false.
+queries report true in version `0.3.0` with `storedQueryMode: 'read-write-tables'`,
+`sqlWrites: true`, `transactions: true` and `queryParameters: true`; sync remains false.
 Capabilities describe the engine; storage-independent handles
 still expose only validation and scalar execution.
 

@@ -19,6 +19,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "storedQueryMode": "read-write-tables",
             "sqlWrites": true,
             "transactions": true,
+            "queryParameters": true,
             "sync": false,
         })
     });
@@ -179,11 +180,62 @@ pub struct BrowserDatabase {
 }
 
 fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> JsValue {
-    let result = Error::new(&error.to_string());
-    match js_sys::Reflect::set(&result, &"code".into(), &error.code().into()) {
+    coded_error(error.code(), error)
+}
+
+fn coded_error(code: &str, message: impl std::fmt::Display) -> JsValue {
+    let result = Error::new(&message.to_string());
+    match js_sys::Reflect::set(&result, &"code".into(), &code.into()) {
         Ok(_) => result.into(),
         Err(error) => error,
     }
+}
+
+fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
+    use reddb_types::Value;
+    let invalid = || {
+        coded_error("INVALID_ARGUMENT", "Parameters require null, boolean, string, finite numbers with safe integers, or i64/u64 bigints")
+    };
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    if let Some(value) = value.as_bool() {
+        return Ok(Value::Boolean(value));
+    }
+    if let Some(value) = value.as_string() {
+        return Ok(Value::text(value));
+    }
+    if let Some(value) = value.as_f64() {
+        if !value.is_finite() {
+            return Err(invalid());
+        }
+        return if value.fract() == 0.0 {
+            if value.abs() > MAX_EXACT_OFFSET as f64 {
+                return Err(invalid());
+            }
+            // Finite, integral and bounded to JS's safe range, which fits i64.
+            #[allow(clippy::cast_possible_truncation)]
+            let integer = value as i64;
+            Ok(Value::Integer(integer))
+        } else {
+            Ok(Value::Float(value))
+        };
+    }
+    if value.is_bigint() {
+        let integer: String = value
+            .unchecked_into::<js_sys::BigInt>()
+            .to_string(10)
+            .map_err(JsValue::from)?
+            .into();
+        if let Ok(value) = integer.parse::<i64>() {
+            return Ok(Value::Integer(value));
+        }
+        return integer
+            .parse::<u64>()
+            .map(Value::UnsignedInteger)
+            .map_err(|_| invalid());
+    }
+    Err(invalid())
 }
 
 #[wasm_bindgen]
@@ -211,6 +263,30 @@ impl BrowserDatabase {
         let result = self
             .database
             .query(sql, exact_integer(now_ms).map_err(js_error)?)
+            .map_err(local_query_error)?;
+        js_sys::JSON::parse(&result.to_json().to_string_compact())
+    }
+
+    #[wasm_bindgen(js_name = queryWithParams)]
+    pub fn query_with_params(
+        &mut self,
+        sql: &str,
+        params: Array,
+        now_ms: f64,
+    ) -> Result<JsValue, JsValue> {
+        if params.length() as usize > reddb_engine::query::local_database::MAX_QUERY_PARAMETERS {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "At most 65536 positional parameters are supported",
+            ));
+        }
+        let values = params
+            .iter()
+            .map(query_parameter)
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self
+            .database
+            .query_with_params(sql, &values, exact_integer(now_ms).map_err(js_error)?)
             .map_err(local_query_error)?;
         js_sys::JSON::parse(&result.to_json().to_string_compact())
     }

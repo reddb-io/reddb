@@ -12,6 +12,7 @@ pub mod local_database;
 pub mod local_read;
 #[doc(hidden)]
 pub mod logical_plan;
+pub mod parameters;
 #[doc(hidden)]
 pub mod planning;
 pub mod records;

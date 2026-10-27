@@ -34,6 +34,7 @@ pub enum LocalReadError {
     Unsupported(&'static str),
     Evaluation(EvalError),
     Query(String),
+    Parameters(super::parameters::UserParamError),
     ResourceLimit,
 }
 
@@ -46,6 +47,7 @@ impl LocalReadError {
             Self::Unsupported(_) => "QUERY_UNSUPPORTED",
             Self::Evaluation(_) | Self::Query(_) => "QUERY_EVALUATION_ERROR",
             Self::ResourceLimit => "QUERY_RESOURCE_LIMIT",
+            Self::Parameters(_) => "INVALID_PARAMS",
         }
     }
 }
@@ -58,6 +60,7 @@ impl std::fmt::Display for LocalReadError {
             Self::Parse(error) => error.fmt(formatter),
             Self::Unsupported(message) => formatter.write_str(message),
             Self::Evaluation(error) => error.fmt(formatter),
+            Self::Parameters(error) => error.fmt(formatter),
             Self::ResourceLimit => {
                 formatter.write_str("local SELECT materialization exceeds 100000 rows")
             }
@@ -114,6 +117,22 @@ pub(crate) fn query_resident(
     sql: &str,
 ) -> Result<ScalarResult, LocalReadError> {
     let query = admission::query(sql)?;
+    execute_resident_query(resident, contracts, query)
+}
+
+pub(crate) fn query_resident_bound(
+    resident: &crate::storage::resident_store::ResidentStore,
+    contracts: &HashMap<String, CollectionContract>,
+    query: reddb_rql::ast::TableQuery,
+) -> Result<ScalarResult, LocalReadError> {
+    execute_resident_query(resident, contracts, admission::table(query)?)
+}
+
+fn execute_resident_query(
+    resident: &crate::storage::resident_store::ResidentStore,
+    contracts: &HashMap<String, CollectionContract>,
+    query: reddb_rql::ast::TableQuery,
+) -> Result<ScalarResult, LocalReadError> {
     let contract = contracts.get(&query.table).ok_or_else(|| {
         LocalReadError::Catalog(format!(
             "no persisted collection contract for {}",
