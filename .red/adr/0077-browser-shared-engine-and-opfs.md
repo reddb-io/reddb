@@ -3,6 +3,27 @@
 Status: accepted architecture; shared native/WASM storage and query core; public local table SQL and single-owner transactions in source builds; other models and sync pending
 Date: 2026-10-22
 
+## Native database backups (Browser 0.4.0)
+
+The JS/TS database handle exports the complete `.rdb` through its owning Worker.
+The operation is serialized with queries and holds both Web Locks and the OPFS
+exclusive access handle, so the physical image cannot change during the copy.
+Pending SQL transactions remain in resident memory and are excluded from export.
+Restore requires a new file, flushes its bytes and validates it through the same
+Rust `BrowserDatabase::open` used for normal recovery. Existing destinations are
+never overwritten. Ordinary rejected restores remove their newly created file
+before the SDK terminates the Worker; termination during restore can leave a new
+incomplete file, which is not silently recreated on retry.
+
+This boundary does not redeclare any storage codec, execute generated SQL or
+change publication barriers. Both export and restore are bounded at 256 MiB.
+Physical copies can retain historical/deleted bytes and supply no encryption,
+tenant filtering or redaction. Hosts own download, file selection and retention.
+Cost sketch: N file bytes require O(N) reads/writes and a full JS buffer; export
+transfers its output buffer, while restore also materializes the resident engine
+state. Native file integrity/recovery rules remain authoritative; no speed claim
+is made.
+
 ## Decision
 
 RedDB Browser will run a shared Rust engine in WebAssembly inside a dedicated

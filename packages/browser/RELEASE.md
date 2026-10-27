@@ -1,7 +1,7 @@
-RedDB Browser 0.3.0 adds positional SQL parameters to the local JavaScript/TypeScript database. It uses the same AST binder as the native RedDB runtime: values bind as typed literals and never become SQL syntax. The Rust/WASM Worker and OPFS database continue to run locally without a RedDB server, account, API key or network service.
+RedDB Browser 0.4.0 adds complete native `.rdb` backup export and restore to the local JavaScript/TypeScript database. The Worker copies the file under exclusive ownership; restore uses the canonical Rust file recovery and SQL catalog. The Rust/WASM Worker and OPFS database continue to run locally without a RedDB server, account, API key or network service.
 
 ```sh
-npm add @reddb-io/browser@0.3.0
+npm add @reddb-io/browser@0.4.0
 ```
 
 Vite applications import `openDatabase` and supply the bundled Worker:
@@ -25,6 +25,9 @@ try {
 
 Included in this release:
 
+- `database.exportBackup()` returns committed snapshot, catalog and WAL bytes as a transferable `Uint8Array`. Pending transaction changes are excluded without committing or rolling back the transaction.
+- `restoreDatabase({ name, backup, worker? })` restores into a new file and validates through Rust before returning a query handle. Existing destinations are never overwritten. Failed validation cleans up the new destination; an interrupted Worker/browser may leave an incomplete new file.
+- Physical backups are bounded at 256 MiB and may contain older/deleted bytes. They are sensitive, not redacted or additionally encrypted. Applications own download, file selection and retention outside the origin. Export/restore uses memory proportional to file size.
 - `query(sql, params)` binds `$1`, `$2`, … and numbered `?1`, `?2`, … through the shared native Rust binder. Repeated positions reuse values; missing, extra or skipped positions return `INVALID_PARAMS`.
 - Parameters accept null, boolean, string, finite fractional numbers, safe integer numbers and bigint within i64/u64 bounds. Unsafe integer numbers, out-of-range bigints and unsupported parameter types are rejected. Exact results retain `$int`/`$uint` envelopes.
 - CREATE TABLE, INSERT, UPDATE, DELETE and SELECT remain available. Parameters apply to supported SELECT/INSERT/UPDATE/DELETE expressions and pagination, with a 65,536-value cap. SQL identifiers and DDL are not parameterized.

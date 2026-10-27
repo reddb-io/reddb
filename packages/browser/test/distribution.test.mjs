@@ -41,7 +41,7 @@ before(async () => {
   await writeFile(resolve(temporary, 'index.html'), '<!doctype html><meta charset="utf-8"><title>RedDB package consumer</title><script type="module" src="/main.ts"></script>')
   await writeFile(resolve(temporary, 'worker.d.ts'), "declare module '*?worker' { const Constructor: { new(): Worker }; export default Constructor }")
   await writeFile(resolve(temporary, 'main.ts'), `
-import { createRuntime, createInteropRuntime, openArtifact, openDatabase, type QueryParameter } from '@reddb-io/browser'
+import { createRuntime, createInteropRuntime, openArtifact, openDatabase, restoreDatabase, type QueryParameter } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 const parameterText = ${JSON.stringify(parameterText)}
 declare global { interface Window { result: Promise<unknown> } }
@@ -101,6 +101,20 @@ window.result = (async () => {
     if (JSON.stringify(exact.rows) !== JSON.stringify([[{ $uint: '18446744073709551615' }]])) throw new Error('Bigint parameter lost precision')
     await queryLocal('BEGIN')
     await queryLocal('UPDATE todos SET title = $1', ['must not survive close'])
+    const revision = created.rows[0][2] as number
+    if (revision > 1) {
+      const previous = await openDatabase({ name: 'packed-backup-' + (revision - 1), worker: new RedDBWorker() })
+      try {
+        const saved = await previous.query('SELECT id, title, revision FROM todos')
+        if (JSON.stringify(saved.rows) !== JSON.stringify([[1, parameterText, revision - 1]])) throw new Error('Restored backup did not survive browser restart')
+      } finally { await previous.close() }
+    }
+    const backup: Uint8Array = await local.exportBackup()
+    const restored = await restoreDatabase({ name: 'packed-backup-' + revision, backup, worker: new RedDBWorker() })
+    try {
+      const saved = await restored.query('SELECT id, title, revision FROM todos')
+      if (JSON.stringify(saved.rows) !== JSON.stringify(created.rows)) throw new Error('Backup included uncommitted data')
+    } finally { await restored.close() }
     return { before, scalar, stored, localBefore, created }
   } catch (error) { failure = error; throw error }
   finally { try { await local.close() } catch (error) { if (!failure) throw error } }

@@ -1,5 +1,5 @@
 import init, * as wasm from './wasm/reddb_wasm.js'
-import { RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS } from './protocol.js'
+import { RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS, MAX_DATABASE_BACKUP_BYTES } from './protocol.js'
 
 let artifact
 let database
@@ -35,20 +35,26 @@ function synchronous(value) {
   return value
 }
 
-async function open(name, sqlDatabase = false, create = false) {
+async function open(name, sqlDatabase = false, create = false, backup) {
+  const restoring = backup !== undefined
   await initialize()
   if (artifact || database) throw error('INVALID_ARGUMENT', 'This worker already owns an open file')
   await new Promise((resolve, reject) => {
     ownership = navigator.locks.request(`reddb-browser:${name}`, { ifAvailable: true }, async (lock) => {
       if (!lock) throw error('FILE_BUSY', 'This artifact is already open in another worker or tab')
+      let directory
+      let created = false
+      let opened = false
       try {
         const root = await navigator.storage.getDirectory()
-        const directory = await root.getDirectoryHandle('reddb-browser', { create: !sqlDatabase || create })
+        directory = await root.getDirectoryHandle('reddb-browser', { create: !sqlDatabase || create || restoring })
         let file
-        let created = false
-        try { file = await directory.getFileHandle(`${name}.rdb`, { create: !sqlDatabase }) }
+        try {
+          file = await directory.getFileHandle(`${name}.rdb`, { create: !sqlDatabase })
+          if (restoring) throw error('DATABASE_EXISTS', 'Restore requires a new database name; existing files are never overwritten')
+        }
         catch (failure) {
-          if (!sqlDatabase || !create || failure.name !== 'NotFoundError') throw failure
+          if (!sqlDatabase || (!create && !restoring) || failure.name !== 'NotFoundError') throw failure
           file = await directory.getFileHandle(`${name}.rdb`, { create: true })
           created = true
         }
@@ -56,6 +62,16 @@ async function open(name, sqlDatabase = false, create = false) {
           throw error('STORAGE_UNSUPPORTED', 'This browser does not support synchronous OPFS access in a dedicated worker')
         }
         access = await file.createSyncAccessHandle()
+        if (restoring) {
+          let offset = 0
+          while (offset < backup.byteLength) {
+            const written = synchronous(access.write(backup.subarray(offset, offset + 1024 * 1024), { at: offset }))
+            if (!written) throw error('ARTIFACT_ERROR', 'Unable to write the complete database backup')
+            offset += written
+          }
+          synchronous(access.flush())
+          backup = undefined
+        }
         const fileIo = {
           readAt: (buffer, offset) => synchronous(access.read(buffer, { at: offset })),
           writeAt: (buffer, offset) => synchronous(access.write(buffer, { at: offset })),
@@ -63,19 +79,19 @@ async function open(name, sqlDatabase = false, create = false) {
           truncate: (size) => synchronous(access.truncate(size)),
           flush: () => synchronous(access.flush()),
         }
-        if (sqlDatabase) database = created
+        if (sqlDatabase) database = created && !restoring
           ? wasm.BrowserDatabase.create(fileIo, name, Date.now())
           : wasm.BrowserDatabase.open(fileIo, name)
         else artifact = fileIo.getSize() === 0
             ? wasm.BrowserArtifact.create(fileIo, name, Date.now())
             : wasm.BrowserArtifact.open(fileIo, name)
+        opened = true
         const lifetime = new Promise((resolveRelease) => { release = resolveRelease })
         resolve()
         await lifetime
       } catch (failure) {
         const reported = sqlDatabase && failure.name === 'NotFoundError'
           ? error('DATABASE_NOT_FOUND', 'The local .rdb file does not exist') : failure
-        reject(reported)
         throw reported
       } finally {
         artifact?.free()
@@ -84,6 +100,10 @@ async function open(name, sqlDatabase = false, create = false) {
         database = undefined
         if (access) synchronous(access.close())
         access = undefined
+        // Reject through ownership.catch only after cleanup, before the SDK can
+        // terminate this Worker. An interrupted restore may leave a new file;
+        // existing destinations are always preserved.
+        if (restoring && created && !opened) await directory.removeEntry(`${name}.rdb`)
       }
     })
     // Observe early lock/open failures, including ifAvailable returning null.
@@ -96,9 +116,34 @@ function bytes(value) {
   return value
 }
 
+function backupBytes(value) {
+  const backup = bytes(value)
+  if (!backup.byteLength || backup.byteLength > MAX_DATABASE_BACKUP_BYTES) {
+    throw error('INVALID_ARGUMENT', 'Expected a nonempty .rdb backup of at most 256 MiB')
+  }
+  return backup
+}
+
+function exportBackup() {
+  const size = synchronous(access.getSize())
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_DATABASE_BACKUP_BYTES) {
+    throw error('BACKUP_SIZE_LIMIT', 'Database backups must fit within 256 MiB')
+  }
+  synchronous(access.flush())
+  const backup = new Uint8Array(size)
+  let offset = 0
+  while (offset < size) {
+    const read = synchronous(access.read(backup.subarray(offset, offset + 1024 * 1024), { at: offset }))
+    if (!read) throw error('ARTIFACT_ERROR', 'Unable to read the complete database backup')
+    offset += read
+  }
+  return backup
+}
+
 async function execute(method, params) {
   if (method === 'initialize' || method === 'info') return initialize()
   if (method === 'open') return open(params.name)
+  if (method === 'restoreDatabase') return open(params.name, true, false, backupBytes(params.backup))
   if (method === 'openDatabase') {
     if (typeof params.create !== 'boolean') throw error('INVALID_ARGUMENT', 'Expected a boolean create option')
     return open(params.name, true, params.create)
@@ -115,6 +160,7 @@ async function execute(method, params) {
     return
   }
   if (database) {
+    if (method === 'exportBackup') return exportBackup()
     if (method !== 'query' && method !== 'queryWithParams') throw error('QUERY_UNSUPPORTED', 'This database handle exposes local SQL')
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
     if (method === 'queryWithParams') {
@@ -152,7 +198,7 @@ self.onmessage = ({ data }) => {
   queue = queue.then(async () => {
     try {
       const result = await execute(method, params)
-      self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, result })
+      self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, result }, method === 'exportBackup' ? [result.buffer] : [])
     } catch (failure) {
       self.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, error: { code: failure.code || 'ARTIFACT_ERROR', message: failure.message || String(failure) } })
     }

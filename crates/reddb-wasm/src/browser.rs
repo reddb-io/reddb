@@ -20,6 +20,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "sqlWrites": true,
             "transactions": true,
             "queryParameters": true,
+            "databaseBackups": true,
             "sync": false,
         })
     });

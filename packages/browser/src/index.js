@@ -1,5 +1,5 @@
 /** Shared Rust/WASM runtime and artifact storage. */
-import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS } from './protocol.js'
+import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS, MAX_DATABASE_BACKUP_BYTES } from './protocol.js'
 export { BrowserError } from './protocol.js'
 
 function createClient(suppliedWorker) {
@@ -126,7 +126,7 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-async function openFile({ name, worker, create = false } = {}, method = 'open') {
+async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
   if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
@@ -137,12 +137,16 @@ async function openFile({ name, worker, create = false } = {}, method = 'open') 
   const client = createClient(worker)
   try {
     const info = await client.ready
-    if (method === 'openDatabase' && (info.capabilities.storedQueries !== true
+    const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
+    if (sqlDatabase && (info.capabilities.storedQueries !== true
       || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
       || info.capabilities.queryParameters !== true)) {
       throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
     }
-    await client.call(method, method === 'openDatabase' ? { name, create } : { name })
+    if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
+      throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
+    }
+    await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
   }
   catch (error) { client.shutdown(error); throw error }
   return client
@@ -165,7 +169,19 @@ export async function openArtifact(options) {
 
 /** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
 export async function openDatabase(options) {
-  const client = await openFile(options, 'openDatabase')
+  return databaseMethods(await openFile(options, 'openDatabase'))
+}
+
+/** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */
+export async function restoreDatabase(options) {
+  const backup = options?.backup
+  if (!(backup instanceof Uint8Array) || !backup.byteLength || backup.byteLength > MAX_DATABASE_BACKUP_BYTES) {
+    throw new BrowserError('INVALID_ARGUMENT', 'Expected a nonempty .rdb backup of at most 256 MiB as Uint8Array')
+  }
+  return databaseMethods(await openFile(options, 'restoreDatabase'))
+}
+
+function databaseMethods(client) {
   return {
     ...runtimeMethods(client),
     query(sql, params) {
@@ -176,6 +192,7 @@ export async function openDatabase(options) {
       }
       return client.call('queryWithParams', { sql, params })
     },
+    exportBackup: () => client.call('exportBackup'),
     close: client.closeFile,
   }
 }
