@@ -109,11 +109,12 @@ impl<'a> DmlTargetScan<'a> {
             if let Some(entity_id) = entity_id {
                 let logical_id = EntityId::new(entity_id);
                 let entity = if self.live_table_rows {
-                    store.get_table_row_by_logical_id(self.table, logical_id)
+                    store.try_get_table_row_by_logical_id(self.table, logical_id)
                 } else {
                     self.table_row_resolver
                         .resolve_logical_id(&store, self.table, logical_id)
-                };
+                }
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 if let Some(entity) = entity {
                     return Ok(self.target_ids_from_entities([entity]));
                 }
@@ -123,7 +124,10 @@ impl<'a> DmlTargetScan<'a> {
                 // direct physical-id lookup so `DELETE FROM <vector>
                 // WHERE rid = N` actually targets the vector instead of
                 // silently matching nothing.
-                if let Some(entity) = store.get(self.table, logical_id) {
+                if let Some(entity) = store
+                    .try_get(self.table, logical_id)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?
+                {
                     if !matches!(entity.kind, EntityKind::TableRow { .. }) {
                         return Ok(self.target_ids_from_entities([entity]));
                     }

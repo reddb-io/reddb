@@ -994,6 +994,18 @@ impl UnifiedStore {
         }
     }
 
+    /// Fallible current-row lookup over the complete physical source.
+    pub fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        match self.collection_read_view(collection) {
+            Some(view) => view.resolve_table_row(logical_id, false, |_| true),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve a table row by stable logical identity.
     ///
     /// Legacy rows use `logical_id == id`, so the physical-id lookup remains

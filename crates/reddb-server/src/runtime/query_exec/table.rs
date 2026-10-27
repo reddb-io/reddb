@@ -184,9 +184,11 @@ fn resolve_table_row_by_logical_id(
     db: &RedDB,
     table: &str,
     logical_id: EntityId,
-) -> Option<UnifiedEntity> {
+) -> RedDBResult<Option<UnifiedEntity>> {
     let store = db.store();
-    TableRowMvccReadResolver::current_statement().resolve_logical_id(&store, table, logical_id)
+    TableRowMvccReadResolver::current_statement()
+        .resolve_logical_id(&store, table, logical_id)
+        .map_err(|err| RedDBError::Internal(err.to_string()))
 }
 
 fn projections_require_runtime_projection(projections: &[Projection]) -> bool {
@@ -640,7 +642,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     if !requires_runtime_projection {
         if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
             let entity =
-                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id));
+                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))?;
             if let Some(entity) = entity {
                 return Ok(
                     super::super::record_search::runtime_table_record_lean_in_collection(
@@ -2066,7 +2068,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     db,
                     &context.query.table,
                     EntityId::new(entity_id),
-                );
+                )?;
                 if let Some(entity) = entity {
                     if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
                         return Ok(Vec::new());
@@ -2236,7 +2238,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     db,
                     &context.query.table,
                     EntityId::new(entity_id),
-                );
+                )?;
                 if let Some(entity) = entity {
                     return Ok(Some(
                         super::super::record_search::runtime_table_record_lean_in_collection(

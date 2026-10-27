@@ -181,7 +181,7 @@ fn execute_runtime_table_query_materialized(
     {
         if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
             if let Some(entity) =
-                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))
+                resolve_table_row_by_logical_id(db, &query.table, EntityId::new(entity_id))?
             {
                 let json = execute_runtime_serialize_single_entity(&entity);
                 // Honor explicit column projections on the fast
@@ -289,11 +289,12 @@ fn resolve_table_row_by_logical_id(
     db: &RedDB,
     table: &str,
     logical_id: EntityId,
-) -> Option<UnifiedEntity> {
+) -> RedDBResult<Option<UnifiedEntity>> {
     let store = db.store();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(snapshot)
         .resolve_logical_id(&store, table, logical_id)
+        .map_err(|err| RedDBError::Internal(err.to_string()))
 }
 
 pub(super) use reddb_engine::query::runtime::field_resolution::runtime_record_has_document_capability;

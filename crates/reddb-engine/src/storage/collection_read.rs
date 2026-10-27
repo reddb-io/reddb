@@ -68,6 +68,68 @@ impl MvccVacuumStats {
 }
 
 impl<P: PageStore> CollectionReadView<P> {
+    pub fn resolve_table_row(
+        &self,
+        logical_id: EntityId,
+        select_versions: bool,
+        mut visible: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let matches = |entity: &UnifiedEntity| {
+            matches!(entity.kind, EntityKind::TableRow { .. }) && entity.logical_id() == logical_id
+        };
+        // Preserve resident traversal and apply policy outside segment locks.
+        if let ReadAuthority::Resident(manager) = &self.authority {
+            if select_versions {
+                return Ok(manager
+                    .query_all(matches)
+                    .into_iter()
+                    .filter(|row| visible(row))
+                    .max_by_key(|row| row.xmin));
+            }
+            if let Some(row) = manager.get(logical_id) {
+                if matches(&row) && row.xmax == 0 {
+                    return Ok(visible(&row).then_some(row));
+                }
+            }
+            let mut rows = manager.query_all(matches);
+            let row = rows
+                .iter()
+                .find(|row| row.xmax == 0)
+                .cloned()
+                .or_else(|| rows.pop());
+            return Ok(row.filter(|row| visible(row)));
+        }
+
+        if !select_versions {
+            if let Some(row) = self.get(logical_id)? {
+                if matches(&row) && row.xmax == 0 {
+                    return Ok(visible(&row).then_some(row));
+                }
+            }
+        }
+        let mut selected: Option<UnifiedEntity> = None;
+        let mut found_live = false;
+        self.visit_entities(|row| {
+            if !matches(row) {
+                return true;
+            }
+            if select_versions {
+                if visible(row) && selected.as_ref().is_none_or(|old| row.xmin >= old.xmin) {
+                    selected = Some(row.clone());
+                }
+            } else if !found_live {
+                found_live = row.xmax == 0;
+                selected = Some(row.clone());
+            }
+            true
+        })?;
+        Ok(if select_versions {
+            selected
+        } else {
+            selected.filter(|row| visible(row))
+        })
+    }
+
     /// Prepare a complete physical deletion plan before the host mutates anything.
     /// The caller must retain its existing snapshot-horizon and mutation fences.
     pub fn plan_mvcc_vacuum(

@@ -62,14 +62,13 @@ impl TableRowMvccReadResolver {
         store: &UnifiedStore,
         collection: &str,
         logical_id: EntityId,
-    ) -> Option<UnifiedEntity> {
-        reddb_engine::transaction::read::resolve_logical_id(
-            store,
-            collection,
-            logical_id,
-            self.needs_version_selection(),
-            |entity| self.resolve_candidate(entity).is_some(),
-        )
+    ) -> Result<Option<UnifiedEntity>, crate::storage::unified::StoreError> {
+        let Some(view) = store.collection_read_view(collection) else {
+            return Ok(None);
+        };
+        view.resolve_table_row(logical_id, self.needs_version_selection(), |entity| {
+            self.resolve_candidate(entity).is_some()
+        })
     }
 
     fn needs_version_selection(&self) -> bool {

@@ -89,7 +89,7 @@ pub(super) fn resolve_update_entity_by_logical_id(
     runtime: &RedDBRuntime,
     table: &str,
     logical_id: EntityId,
-) -> Option<UnifiedEntity> {
+) -> RedDBResult<Option<UnifiedEntity>> {
     let store = runtime.inner.db.store();
 
     // Read-modify-write pre-image resolution.
@@ -122,15 +122,23 @@ pub(super) fn resolve_update_entity_by_logical_id(
         };
         let resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(Some(ctx));
-        if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
-            return Some(entity);
+        if let Some(entity) = resolver
+            .resolve_logical_id(&store, table, logical_id)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?
+        {
+            return Ok(Some(entity));
         }
-    } else if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
-        return Some(entity);
+    } else if let Some(entity) = store
+        .try_get_table_row_by_logical_id(table, logical_id)
+        .map_err(|err| RedDBError::Internal(err.to_string()))?
+    {
+        return Ok(Some(entity));
     }
     // Fallback for non-table-row entities (graph nodes/edges, etc.) where
     // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
-    store.get(table, logical_id)
+    store
+        .try_get(table, logical_id)
+        .map_err(|err| RedDBError::Internal(err.to_string()))
 }
 
 pub(super) fn update_cdc_item_kind(

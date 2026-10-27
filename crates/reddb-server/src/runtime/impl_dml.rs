@@ -2394,7 +2394,8 @@ impl RedDBRuntime {
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
+            let Some(entity) =
+                resolve_update_entity_by_logical_id(self, &query.table, *logical_id)?
             else {
                 continue;
             };

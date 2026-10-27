@@ -38,6 +38,10 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_vacuum_plan_uses_complete_source",
         vacuum_plan_uses_complete_source,
     ),
+    (
+        "collection_selects_visible_cold_versions",
+        selects_visible_cold_versions,
+    ),
 ];
 
 struct ReadPages {
@@ -196,6 +200,57 @@ fn vacuum_plan_uses_complete_source() {
     assert!(
         view.plan_mvcc_vacuum(10).is_err(),
         "a failed second pass must not yield a partial deletion plan"
+    );
+    pages.fail_after.set(None);
+}
+
+fn selects_visible_cold_versions() {
+    fn version(id: u64, logical: u64, xmin: u64, xmax: u64) -> Arc<PagedEntityRecord> {
+        let mut record = Arc::try_unwrap(record(id, 1)).ok().expect("unique record");
+        record.entity.set_logical_id(EntityId::new(logical));
+        record.entity.xmin = xmin;
+        record.entity.xmax = xmax;
+        Arc::new(record)
+    }
+    let (pages, base) = base_from([
+        version(10, 10, 1, 5),
+        version(30, 10, 5, 0),
+        version(50, 50, 2, 0),
+    ]);
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(30), None);
+    changes.insert(EntityId::new(70), Some(version(70, 10, 7, 0)));
+    let view = CollectionReadView::paged(base.clone(), Arc::new(changes), None);
+    let old = view
+        .resolve_table_row(EntityId::new(10), true, |row| row.xmin < 4)
+        .expect("old read")
+        .expect("visible old row");
+    assert_eq!(old.id, EntityId::new(10));
+    let latest = view
+        .resolve_table_row(EntityId::new(10), true, |_| true)
+        .expect("latest read")
+        .expect("visible latest row");
+    assert_eq!(latest.id, EntityId::new(70));
+    let current = view
+        .resolve_table_row(EntityId::new(10), false, |_| true)
+        .expect("current read")
+        .expect("current row");
+    assert_eq!(current.id, EntityId::new(70));
+    assert!(view
+        .resolve_table_row(EntityId::new(10), false, |_| false)
+        .expect("policy checked")
+        .is_none());
+    pages.reads.set(0);
+    let mut prefix = base.cursor().expect("prefix cursor");
+    assert!(prefix.next().expect("first row").is_some());
+    let prefix_reads = pages.reads.get();
+    drop(prefix);
+    pages.reads.set(0);
+    pages.fail_after.set(Some(prefix_reads));
+    assert!(
+        view.resolve_table_row(EntityId::new(10), true, |_| true)
+            .is_err(),
+        "source failure after a visible prefix must not return that prefix as the latest version"
     );
     pages.fail_after.set(None);
 }
