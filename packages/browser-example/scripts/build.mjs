@@ -17,14 +17,15 @@ async function files(directory, prefix = './') {
   return names.sort()
 }
 const assets = await files(output)
-const hash = createHash('sha256')
+const hash = createHash('sha256').update(await readFile(fileURLToPath(import.meta.url)))
 for (const path of assets) hash.update(path).update(await readFile(resolve(output, path)))
 const revision = hash.digest('hex').slice(0, 16)
 await writeFile(resolve(output, 'service-worker.js'), `
 const prefix = 'reddb-browser-example:' + self.registration.scope + ':'
 const current = prefix + '${revision}'
 const assets = ${JSON.stringify(['./', ...assets])}
-self.addEventListener('install', event => event.waitUntil(caches.open(current).then(cache => cache.addAll(assets))))
+const requests = assets.map(path => new Request(new URL(path, self.registration.scope), { cache: 'reload' }))
+self.addEventListener('install', event => event.waitUntil(caches.open(current).then(cache => cache.addAll(requests))))
 self.addEventListener('message', event => {
   if (event.data?.type === 'ACTIVATE_UPDATE') event.waitUntil(self.skipWaiting())
 })

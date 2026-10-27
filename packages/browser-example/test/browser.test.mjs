@@ -33,8 +33,11 @@ before(async () => {
       if (relative === 'service-worker.js' && updateRevision) {
         body = Buffer.from(body.toString().replace(/(const current = prefix \+ '[^']*)'/, "$1-update-test'"))
       }
+      if (relative === 'index.html') {
+        body = Buffer.from(body.toString().replace('</head>', `<meta name="test-build" content="${updateRevision ? 'updated' : 'initial'}"></head>`))
+      }
       const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' }[extname(path)] || 'application/octet-stream'
-      response.writeHead(200, { 'Content-Type': type }).end(body)
+      response.writeHead(200, { 'Content-Type': type, ...(relative === 'index.html' ? { 'Cache-Control': 'public, max-age=600' } : {}) }).end(body)
     } catch { response.writeHead(404).end() }
   })
   server.listen(0, '127.0.0.1')
@@ -446,12 +449,17 @@ test('query workspace follows the DS reference with a code editor, real result g
 })
 
 
-test('an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline', { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, async () => {
-  const browser = await chromium.launch({ headless: true })
+for (const [name, browserType] of Object.entries({ chromium, firefox })) {
+  test(`${name}: an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline`, { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, () => installedUpdate(browserType))
+}
+
+async function installedUpdate(browserType) {
+  const browser = await browserType.launch({ headless: true })
   try {
     const context = await browser.newContext()
     const page = await context.newPage()
     await ready(page)
+    assert.equal(await page.locator('meta[name="test-build"]').getAttribute('content'), 'initial')
     await preset(page, 'Inserir')
     await transaction(page, 'BEGIN')
     await execute(page, "INSERT INTO notes VALUES (2, 'Descartar ao atualizar')")
@@ -464,6 +472,7 @@ test('an installed update waits for explicit activation, retains OPFS and suppor
       page.waitForEvent('load'),
       page.getByRole('button', { name: 'Atualizar aplicação' }).click(),
     ])
+    assert.equal(await page.locator('meta[name="test-build"]').getAttribute('content'), 'updated', 'a new worker must not recache stale HTTP-cached HTML')
     await page.getByRole('gridcell', { name: 'Minha nota offline', exact: true }).waitFor()
     await page.getByRole('tab', { name: 'JSON', exact: true }).click()
     await page.waitForFunction(() => !document.querySelector('#reload').disabled)
@@ -487,4 +496,4 @@ test('an installed update waits for explicit activation, retains OPFS and suppor
       await once(server, 'listening')
     }
   } finally { updateRevision = false; await browser.close() }
-})
+}
