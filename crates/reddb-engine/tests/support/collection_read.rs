@@ -26,6 +26,10 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_read_visibility_and_cancellation",
         visibility_and_cancellation,
     ),
+    (
+        "collection_read_fold_visibility_and_failure",
+        fold_visibility_and_failure,
+    ),
 ];
 
 struct ReadPages {
@@ -224,6 +228,60 @@ fn early_stop() {
         })
         .expect("no source read after stopping"));
     assert_eq!(ids, [10]);
+}
+
+fn fold_visibility_and_failure() {
+    use reddb_engine::storage::manager::SegmentManager;
+    let (pages, base) = base();
+    let mut changes = CollectionReadChanges::new();
+    let manager = Arc::new(SegmentManager::new("rows"));
+    for id in [30, 90] {
+        let mut live = Arc::try_unwrap(record(id, 2))
+            .ok()
+            .expect("unique live row");
+        live.entity.xmax = 0;
+        manager
+            .restore_snapshot_entity(live.entity.clone())
+            .expect("resident row");
+        changes.insert(EntityId::new(id), Some(Arc::new(live)));
+    }
+    // The raw source's other records remain superseded and must be hidden.
+    manager
+        .restore_snapshot_entity(record(10, 1).entity.clone())
+        .expect("resident historical row");
+    changes.insert(EntityId::new(50), None);
+    let paged = CollectionReadView::paged(base, Arc::new(changes), None);
+    let resident = CollectionReadView::<ReadPages>::resident(manager);
+    for view in [&paged, &resident] {
+        let mut ids = view
+            .try_fold_parallel(
+                None,
+                Vec::<u64>::new,
+                |mut ids, entity| {
+                    ids.push(entity.id.raw());
+                    ids
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
+            )
+            .expect("complete visible fold");
+        ids.sort_unstable();
+        assert_eq!(ids, [30, 90]);
+    }
+    pages.fail.set(true);
+    assert!(
+        paged
+            .try_fold_parallel(
+                None,
+                || 0u64,
+                |sum, entity| sum + entity.id.raw(),
+                |a, b| a + b
+            )
+            .is_err(),
+        "a cold fold cannot hide a source failure as a complete aggregate"
+    );
 }
 
 fn id_iteration() {

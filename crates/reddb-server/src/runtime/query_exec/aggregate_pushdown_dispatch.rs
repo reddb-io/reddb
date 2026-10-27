@@ -83,11 +83,11 @@ pub(super) fn try_execute_pushdown_aggregate(
     // ── Build resolver kinds ────────────────────────────────────
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-    let manager = db
+    let view = db
         .store()
-        .get_collection(table_name)
+        .collection_read_view(table_name)
         .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-    let schema = manager.column_schema();
+    let schema = view.column_schema();
     let classify = |field: &FieldRef| match schema.as_ref() {
         Some(schema) => classify_field_with_schema(field, table_name, table_alias, schema),
         None => classify_field(field, table_name, table_alias),
@@ -159,36 +159,33 @@ pub(super) fn try_execute_pushdown_aggregate(
 
     let mut rows: Vec<ScanRow> = Vec::new();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
-        |entity| {
-            if let Some(f) = compiled_filter.as_ref() {
-                if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
-                    return true;
-                }
+    crate::runtime::function_budget::scan_view(&view, snapshot.as_ref(), |entity| {
+        if let Some(f) = compiled_filter.as_ref() {
+            if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
+                return true;
             }
-            let group_key = match resolve_kind(&group_kind, entity) {
-                Some(v) => v.into_owned(),
-                None => return true,
-            };
-            let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
-            for slot in &lowered {
-                let value = match &slot.input_kind {
+        }
+        let group_key = match resolve_kind(&group_kind, entity) {
+            Some(v) => v.into_owned(),
+            None => return true,
+        };
+        let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
+        for slot in &lowered {
+            let value = match &slot.input_kind {
+                None => Value::Null,
+                Some(kind) => match resolve_kind(kind, entity) {
+                    Some(v) => v.into_owned(),
                     None => Value::Null,
-                    Some(kind) => match resolve_kind(kind, entity) {
-                        Some(v) => v.into_owned(),
-                        None => Value::Null,
-                    },
-                };
-                agg_inputs.push(value);
-            }
-            rows.push(ScanRow {
-                group_key,
-                agg_inputs,
-            });
-            true
-        },
-    )?;
+                },
+            };
+            agg_inputs.push(value);
+        }
+        rows.push(ScanRow {
+            group_key,
+            agg_inputs,
+        });
+        true
+    })?;
 
     let stream = AggregateQueryPlanner::plan(&ast, VecScanIter(rows.into_iter()))
         .map_err(|e| RedDBError::Query(format!("aggregate push-down planner: {e}")))?;

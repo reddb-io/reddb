@@ -188,6 +188,8 @@ struct PhysicalRootCacheEntry {
     root: u64,
 }
 
+type ResidentScanSources = Vec<(Arc<RwLock<GrowingSegment>>, SegmentScanCursor)>;
+
 /// Resumable physical maintenance positions. Weak sources let consolidation
 /// release retired payloads; a later sweep revisits any replacement segments.
 #[doc(hidden)]
@@ -2203,6 +2205,72 @@ impl SegmentManager {
         ids
     }
 
+    fn capture_scan_sources(
+        &self,
+        before_work: &mut impl FnMut() -> bool,
+    ) -> Option<ResidentScanSources> {
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+        for segment in growing.iter().chain(sealed.iter()) {
+            if !before_work() {
+                return None;
+            }
+            let cursor = segment.read().scan_cursor();
+            segments.push((Arc::clone(segment), cursor));
+        }
+        Some(segments)
+    }
+
+    /// Pin append boundaries and a small batch of physical IDs, then hydrate one
+    /// visible row at a time from current storage. Consumers run with no segment
+    /// or topology guards and may re-enter storage. Payload ownership is one row,
+    /// not SCAN_BATCH_SIZE rows; single-value workspace admission belongs to the
+    /// caller. Source handles retain the existing cursor retirement semantics.
+    #[doc(hidden)]
+    pub fn scan_owned(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> bool {
+        let Some(segments) = self.capture_scan_sources(&mut before_work) else {
+            return false;
+        };
+        let mut ids = Vec::new();
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                ids.clear();
+                ids.reserve_exact(cursor.remaining().min(super::segment::SCAN_BATCH_SIZE));
+                {
+                    let source = segment.read();
+                    if !source.scan_batch(&mut cursor, &mut before_work, &mut |id| ids.push(id)) {
+                        return false;
+                    }
+                }
+                for id in &ids {
+                    if !before_work() {
+                        return false;
+                    }
+                    // A pinned source can have retired. Read its current owner,
+                    // and filter hidden versions before copying their payloads.
+                    let entity = self
+                        .get_with(*id, |entity| {
+                            Self::scan_entity_visible(snapshot, entity).then(|| entity.clone())
+                        })
+                        .flatten();
+                    if let Some(mut entity) = entity {
+                        self.restore_owned_row_schemas(std::iter::once(&mut entity));
+                        if !before_work() || !consume(&entity) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Capture segment membership and append boundaries, then hydrate bounded
     /// batches. The consumer runs outside topology and segment locks, so scoring
     /// and RLS may re-enter storage and writers can progress between batches.
@@ -2215,18 +2283,8 @@ impl SegmentManager {
         mut before_work: impl FnMut() -> bool,
         mut consume: impl FnMut(&[UnifiedEntity]) -> bool,
     ) -> bool {
-        let segments = {
-            let growing = self.growing.read();
-            let sealed = self.sealed.read();
-            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
-            for segment in growing.iter().chain(sealed.iter()) {
-                if !before_work() {
-                    return false;
-                }
-                let cursor = segment.read().scan_cursor();
-                segments.push((Arc::clone(segment), cursor));
-            }
-            segments
+        let Some(segments) = self.capture_scan_sources(&mut before_work) else {
+            return false;
         };
         let mut ids = Vec::new();
         let mut batch = Vec::new();

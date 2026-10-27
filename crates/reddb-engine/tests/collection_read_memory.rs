@@ -41,6 +41,7 @@ struct TrackedAllocator;
 static ALLOCATOR: TrackedAllocator = TrackedAllocator;
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+static TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn account_allocated(bytes: usize) {
     let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
@@ -85,6 +86,7 @@ unsafe impl GlobalAlloc for TrackedAllocator {
 
 #[test]
 fn indexed_candidate_reads_materialize_only_the_consumed_prefix() {
+    let _gate = TEST_GATE.lock().expect("serial allocation observation");
     const ROWS: u64 = 2048;
     const PAYLOAD_BYTES: usize = 4096;
     const WORKSPACE_BYTES: usize = 128 * 1024;
@@ -133,5 +135,132 @@ fn indexed_candidate_reads_materialize_only_the_consumed_prefix() {
     assert!(
         retained < WORKSPACE_BYTES,
         "discarded candidates retained payloads: {retained}"
+    );
+}
+
+#[test]
+fn scan_consumer_releases_locks_and_keeps_the_initial_append_boundary() {
+    let _gate = TEST_GATE.lock().expect("serial allocation observation");
+    let manager = Arc::new(SegmentManager::new("rows"));
+    for id in 1..=2 {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(id),
+                "rows",
+                id,
+                vec![],
+            ))
+            .expect("initial row");
+    }
+    let view = CollectionReadView::<NoPages>::resident(manager.clone());
+    let mut seen = Vec::new();
+    let mut writer_completed_during_callback = false;
+    std::thread::scope(|scope| {
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let mut writer = None;
+        assert!(view
+            .scan_for_each(
+                None,
+                || true,
+                |entity| {
+                    seen.push(entity.id.raw());
+                    if writer.is_none() {
+                        let manager = manager.clone();
+                        let sent = sent.clone();
+                        writer = Some(scope.spawn(move || {
+                            manager.force_seal().expect("seal while consumer executes");
+                            manager
+                                .insert(UnifiedEntity::table_row(
+                                    EntityId::new(3),
+                                    "rows",
+                                    3,
+                                    vec![],
+                                ))
+                                .expect("concurrent append");
+                            let _ = sent.send(()); // The failing baseline can finish after receiver timeout.
+                        }));
+                        writer_completed_during_callback = received
+                            .recv_timeout(std::time::Duration::from_secs(2))
+                            .is_ok();
+                    }
+                    true
+                }
+            )
+            .expect("complete scan"));
+    }); // Join after scan releases its guards, including the failing baseline.
+    assert!(
+        writer_completed_during_callback,
+        "scan consumer retained a topology/segment lock"
+    );
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        [1, 2],
+        "late appends must not extend the opened cursor"
+    );
+    assert!(manager.get(EntityId::new(3)).is_some());
+}
+
+#[test]
+fn owned_scan_streams_payloads_without_materializing_a_batch() {
+    let _gate = TEST_GATE.lock().expect("serial allocation observation");
+    const ROWS: usize = 2048;
+    const PAYLOAD_BYTES: usize = 4096;
+    const WORKSPACE_BYTES: usize = 128 * 1024;
+    let manager = Arc::new(SegmentManager::new("rows"));
+    for id in 1..=ROWS as u64 {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(id),
+                "rows",
+                id,
+                vec![Value::Blob(vec![42; PAYLOAD_BYTES])],
+            ))
+            .expect("fixture row");
+    }
+    let view = CollectionReadView::<NoPages>::resident(manager);
+    let mut seen = vec![false; ROWS + 1];
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(baseline, Ordering::Relaxed);
+    let mut consumed = 0;
+    assert!(!view
+        .scan_for_each(
+            None,
+            || true,
+            |_| {
+                consumed += 1;
+                false
+            }
+        )
+        .expect("early stop"));
+    assert_eq!(consumed, 1);
+    assert!(view
+        .scan_for_each(
+            None,
+            || true,
+            |entity| {
+                let id = usize::try_from(entity.id.raw()).expect("fixture ID");
+                assert!(!seen[id], "duplicate physical row");
+                seen[id] = true;
+                let Value::Blob(payload) = &entity.data.as_row().expect("row").columns[0] else {
+                    panic!("blob payload")
+                };
+                assert_eq!(payload.len(), PAYLOAD_BYTES);
+                assert!(payload.iter().all(|byte| *byte == 42));
+                true
+            }
+        )
+        .expect("complete owned scan"));
+    assert!(seen[1..].iter().all(|seen| *seen));
+    let peak = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+    let retained = LIVE_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+    eprintln!("owned_scan rows={ROWS} payload_bytes={} peak_extra_bytes={peak} retained_extra_bytes={retained}", ROWS * PAYLOAD_BYTES);
+    assert!(
+        peak < WORKSPACE_BYTES,
+        "owned scan hydrated a payload batch: {peak}"
+    );
+    assert!(
+        retained < WORKSPACE_BYTES,
+        "scan retained payloads: {retained}"
     );
 }

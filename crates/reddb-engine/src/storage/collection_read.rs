@@ -3,9 +3,10 @@
 //! entry is cold; an entry containing None is a completed physical deletion.
 //!
 //! Paged callers must supply an immutable/fenced base, admit overlay ownership
-//! and retained generations, and bound read workspace. This module neither
-//! publishes mutations nor applies MVCC visibility. Captured Arcs retain their
-//! source, but do not make in-place writes to that source into snapshots.
+//! and retained generations, and bound read workspace. Raw reads preserve MVCC
+//! stamps; query scans apply an explicit snapshot. This module does not publish
+//! mutations. Captured Arcs retain their source, but do not turn in-place writes
+//! into snapshots.
 #![deny(
     clippy::unwrap_used,
     clippy::too_many_lines,
@@ -183,7 +184,8 @@ impl<P: PageStore> CollectionReadView<P> {
 
     /// Statement visibility matches resident scans, including moderation and
     /// serializable read tracking. Check work before cold I/O, even when all
-    /// inspected physical versions are hidden. Resident scan order is retained.
+    /// inspected physical versions are hidden. Consumers run outside storage
+    /// guards. Resident cursors retain their captured append boundaries.
     pub fn scan_for_each(
         &self,
         snapshot: Option<&SnapshotContext>,
@@ -194,13 +196,7 @@ impl<P: PageStore> CollectionReadView<P> {
             return Ok(false);
         }
         if let ReadAuthority::Resident(manager) = &self.authority {
-            let mut completed = true;
-            manager.for_each_entity(|entity| {
-                completed = before_work()
-                    && (!SegmentManager::scan_entity_visible(snapshot, entity) || visit(entity));
-                completed
-            });
-            return Ok(completed);
+            return Ok(manager.scan_owned(snapshot, before_work, visit));
         }
         self.visit_records_checked(before_work, |entity, _| {
             !SegmentManager::scan_entity_visible(snapshot, entity) || visit(entity)
@@ -212,6 +208,39 @@ impl<P: PageStore> CollectionReadView<P> {
             ReadAuthority::Resident(manager) => manager.column_schema(),
             ReadAuthority::Paged { schema, .. } => schema.clone(),
         }
+    }
+
+    /// Preserve resident parallel aggregation without treating resident rows as
+    /// complete cold state. Paged authority folds the complete fallible stream.
+    /// Resident workers run under read guards: folds must be pure and may not
+    /// re-enter storage. Budgeted callers use scan_for_each instead.
+    pub fn try_fold_parallel<T, FInit, FFold, FReduce>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        init: FInit,
+        fold: FFold,
+        reduce: FReduce,
+    ) -> Result<T, StoreError>
+    where
+        T: Send,
+        FInit: Fn() -> T + Send + Sync,
+        FFold: Fn(T, &UnifiedEntity) -> T + Send + Sync,
+        FReduce: Fn(T, T) -> T + Send + Sync,
+    {
+        if let ReadAuthority::Resident(manager) = &self.authority {
+            return Ok(manager.scan_fold_parallel(snapshot, init, fold, reduce));
+        }
+        let mut accumulator = Some(init());
+        self.scan_for_each(
+            snapshot,
+            || true,
+            |entity| {
+                let current = accumulator.take().expect("fold owns its accumulator");
+                accumulator = Some(fold(current, entity));
+                true
+            },
+        )?;
+        Ok(accumulator.expect("fold restores its accumulator"))
     }
 
     /// Materialize one candidate per next() in either authority, preserving

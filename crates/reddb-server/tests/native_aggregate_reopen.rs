@@ -174,6 +174,26 @@ fn native_pushdown_groups_resolve_reopened_column_names() {
 }
 
 #[test]
+fn native_parallel_groups_read_complete_reopened_payloads() {
+    let (_directory, runtime) = reopened_fixture();
+    let result = runtime
+        .execute_query("SELECT bucket,COUNT(*) AS n,SUM(id) AS total FROM probe GROUP BY bucket ORDER BY bucket")
+        .expect("parallel group fold over native positional rows");
+    assert_eq!(result.result.records.len(), 10);
+    for (row, bucket) in result.result.records.iter().zip(0..10) {
+        assert_eq!(
+            row.get("bucket").expect("group").to_string(),
+            bucket.to_string()
+        );
+        assert_eq!(row.get("n").expect("count").to_string(), "2");
+        assert_eq!(
+            row.get("total").expect("sum").to_string(),
+            (2 * bucket + 10).to_string()
+        );
+    }
+}
+
+#[test]
 fn native_fallback_groups_resolve_reopened_column_names() {
     let (_directory, runtime) = reopened_fixture();
     let sql = "SELECT bucket+0 AS b,COUNT(*) AS n,SUM(id+0) AS total FROM probe WHERE bucket+0>=7 GROUP BY bucket+0 HAVING COUNT(*)=2 ORDER BY b";

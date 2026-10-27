@@ -82,10 +82,11 @@ remain explicit paged-reader operations. Current native boot still restores
 every row, and its view factory selects only complete resident authority.
 The paged composition is not yet activated as runtime cold ownership.
 
-SQL table scans and indexed candidate hydration now use fallible views, with
-the same statement visibility and deadline checks. Aggregate, batch, maintenance
-and index reads that still access resident managers must be migrated before
-that activation. Mutation, replay, allocator
+SQL table scans, indexed candidate hydration and the generic, pushdown and
+parallel aggregate entry points now use fallible views, preserving explicit
+statement visibility and error propagation. Budgeted scans retain deadline
+checks. Other batch, maintenance, index and mutation reads that still access
+resident managers must be migrated before cold ownership is activated. Mutation, replay, allocator
 high-water marks and checkpoint composition are also still pending. A captured
 overlay is immutable; an Arc to a B-tree alone does not stop in-place writes.
 The publisher must preserve the existing fencing and generation rules.
@@ -186,3 +187,36 @@ All 38 selected native read/checkpoint/recovery tests passed. The unchanged
 full-runtime opening gate still fails at 10,543,588 accounted bytes for 8 MiB
 of payload and a 2,097,152-byte budget. Query ownership improvements therefore
 do not admit cold-runtime activation, historical qualification or fleet rollout.
+
+
+## Query consumers outside segment guards
+
+Resident query scans capture the existing segment membership and append
+boundaries, pin those cursor sources, and inspect at most 256 physical slots
+under one source guard. They then hydrate a single visible row from its current
+owner, release storage guards and invoke the consumer. Hidden versions are
+filtered before cloning. Retired sources retain positions; current owners
+supply the data, preserving the existing consolidation model. New appends do
+not extend an opened cursor. Raw borrowed fingerprint/checkpoint visitors and
+pure resident parallel folds retain their distinct non-reentrant contracts.
+
+The reentrant regression failed before this change: a writer could not seal
+and append during the consumer callback. Its bounded timeout releases the old
+scan and joins the writer even on failure. With the new scan, the writer
+finishes during the callback while the reader still returns just its original
+two IDs. A full 2,048-row, 8 MiB blob scan and an early stop use 6,232 extra
+allocation bytes and retain zero payload bytes; the assertion remains 128 KiB.
+This measures scan-owned copies, not the resident source or process RSS.
+
+Generic and pushdown aggregates use that same deadline-aware scan. The pure
+parallel aggregate retains its resident fast fold through the view; a paged
+view folds its complete merged stream and propagates source failures. Shared
+cases verify live rows, masked and historical rows, and failures rather than
+silently producing a partial or zero aggregate. The paged branch is not yet
+selected by native boot.
+
+A single large value still requires workspace admission. Resident source pins,
+ID directories and aggregate result/group state require their own accounting;
+pushdown still collects its projected ScanRows before planning. These changes
+do not constitute cold ownership, a global query-workspace bound, or approval
+of the full-runtime memory gate.
