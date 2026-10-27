@@ -14,7 +14,7 @@
 )]
 
 use super::{
-    entity::{EntityData, EntityId, UnifiedEntity},
+    entity::{EntityData, EntityId, EntityKind, UnifiedEntity},
     error::StoreError,
     manager::SegmentManager,
     metadata::Metadata,
@@ -22,7 +22,10 @@ use super::{
     paged_collection::{PagedCollectionReader, PagedEntityRecord},
 };
 use crate::transaction::read::SnapshotContext;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// Shared record owners let an admitted successor overlay retain unchanged
 /// payloads without cloning them. Retained maps/owners still require accounting.
@@ -41,7 +44,93 @@ pub struct CollectionReadView<P: PageStore> {
     authority: ReadAuthority<P>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MvccVacuumStats {
+    pub scanned_versions: u64,
+    pub retained_versions: u64,
+    pub reclaimed_versions: u64,
+    pub retained_history_versions: u64,
+    pub reclaimed_history_versions: u64,
+    pub retained_tombstones: u64,
+    pub reclaimed_tombstones: u64,
+}
+
+impl MvccVacuumStats {
+    pub fn add(&mut self, other: &Self) {
+        self.scanned_versions += other.scanned_versions;
+        self.retained_versions += other.retained_versions;
+        self.reclaimed_versions += other.reclaimed_versions;
+        self.retained_history_versions += other.retained_history_versions;
+        self.reclaimed_history_versions += other.reclaimed_history_versions;
+        self.retained_tombstones += other.retained_tombstones;
+        self.reclaimed_tombstones += other.reclaimed_tombstones;
+    }
+}
+
 impl<P: PageStore> CollectionReadView<P> {
+    /// Prepare a complete physical deletion plan before the host mutates anything.
+    /// The caller must retain its existing snapshot-horizon and mutation fences.
+    pub fn plan_mvcc_vacuum(
+        &self,
+        cutoff_xid: u64,
+    ) -> Result<(MvccVacuumStats, Vec<EntityId>), StoreError> {
+        let mut logical = HashMap::<EntityId, (bool, u64)>::new();
+        self.visit_vacuum_entities(|entity| {
+            if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
+                entry.0 |= entity.xmax == 0;
+                entry.1 = entry.1.max(entity.xmin);
+            }
+        })?;
+        let mut stats = MvccVacuumStats::default();
+        let mut reclaim_ids = Vec::new();
+        self.visit_vacuum_entities(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) || entity.xmax == 0 {
+                return;
+            }
+            stats.scanned_versions += 1;
+            let (has_live_version, max_xmin) = logical
+                .get(&entity.logical_id())
+                .copied()
+                .unwrap_or((false, entity.xmin));
+            let tombstone = !has_live_version && entity.xmin == max_xmin;
+            if entity.xmax < cutoff_xid {
+                stats.reclaimed_versions += 1;
+                if tombstone {
+                    stats.reclaimed_tombstones += 1;
+                } else {
+                    stats.reclaimed_history_versions += 1;
+                }
+                reclaim_ids.push(entity.id);
+            } else {
+                stats.retained_versions += 1;
+                if tombstone {
+                    stats.retained_tombstones += 1;
+                } else {
+                    stats.retained_history_versions += 1;
+                }
+            }
+        })?;
+        Ok((stats, reclaim_ids))
+    }
+
+    fn visit_vacuum_entities(
+        &self,
+        mut visit: impl FnMut(&UnifiedEntity),
+    ) -> Result<(), StoreError> {
+        if let ReadAuthority::Resident(manager) = &self.authority {
+            manager.for_each_entity(|entity| {
+                visit(entity);
+                true
+            });
+        } else {
+            self.visit_entities(|entity| {
+                visit(entity);
+                true
+            })?;
+        }
+        Ok(())
+    }
     pub fn resident(manager: Arc<SegmentManager>) -> Self {
         Self {
             authority: ReadAuthority::Resident(manager),

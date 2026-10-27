@@ -56,28 +56,7 @@ pub use reddb_file::{
     STORE_VERSION_V9,
 };
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MvccVacuumStats {
-    pub scanned_versions: u64,
-    pub retained_versions: u64,
-    pub reclaimed_versions: u64,
-    pub retained_history_versions: u64,
-    pub reclaimed_history_versions: u64,
-    pub retained_tombstones: u64,
-    pub reclaimed_tombstones: u64,
-}
-
-impl MvccVacuumStats {
-    pub fn add(&mut self, other: &Self) {
-        self.scanned_versions += other.scanned_versions;
-        self.retained_versions += other.retained_versions;
-        self.reclaimed_versions += other.reclaimed_versions;
-        self.retained_history_versions += other.retained_history_versions;
-        self.reclaimed_history_versions += other.reclaimed_history_versions;
-        self.retained_tombstones += other.retained_tombstones;
-        self.reclaimed_tombstones += other.reclaimed_tombstones;
-    }
-}
+pub use reddb_engine::storage::collection_read::MvccVacuumStats;
 
 #[derive(Debug, Clone)]
 pub struct NativePhysicalState {

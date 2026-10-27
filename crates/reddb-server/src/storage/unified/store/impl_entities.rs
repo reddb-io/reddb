@@ -1041,49 +1041,9 @@ impl UnifiedStore {
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-        let mut logical = HashMap::<EntityId, (bool, u64)>::new();
-        manager.for_each_entity(|entity| {
-            if !matches!(entity.kind, EntityKind::TableRow { .. }) {
-                return true;
-            }
-            let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
-            if entity.xmax == 0 {
-                entry.0 = true;
-            }
-            entry.1 = entry.1.max(entity.xmin);
-            true
-        });
-
-        let mut stats = MvccVacuumStats::default();
-        let mut reclaim_ids = Vec::new();
-        manager.for_each_entity(|entity| {
-            if !matches!(entity.kind, EntityKind::TableRow { .. }) || entity.xmax == 0 {
-                return true;
-            }
-            stats.scanned_versions += 1;
-            let (has_live_version, max_xmin) = logical
-                .get(&entity.logical_id())
-                .copied()
-                .unwrap_or((false, entity.xmin));
-            let is_delete_tombstone = !has_live_version && entity.xmin == max_xmin;
-            if entity.xmax < cutoff_xid {
-                stats.reclaimed_versions += 1;
-                if is_delete_tombstone {
-                    stats.reclaimed_tombstones += 1;
-                } else {
-                    stats.reclaimed_history_versions += 1;
-                }
-                reclaim_ids.push(entity.id);
-            } else {
-                stats.retained_versions += 1;
-                if is_delete_tombstone {
-                    stats.retained_tombstones += 1;
-                } else {
-                    stats.retained_history_versions += 1;
-                }
-            }
-            true
-        });
+        let (stats, reclaim_ids) = self
+            .collection_read_authority(manager)
+            .plan_mvcc_vacuum(cutoff_xid)?;
 
         if !reclaim_ids.is_empty() {
             self.delete_batch(collection, &reclaim_ids)?;

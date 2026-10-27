@@ -34,16 +34,24 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_bootstrap_is_complete_or_fails",
         bootstrap_is_complete_or_fails,
     ),
+    (
+        "collection_vacuum_plan_uses_complete_source",
+        vacuum_plan_uses_complete_source,
+    ),
 ];
 
 struct ReadPages {
     pager: Pager<MemoryFile, NoWal>,
     fail: Cell<bool>,
+    reads: Cell<usize>,
+    fail_after: Cell<Option<usize>>,
 }
 
 impl PageStore for ReadPages {
     fn read_page(&self, id: u32) -> Result<Page, PagerError> {
-        if self.fail.get() {
+        let reads = self.reads.get();
+        self.reads.set(reads + 1);
+        if self.fail.get() || self.fail_after.get().is_some_and(|n| reads >= n) {
             return Err(PagerError::Io(std::io::Error::other(
                 "injected read failure",
             )));
@@ -134,6 +142,8 @@ fn base_from(
     let pages = Arc::new(ReadPages {
         pager,
         fail: Cell::new(false),
+        reads: Cell::new(0),
+        fail_after: Cell::new(None),
     });
     let source = Arc::new(
         PagedCollectionReader::new(
@@ -144,6 +154,50 @@ fn base_from(
         .expect("framed source"),
     );
     (pages, source)
+}
+
+fn vacuum_plan_uses_complete_source() {
+    fn version(id: u64, logical: u64, xmin: u64, xmax: u64) -> Arc<PagedEntityRecord> {
+        let mut record = Arc::try_unwrap(record(id, 1)).ok().expect("unique record");
+        record.entity.set_logical_id(EntityId::new(logical));
+        record.entity.xmin = xmin;
+        record.entity.xmax = xmax;
+        Arc::new(record)
+    }
+    let (pages, base) = base_from([
+        version(10, 1, 1, 3),
+        version(30, 1, 3, 0),
+        version(50, 2, 2, 7),
+        version(70, 3, 4, 20),
+    ]);
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(30), None);
+    changes.insert(EntityId::new(80), Some(version(80, 1, 8, 0)));
+    let view = CollectionReadView::paged(base.clone(), Arc::new(changes), None);
+    let (stats, ids) = view.plan_mvcc_vacuum(10).expect("complete plan");
+    assert_eq!(ids, [EntityId::new(10), EntityId::new(50)]);
+    assert_eq!(stats.scanned_versions, 3);
+    assert_eq!(stats.reclaimed_versions, 2);
+    assert_eq!(stats.reclaimed_history_versions, 1);
+    assert_eq!(stats.reclaimed_tombstones, 1);
+    assert_eq!(stats.retained_tombstones, 1);
+
+    pages.reads.set(0);
+    view.visit_entities(|_| true).expect("measure first pass");
+    let first_pass_reads = pages.reads.get();
+    assert!(first_pass_reads > 0);
+    pages.reads.set(0);
+    let mut prefix = base.cursor().expect("prefix cursor");
+    assert!(prefix.next().expect("prefix read").is_some());
+    let prefix_reads = pages.reads.get();
+    drop(prefix);
+    pages.reads.set(0);
+    pages.fail_after.set(Some(first_pass_reads + prefix_reads));
+    assert!(
+        view.plan_mvcc_vacuum(10).is_err(),
+        "a failed second pass must not yield a partial deletion plan"
+    );
+    pages.fail_after.set(None);
 }
 
 fn bootstrap_is_complete_or_fails() {
