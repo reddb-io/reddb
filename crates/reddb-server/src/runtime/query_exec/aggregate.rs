@@ -11,13 +11,13 @@
 //! `execute_runtime_table_query` when any projection is an aggregate
 //! function.
 
-use super::filter_compiled::{classify_field, EntityColumnResolver};
+use super::filter_compiled::{classify_field, classify_field_with_schema, EntityColumnResolver};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
     projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
-use crate::runtime::runtime_table_record_from_entity_ref;
+use crate::runtime::runtime_table_record_from_entity_ref_with_schema;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::RedDB;
 use reddb_rql::ast::{
@@ -270,6 +270,13 @@ pub(crate) fn execute_aggregate_query(
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
     let has_group_by = !effective_group_by.is_empty();
+    // Native positional records omit their per-row schema on disk. Borrowed
+    // scans must resolve names against the collection, as ordinary SELECT does.
+    let schema = manager.column_schema();
+    let classify = |field: &FieldRef| match schema.as_ref() {
+        Some(schema) => classify_field_with_schema(field, table_name, table_alias, schema),
+        None => classify_field(field, table_name, table_alias),
+    };
 
     // Compile the filter ONCE before the for_each_entity loop. The
     // compiled form pre-classifies every FieldRef into an
@@ -282,7 +289,19 @@ pub(crate) fn execute_aggregate_query(
     // wire-up.
     let compiled_filter = effective_filter
         .as_ref()
-        .map(|f| super::filter_compiled::CompiledEntityFilter::compile(f, table_name, table_alias));
+        .map(|filter| match schema.as_ref() {
+            Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                filter,
+                table_name,
+                table_alias,
+                schema,
+            ),
+            None => super::filter_compiled::CompiledEntityFilter::compile(
+                filter,
+                table_name,
+                table_alias,
+            ),
+        });
 
     // ── GROUP BY fast path ───────────────────────────────────────────────
     // Pre-classify each GROUP BY expression once. When all expressions are
@@ -305,7 +324,7 @@ pub(crate) fn execute_aggregate_query(
                 match expr {
                     Expr::Column { field, .. } => {
                         let col_name = field_ref_name(field);
-                        let kind = classify_field(field, table_name, table_alias);
+                        let kind = classify(field);
                         if matches!(
                             kind,
                             super::filter_compiled::EntityFieldKind::DocumentPath(_)
@@ -339,7 +358,7 @@ pub(crate) fn execute_aggregate_query(
                 };
                 match args.first() {
                     Some(Projection::Field(field, _)) => {
-                        let kind = classify_field(field, table_name, table_alias);
+                        let kind = classify(field);
                         if matches!(
                             kind,
                             super::filter_compiled::EntityFieldKind::DocumentPath(_)
@@ -355,7 +374,7 @@ pub(crate) fn execute_aggregate_query(
                             table: String::new(),
                             column: col.clone(),
                         };
-                        let kind = classify_field(&field, table_name, table_alias);
+                        let kind = classify(&field);
                         if matches!(
                             kind,
                             super::filter_compiled::EntityFieldKind::DocumentPath(_)
@@ -412,7 +431,10 @@ pub(crate) fn execute_aggregate_query(
             macro_rules! get_or_make_record {
                 () => {{
                     if record_cache.is_none() {
-                        record_cache = runtime_table_record_from_entity_ref(entity);
+                        record_cache = runtime_table_record_from_entity_ref_with_schema(
+                            entity,
+                            schema.as_ref(),
+                        );
                     }
                     record_cache.as_ref()
                 }};

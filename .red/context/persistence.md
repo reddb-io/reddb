@@ -63,6 +63,11 @@ shared schema before mutation or index backfill. Explicit row schemas and named
 fields remain authoritative. This changes neither the stored record format nor
 the raw segment revisions used by checkpoint reuse.
 
+Borrowed aggregate scans resolve filters, grouping keys and aggregate arguments
+using the collection schema when native positional rows omit their column names.
+Expression fallback materialization uses that same schema, so checkpoint and
+reopen preserve COUNT/SUM and grouped-query results without copying all rows.
+
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Active and aborted transaction visibility, pending vault
 versions and record format also participate in reuse admission.

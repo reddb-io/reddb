@@ -23,8 +23,8 @@ use super::aggregate_planner::{
     AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, ScanIterator, ScanRow,
 };
 use super::filter_compiled::{
-    classify_field, resolve_kind, CompiledEntityFilter, CompiledEntityFilterDecision,
-    EntityFieldKind,
+    classify_field, classify_field_with_schema, resolve_kind, CompiledEntityFilter,
+    CompiledEntityFilterDecision, EntityFieldKind,
 };
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
@@ -83,12 +83,21 @@ pub(super) fn try_execute_pushdown_aggregate(
     // ── Build resolver kinds ────────────────────────────────────
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let manager = db
+        .store()
+        .get_collection(table_name)
+        .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+    let schema = manager.column_schema();
+    let classify = |field: &FieldRef| match schema.as_ref() {
+        Some(schema) => classify_field_with_schema(field, table_name, table_alias, schema),
+        None => classify_field(field, table_name, table_alias),
+    };
 
     let group_field = FieldRef::TableColumn {
         table: String::new(),
         column: group_col_name.clone(),
     };
-    let group_kind = classify_field(&group_field, table_name, table_alias);
+    let group_kind = classify(&group_field);
     if !is_fast_kind(&group_kind) {
         return Ok(None);
     }
@@ -102,7 +111,7 @@ pub(super) fn try_execute_pushdown_aggregate(
                     table: String::new(),
                     column: col.to_string(),
                 };
-                let kind = classify_field(&field, table_name, table_alias);
+                let kind = classify(&field);
                 if !is_fast_kind(&kind) {
                     return Ok(None);
                 }
@@ -129,14 +138,18 @@ pub(super) fn try_execute_pushdown_aggregate(
     // O(group count), not O(row count). A `ScanRow` holds only the
     // GROUP BY value plus the per-aggregate input values; no
     // HashMap, no system fields.
-    let manager = db
-        .store()
-        .get_collection(query.table.as_str())
-        .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-
-    let compiled_filter = effective_table_filter(query)
-        .as_ref()
-        .map(|f| CompiledEntityFilter::compile(f, table_name, table_alias));
+    let compiled_filter =
+        effective_table_filter(query)
+            .as_ref()
+            .map(|filter| match schema.as_ref() {
+                Some(schema) => CompiledEntityFilter::compile_with_schema(
+                    filter,
+                    table_name,
+                    table_alias,
+                    schema,
+                ),
+                None => CompiledEntityFilter::compile(filter, table_name, table_alias),
+            });
     if compiled_filter
         .as_ref()
         .is_some_and(CompiledEntityFilter::has_fallback)
