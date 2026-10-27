@@ -5,7 +5,7 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-Version `0.3.0` exposes `openDatabase`, local table CRUD and single-owner SQL
+Version `0.4.0` exposes `openDatabase`, local table CRUD and single-owner SQL
 transactions, alongside artifact persistence/recovery, RQL validation and
 storage-free scalar SELECT. Other collection models, observation and optional
 synchronization remain pending. `append` and `checkpoint` retain their separate
@@ -66,7 +66,7 @@ offline browser restarts, with the HTTP listener stopped.
 
 ## Bind JavaScript/TypeScript values
 
-Version 0.3.0 adds positional parameters to the same local database handle:
+Version 0.3.0 added positional parameters to the same local database handle:
 
 ```ts
 const body = "O'Reilly's offline note"
@@ -87,6 +87,39 @@ dates, binary values, named parameters and SQL identifiers are not admitted as
 parameters. The count is capped at 65,536. LIMIT parameters must be positive and
 OFFSET parameters nonnegative. See the [parameter contract](https://github.com/reddb-io/reddb/tree/main/packages/browser#positional-parameters).
 
+## Export and restore a database
+
+Version 0.4.0 provides complete native `.rdb` backups through the same JS/TS API:
+
+```ts
+import { restoreDatabase } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const backup = await database.exportBackup()
+// Save backup outside this site's storage. For a selected File:
+// const backup = new Uint8Array(await selectedFile.arrayBuffer())
+const restored = await restoreDatabase({
+  name: 'my-app-restored', backup, worker: new RedDBWorker(),
+})
+try { console.log(await restored.query('SELECT * FROM notes')) }
+finally { await restored.close() }
+```
+
+Export reads the native file while its Worker retains exclusive ownership. It
+includes committed catalog/data/WAL and excludes the active transaction's pending
+changes, without committing or rolling back that transaction. Restore validates
+through the native Rust engine and requires an unused name. Existing destinations
+are preserved (`DATABASE_EXISTS`, or `FILE_BUSY` while open).
+
+Both operations work offline and accept files up to 256 MiB. Invalid inputs are
+rejected; ordinary failed restores clean up their new destination. Terminating
+the Worker/browser during restore may leave an incomplete new file; retries do
+not overwrite it. A physical backup can contain old/deleted bytes and provides
+no extra encryption or filtering. Save it as sensitive data outside the origin;
+storage persistence by itself is not a backup. File selection/download belongs
+to the embedding application. Export/restore requires memory proportional to
+the physical file, in addition to the engine's resident database.
+
 ## Storage-independent runtime and other languages
 
 For validation and scalar SELECTs without opening an OPFS file, use
@@ -94,8 +127,8 @@ For validation and scalar SELECTs without opening an OPFS file, use
 `validateQuery(sql)`, `executeScalar(sql)` and `close()`. The runtime needs module
 Workers and WebAssembly; OPFS and Web Locks are only required for artifacts.
 `info()` reports ABI 1, `reddb-json-v1` value encoding and capabilities. Stored
-queries report true in version `0.3.0` with `storedQueryMode: 'read-write-tables'`,
-`sqlWrites: true`, `transactions: true` and `queryParameters: true`; sync remains false.
+queries report true in version `0.4.0` with `storedQueryMode: 'read-write-tables'`,
+`sqlWrites: true`, `transactions: true`, `queryParameters: true` and `databaseBackups: true`; sync remains false.
 Capabilities describe the engine; storage-independent handles
 still expose only validation and scalar execution.
 

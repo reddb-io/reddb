@@ -274,7 +274,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
@@ -397,6 +397,101 @@ for (const browser of browsers) {
         assert.deepEqual(result.page.rows, [[{ $int: '9007199254740993' }]])
         assert.deepEqual(result.errors, [...new Array(8).fill('INVALID_ARGUMENT'), 'INVALID_PARAMS', 'INVALID_PARAMS', 'INVALID_PARAMS', 'QUERY_EVALUATION_ERROR'])
         assert.deepEqual(result.unchanged.rows, [["O'Reilly'); DELETE FROM bindings; -- $1\0🦊"]])
+      } finally { await current.close() }
+    })
+
+    storageTest('native database backups preserve committed state and never overwrite existing files', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async fixture => {
+          const same = (left, right) => left.length === right.length && left.every((byte, index) => byte === right[index])
+          const native = await RedDBBrowser.restoreDatabase({ name: 'backup-native', backup: Uint8Array.from(fixture) })
+          let nativeMatch
+          try {
+            nativeMatch = same(await native.exportBackup(), fixture)
+            await native.query('SELECT name FROM people')
+          } finally { await native.close() }
+          const database = await RedDBBrowser.openDatabase({ name: 'backup-source', create: true })
+          const errors = []
+          const chunks = []
+          for (let index = 0; index < 48; index++) chunks.push(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32768))))
+          const text = "O'Reilly\0🦊" + btoa(chunks.join(''))
+          let backup, pendingExcluded, stillPending
+          try {
+            await database.query('CREATE TABLE backups (id INTEGER PRIMARY KEY, body TEXT NOT NULL, revision INTEGER DEFAULT = 7)')
+            await database.query('INSERT INTO backups (id, body) VALUES ($1, $2)', [9007199254740993n, text])
+            backup = await database.exportBackup()
+            await database.query('BEGIN')
+            await database.query('UPDATE backups SET body = $1', ['Uncommitted'])
+            pendingExcluded = same(backup, await database.exportBackup())
+            stillPending = (await database.query('SELECT body FROM backups')).rows[0][0] === 'Uncommitted'
+            try { await RedDBBrowser.restoreDatabase({ name: 'backup-source', backup }) }
+            catch (error) { errors.push(error.code) }
+          } finally { await database.close() }
+          const restored = await RedDBBrowser.restoreDatabase({ name: 'backup-restored', backup })
+          let restoredMatch, exact, revision
+          try {
+            restoredMatch = same(backup, await restored.exportBackup())
+            const rows = (await restored.query('SELECT id, body, revision FROM backups')).rows
+            exact = rows[0][0].$int === '9007199254740993' && rows[0][1] === text
+            revision = rows[0][2]
+            await restored.query('INSERT INTO backups (id, body) VALUES ($1, $2)', [2, 'after restore'])
+          } finally { await restored.close() }
+          try { await RedDBBrowser.restoreDatabase({ name: 'backup-restored', backup }) }
+          catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.restoreDatabase({ name: 'backup-corrupt', backup: new Uint8Array(32) }) }
+          catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.openDatabase({ name: 'backup-corrupt' }) }
+          catch (error) { errors.push(error.code) }
+          const reopened = await RedDBBrowser.openDatabase({ name: 'backup-restored' })
+          let preserved
+          try {
+            const rows = (await reopened.query('SELECT body, revision FROM backups WHERE id = $1', [2])).rows
+            preserved = rows[0][0] === 'after restore' && rows[0][1] === 7
+          }
+          finally { await reopened.close() }
+          return { nativeMatch, pendingExcluded, stillPending, restoredMatch, exact, revision, preserved, errors, length: backup.length }
+        }, nativeQueryFixture)
+        assert.deepEqual({ ...result, length: undefined }, {
+          nativeMatch: true, pendingExcluded: true, stillPending: true, restoredMatch: true,
+          exact: true, revision: 7, preserved: true,
+          errors: ['FILE_BUSY', 'DATABASE_EXISTS', 'DATABASE_ERROR', 'DATABASE_NOT_FOUND'], length: undefined,
+        })
+        assert.ok(result.length > 1024 * 1024, 'exercise multi-chunk backup I/O')
+      } finally { await current.close() }
+    })
+
+    storageTest('database backup reads honor the native publication failure fence', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', create: true, worker })
+          const errors = []
+          try {
+            await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)')
+            await database.query("INSERT INTO notes (id, body) VALUES (1, 'before')")
+            for (const operation of [
+              () => database.query("UPDATE notes SET body = 'failed' WHERE id = 1"),
+              () => database.exportBackup(),
+              () => database.query('SELECT body FROM notes'),
+            ]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await database.close() }
+          const reopened = await RedDBBrowser.openDatabase({ name: 'backup-failed-io' })
+          let rows
+          try { rows = (await reopened.query('SELECT body FROM notes')).rows }
+          finally { await reopened.close() }
+          const failing = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', worker: new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' }) })
+          try {
+            for (const operation of [() => failing.exportBackup(), () => failing.query('SELECT body FROM notes')]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await failing.close(); await failing.close() }
+          return { errors, rows }
+        })
+        assert.deepEqual(result, { errors: ['DATABASE_ERROR', 'DATABASE_ERROR', 'DATABASE_ERROR', 'ARTIFACT_ERROR', 'CLOSED'], rows: [['before']] })
       } finally { await current.close() }
     })
 

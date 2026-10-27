@@ -20,6 +20,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "sqlWrites": true,
             "transactions": true,
             "queryParameters": true,
+            "databaseBackups": true,
             "sync": false,
         })
     });
@@ -240,6 +241,11 @@ fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
 
 #[wasm_bindgen]
 impl BrowserDatabase {
+    #[wasm_bindgen(js_name = checkHealthy)]
+    pub fn check_healthy(&self) -> Result<(), JsValue> {
+        self.database.check_healthy().map_err(local_query_error)
+    }
+
     pub fn open(handle: SyncFile, name: &str) -> Result<BrowserDatabase, JsValue> {
         let database = reddb_engine::query::local_database::LocalDatabase::open(
             BrowserFile::new(handle),

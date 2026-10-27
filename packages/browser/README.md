@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.3.0` exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.4.0` adds native `.rdb` backup export and restore. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
@@ -149,9 +149,9 @@ try {
 
 The versioned Worker/WASM contract reports `abiVersion: 1`,
 `valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
-and `scalarQueries` are true. Version `0.3.0` also reports `storedQueries: true`
+and `scalarQueries` are true. Version `0.4.0` also reports `storedQueries: true`
 with `storedQueryMode: 'read-write-tables'`, `sqlWrites: true` and
-`transactions: true` and `queryParameters: true`; `sync` remains false.
+`transactions: true`, `queryParameters: true` and `databaseBackups: true`; `sync` remains false.
 Capabilities describe the engine, not the operations exposed by a particular handle. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
 opening storage. Cache the JS, Worker and WASM as one versioned unit.
 
@@ -274,6 +274,46 @@ access, emulate file locks, or require `SharedArrayBuffer` or isolation headers.
 OPFS is subject to origin quota, storage eviction and explicit site-data clearing.
 Applications can request persistent storage through `navigator.storage.persist()`;
 these primitives do not promise that a browser will grant it or sync after closing.
+
+## Database backups
+
+`database.exportBackup()` returns a `Uint8Array` containing the complete native
+`.rdb` file, including its committed catalog, snapshot and WAL. The Worker keeps
+exclusive ownership while reading the file and transfers the resulting buffer
+to the caller. No SQL is generated and no storage format is reimplemented in JS.
+An active transaction stays active; its uncommitted changes are excluded.
+The Rust publication fence is checked before copying. A backup read/flush failure
+closes the owner; reopen and recover before issuing more operations. A size-limit
+rejection leaves the handle usable.
+
+```ts
+import { restoreDatabase } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const backup = await database.exportBackup()
+// Save these bytes outside this origin, for example as a downloaded .rdb file.
+const restored = await restoreDatabase({
+  name: 'my-app-restored', backup, worker: new RedDBWorker(),
+})
+try { console.log(await restored.query('SELECT * FROM notes')) }
+finally { await restored.close() }
+```
+
+Restore requires a new name. An existing file returns `DATABASE_EXISTS`; an
+actively owned destination returns `FILE_BUSY`. It writes the new file, flushes
+it and opens it through the canonical Rust engine before returning a handle.
+A rejected backup removes only its newly created destination before reporting
+the failure. Worker/browser termination during restore can leave an incomplete
+new destination; it is never silently overwritten on retry.
+
+Backups are bounded at 256 MiB of physical file bytes. The embedding application
+owns file selection, download and retention. These are complete physical copies,
+which can contain older/deleted bytes, not compacted or redacted exports. They
+do not provide additional encryption, synchronization or tenant filtering.
+Treat backups as sensitive and export only an authorized database. File codecs,
+format versions and native publication/recovery remain unchanged. Export takes
+O(file size) reads and one full JS buffer; restore also holds the input and the
+recovered resident database in memory. No performance improvement is claimed.
 
 ## Offline asset loading
 

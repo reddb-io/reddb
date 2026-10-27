@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { createRuntime, createInteropRuntime, openDatabase, BrowserError } from '../src/index.js'
+import { createRuntime, createInteropRuntime, openDatabase, restoreDatabase, BrowserError } from '../src/index.js'
 
 const info = {
   abiVersion: 1,
   valueEncoding: 'reddb-json-v1',
-  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, sync: false },
+  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
 }
 class ScriptedWorker {
   messages = []
@@ -84,6 +84,36 @@ test('worker and WASM ABI mismatches fail before opening storage', async () => {
     await assert.rejects(createRuntime({ worker }), { code: 'VERSION_MISMATCH' })
     assert.equal(worker.terminated, 1)
     assert.deepEqual(worker.messages.map(request => request.method), ['initialize'])
+  }
+})
+
+test('database backup restoration validates input and runtime before touching storage', async () => {
+  const originals = new Map(['isSecureContext', 'navigator'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  Object.defineProperty(globalThis, 'isSecureContext', { value: true, configurable: true })
+  Object.defineProperty(globalThis, 'navigator', { value: { storage: { getDirectory() {} }, locks: {} }, configurable: true })
+  try {
+    for (const backup of [undefined, [], new ArrayBuffer(4), new Uint8Array()]) {
+      const worker = new ScriptedWorker()
+      await assert.rejects(restoreDatabase({ name: 'restore', backup, worker }), { code: 'INVALID_ARGUMENT' })
+      assert.deepEqual(worker.messages, [])
+    }
+    const old = new ScriptedWorker()
+    old.info = { ...info, capabilities: { ...info.capabilities, databaseBackups: undefined } }
+    await assert.rejects(restoreDatabase({ name: 'restore', backup: new Uint8Array([1]), worker: old }), { code: 'VERSION_MISMATCH' })
+    assert.deepEqual(old.messages.map(message => message.method), ['initialize'])
+    const worker = new ScriptedWorker()
+    const backup = new Uint8Array([82, 68, 66])
+    const database = await restoreDatabase({ name: 'restore', backup, worker })
+    assert.equal(worker.messages.at(-1).method, 'restoreDatabase')
+    assert.deepEqual(worker.messages.at(-1).params, { name: 'restore', create: false, backup })
+    await database.exportBackup()
+    assert.equal(worker.messages.at(-1).method, 'exportBackup')
+    await database.close()
+  } finally {
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
   }
 })
 

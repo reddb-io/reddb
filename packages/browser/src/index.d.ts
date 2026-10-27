@@ -15,6 +15,7 @@ export interface RuntimeInfo {
     readonly sqlWrites: boolean
     readonly transactions: boolean
     readonly queryParameters?: boolean
+    readonly databaseBackups?: boolean
     readonly sync: boolean
   }
 }
@@ -71,6 +72,8 @@ export type QueryParameter = null | boolean | number | string | bigint
 export interface Database extends Runtime {
   /** SELECT and table SQL mutations; mutations return an affectedRows column. */
   query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** Complete native .rdb image of committed state, at most 256 MiB. Pending SQL changes are excluded. */
+  exportBackup(): Promise<Uint8Array>
   /** Release exclusive ownership of the local file and terminate its worker. */
   close(): Promise<void>
 }
@@ -80,5 +83,12 @@ export function openDatabase(options: {
   name: string
   /** Create a missing database. Defaults to false. */
   create?: boolean
+  worker?: Worker
+}): Promise<Database>
+
+/** Restore a native .rdb image to a new name. Existing files are never overwritten. */
+export function restoreDatabase(options: {
+  name: string
+  backup: Uint8Array
   worker?: Worker
 }): Promise<Database>
