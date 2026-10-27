@@ -25,7 +25,7 @@ fn refresh_context_index(
     id: crate::storage::EntityId,
 ) -> RedDBResult<()> {
     let store = db.store();
-    let Some(entity) = store.get(collection, id) else {
+    let Some(entity) = store.try_get(collection, id)? else {
         return Ok(());
     };
 
@@ -1767,7 +1767,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -1810,7 +1810,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 }
@@ -1947,7 +1947,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // create_row() p50 roughly in half on the hot path.
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&collection, id),
+            entity: db.store().try_get(&collection, id)?,
         })
     }
 
@@ -2017,14 +2017,16 @@ impl RuntimeEntityPort for RedDBRuntime {
         let result = engine.apply(collection.clone(), mutation_rows)?;
 
         let store = db.store();
-        Ok(result
+        result
             .ids
             .into_iter()
-            .map(|id| CreateEntityOutput {
-                id,
-                entity: store.get(&collection, id),
+            .map(|id| {
+                Ok(CreateEntityOutput {
+                    id,
+                    entity: store.try_get(&collection, id)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn create_rows_batch_prevalidated_columnar(
@@ -2186,14 +2188,16 @@ impl RuntimeEntityPort for RedDBRuntime {
         };
         let result = engine.apply(collection.clone(), mutation_rows)?;
         let store = db.store();
-        Ok(result
+        result
             .ids
             .into_iter()
-            .map(|id| CreateEntityOutput {
-                id,
-                entity: store.get(&collection, id),
+            .map(|id| {
+                Ok(CreateEntityOutput {
+                    id,
+                    entity: store.try_get(&collection, id)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
@@ -2246,7 +2250,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // The transaction stamp must be present on the first published version.
         // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
         let id = builder.save_with_xmin(self.current_xid())?;
-        let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
+        let dense_for_turbo = match db.store().try_get(&input.collection, id)?.map(|e| e.data) {
             Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
             _ => None,
         };
@@ -2290,7 +2294,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -2350,7 +2354,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -2402,7 +2406,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&collection, id),
+            entity: db.store().try_get(&collection, id)?,
         })
     }
 

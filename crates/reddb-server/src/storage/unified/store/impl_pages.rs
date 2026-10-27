@@ -1068,10 +1068,7 @@ impl UnifiedStore {
                             )?;
                         let mut cursor = reader.cursor()?;
                         let manager = self.get_collection(&name);
-                        loop {
-                            let Some(record) = cursor.next()? else {
-                                break;
-                            };
+                        while let Some(record) = cursor.next()? {
                             let reddb_engine::storage::paged_collection::PagedEntityRecord {
                                 entity,
                                 metadata,

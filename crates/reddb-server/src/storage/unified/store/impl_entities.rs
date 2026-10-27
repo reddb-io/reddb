@@ -953,34 +953,34 @@ impl UnifiedStore {
 
     /// Get an entity from a collection
     ///
-    /// Prefers the live SegmentManager view so reads after update/delete observe
-    /// the current in-memory state even when the paged B-tree image has not been
-    /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
+    /// Resident compatibility read. Current native boot restores the complete
+    /// collection, so a miss is authoritative, including uncheckpointed deletes.
+    /// Paged/recovery reads must use an explicit fallible read authority.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Prefer the live manager state to avoid stale reads after manager.update().
-        if let Some(entity) = self
-            .get_collection(collection)
+        self.get_collection(collection)
             .and_then(|manager| manager.get(id))
-        {
-            return Some(entity);
-        }
+    }
 
-        // Fall back to the paged B-tree image if the manager does not currently hold the row.
-        if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let key = id.raw().to_be_bytes();
-                if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok((entity, _)) =
-                        Self::deserialize_entity_record(&value, self.format_version())
-                    {
-                        return Some(entity);
-                    }
-                }
-            }
-        }
+    /// Fallible physical read authority. Native boot still restores every row;
+    /// do not select a paged view until mutation/recovery/checkpoint integration
+    /// preserves the complete cold base and admitted changes.
+    pub fn collection_read_view(
+        &self,
+        collection: &str,
+    ) -> Option<reddb_engine::storage::collection_read::CollectionReadView<Pager>> {
+        self.get_collection(collection)
+            .map(reddb_engine::storage::collection_read::CollectionReadView::resident)
+    }
 
-        None
+    pub fn try_get(
+        &self,
+        collection: &str,
+        id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        match self.collection_read_view(collection) {
+            Some(view) => view.get(id),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a table row by stable logical identity.

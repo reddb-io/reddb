@@ -1,5 +1,6 @@
 //! Fallible reads are required before cold entities can stop owning resident payloads.
 use reddb_engine::storage::{
+    collection_read::{CollectionReadChanges, CollectionReadView},
     entity::{EntityId, UnifiedEntity},
     error::StoreError,
     metadata::{Metadata, MetadataValue},
@@ -290,6 +291,123 @@ fn disk_reader_attaches_without_loading_rows_and_scans_the_complete_reopened_tre
         retirement_observer.upgrade().is_none(),
         "closing cursor releases source ownership"
     );
+    verify_composed_reads(&pages, root, ROWS);
+    let composed_peak = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+    assert!(
+        composed_peak <= READER_BUDGET_BYTES,
+        "composed cold reads exceeded the same budget: {composed_peak}"
+    );
+    eprintln!("composed disk reads extra_peak_bytes={composed_peak}");
+}
+
+fn verify_composed_reads(pages: &Arc<ObservedPages>, root: u32, rows: u64) {
+    let tree = Arc::new(reddb_engine::storage::btree::BTree::with_root(
+        pages.clone(),
+        root,
+    ));
+    let base = Arc::new(
+        PagedCollectionReader::new(tree, "rows", reddb_file::STORE_VERSION_CURRENT)
+            .expect("supported format"),
+    );
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(1), None);
+    changes.insert(EntityId::new(rows), None);
+    let (mut updated, mut metadata) = fixture_record(rows / 2);
+    let reddb_engine::storage::entity::EntityData::Row(row) = &mut updated.data else {
+        panic!("fixture is a table row");
+    };
+    row.columns[1] = Value::Blob(vec![0xab; 4096]);
+    metadata.set("fixture", MetadataValue::Int(99));
+    changes.insert(
+        updated.id,
+        Some(Arc::new(PagedEntityRecord {
+            entity: updated,
+            metadata: Some(metadata),
+        })),
+    );
+    for id in [rows + 1, rows + 2] {
+        let (entity, metadata) = fixture_record(id);
+        changes.insert(
+            entity.id,
+            Some(Arc::new(PagedEntityRecord {
+                entity,
+                metadata: Some(metadata),
+            })),
+        );
+    }
+    let schema = Arc::new(vec!["id".to_string(), "body".to_string()]);
+    let view = CollectionReadView::paged(base, Arc::new(changes), Some(schema.clone()));
+    let before = pages.reads.load(Ordering::Relaxed);
+    pages.fail_reads.store(true, Ordering::Relaxed);
+    assert!(view
+        .get(EntityId::new(1))
+        .expect("deleted mask needs no disk read")
+        .is_none());
+    let current = view
+        .get(EntityId::new(rows / 2))
+        .expect("overlay needs no disk read")
+        .expect("updated row");
+    assert_eq!(
+        current.data.as_row().expect("row").columns[1],
+        Value::Blob(vec![0xab; 4096])
+    );
+    assert_eq!(
+        current.data.as_row().expect("row").schema.as_ref(),
+        Some(&schema)
+    );
+    assert_eq!(pages.reads.load(Ordering::Relaxed), before);
+    assert!(
+        view.get(EntityId::new(2)).is_err(),
+        "unmodified cold read must propagate I/O failure"
+    );
+    assert!(
+        view.page_in_id_order(0, 1).is_err(),
+        "a failed scan must not become a partial page"
+    );
+    pages.fail_reads.store(false, Ordering::Relaxed);
+    let expected: Vec<_> = (2..rows).chain([rows + 1, rows + 2]).collect();
+    let mut ids = Vec::new();
+    assert!(view
+        .visit_records(|entity, metadata| {
+            ids.push(entity.id.raw());
+            let expected_metadata = if entity.id.raw() == rows / 2 { 99 } else { 42 };
+            assert_eq!(
+                metadata.expect("record metadata").get("fixture"),
+                Some(&MetadataValue::Int(expected_metadata))
+            );
+            assert_eq!(entity.xmin, 17);
+            assert_eq!(entity.xmax, 29);
+            true
+        })
+        .expect("complete fallible scan"));
+    assert_eq!(ids, expected);
+    for offset in [
+        0,
+        rows as usize / 2,
+        rows as usize - 1,
+        rows as usize,
+        usize::MAX,
+    ] {
+        let (total, page) = view.page_in_id_order(offset, 1).expect("composed page");
+        assert_eq!(total, expected.len());
+        assert_eq!(
+            page.first().map(|entity| entity.id.raw()),
+            expected.get(offset).copied()
+        );
+        if let Some(entity) = page.first() {
+            assert_eq!(
+                entity.data.as_row().expect("row").schema.as_ref(),
+                Some(&schema)
+            );
+        }
+    }
+    assert!(!view
+        .visit_entities(|_| {
+            pages.fail_reads.store(true, Ordering::Relaxed);
+            false
+        })
+        .expect("stopping must not read another source record"));
+    pages.fail_reads.store(false, Ordering::Relaxed);
 }
 
 #[test]
@@ -384,4 +502,144 @@ fn paged_open_rejects_an_entity_under_a_different_physical_key() {
         matches!(result, Err(StoreError::StorageIntegrity(_))),
         "a validly framed row under the wrong key must not be silently restored"
     );
+}
+
+#[test]
+fn current_resident_deletion_does_not_fall_back_to_an_older_paged_row() {
+    let _test = TEST_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = tempfile::tempdir().expect("isolated authority fixture");
+    let path = directory.path().join("current-authority.rdb");
+    let store = UnifiedStore::open(&path).expect("fixture store");
+    store.create_collection("rows").expect("fixture collection");
+    let id = EntityId::new(1024);
+    let entity = UnifiedEntity::table_row(id, "rows", 1, vec![Value::Integer(42)]);
+    store.insert("rows", entity).expect("fixture row");
+    store.persist().expect("published preimage");
+    let manager = store
+        .get_collection("rows")
+        .expect("complete resident collection");
+    let mut current = manager.get(id).expect("resident row");
+    let reddb_engine::storage::entity::EntityData::Row(row) = &mut current.data else {
+        panic!("fixture is a table row");
+    };
+    row.columns[0] = Value::Integer(43);
+    manager.update(current).expect("current resident update");
+    assert_eq!(
+        store
+            .get("rows", id)
+            .expect("current row")
+            .data
+            .as_row()
+            .expect("row")
+            .columns[0],
+        Value::Integer(43)
+    );
+    // This is a current-state read test, not a claim that a raw manager edit
+    // crossed a WAL commit. The published tree intentionally still has the row.
+    assert!(manager.delete(id).expect("current physical deletion"));
+    assert!(manager.get(id).is_none());
+    assert!(
+        store.get("rows", id).is_none(),
+        "a complete resident miss must not resurrect the published preimage"
+    );
+    assert!(store
+        .try_get("rows", id)
+        .expect("fallible current read")
+        .is_none());
+    let (total, page) = store
+        .collection_read_view("rows")
+        .expect("read authority")
+        .page_in_id_order(0, 1)
+        .expect("fallible current page");
+    assert_eq!(total, 0);
+    assert!(page.is_empty());
+}
+
+#[test]
+fn paged_overlay_preserves_prefix_middle_and_tail_order_without_duplicate_replacements() {
+    let _test = TEST_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = tempfile::tempdir().expect("isolated sparse fixture");
+    let path = directory.path().join("sparse-overlay.rdb");
+    let root;
+    {
+        let pager = Arc::new(Pager::open_default(&path).expect("fixture pager"));
+        let tree = BTree::new(pager.clone());
+        for id in [10u64, 30, 50, 70] {
+            let (entity, metadata) = fixture_record(id);
+            tree.insert(
+                &id.to_be_bytes(),
+                &serialize_entity_record(
+                    &entity,
+                    Some(&metadata),
+                    reddb_file::STORE_VERSION_CURRENT,
+                ),
+            )
+            .expect("base record");
+        }
+        root = tree.root_page_id();
+        pager.flush().expect("durable base");
+    }
+    let (pages, tree) = observed_tree(&path, root);
+    let base = Arc::new(
+        PagedCollectionReader::new(tree, "rows", reddb_file::STORE_VERSION_CURRENT)
+            .expect("supported format"),
+    );
+    let mut changes = CollectionReadChanges::new();
+    for id in [5u64, 20, 30, 90] {
+        let (entity, mut metadata) = fixture_record(id);
+        metadata.set("fixture", MetadataValue::Int(99));
+        changes.insert(
+            entity.id,
+            Some(Arc::new(PagedEntityRecord {
+                entity,
+                metadata: Some(metadata),
+            })),
+        );
+    }
+    changes.insert(EntityId::new(50), None);
+    let view = CollectionReadView::paged(base.clone(), Arc::new(changes), None);
+    let mut seen = Vec::new();
+    assert!(view
+        .visit_records(|entity, metadata| {
+            seen.push(entity.id.raw());
+            let changed = [5, 20, 30, 90].contains(&entity.id.raw());
+            assert_eq!(
+                metadata.expect("complete metadata").get("fixture"),
+                Some(&MetadataValue::Int(if changed { 99 } else { 42 }))
+            );
+            true
+        })
+        .expect("merged physical scan"));
+    assert_eq!(seen, [5, 10, 20, 30, 70, 90]);
+    let mut seen_before_failure = Vec::new();
+    assert!(
+        view.visit_entities(|entity| {
+            seen_before_failure.push(entity.id.raw());
+            if entity.id.raw() == 10 {
+                pages.fail_reads.store(true, Ordering::Relaxed);
+            }
+            true
+        })
+        .is_err(),
+        "an error after a prefix must not report a complete scan"
+    );
+    assert!(!seen_before_failure.is_empty());
+    assert!([5, 10, 20, 30, 70, 90].starts_with(&seen_before_failure));
+    pages.fail_reads.store(false, Ordering::Relaxed);
+    // A different overlay generation cannot mutate an already captured view.
+    let mut next_changes = CollectionReadChanges::new();
+    next_changes.insert(EntityId::new(10), None);
+    let next_view = CollectionReadView::paged(base, Arc::new(next_changes), None);
+    assert!(view
+        .get(EntityId::new(10))
+        .expect("retained view")
+        .is_some());
+    assert!(next_view
+        .get(EntityId::new(10))
+        .expect("new view")
+        .is_none());
 }

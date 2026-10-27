@@ -58,6 +58,36 @@ never increased that peak. The fixture was aligned to the runtime's existing
 budget-derived cache share; no production budget, dataset or runtime acceptance
 gate was relaxed. The full runtime still eagerly restores the cold payloads.
 
+## Read authority and mutation composition
+
+`storage::collection_read::CollectionReadView` now distinguishes a complete
+resident collection from a published paged base plus immutable, admitted
+changes. An absent change reads the base; an explicit deletion masks it; a
+replacement supplies the current physical record. Overlay record owners are
+shared across captured views instead of copying all changed payloads. Map
+metadata and retained owners still need budget accounting by their publisher.
+
+The paged visitor merges both sources in physical-ID order, emitting each ID
+once and retaining metadata and MVCC stamps. It decodes one cold record at a
+time. Owned point/page results restore the shared positional row schema while
+preserving explicit schemas and named fields. A failed scan returns an error,
+including after an already visited prefix; it never reports a complete page.
+Stopping a visitor does not read another record.
+
+Native physical page reads and ten entity-port reads now use this fallible
+interface. The legacy resident-only getter no longer falls back to an old
+tree after a complete resident miss: a pre-checkpoint physical deletion had
+been resurrected by that fallback in the failing regression. Recovery reads
+remain explicit paged-reader operations. Current native boot still restores
+every row, and its view factory selects only complete resident authority.
+The paged composition is not yet activated as runtime cold ownership.
+
+SQL/aggregate, batch, maintenance and index reads that still access resident
+managers must be migrated before that activation. Mutation, replay, allocator
+high-water marks and checkpoint composition are also still pending. A captured
+overlay is immutable; an Arc to a B-tree alone does not stop in-place writes.
+The publisher must preserve the existing fencing and generation rules.
+
 ## Remaining integration, in order
 
 1. Route query, maintenance, index and mutation reads through fallible views of

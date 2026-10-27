@@ -150,13 +150,13 @@ impl RedDBRuntime {
         limit: usize,
     ) -> RedDBResult<ScanPage> {
         let store = self.inner.db.store();
-        let manager = store
-            .get_collection(collection)
+        let view = store
+            .collection_read_view(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.to_string()))?;
 
         let offset = cursor.map(|cursor| cursor.offset).unwrap_or(0);
         let limit = limit.max(1);
-        let (total, items) = manager.page_in_id_order(offset, limit);
+        let (total, items) = view.page_in_id_order(offset, limit)?;
         let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 
