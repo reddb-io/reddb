@@ -91,6 +91,7 @@ for (const name of browsers) {
     let context = ephemeralBrowser
       ? await ephemeralBrowser.newContext()
       : await browserTypes[name].launchPersistentContext(profile, { headless: true })
+    let dartVisits = 0
     async function probe(language) {
       const page = await context.newPage()
       const diagnostics = []
@@ -110,6 +111,8 @@ for (const name of browsers) {
         assert.deepEqual(outcome.result, {
           language, abi: 1, storedQueries: true, answer: 42, exact: '9007199254740993',
           unsupported: 'QUERY_UNSUPPORTED', closed: 'CLOSED',
+          ...(language === 'dart' ? { database: name === 'webkit' && outcome.result.database === 'STORAGE_UNSUPPORTED'
+            ? 'STORAGE_UNSUPPORTED' : { visits: ++dartVisits, busy: 'FILE_BUSY', stale: 'CLOSED', closed: 'CLOSED' } } : {}),
         })
         return page
       } catch (error) {

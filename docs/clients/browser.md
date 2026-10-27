@@ -5,7 +5,7 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-Version `0.5.0` adds reusable Worker sessions and exposes `openDatabase`, local table CRUD and single-owner SQL
+Version `0.6.0` adds local database sessions for Dart/Flutter Web and retains reusable Worker sessions and exposes `openDatabase`, local table CRUD and single-owner SQL
 transactions, alongside artifact persistence/recovery, RQL validation and
 storage-free scalar SELECT. Other collection models, observation and optional
 synchronization remain pending. `append` and `checkpoint` retain their separate

@@ -231,6 +231,67 @@ export async function createDatabaseSession({ worker } = {}) {
   }
 }
 
+/** JSON-safe session boundary for Dart and other JS-interop hosts. */
+export function createInteropDatabaseSession(options = {}) {
+  let ready
+  try { ready = createDatabaseSession(options) }
+  catch (error) { ready = Promise.reject(error) }
+  ready.catch(() => {})
+  let database
+  let handle = 0
+  let fileClosing
+  let closed = false
+  return {
+    async invoke(method, params = {}) {
+      try {
+        if (method === 'close' || (method === 'closeDatabase' && closed)) {
+          closed = true
+          await (await ready).close()
+          return { ok: true, result: null }
+        }
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        const session = await ready
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        if (!params || typeof params !== 'object' || Array.isArray(params)) {
+          throw new BrowserError('INVALID_ARGUMENT', 'Expected an argument object')
+        }
+        let result
+        switch (method) {
+          case 'ready': break
+          case 'openDatabase':
+            database = await session.openDatabase({ name: params.name, create: params.create ?? false })
+            fileClosing = undefined
+            result = ++handle
+            break
+          case 'closeDatabase':
+            // A repeated close of an old handle cannot release the current owner.
+            if (params.handle === handle) {
+              if (database) {
+                const releasing = database
+                database = undefined
+                fileClosing = releasing.close()
+              }
+              await fileClosing
+            }
+            break
+          case 'info':
+          case 'query':
+            if (!database || params.handle !== handle) throw new BrowserError('CLOSED', 'This database handle is closed')
+            result = method === 'info' ? await database.info() : await database.query(params.sql, params.params)
+            break
+          default: throw new BrowserError('INVALID_ARGUMENT', 'Unknown database operation')
+        }
+        return { ok: true, result: result ?? null }
+      } catch (error) {
+        return { ok: false, error: {
+          code: typeof error.code === 'string' ? error.code : 'RUNTIME_ERROR',
+          message: error.message || String(error),
+        } }
+      }
+    },
+  }
+}
+
 /** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */
 export async function restoreDatabase(options) {
   const backup = options?.backup
