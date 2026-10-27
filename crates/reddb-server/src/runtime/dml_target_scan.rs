@@ -145,7 +145,7 @@ impl<'a> DmlTargetScan<'a> {
                     self.table,
                     self.runtime.index_store_ref(),
                 ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
                 }
 
                 if let Some(ids) = query_exec::try_sorted_index_lookup(
@@ -154,7 +154,7 @@ impl<'a> DmlTargetScan<'a> {
                     self.runtime.index_store_ref(),
                     None,
                 ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
                 }
             }
         }
@@ -275,15 +275,16 @@ impl<'a> DmlTargetScan<'a> {
         &self,
         entity_ids: Vec<EntityId>,
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
-    ) -> Vec<EntityId> {
+    ) -> RedDBResult<Vec<EntityId>> {
         let db = self.runtime.db();
         let store = db.store();
-        let Some(manager) = store.get_collection(self.table) else {
-            return Vec::new();
-        };
-
         let mut ids = Vec::with_capacity(entity_ids.len());
-        for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+        for entity in store
+            .try_get_batch(self.table, &entity_ids)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?
+            .into_iter()
+            .flatten()
+        {
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
                 && self.matches_filter(&entity, compiled_filter)
@@ -294,7 +295,7 @@ impl<'a> DmlTargetScan<'a> {
                 }
             }
         }
-        ids
+        Ok(ids)
     }
 
     fn target_ids_from_entities<I>(&self, entities: I) -> Vec<EntityId>

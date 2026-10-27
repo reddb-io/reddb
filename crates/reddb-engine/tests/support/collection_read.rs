@@ -42,6 +42,10 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_selects_visible_cold_versions",
         selects_visible_cold_versions,
     ),
+    (
+        "collection_batch_is_complete_or_fails",
+        batch_is_complete_or_fails,
+    ),
 ];
 
 struct ReadPages {
@@ -251,6 +255,39 @@ fn selects_visible_cold_versions() {
         view.resolve_table_row(EntityId::new(10), true, |_| true)
             .is_err(),
         "source failure after a visible prefix must not return that prefix as the latest version"
+    );
+    pages.fail_after.set(None);
+}
+
+fn batch_is_complete_or_fails() {
+    let (pages, base) = base();
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(30), None);
+    changes.insert(EntityId::new(80), Some(record(80, 2)));
+    let view = CollectionReadView::paged(base, Arc::new(changes), None);
+    let ids = [
+        EntityId::new(10),
+        EntityId::new(30),
+        EntityId::new(99),
+        EntityId::new(80),
+        EntityId::new(10),
+    ];
+    let rows = view.get_many(&ids).expect("complete batch");
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.map(|row| row.id.raw()))
+            .collect::<Vec<_>>(),
+        [Some(10), None, None, Some(80), Some(10)]
+    );
+    pages.reads.set(0);
+    assert!(view.get(EntityId::new(10)).expect("first lookup").is_some());
+    let prefix_reads = pages.reads.get();
+    pages.reads.set(0);
+    pages.fail_after.set(Some(prefix_reads));
+    assert!(
+        view.get_many(&[EntityId::new(10), EntityId::new(50)])
+            .is_err(),
+        "a read failure after a successful prefix must not publish a partial batch"
     );
     pages.fail_after.set(None);
 }

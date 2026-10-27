@@ -1143,6 +1143,18 @@ impl UnifiedStore {
         }
     }
 
+    /// Fallible ordered batch over the complete read authority.
+    pub fn try_get_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match self.collection_read_view(collection) {
+            Some(view) => view.get_many(ids),
+            None => Ok(vec![None; ids.len()]),
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
         self.resident.get_any(id)

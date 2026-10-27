@@ -91,3 +91,37 @@ fn constant_update_preserves_reopened_positional_fields_and_indexes() {
 fn expression_update_preserves_reopened_positional_fields_and_indexes() {
     exercise("UPDATE updated_rows SET n = n + 1");
 }
+
+#[test]
+fn indexed_update_preserves_other_rows_after_checkpoint_and_reopen() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("data.rdb");
+    seed(&path);
+    {
+        let runtime = open(&path, false);
+        let result = runtime
+            .execute_query("UPDATE updated_rows SET n = 7 WHERE id = 1")
+            .expect("indexed update");
+        assert_eq!(result.affected_rows, 1);
+        runtime.checkpoint().expect("checkpoint indexed update");
+    }
+    let runtime = open(&path, false);
+    for (id, n, payload) in [(0, 1, "zero"), (1, 7, "one"), (2, 1, "two")] {
+        let rows = runtime
+            .execute_query(&format!(
+                "SELECT n,payload FROM updated_rows WHERE id = {id}"
+            ))
+            .expect("indexed read");
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("n").expect("n").to_string(),
+            n.to_string()
+        );
+        assert_eq!(
+            rows.result.records[0]
+                .get("payload")
+                .and_then(|value| value.as_text()),
+            Some(payload)
+        );
+    }
+}

@@ -233,6 +233,14 @@ impl<P: PageStore> CollectionReadView<P> {
         Ok(entity)
     }
 
+    /// Returns no partial batch if any source read fails.
+    pub fn get_many(&self, ids: &[EntityId]) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match &self.authority {
+            ReadAuthority::Resident(manager) => Ok(manager.get_many(ids)),
+            ReadAuthority::Paged { .. } => ids.iter().map(|id| self.get(*id)).collect(),
+        }
+    }
+
     /// Borrow payloads and preserve complete physical-ID order. Returning false
     /// stops before another source read. Resident callbacks run under a segment
     /// read guard and must not re-enter storage or memory admission.

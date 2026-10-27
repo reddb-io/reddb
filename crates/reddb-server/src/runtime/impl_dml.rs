@@ -2250,7 +2250,12 @@ impl RedDBRuntime {
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            for entity in manager.get_many(chunk).into_iter().flatten() {
+            for entity in store
+                .try_get_batch(&query.table, chunk)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
+                .into_iter()
+                .flatten()
+            {
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
