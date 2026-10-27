@@ -1,47 +1,38 @@
-RedDB Browser 0.4.0 adds complete native `.rdb` backup export and restore to the local JavaScript/TypeScript database. The Worker copies the file under exclusive ownership; restore uses the canonical Rust file recovery and SQL catalog. The Rust/WASM Worker and OPFS database continue to run locally without a RedDB server, account, API key or network service.
+RedDB Browser 0.5.0 adds `createDatabaseSession` for JavaScript/TypeScript applications that repeatedly open and close local databases. The session retains the initialized Rust/WASM Worker between operations while every database handle still releases its exclusive OPFS file ownership on close.
 
 ```sh
-npm add @reddb-io/browser@0.4.0
+npm add @reddb-io/browser@0.5.0
 ```
-
-Vite applications import `openDatabase` and supply the bundled Worker:
 
 ```ts
-import { openDatabase } from '@reddb-io/browser'
+import { createDatabaseSession } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 
-const db = await openDatabase({
-  name: 'my-app', create: true, worker: new RedDBWorker(),
-})
+const session = await createDatabaseSession({ worker: new RedDBWorker() })
 try {
-  await db.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
-  await db.query('BEGIN')
-  const existing = await db.query('SELECT id FROM notes WHERE id = $1', [1])
-  if (!existing.rows.length) await db.query('INSERT INTO notes VALUES ($1, $2)', [1, "O'Reilly's offline note"])
-  await db.query('COMMIT')
-  console.log(await db.query('SELECT id, body FROM notes'))
-} finally { await db.close() }
+  const db = await session.openDatabase({ name: 'my-app', create: true })
+  try {
+    await db.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+    console.log(await db.query('SELECT id, body FROM notes'))
+  } finally { await db.close() }
+  // Later operations can open another handle in the same session.
+} finally { await session.close() }
 ```
 
-Included in this release:
+- One session has at most one open database, including during opening and release. Overlapping opens fail explicitly.
+- Closing a database releases its file and discards an uncommitted transaction. Later opens recover current committed state, including changes by another tab or Worker.
+- Old handles stay closed and cannot query or release a later owner's file.
+- A failed release fences the session and terminates its Worker. Dispose failed sessions and create a new one before retrying after a Worker crash.
+- `session.close()` is idempotent and closes the current file before terminating the Worker. Keeping the session alive retains initialized WASM memory; applications must dispose it when finished.
+- Standalone `openDatabase`, artifact, scalar runtime, native backup and JSON-safe scalar interop APIs keep their existing behavior. No native file format, SQL semantics or Worker protocol changes are required.
 
-- `database.exportBackup()` returns committed snapshot, catalog and WAL bytes as a transferable `Uint8Array`. Pending transaction changes are excluded without committing or rolling back the transaction.
-- `restoreDatabase({ name, backup, worker? })` restores into a new file and validates through Rust before returning a query handle. Existing destinations are never overwritten. Failed validation cleans up the new destination; an interrupted Worker/browser may leave an incomplete new file.
-- Physical backups are bounded at 256 MiB and may contain older/deleted bytes. They are sensitive, not redacted or additionally encrypted. Applications own download, file selection and retention outside the origin. Export/restore uses memory proportional to file size.
-- `query(sql, params)` binds `$1`, `$2`, … and numbered `?1`, `?2`, … through the shared native Rust binder. Repeated positions reuse values; missing, extra or skipped positions return `INVALID_PARAMS`.
-- Parameters accept null, boolean, string, finite fractional numbers, safe integer numbers and bigint within i64/u64 bounds. Unsafe integer numbers, out-of-range bigints and unsupported parameter types are rejected. Exact results retain `$int`/`$uint` envelopes.
-- CREATE TABLE, INSERT, UPDATE, DELETE and SELECT remain available. Parameters apply to supported SELECT/INSERT/UPDATE/DELETE expressions and pagination, with a 65,536-value cap. SQL identifiers and DDL are not parameterized.
-- BEGIN/COMMIT/ROLLBACK with own-write visibility and durable committed recovery. Close or Worker termination discards uncommitted changes; statement errors abort an explicit transaction until ROLLBACK.
-- Shared native schema, defaults, generated columns, CHECK and uniqueness enforcement. Row-only commits use the canonical WAL batch; catalog changes publish a complete canonical snapshot.
-- Existing artifact, scalar-runtime and JSON-safe language interop APIs remain available. The JS, TypeScript declarations, Worker and WASM ship together; consumers need no Rust toolchain.
+Applications sharing a file across tabs must retain their writer/snapshot guards and queue open/operation/close with an application Web Lock. Sessions amortize Worker startup; file recovery and SQL costs remain. This release makes no universal latency, CPU or memory improvement claim. The optional browser benchmark compares equal 300 kB committed writes, alternating fresh Workers and a reused session with the same file history.
 
-One handle exclusively owns its file. Tables and pending transaction actions are each bounded at 100,000 rows/actions. BEGIN copies the committed resident image. Ambiguous storage errors fence the handle until reopen.
+Local operation needs no RedDB server, account, API key or network service. Bundle/cache HTML, JS, Worker and WASM together for offline startup. Real Chromium and Firefox tests cover ownership handoff, peer commit visibility, rollback on close, stale-handle isolation, I/O failures and offline browser restarts. The packaged TS/Vite consumer also reopens sessions offline.
 
-This version supports ordinary tables. Objects, arrays, binary values and dates are not JavaScript parameter values. Other collection models, advanced SELECT clauses, encrypted writes, AI/events, observation and synchronization remain unsupported. The local file-owner API does not establish a server identity or enforce server tenant/RLS policies; export only an authorized subset.
+Table SQL/transactions and native `.rdb` backups remain supported with their existing limits. Other collection models, advanced SELECT clauses, AI/events, observation and synchronization remain unsupported. Real Safari/iOS persistence remains unqualified. See the full support contract and examples:
 
-The embedding application must bundle or cache its HTML, JS, Worker and WASM together for offline startup. Installed TypeScript/Vite consumers verify CRUD, commit/rollback and two complete offline browser restarts in Chromium and Firefox, including recovery of writes made offline. Real Safari/iOS persistence remains unqualified.
+- https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md
+- https://github.com/reddb-io/reddb/tree/main/packages/browser
 
-Usage guide: https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md
-API details: https://github.com/reddb-io/reddb/tree/main/packages/browser
-
-The `.tgz` release asset is directly installable with npm/pnpm; `SHA256SUMS` records its checksum. The Browser version/tag is independent of native RedDB releases and publishes to npm's `latest` channel.
+The installable `.tgz` and `SHA256SUMS` accompany this release. Browser versioning is independent of native RedDB and publishes to npm's `latest` channel.

@@ -41,7 +41,7 @@ before(async () => {
   await writeFile(resolve(temporary, 'index.html'), '<!doctype html><meta charset="utf-8"><title>RedDB package consumer</title><script type="module" src="/main.ts"></script>')
   await writeFile(resolve(temporary, 'worker.d.ts'), "declare module '*?worker' { const Constructor: { new(): Worker }; export default Constructor }")
   await writeFile(resolve(temporary, 'main.ts'), `
-import { createRuntime, createInteropRuntime, openArtifact, openDatabase, restoreDatabase, type QueryParameter } from '@reddb-io/browser'
+import { createRuntime, createInteropRuntime, createDatabaseSession, openArtifact, openDatabase, restoreDatabase, type QueryParameter } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
 const parameterText = ${JSON.stringify(parameterText)}
 declare global { interface Window { result: Promise<unknown> } }
@@ -78,7 +78,8 @@ window.result = (async () => {
   try {
     stored = await database.query('SELECT rid, name, total FROM people WHERE rid IN (2, 9007199254740993) ORDER BY total DESC')
   } finally { await database.close() }
-  const local = await openDatabase({ name: 'packed-local', create: true, worker: new RedDBWorker() })
+  const session = await createDatabaseSession({ worker: new RedDBWorker() })
+  let local = await session.openDatabase({ name: 'packed-local', create: true })
   let failure
   const queryLocal = async (sql: string, params?: readonly QueryParameter[]) => {
     try { return await local.query(sql, params) }
@@ -99,6 +100,13 @@ window.result = (async () => {
     const created = await queryLocal('SELECT id, title, revision FROM todos ORDER BY id')
     const exact = await queryLocal('SELECT $1 AS exact FROM todos WHERE id = $2', [18446744073709551615n, 1])
     if (JSON.stringify(exact.rows) !== JSON.stringify([[{ $uint: '18446744073709551615' }]])) throw new Error('Bigint parameter lost precision')
+    const released = local
+    await local.close()
+    local = await session.openDatabase({ name: 'packed-local' })
+    try { await released.query('DELETE FROM todos'); throw new Error('Closed handle was reused') }
+    catch (error) { if (!(error instanceof Error) || !('code' in error) || error.code !== 'CLOSED') throw error }
+    await released.close()
+    if (JSON.stringify((await local.query('SELECT id, title, revision FROM todos')).rows) !== JSON.stringify(created.rows)) throw new Error('Session did not recover committed data')
     await queryLocal('BEGIN')
     await queryLocal('UPDATE todos SET title = $1', ['must not survive close'])
     const revision = created.rows[0][2] as number
@@ -117,7 +125,7 @@ window.result = (async () => {
     } finally { await restored.close() }
     return { before, scalar, stored, localBefore, created }
   } catch (error) { failure = error; throw error }
-  finally { try { await local.close() } catch (error) { if (!failure) throw error } }
+  finally { try { await local.close() } catch (error) { if (!failure) throw error } finally { await session.close() } }
 })()
 `)
   const tsc = resolve(packageRoot, 'node_modules/typescript/bin/tsc')
