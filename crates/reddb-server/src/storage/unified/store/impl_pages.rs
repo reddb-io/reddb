@@ -1,5 +1,6 @@
 use super::*;
 use parking_lot::RwLock;
+use reddb_file::{NativePagedAllocatorState, NativePagedRowAllocator};
 
 #[cfg(test)]
 use reddb_engine::storage::checkpoint_tree::CHECKPOINT_BATCH_BYTES;
@@ -291,6 +292,49 @@ impl UnifiedStore {
         Ok(built.tree)
     }
 
+    fn paged_allocator_state(
+        &self,
+        collections: &HashMap<String, Arc<SegmentManager>>,
+    ) -> NativePagedAllocatorState {
+        let mut rows: Vec<_> = collections
+            .iter()
+            .map(|(name, manager)| NativePagedRowAllocator {
+                collection: name.clone(),
+                next_row_id: manager.row_allocator_next(),
+            })
+            .collect();
+        rows.sort_unstable_by(|a, b| a.collection.cmp(&b.collection));
+        NativePagedAllocatorState {
+            next_entity_id: self.resident.next_entity_id.load(Ordering::SeqCst),
+            collections: rows,
+        }
+    }
+
+    fn restore_paged_allocators(&self, state: NativePagedAllocatorState) -> Result<(), StoreError> {
+        let collections = self.resident.collections.read();
+        if state.collections.len() != collections.len()
+            || state
+                .collections
+                .iter()
+                .any(|entry| !collections.contains_key(&entry.collection))
+        {
+            return Err(page_integrity(
+                1,
+                None,
+                "allocator collections do not match the durable catalog",
+            ));
+        }
+        // Source loading and committed WAL may have observed a larger value.
+        // Durable floors can advance these counters, never rewind them.
+        self.resident
+            .next_entity_id
+            .fetch_max(state.next_entity_id, Ordering::SeqCst);
+        for entry in state.collections {
+            collections[&entry.collection].restore_row_allocator_next(entry.next_row_id);
+        }
+        Ok(())
+    }
+
     /// Publication first, reuse second. The immediately preceding generation
     /// stays in the durable ledger for one more publication. Cursors and cloned
     /// tree handles defer retirement further without holding the writer fence.
@@ -299,6 +343,7 @@ impl UnifiedStore {
         pager: &Pager,
         metadata: &mut Vec<u8>,
         live: &HashMap<String, Arc<BTree>>,
+        allocators: &NativePagedAllocatorState,
     ) -> Result<(), StoreError> {
         let mut retired = self.retired_btrees.lock();
         let mut roots = Vec::new();
@@ -342,6 +387,8 @@ impl UnifiedStore {
             .filter(|id| !released.contains(id))
             .collect();
         reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        reddb_file::encode_native_paged_allocators(metadata, allocators)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
         // Do not mutate retirement state or the free list before both the new
         // children and the manifest that forgets old roots have been synced.
@@ -571,6 +618,7 @@ impl UnifiedStore {
                 .map_or(0, |btree| btree.root_page_id());
             collection_roots.push((name.clone(), root_page));
         }
+        let allocators = self.paged_allocator_state(&collections);
         drop(btree_indices);
         drop(collections);
 
@@ -601,7 +649,12 @@ impl UnifiedStore {
             }
         }
 
-        self.publish_reclaimable_trees(pager, &mut meta_data, &self.btree_indices.read())?;
+        self.publish_reclaimable_trees(
+            pager,
+            &mut meta_data,
+            &self.btree_indices.read(),
+            &allocators,
+        )?;
 
         Ok(())
     }
@@ -1081,6 +1134,11 @@ impl UnifiedStore {
                 pager
                     .restore_deferred_reclamation(&deferred)
                     .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                if let Some(state) = reddb_file::decode_native_paged_allocators(content, &mut pos)
+                    .map_err(|e| page_integrity(1, None, e.to_string()))?
+                {
+                    self.restore_paged_allocators(state)?;
+                }
             }
         }
 
@@ -1314,7 +1372,8 @@ impl UnifiedStore {
                 self.retire_btree(Arc::clone(previous));
             }
         }
-        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
+        let allocators = self.paged_allocator_state(&collections);
+        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &allocators)?;
 
         // Only the now-durable catalog may replace the live tree handles. The
         // previous generation is retained in the manifest retirement ledger.

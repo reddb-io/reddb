@@ -258,3 +258,53 @@ plus Clippy with warnings denied. The unchanged runtime-opening memory
 acceptance still failed at 10,543,588 bytes against 2,097,152 bytes. No final
 release image, historical Auth/Platform qualification, fleet rollout or OCI
 volume reduction is admitted by these component/native results.
+
+
+## Durable allocator floors before cold bootstrap
+
+A real native-file regression showed that deleting the highest physical row,
+then checkpointing or replaying its delete on reopen, let the next insert reuse
+both entity ID 2 and row ID 2. Existing boot reconstructed counters solely from
+surviving records. This establishes a bootstrap identity defect; it does not
+establish that this defect caused the historical storage-growth incident.
+
+An optional `RDA1` tail now publishes the global next-entity floor and each
+collection's next-row floor with the same paged catalog, after `RDR1`/`RDF1`.
+Full checkpoints and inline registry publications capture these values while
+holding their existing publication fence. Only after catalog durability may
+checkpoint truncate its WAL. Restore uses monotonic maxima against source
+observations; replay of a committed physical delete also advances the global
+floor when the row is already absent. Floors do not consume an identity or
+invalidate otherwise unchanged row trees.
+
+Framing rejects zero next values, duplicates, impossible counts and truncated
+known tails. Native open also requires the allocator names to match the durable
+collection catalog. The regression changes 2-to-2 reuse into allocation of ID 3
+and row ID 3 for both checkpoint and WAL recovery. It also checks an empty
+collection, dropping the final collection, repeated reopen and semantic catalog
+faults with valid page checksums. No surviving payload is required to restore
+the floor in the empty-collection case.
+
+Legacy tails remain optional. Their initial baseline still comes from surviving
+records and committed replay; already lost historical maxima cannot be inferred
+from surviving data. Older readers ignore the new tail, while older writers
+discard it. A writer downgrade therefore requires a compatible allocator-aware
+writer or a separately verified pre-upgrade copy. This step changes the paged
+layout; embedded dump allocator history is not qualified by these native cases.
+
+The floor tail is not a complete cold descriptor: physical counts, sequence
+allocation for retained source records, full read/mutation/index composition,
+generation-aware checkpoint proofs and shared workspace admission remain.
+Native boot still restores payloads, and the existing runtime memory gate must
+pass unchanged before activation or fleet rollout.
+
+
+Allocator qualification passed the two formerly failing cases and three
+additional native catalog/empty-state cases. The wider check passed 3 codec,
+35 shared-engine and 44 native tests, plus static checks. The runtime-opening
+memory gate remains red with its original dataset and 2 MiB assertion.
+Stored record sequences remain segment-local: this change preserves their
+existing replay/adoption behavior instead of introducing a global sequence
+counter. Cold bootstrap must preserve those recorded stamps and the complete
+physical count while dropping payload ownership; allocator floors alone do
+not supply those properties.

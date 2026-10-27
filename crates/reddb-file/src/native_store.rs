@@ -12,6 +12,12 @@ use std::path::Path;
 use crate::embedded::{RdbFileError, RdbFileResult};
 use crate::physical_metadata::{ManifestEvent, ManifestEventKind};
 
+mod paged_allocators;
+pub use paged_allocators::{
+    decode_native_paged_allocators, encode_native_paged_allocators, NativePagedAllocatorState,
+    NativePagedRowAllocator,
+};
+
 pub const STORE_MAGIC: &[u8; 4] = b"RDST";
 pub const STORE_VERSION_V1: u32 = 1;
 pub const STORE_VERSION_V2: u32 = 2;

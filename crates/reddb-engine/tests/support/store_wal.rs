@@ -21,7 +21,41 @@ pub const CASES: &[(&str, fn())] = &[
     ("store_wal_host_index_boundaries", host_index_boundaries),
     ("store_wal_atomic_resident_refresh", atomic_resident_refresh),
     ("store_wal_recovery_fixture", recovery_fixture),
+    (
+        "store_wal_delete_retains_absent_identity_floor",
+        delete_retains_absent_identity_floor,
+    ),
 ];
+
+fn delete_retains_absent_identity_floor() {
+    let store = ResidentStore::new();
+    replay(
+        &store,
+        StoreWalAction::DeleteEntityRecord {
+            collection: "absent".into(),
+            entity_id: 900,
+        },
+    );
+    assert_eq!(store.next_entity_id(), EntityId::new(901));
+    replay(
+        &store,
+        StoreWalAction::CreateCollection {
+            name: "empty".into(),
+        },
+    );
+    replay(
+        &store,
+        StoreWalAction::DeleteEntityRecord {
+            collection: "empty".into(),
+            entity_id: 12,
+        },
+    );
+    assert_eq!(
+        store.next_entity_id(),
+        EntityId::new(902),
+        "replay cannot rewind the floor even when the row is already absent"
+    );
+}
 
 pub fn recovery_actions() -> Vec<StoreWalAction> {
     let metadata = super::metadata_corpus::metadata();

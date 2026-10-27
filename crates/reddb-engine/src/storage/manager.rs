@@ -438,6 +438,19 @@ impl SegmentManager {
         self.next_row_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Snapshot the next row identity without allocating one.
+    #[doc(hidden)]
+    pub fn row_allocator_next(&self) -> u64 {
+        self.next_row_id.load(Ordering::SeqCst)
+    }
+
+    /// Restore a durable floor without rewinding source/replay observations.
+    #[doc(hidden)]
+    pub fn restore_row_allocator_next(&self, next: u64) {
+        assert!(next > 0, "row allocator next value must be nonzero");
+        self.next_row_id.fetch_max(next, Ordering::SeqCst);
+    }
+
     /// Reserve `n` contiguous per-table row IDs with one atomic
     /// fetch_add. Caller assigns `row_id = start + i` per entity.
     /// Saves N-1 atomic RMWs on bulk inserts (25k atomics → 1).

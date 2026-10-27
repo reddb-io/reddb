@@ -598,6 +598,9 @@ impl ResidentStore {
         id: EntityId,
         update_index: impl FnOnce(),
     ) -> Result<(), StoreError> {
+        // Idempotent replay can see an already absent row. Its committed WAL
+        // identity still advances the global allocator floor.
+        self.register_entity_id(id);
         self.entity_cache.remove(id.raw());
         if let Some(manager) = self.get_collection(collection) {
             let deleted = manager.delete(id)?;

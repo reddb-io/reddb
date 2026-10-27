@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 pub const CASES: &[(&str, fn())] = &[
     ("resident_store_global_identity", global_identity),
+    ("resident_store_row_allocator_floor", row_allocator_floor),
     (
         "resident_store_reference_write_boundaries",
         reference_write_boundaries,
@@ -34,6 +35,21 @@ pub const CASES: &[(&str, fn())] = &[
         graph_metadata_and_references,
     ),
 ];
+
+fn row_allocator_floor() {
+    let manager = SegmentManager::new("empty");
+    assert_eq!(manager.row_allocator_next(), 1);
+    manager.restore_row_allocator_next(31);
+    assert_eq!(manager.row_allocator_next(), 31);
+    assert_eq!(manager.next_row_id(), 31);
+    manager.register_row_id(90);
+    manager.restore_row_allocator_next(20);
+    assert_eq!(
+        manager.next_row_id(),
+        91,
+        "a stale durable floor cannot rewind source observations"
+    );
+}
 
 fn cache_reads_current_headers_and_payloads() {
     let store = ResidentStore::new();
