@@ -253,22 +253,6 @@ fn evaluate_native_scalar_function(
     let func_name = name.split(':').next().unwrap_or(name);
 
     match func_name {
-        "GEO_DISTANCE" | "HAVERSINE" => {
-            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
-            Some(Value::Float(crate::geo::haversine_km(
-                lat1, lon1, lat2, lon2,
-            )))
-        }
-        "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
-            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
-            Some(Value::Float(crate::geo::vincenty_km(
-                lat1, lon1, lat2, lon2,
-            )))
-        }
-        "GEO_BEARING" => {
-            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
-            Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
-        }
         // H3 hexagonal index scalars (PRD #1574 slice 1, #1575). Mirror
         // of the `expr_eval::dispatch_builtin_function` arms for the
         // legacy projection / WHERE-clause path.
@@ -321,14 +305,6 @@ fn evaluate_native_scalar_function(
                     .into_iter()
                     .map(Value::UnsignedInteger)
                     .collect(),
-            ))
-        }
-        "GEO_MIDPOINT" => {
-            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
-            let (lat, lon) = crate::geo::midpoint(lat1, lon1, lat2, lon2);
-            Some(Value::GeoPoint(
-                crate::geo::deg_to_micro(lat),
-                crate::geo::deg_to_micro(lon),
             ))
         }
         "VERIFY_PASSWORD" => {
@@ -400,7 +376,7 @@ fn evaluate_native_scalar_function(
     }
 }
 
-pub(super) use reddb_engine::query::runtime::numeric::{value_as_number, NumOperand};
+pub(super) use reddb_engine::query::runtime::numeric::value_as_number;
 
 pub(super) fn resolve_scalar_arg(
     args: &[Projection],

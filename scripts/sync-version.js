@@ -65,6 +65,16 @@ const targets = [
   // umbrella reddb crate so the release workflow can publish them in
   // dependency order without version drift.
   {
+    label: 'crates/reddb-tonic/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-tonic', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-tonic-prost/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-tonic-prost', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
     label: 'crates/reddb-types/Cargo.toml',
     file: path.join(root, 'crates', 'reddb-types', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -214,6 +224,8 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-rql',
   'reddb-io-engine',
   'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
@@ -227,6 +239,8 @@ syncCargoLock(path.join(root, 'drivers', 'node', 'Cargo.lock'), [
   'reddb-io-rql',
   'reddb-io-engine',
   'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
@@ -240,6 +254,8 @@ syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io-rql',
   'reddb-io-engine',
   'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
@@ -259,6 +275,8 @@ const stageList = [
   'crates/reddb-rql/Cargo.toml',
   'crates/reddb-engine/Cargo.toml',
   'crates/reddb-wire/Cargo.toml',
+  'crates/reddb-tonic/Cargo.toml',
+  'crates/reddb-tonic-prost/Cargo.toml',
   'crates/reddb-grpc-proto/Cargo.toml',
   'crates/reddb-server/Cargo.toml',
   'crates/reddb-client/Cargo.toml',

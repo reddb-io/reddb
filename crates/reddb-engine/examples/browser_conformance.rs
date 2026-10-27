@@ -2,6 +2,10 @@
 //! This is built separately and never included in the application WASM bundle.
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/aggregation.rs"]
+mod aggregation;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/catalog.rs"]
 mod catalog;
 
@@ -28,6 +32,30 @@ mod record_ordering;
 #[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/record_projection.rs"]
 mod record_projection;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/table_planning.rs"]
+mod table_planning;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/window_phase.rs"]
+mod window_phase;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/value_functions.rs"]
+mod value_functions;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/runtime_expressions.rs"]
+mod runtime_expressions;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/table_plan.rs"]
+mod table_plan;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/geographic.rs"]
+mod geographic;
 
 #[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/temporal_scalars.rs"]
@@ -140,7 +168,14 @@ pub fn run_conformance() -> String {
         .chain(record_projection::CASES.iter())
         .chain(numeric_scalars::CASES.iter())
         .chain(text_scalars::CASES.iter())
-        .chain(temporal_scalars::CASES.iter());
+        .chain(temporal_scalars::CASES.iter())
+        .chain(geographic::CASES.iter())
+        .chain(table_plan::CASES.iter())
+        .chain(table_planning::CASES.iter())
+        .chain(runtime_expressions::CASES.iter())
+        .chain(value_functions::CASES.iter())
+        .chain(window_phase::CASES.iter())
+        .chain(aggregation::CASES.iter());
     for (_, run) in cases.clone() {
         run();
     }

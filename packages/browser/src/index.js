@@ -1,5 +1,5 @@
 /** Shared Rust/WASM runtime and artifact storage. */
-import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING } from './protocol.js'
+import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS, MAX_DATABASE_BACKUP_BYTES } from './protocol.js'
 export { BrowserError } from './protocol.js'
 
 function createClient(suppliedWorker) {
@@ -126,8 +126,8 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-/** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
-export async function openArtifact({ name, worker } = {}) {
+async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+  if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
@@ -135,8 +135,26 @@ export async function openArtifact({ name, worker } = {}) {
     throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
   }
   const client = createClient(worker)
-  try { await client.ready; await client.call('open', { name }) }
+  try {
+    const info = await client.ready
+    const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
+    if (sqlDatabase && (info.capabilities.storedQueries !== true
+      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
+      || info.capabilities.queryParameters !== true)) {
+      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
+    }
+    if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
+      throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
+    }
+    await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
+  }
   catch (error) { client.shutdown(error); throw error }
+  return client
+}
+
+/** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
+export async function openArtifact(options) {
+  const client = await openFile(options)
   const { call } = client
   return {
     ...runtimeMethods(client),
@@ -145,6 +163,36 @@ export async function openArtifact({ name, worker } = {}) {
     readSnapshot: () => call('readSnapshot'),
     append: (payloads) => call('append', { payloads }),
     checkpoint: (snapshot, minWalBytes = 0) => call('checkpoint', { snapshot, minWalBytes }),
+    close: client.closeFile,
+  }
+}
+
+/** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
+export async function openDatabase(options) {
+  return databaseMethods(await openFile(options, 'openDatabase'))
+}
+
+/** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */
+export async function restoreDatabase(options) {
+  const backup = options?.backup
+  if (!(backup instanceof Uint8Array) || !backup.byteLength || backup.byteLength > MAX_DATABASE_BACKUP_BYTES) {
+    throw new BrowserError('INVALID_ARGUMENT', 'Expected a nonempty .rdb backup of at most 256 MiB as Uint8Array')
+  }
+  return databaseMethods(await openFile(options, 'restoreDatabase'))
+}
+
+function databaseMethods(client) {
+  return {
+    ...runtimeMethods(client),
+    query(sql, params) {
+      if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
+      if (params === undefined) return client.call('query', { sql })
+      if (!Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS) {
+        return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an array of at most 65536 positional parameters'))
+      }
+      return client.call('queryWithParams', { sql, params })
+    },
+    exportBackup: () => client.call('exportBackup'),
     close: client.closeFile,
   }
 }

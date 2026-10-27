@@ -265,3 +265,79 @@ fn portable_temporal_scalar_conformance() {
         run();
     }
 }
+
+#[path = "support/geographic.rs"]
+mod geographic;
+
+#[test]
+fn portable_geographic_conformance() {
+    for (name, run) in geographic::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/table_plan.rs"]
+mod table_plan;
+
+#[test]
+fn portable_table_plan_conformance() {
+    for (name, run) in table_plan::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/table_planning.rs"]
+mod table_planning;
+
+#[test]
+fn portable_table_planning_conformance() {
+    for (name, run) in table_planning::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/runtime_expressions.rs"]
+mod runtime_expressions;
+
+#[test]
+fn portable_runtime_expression_conformance() {
+    for (name, run) in runtime_expressions::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/value_functions.rs"]
+mod value_functions;
+
+#[test]
+fn portable_value_function_conformance() {
+    for (name, run) in value_functions::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/window_phase.rs"]
+mod window_phase;
+
+#[test]
+fn portable_window_phase_conformance() {
+    for (name, run) in window_phase::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
+#[path = "support/aggregation.rs"]
+mod aggregation;
+#[test]
+fn portable_aggregation_conformance() {
+    for (name, run) in aggregation::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}

@@ -32,11 +32,13 @@ on:
       - 'crates/reddb-server/src/runtime/query_exec/json_writers.rs'
       - 'crates/reddb-server/src/runtime/query_exec.rs'
       - 'crates/reddb-server/src/runtime/query_exec/aggregate.rs'
+      - 'crates/reddb-server/src/runtime/query_exec/table.rs'
       - 'crates/reddb-server/src/runtime/window_phase.rs'
       - 'tests/grouped_mvcc_transactions.rs'
       - 'tests/grouped/mvcc_transactions/**'
       - 'crates/reddb-server/src/runtime/join_filter/**'
       - 'crates/reddb-server/src/runtime/expr_eval.rs'
+      - 'crates/reddb-server/src/geo/**'
       - 'crates/reddb-server/src/runtime/evaluator_differential.rs'
       - 'crates/reddb-server/tests/portable_query_engine.rs'
       - 'crates/reddb-server/tests/pager_*.rs'
@@ -138,9 +140,11 @@ jobs:
       - name: Verify shared record queries and native secret policies
         if: runner.os == 'Linux'
         run: |
+          cargo test --locked -p reddb-io-server --lib geo::h3
           cargo test --locked -p reddb-io-server --lib runtime::expr_eval
           cargo test --locked -p reddb-io-server --lib runtime::join_filter
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::table
+          cargo test --locked -p reddb-io-server --lib storage::query::planner
           cargo test --locked -p reddb-io-server --lib runtime::evaluator_differential
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::aggregate
           cargo test --locked -p reddb-io-server --lib runtime::window_phase

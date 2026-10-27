@@ -73,7 +73,7 @@ reddb-server = { workspace = true, optional = true }
 
 # Per-frame compression (Flags::COMPRESSED). Pulled in only by
 # the `redwire` feature so embedded-only callers don't pay it.
-zstd = { version = "0.13", default-features = false, optional = true }
+zstd = { version = "0.14.3", default-features = false, optional = true }
 
 # The RedWire adapter supplies a CSPRNG nonce to reddb-wire's sans-I/O
 # SCRAM client driver.
@@ -104,7 +104,7 @@ serde_json = "1"
 # slim client-only feature set (`channel`, `codegen`); cargo unions
 # features across [dependencies] and [dev-dependencies], so this
 # only widens tonic during tests.
-tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
+tonic = { workspace = true, features = ["channel", "codegen", "server", "router"] }
 reddb-grpc-proto = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 # Proptest exercises HealthAwareRouter (issue #171): random RTT

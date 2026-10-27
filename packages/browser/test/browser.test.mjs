@@ -19,6 +19,7 @@ let fixtures
 let nativeTreeFixture
 let nativeFixture
 let nativeSnapshot
+let nativeQueryFixture
 const networkRequests = []
 
 async function withHostOffline(run) {
@@ -113,6 +114,7 @@ async function sharedConformance(browserPage) {
     'record_order_text_prefixes_and_stable_ties', 'record_order_expression_keys_once',
     'record_order_topk_matches_stable_sort', 'record_order_limit_offset_width',
     'record_order_identity_and_secret_callbacks', 'record_order_unordered_and_nan_edges',
+    'scalar_geo_aliases_and_operations', 'scalar_geo_argument_forms', 'scalar_geo_input_policy',
     'scalar_dispatch_clock_values', 'scalar_dispatch_time_bucket_inputs',
     'scalar_dispatch_substrings_and_patterns', 'scalar_dispatch_trim_slice_and_quote',
     'scalar_dispatch_arithmetic_and_cast', 'scalar_dispatch_case_and_coalesce_lazy',
@@ -132,6 +134,33 @@ async function sharedConformance(browserPage) {
     'text_scalar_trim_position_and_quote',
     'temporal_duration_units_and_overflow', 'temporal_timestamp_conversion_and_bounds',
     'temporal_bucket_zero_and_wide_values',
+    'geo_values_and_coordinate_forms', 'geo_spherical_and_ellipsoidal_math', 'geo_polygon_and_bounds',
+    'table_plan_callback_order_and_aliases', 'table_plan_fast_lookup_and_errors',
+    'table_plan_wide_bounds_and_topk', 'table_plan_depth_and_first_child',
+    'table_planning_order_costs_and_metadata', 'table_planning_document_and_universal_routes',
+    'table_planning_effective_sql_and_zero_bounds', 'table_planning_bounded_metadata_and_secrets',
+    'runtime_expression_native_values_and_casts', 'runtime_expression_lazy_boolean_and_case',
+    'runtime_expression_eager_functions_and_raw_specials', 'runtime_expression_predicates_and_unsupported',
+    'runtime_expression_secret_policy_and_depth',
+    'value_functions_text_and_missing', 'value_functions_clock_money_and_geo',
+    'value_functions_json_and_binary_documents', 'value_functions_json_mutation',
+    'value_functions_depth_and_wide_indices', 'value_functions_host_routing',
+    'window_ranks_partition_order_and_ties', 'window_lag_lead_values_and_defaults',
+    'window_aggregate_frames_and_peers', 'window_wide_offsets_and_bounds',
+    'window_errors_and_publication_order', 'window_materialization_admission',
+    'window_cross_row_secret_policy', 'window_projection_depth_and_subtraction',
+    'aggregate_group_bindings_alias_resolution', 'aggregate_group_bindings_expression_labels',
+    'aggregate_group_bindings_shape_and_host_admission', 'aggregate_group_bindings_depth_limits',
+    'aggregate_group_bindings_result_metadata',
+    'aggregate_results_grouped_columns_and_hidden', 'aggregate_results_empty_input_semantics',
+    'aggregate_results_wide_pagination', 'aggregate_results_admission_and_secret_policy',
+    'aggregate_planning_aliases_and_hidden_reuse', 'aggregate_planning_dedup_and_legacy_inputs',
+    'aggregate_planning_nested_expressions_and_ordering', 'aggregate_planning_parameters_and_pagination',
+    'aggregate_planning_signatures_and_unsupported', 'aggregate_planning_depth_bounds',
+    'aggregate_shared_numeric_slots', 'aggregate_counts_nulls_and_empty',
+    'aggregate_ordered_values_and_distinct', 'aggregate_parameters_and_aliases',
+    'aggregate_merge_batches', 'aggregate_numeric_coercion',
+    'aggregate_typed_group_keys', 'aggregate_depth_and_host_policy',
   ])
 }
 
@@ -144,6 +173,9 @@ before(async () => {
   const treePath = resolve(fixtures, 'native-tree.rdb')
   nativeTree('create', treePath)
   nativeTreeFixture = [...await readFile(treePath)]
+  const queryPath = resolve(fixtures, 'native-query.rdb')
+  execFileSync('cargo', [`+${toolchain}`, 'run', '--quiet', '--locked', '-p', 'reddb-io-engine', '--example', 'browser_stored_query', '--', queryPath], { cwd: root, stdio: 'inherit' })
+  nativeQueryFixture = [...await readFile(queryPath)]
   server = createServer(async (request, response) => {
     networkRequests.push(request.url)
     try {
@@ -244,7 +276,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: false, transactions: false, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
@@ -275,6 +307,234 @@ for (const browser of browsers) {
           } finally { worker.terminate() }
         })
         assert.deepEqual(result, { code: 'VERSION_MISMATCH', created: false })
+      } finally { await current.close() }
+    })
+
+    storageTest('public table SELECT recovers native snapshot and WAL after an offline browser restart', async () => {
+      const current = await page()
+      const first = await current.evaluate(async (fixture) => {
+        const root = await navigator.storage.getDirectory()
+        const directory = await root.getDirectoryHandle('reddb-browser', { create: true })
+        const file = await directory.getFileHandle('public-sql.rdb', { create: true })
+        const writer = await file.createWritable()
+        await writer.write(Uint8Array.from(fixture))
+        await writer.close()
+        const database = await RedDBBrowser.openDatabase({ name: 'public-sql' })
+        const errors = []
+        let result
+        try {
+          result = await database.query('SELECT p.rid AS id, UPPER(name) AS label, total * 2 AS doubled FROM people AS p WHERE nickname IS NULL ORDER BY total DESC LIMIT 4294967296')
+          const exact = await database.query('SELECT name FROM people WHERE rid IN (9007199254740993)')
+          if (JSON.stringify(exact.rows) !== JSON.stringify([['Ana']])) throw new Error('Unsigned identity IN lost its exact SQL binding')
+          for (const sql of ['INSERT INTO people (name) VALUES (\'x\')', 'SELECT COUNT(*) FROM empty', 'SELECT missing FROM empty', 'SELECT total / 0 FROM people', null]) {
+            try { await database.query(sql) } catch (error) { errors.push(error.code) }
+          }
+          try { await RedDBBrowser.openArtifact({ name: 'public-sql' }) } catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.openDatabase({ name: 'public-sql' }) } catch (error) { errors.push(error.code) }
+        } finally { await database.close() }
+        try { await RedDBBrowser.openDatabase({ name: 'missing-public-sql' }) } catch (error) { errors.push(error.code) }
+        const bytes = [...new Uint8Array(await (await file.getFile()).arrayBuffer())]
+        await navigator.serviceWorker.register('/packages/browser/test/offline-worker.js', { scope: '/packages/browser/' })
+        return { result, errors, unchanged: bytes.every((byte, index) => byte === fixture[index]) && bytes.length === fixture.length }
+      }, nativeQueryFixture)
+      const expected = { columns: ['id', 'label', 'doubled'], rows: [[2, 'BIA', 44], [{ $uint: '9007199254740993' }, 'ANA', 20]] }
+      assert.deepEqual(first.result, expected)
+      assert.deepEqual(first.errors, ['QUERY_UNSUPPORTED', 'QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_EVALUATION_ERROR', 'INVALID_ARGUMENT', 'FILE_BUSY', 'FILE_BUSY', 'DATABASE_NOT_FOUND'])
+      assert.equal(first.unchanged, true, 'public SELECT and failed mutations must leave native bytes intact')
+      await current.waitForFunction(() => navigator.serviceWorker.controller)
+      await current.close()
+      await context.close()
+      try {
+        await withHostOffline(async () => {
+          const requestsBefore = networkRequests.length
+          await launch({ offline: true })
+          const reopened = await page()
+          try {
+            const result = await reopened.evaluate(async () => {
+              const database = await RedDBBrowser.openDatabase({ name: 'public-sql' })
+              try { return await database.query('SELECT p.rid AS id, UPPER(name) AS label, total * 2 AS doubled FROM people AS p WHERE nickname IS NULL ORDER BY total DESC LIMIT 4294967296') }
+              finally { await database.close() }
+            })
+            assert.deepEqual(result, expected)
+            assert.equal(networkRequests.length, requestsBefore, 'public SQL must not reach the HTTP host')
+          } finally { await reopened.close() }
+        })
+      } finally { await context.setOffline(false) }
+    })
+
+    storageTest('positional parameters retain types through the real Worker and WASM binder', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const database = await RedDBBrowser.openDatabase({ name: 'sql-params', create: true })
+          const text = "O'Reilly'); DELETE FROM bindings; -- $1\0🦊"
+          const errors = []
+          try {
+            await database.query('CREATE TABLE bindings (id INTEGER PRIMARY KEY, body TEXT, flag BOOLEAN, amount FLOAT)')
+            await database.query('INSERT INTO bindings VALUES ($1, $2, $3, $4)', [9007199254740993n, text, true, 0.125])
+            const first = await database.query('SELECT id, body, flag, amount FROM bindings WHERE id = ?1', [9007199254740993n])
+            const typed = await database.query('SELECT $1 AS nil, $2 AS flag, $3 AS minimum, $4 AS maximum, $5 AS fraction FROM bindings', [null, true, -9223372036854775808n, 18446744073709551615n, 0.125])
+            const page = await database.query('SELECT id FROM bindings LIMIT $1 OFFSET $2', [1, 0])
+            for (const value of [undefined, NaN, Infinity, 9007199254740992, 18446744073709551616n, -9223372036854775809n, {}, [1, 2]]) {
+              try { await database.query('SELECT $1 AS invalid FROM bindings', [value]) }
+              catch (error) { errors.push(error.code) }
+            }
+            for (const params of [[], [1, 2]]) {
+              try { await database.query('SELECT id FROM bindings WHERE id = $1', params) }
+              catch (error) { errors.push(error.code) }
+            }
+            await database.query('BEGIN')
+            await database.query('UPDATE bindings SET body = $1 WHERE id = $2', ['Discard', 9007199254740993n])
+            try { await database.query('DELETE FROM bindings WHERE id = $1', []) }
+            catch (error) { errors.push(error.code) }
+            try { await database.query('COMMIT') } catch (error) { errors.push(error.code) }
+            await database.query('ROLLBACK')
+            const unchanged = await database.query('SELECT body FROM bindings WHERE id = $1', [9007199254740993n])
+            return { first, typed, page, errors, unchanged, capability: (await database.info()).capabilities.queryParameters }
+          } finally { await database.close() }
+        })
+        assert.equal(result.capability, true)
+        assert.deepEqual(result.first.rows, [[{ $int: '9007199254740993' }, "O'Reilly'); DELETE FROM bindings; -- $1\0🦊", true, 0.125]])
+        assert.deepEqual(result.typed.rows, [[null, true, { $int: '-9223372036854775808' }, { $uint: '18446744073709551615' }, 0.125]])
+        assert.deepEqual(result.page.rows, [[{ $int: '9007199254740993' }]])
+        assert.deepEqual(result.errors, [...new Array(8).fill('INVALID_ARGUMENT'), 'INVALID_PARAMS', 'INVALID_PARAMS', 'INVALID_PARAMS', 'QUERY_EVALUATION_ERROR'])
+        assert.deepEqual(result.unchanged.rows, [["O'Reilly'); DELETE FROM bindings; -- $1\0🦊"]])
+      } finally { await current.close() }
+    })
+
+    storageTest('native database backups preserve committed state and never overwrite existing files', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async fixture => {
+          const same = (left, right) => left.length === right.length && left.every((byte, index) => byte === right[index])
+          const native = await RedDBBrowser.restoreDatabase({ name: 'backup-native', backup: Uint8Array.from(fixture) })
+          let nativeMatch
+          try {
+            nativeMatch = same(await native.exportBackup(), fixture)
+            await native.query('SELECT name FROM people')
+          } finally { await native.close() }
+          const database = await RedDBBrowser.openDatabase({ name: 'backup-source', create: true })
+          const errors = []
+          const chunks = []
+          for (let index = 0; index < 48; index++) chunks.push(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32768))))
+          const text = "O'Reilly\0🦊" + btoa(chunks.join(''))
+          let backup, pendingExcluded, stillPending
+          try {
+            await database.query('CREATE TABLE backups (id INTEGER PRIMARY KEY, body TEXT NOT NULL, revision INTEGER DEFAULT = 7)')
+            await database.query('INSERT INTO backups (id, body) VALUES ($1, $2)', [9007199254740993n, text])
+            backup = await database.exportBackup()
+            await database.query('BEGIN')
+            await database.query('UPDATE backups SET body = $1', ['Uncommitted'])
+            pendingExcluded = same(backup, await database.exportBackup())
+            stillPending = (await database.query('SELECT body FROM backups')).rows[0][0] === 'Uncommitted'
+            try { await RedDBBrowser.restoreDatabase({ name: 'backup-source', backup }) }
+            catch (error) { errors.push(error.code) }
+          } finally { await database.close() }
+          const restored = await RedDBBrowser.restoreDatabase({ name: 'backup-restored', backup })
+          let restoredMatch, exact, revision
+          try {
+            restoredMatch = same(backup, await restored.exportBackup())
+            const rows = (await restored.query('SELECT id, body, revision FROM backups')).rows
+            exact = rows[0][0].$int === '9007199254740993' && rows[0][1] === text
+            revision = rows[0][2]
+            await restored.query('INSERT INTO backups (id, body) VALUES ($1, $2)', [2, 'after restore'])
+          } finally { await restored.close() }
+          try { await RedDBBrowser.restoreDatabase({ name: 'backup-restored', backup }) }
+          catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.restoreDatabase({ name: 'backup-corrupt', backup: new Uint8Array(32) }) }
+          catch (error) { errors.push(error.code) }
+          try { await RedDBBrowser.openDatabase({ name: 'backup-corrupt' }) }
+          catch (error) { errors.push(error.code) }
+          const reopened = await RedDBBrowser.openDatabase({ name: 'backup-restored' })
+          let preserved
+          try {
+            const rows = (await reopened.query('SELECT body, revision FROM backups WHERE id = $1', [2])).rows
+            preserved = rows[0][0] === 'after restore' && rows[0][1] === 7
+          }
+          finally { await reopened.close() }
+          return { nativeMatch, pendingExcluded, stillPending, restoredMatch, exact, revision, preserved, errors, length: backup.length }
+        }, nativeQueryFixture)
+        assert.deepEqual({ ...result, length: undefined }, {
+          nativeMatch: true, pendingExcluded: true, stillPending: true, restoredMatch: true,
+          exact: true, revision: 7, preserved: true,
+          errors: ['FILE_BUSY', 'DATABASE_EXISTS', 'DATABASE_ERROR', 'DATABASE_NOT_FOUND'], length: undefined,
+        })
+        assert.ok(result.length > 1024 * 1024, 'exercise multi-chunk backup I/O')
+      } finally { await current.close() }
+    })
+
+    storageTest('database backup reads honor the native publication failure fence', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', create: true, worker })
+          const errors = []
+          try {
+            await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)')
+            await database.query("INSERT INTO notes (id, body) VALUES (1, 'before')")
+            for (const operation of [
+              () => database.query("UPDATE notes SET body = 'failed' WHERE id = 1"),
+              () => database.exportBackup(),
+              () => database.query('SELECT body FROM notes'),
+            ]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await database.close() }
+          const reopened = await RedDBBrowser.openDatabase({ name: 'backup-failed-io' })
+          let rows
+          try { rows = (await reopened.query('SELECT body FROM notes')).rows }
+          finally { await reopened.close() }
+          const failing = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', worker: new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' }) })
+          try {
+            for (const operation of [() => failing.exportBackup(), () => failing.query('SELECT body FROM notes')]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await failing.close(); await failing.close() }
+          return { errors, rows }
+        })
+        assert.deepEqual(result, { errors: ['DATABASE_ERROR', 'DATABASE_ERROR', 'DATABASE_ERROR', 'ARTIFACT_ERROR', 'CLOSED'], rows: [['before']] })
+      } finally { await current.close() }
+    })
+
+    storageTest('public SQL creates a database and worker termination rolls back uncommitted writes', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/src/worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'sql-crash', create: true, worker })
+          await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+          await database.query("INSERT INTO notes VALUES (1, 'committed')")
+          await database.query('BEGIN')
+          await database.query("UPDATE notes SET body = 'uncommitted'")
+          await database.query("INSERT INTO notes VALUES (2, 'also uncommitted')")
+          worker.terminate()
+          await navigator.locks.request('reddb-browser:sql-crash', () => {})
+          const reopened = await RedDBBrowser.openDatabase({ name: 'sql-crash' })
+          try {
+            return await reopened.query('SELECT id, body FROM notes ORDER BY id')
+          } finally { await reopened.close() }
+        })
+        assert.deepEqual(result, { columns: ['id', 'body'], rows: [[1, 'committed']] })
+      } finally { await current.close() }
+    })
+
+    storageTest('create option preserves an existing corrupt SQL database', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const root = await navigator.storage.getDirectory()
+          const directory = await root.getDirectoryHandle('reddb-browser', { create: true })
+          const file = await directory.getFileHandle('sql-corrupt.rdb', { create: true })
+          const writer = await file.createWritable()
+          await writer.write(new Uint8Array([9, 8, 7]))
+          await writer.close()
+          let code
+          try { await RedDBBrowser.openDatabase({ name: 'sql-corrupt', create: true }) }
+          catch (error) { code = error.code }
+          return { code, bytes: [...new Uint8Array(await (await file.getFile()).arrayBuffer())] }
+        })
+        assert.deepEqual(result, { code: 'DATABASE_ERROR', bytes: [9, 8, 7] })
       } finally { await current.close() }
     })
 

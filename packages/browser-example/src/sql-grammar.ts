@@ -1,8 +1,8 @@
-// From the DS v2026.10.30 red-ui query reference (apps/showcase/src/lib/sql-grammar.ts).
+// Based on the DS v2026.10.30 red-ui query reference, extended for local table SQL.
 import type { CodeFieldGrammar, CodeFieldToken } from "@reddb-io/design-system/data/CodeField";
 
 const SQL_KEYWORDS = new Set(
-  "select from where join left inner on and or not in as order by group having limit offset desc asc distinct count sum avg min max case when then else end is null like between with union all explain"
+  "select from where join left inner on and or not in as order by group having limit offset desc asc distinct count sum avg min max case when then else end is null like between with union all explain create table if exists primary key integer text insert into values update set delete begin commit rollback"
     .split(" "),
 );
 

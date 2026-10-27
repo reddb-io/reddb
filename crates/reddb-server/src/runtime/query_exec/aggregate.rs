@@ -11,26 +11,87 @@
 //! `execute_runtime_table_query` when any projection is an aggregate
 //! function.
 
+use reddb_engine::query::planning::aggregation::{
+    prepare_aggregate_runtime_plan, validate_aggregate_projection_shape_with_host,
+    AggregateGroupBinding, AggregateShapeHost,
+};
+use reddb_engine::query::runtime::aggregation::{
+    aggregate_argument_key, aggregate_output_name, build_aggregate_group_key, sum_f64_to_value,
+    AggregateGroupKey, AggregateHost, CompiledAggPlan, GroupKeyPart, ProjSlot, SlottedAggState,
+};
+pub(crate) use reddb_engine::query::runtime::aggregation::{
+    base_function_name, has_aggregate_projections, is_aggregate_function,
+};
+
 use super::filter_compiled::{classify_field, classify_field_with_schema, EntityColumnResolver};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
-    projection_name, resolve_runtime_field, runtime_partial_cmp, sort_records_by_order_by_with_db,
+    projection_name, resolve_runtime_field, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref_with_schema;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::RedDB;
-use reddb_rql::ast::{
-    BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
-};
+use reddb_rql::ast::{Expr, FieldRef, Filter, OrderByClause, Projection};
 use reddb_rql::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
-    projection_to_expr,
 };
-use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
+use reddb_types::Value;
 
 use super::TableQuery;
+
+struct NativeAggregateShapeHost;
+impl AggregateShapeHost for NativeAggregateShapeHost {
+    type Error = RedDBError;
+    fn validate_projection(&self, projection: &Projection) -> RedDBResult<()> {
+        validate_h3_projection_resolutions(projection)
+    }
+    fn validate_group_expression(&self, expression: &Expr) -> RedDBResult<()> {
+        validate_h3_expr_resolutions(expression)
+    }
+    fn query_error(&self, message: String) -> RedDBError {
+        RedDBError::Query(message)
+    }
+}
+
+struct NativeAggregateHost;
+impl AggregateHost for NativeAggregateHost {
+    fn compare_values(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        crate::runtime::join_filter::runtime_partial_cmp(left, right)
+    }
+    fn evaluate_static_projection(&self, projection: &Projection) -> Option<Value> {
+        eval_projection_value_with_db(None, projection, &UnifiedRecord::new())
+    }
+}
+struct NativeAggregateResultHost<'a> {
+    db: &'a RedDB,
+}
+impl AggregateHost for NativeAggregateResultHost<'_> {
+    fn compare_values(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        NativeAggregateHost.compare_values(left, right)
+    }
+    fn evaluate_static_projection(&self, projection: &Projection) -> Option<Value> {
+        NativeAggregateHost.evaluate_static_projection(projection)
+    }
+}
+impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
+    for NativeAggregateResultHost<'_>
+{
+    type Error = RedDBError;
+    fn guard_materialization(&self, groups: usize) -> RedDBResult<()> {
+        crate::runtime::materialization_limit::guard(self.db, "aggregation", groups)
+    }
+    fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter_with_db(Some(self.db), record, filter, None, None)
+    }
+    fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
+        sort_records_by_order_by_with_db(Some(self.db), records, clauses, None, None)
+    }
+    fn secret_query_output(&self, value: Value) -> RedDBResult<Value> {
+        crate::runtime::execution_context::secret_query_output(value)
+    }
+}
 
 struct QueryTempDir {
     path: std::path::PathBuf,
@@ -89,50 +150,12 @@ mod query_temp_dir_tests {
     }
 }
 
-/// Return `true` when any projection in the query is a known aggregate
-/// function. Used by the executor to decide whether to dispatch to
-/// [`execute_aggregate_query`].
-pub(crate) fn has_aggregate_projections(projections: &[Projection]) -> bool {
-    projections.iter().any(|p| {
-        matches!(
-            p,
-            Projection::Function(name, _)
-                if is_aggregate_function(base_function_name(name))
-        )
-    })
-}
-
-pub(crate) fn base_function_name(name: &str) -> &str {
-    name.split(':').next().unwrap_or(name)
-}
-
-pub(crate) fn is_aggregate_function(name: &str) -> bool {
-    matches!(
-        name,
-        "COUNT"
-            | "AVG"
-            | "SUM"
-            | "MIN"
-            | "MAX"
-            | "STDDEV"
-            | "VARIANCE"
-            | "MEDIAN"
-            | "PERCENTILE"
-            | "GROUP_CONCAT"
-            | "STRING_AGG"
-            | "FIRST"
-            | "LAST"
-            | "ARRAY_AGG"
-            | "COUNT_DISTINCT"
-    )
-}
-
 /// Execute a query with aggregate functions (COUNT, AVG, SUM, MIN, MAX, GROUP BY).
 pub(crate) fn execute_aggregate_query(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
-    validate_aggregate_projection_shape(query)?;
+    validate_aggregate_projection_shape_with_host(&NativeAggregateShapeHost, query)?;
     let mut sensitivity_source = UnifiedRecord::new();
     let contract = db.collection_contract(&query.table);
     let declared_schema = contract
@@ -236,31 +259,10 @@ pub(crate) fn execute_aggregate_query(
 
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
-    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
-    let runtime_plan = prepare_aggregate_runtime_plan(query);
-    let mut all_aggregate_projections = effective_projections
-        .iter()
-        .filter(|projection| {
-            matches!(
-                projection,
-                Projection::Function(name, _)
-                    if is_aggregate_function(base_function_name(name))
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    all_aggregate_projections.extend(runtime_plan.hidden_aggregates.iter().cloned());
-    let mut seen_aggregate_signatures = std::collections::HashSet::new();
-    all_aggregate_projections.retain(|projection| {
-        let Projection::Function(name, args) = projection else {
-            return false;
-        };
-        let func_name = base_function_name(name).to_uppercase();
-        if !is_aggregate_function(&func_name) {
-            return false;
-        }
-        seen_aggregate_signatures.insert(aggregate_projection_signature(&func_name, args))
-    });
+    let runtime_plan = prepare_aggregate_runtime_plan(query)
+        .map_err(|message| RedDBError::Query(message.into()))?;
+    let all_aggregate_projections = &runtime_plan.aggregate_projections;
+    let effective_group_by = &runtime_plan.group_bindings;
 
     let manager = db
         .store()
@@ -317,11 +319,10 @@ pub(crate) fn execute_aggregate_query(
             .iter()
             .map(|expr| {
                 // TIME_BUCKET grouping requires a record (timestamp arithmetic).
-                if parse_time_bucket_group_expr(&group_expr_key(expr).unwrap_or_default()).is_some()
-                {
+                if parse_time_bucket_group_expr(expr.key.as_deref().unwrap_or_default()).is_some() {
                     return None;
                 }
-                match expr {
+                match &expr.expression {
                     Expr::Column { field, .. } => {
                         let col_name = field_ref_name(field);
                         let kind = classify(field);
@@ -393,7 +394,8 @@ pub(crate) fn execute_aggregate_query(
     // ── Compile the aggregation plan ─────────────────────────────────────────
     // Assigns a slot index to every projection in `all_aggregate_projections`
     // so the hot loop can use O(1) array writes instead of HashMap lookups.
-    let agg_plan = CompiledAggPlan::compile(&all_aggregate_projections);
+    let agg_plan = CompiledAggPlan::compile(all_aggregate_projections)
+        .ok_or_else(|| RedDBError::Query("aggregate projection exceeds nesting limit".into()))?;
 
     // Work-mem cap: 64 MB mirrors PostgreSQL's work_mem GUC default.
     // When the in-memory HashMap exceeds `max_groups` entries, we flush the
@@ -483,7 +485,7 @@ pub(crate) fn execute_aggregate_query(
                 if group_by_all_fast {
                     // Fast path: all GROUP BY are simple columns → read from entity.
                     let mut values = Vec::with_capacity(effective_group_by.len());
-                    for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
+                    for (resolver_opt, expr) in group_by_kinds.iter().zip(effective_group_by) {
                         let value = if let Some(resolver) = resolver_opt {
                             resolver
                                 .get_value(0, entity)
@@ -513,7 +515,7 @@ pub(crate) fn execute_aggregate_query(
                         return true;
                     };
                     let mut values = Vec::with_capacity(effective_group_by.len());
-                    for group_expr in &effective_group_by {
+                    for group_expr in effective_group_by {
                         let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
                             return true;
                         };
@@ -595,8 +597,8 @@ pub(crate) fn execute_aggregate_query(
                     None => continue,
                 };
 
-                // COUNT(*) — already counted above.
-                if matches!(slot, ProjSlot::CountStar) {
+                // COUNT(*) is already counted; shared slots are updated by their owner.
+                if matches!(slot, ProjSlot::CountStar | ProjSlot::Shared) {
                     continue;
                 }
 
@@ -617,76 +619,9 @@ pub(crate) fn execute_aggregate_query(
                 };
                 let val = val.and_then(crate::runtime::execution_context::secret_query_input);
                 let Some(val) = val else { continue };
-                let num = super::aggregate_value_to_f64(&val);
-
-                match slot {
-                    ProjSlot::CountStar => {}
-                    ProjSlot::CountOnly(idx) => {
-                        if !matches!(val, Value::Null) {
-                            state.count_only[*idx] += 1;
-                        }
-                    }
-                    ProjSlot::SumCount(idx) => {
-                        if let Some(n) = num {
-                            state.sums[*idx] += n;
-                            state.sum_agg_counts[*idx] += 1;
-                        }
-                    }
-                    ProjSlot::SumCountSq(idx) => {
-                        if let Some(n) = num {
-                            state.sums[*idx] += n;
-                            state.sum_agg_counts[*idx] += 1;
-                            state.sum_squares[*idx] += n * n;
-                        }
-                    }
-                    ProjSlot::Min(idx) => {
-                        update_extreme_value_slot(
-                            &mut state.mins[*idx],
-                            &val,
-                            std::cmp::Ordering::Less,
-                        );
-                    }
-                    ProjSlot::Max(idx) => {
-                        update_extreme_value_slot(
-                            &mut state.maxs[*idx],
-                            &val,
-                            std::cmp::Ordering::Greater,
-                        );
-                    }
-                    ProjSlot::AllValues(idx) => {
-                        if let Some(n) = num {
-                            state.all_values[*idx].push(n);
-                        }
-                    }
-                    ProjSlot::Concat(idx) => {
-                        if !matches!(val, Value::Null) {
-                            let text: String = match &val {
-                                Value::Text(s) => s.to_string(),
-                                other => other.display_string(),
-                            };
-                            state.concat_values[*idx].push(text);
-                        }
-                    }
-                    ProjSlot::First(idx) => {
-                        if state.first_values[*idx].is_none() {
-                            state.first_values[*idx] = Some(val);
-                        }
-                    }
-                    ProjSlot::Last(idx) => {
-                        state.last_values[*idx] = Some(val);
-                    }
-                    ProjSlot::Array(idx) => {
-                        state.array_values[*idx].push(val);
-                    }
-                    ProjSlot::Distinct(idx) => {
-                        if !matches!(val, Value::Null) {
-                            state.distinct_sets[*idx]
-                                .get_or_insert_with(std::collections::HashSet::new)
-                                .insert(group_value_key(&val));
-                        }
-                    }
-                }
+                state.accumulate(&NativeAggregateHost, slot, val);
             }
+
             true
         },
     )?;
@@ -712,836 +647,26 @@ pub(crate) fn execute_aggregate_query(
             .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?
     };
 
-    // Issue #769 — cap the materialized in-memory state. `groups` is the
-    // full distinct-group set (in-memory + spilled, merged) so its
-    // cardinality is exactly the aggregation's materialized row count.
-    // A GROUP BY whose distinct-key count blows the ceiling terminates
-    // here rather than continuing to project a runaway result.
-    crate::runtime::materialization_limit::guard(db, "aggregation", groups.len())?;
-
-    // Build result records from accumulated groups
-    let mut records = Vec::with_capacity(groups.len().max(1));
-    let mut columns = Vec::new();
-
-    for group in groups.values() {
-        let mut record = UnifiedRecord::new();
-
-        // Add GROUP BY columns
-        if has_group_by {
-            for (index, group_expr) in effective_group_by.iter().enumerate() {
-                let Some(value) = group.group_values.get(index).cloned() else {
-                    continue;
-                };
-                let label = group_output_label(query, group_expr);
-                if !columns.contains(&label) {
-                    columns.push(label.clone());
-                }
-                record.set(
-                    &group_expr_key(group_expr).unwrap_or_else(|| label.clone()),
-                    value.clone(),
-                );
-                record.set(&label, value);
-            }
-        }
-
-        // Add visible aggregate results
-        for proj in &effective_projections {
-            if let Some((result_name, result_val)) =
-                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
-            {
-                if !columns.contains(&result_name) {
-                    columns.push(result_name.clone());
-                }
-                record.set(&result_name, result_val);
-            }
-        }
-
-        for proj in &runtime_plan.hidden_aggregates {
-            if let Some((result_name, result_val)) =
-                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
-            {
-                record.set(&result_name, result_val);
-            }
-        }
-
-        if having_matches(db, runtime_plan.having.as_ref(), &record) {
-            records.push(record);
-        }
-    }
-
-    // If no input rows matched, return a single aggregate row.
-    let empty_state = SlottedAggState::new(&agg_plan);
-    if groups.is_empty() && !has_group_by {
-        let mut record = UnifiedRecord::new();
-        for proj in &effective_projections {
-            if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
-            {
-                if !columns.contains(&result_name) {
-                    columns.push(result_name.clone());
-                }
-                record.set(&result_name, result_val);
-            }
-        }
-        for proj in &runtime_plan.hidden_aggregates {
-            if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
-            {
-                record.set(&result_name, result_val);
-            }
-        }
-        if having_matches(db, runtime_plan.having.as_ref(), &record) {
-            records.push(record);
-        }
-    }
-
-    if !runtime_plan.order_by.is_empty() {
-        sort_records_by_order_by_with_db(
-            Some(db),
-            &mut records,
-            &runtime_plan.order_by,
-            None,
-            None,
-        );
-    }
-
-    if let Some(offset) = query.offset {
-        let offset = offset as usize;
-        if offset < records.len() {
-            records = records.into_iter().skip(offset).collect();
-        } else {
-            records.clear();
-        }
-    }
-
-    if let Some(limit) = query.limit {
-        records.truncate(limit as usize);
-    }
-
-    if sensitive_query {
-        for record in &mut records {
-            for projection in effective_projections
-                .iter()
-                .chain(&runtime_plan.hidden_aggregates)
-            {
-                if crate::runtime::join_filter::projection_uses_secret(
-                    projection,
-                    &sensitivity_source,
-                    Some(table_name),
-                    Some(table_alias),
-                ) {
-                    let label = visible_aggregate_output_name(projection)
-                        .map(|(_, label)| label)
-                        .unwrap_or_else(|| projection_name(projection));
-                    if let Some(value) = record.get(&label).cloned() {
-                        record.set(
-                            &label,
-                            crate::runtime::execution_context::secret_query_output(value)?,
-                        );
-                    }
-                }
-            }
-            for expression in &effective_group_by {
-                if crate::runtime::join_filter::expression_uses_secret(
-                    expression,
-                    &sensitivity_source,
-                    Some(table_name),
-                    Some(table_alias),
-                ) {
-                    let label = group_output_label(query, expression);
-                    if let Some(value) = record.get(&label).cloned() {
-                        record.set(
-                            &label,
-                            crate::runtime::execution_context::secret_query_output(value)?,
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(UnifiedResult {
-        columns,
-        records,
-        stats: Default::default(),
-        pre_serialized_json: None,
-    })
-}
-
-#[derive(Default)]
-struct AggregateRuntimePlan {
-    hidden_aggregates: Vec<Projection>,
-    having: Option<Filter>,
-    order_by: Vec<OrderByClause>,
-}
-
-#[derive(Default)]
-struct HiddenAggregateRegistry {
-    projections: Vec<Projection>,
-    outputs_by_signature: std::collections::HashMap<String, String>,
-}
-
-impl HiddenAggregateRegistry {
-    fn ensure_output_name(&mut self, func_name: &str, args: &[Expr]) -> Option<String> {
-        let signature = aggregate_expr_signature(func_name, args)?;
-        if let Some(output_name) = self.outputs_by_signature.get(&signature) {
-            return Some(output_name.clone());
-        }
-
-        let projection_args = args
-            .iter()
-            .map(projection_from_expr)
-            .collect::<Option<Vec<_>>>()?;
-        let col_name = aggregate_argument_key(&projection_args)?;
-        let projection = Projection::Function(func_name.to_string(), projection_args);
-        let output_name = aggregate_output_name(&projection, func_name, &col_name);
-
-        self.outputs_by_signature
-            .insert(signature, output_name.clone());
-        self.projections.push(projection);
-        Some(output_name)
-    }
-}
-
-fn prepare_aggregate_runtime_plan(query: &TableQuery) -> AggregateRuntimePlan {
-    let effective_projections = effective_table_projections(query);
-    let visible_outputs = effective_projections
-        .iter()
-        .filter_map(visible_aggregate_output_name)
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut hidden = HiddenAggregateRegistry::default();
-
-    let having = effective_table_having_filter(query)
-        .as_ref()
-        .map(|filter| rewrite_aggregate_filter_refs(filter, &visible_outputs, &mut hidden));
-    let order_by = query
-        .order_by
-        .iter()
-        .map(|clause| rewrite_aggregate_order_by_refs(clause, &visible_outputs, &mut hidden))
-        .collect();
-
-    AggregateRuntimePlan {
-        hidden_aggregates: hidden.projections,
-        having,
-        order_by,
-    }
-}
-
-fn visible_aggregate_output_name(projection: &Projection) -> Option<(String, String)> {
-    let Projection::Function(name, args) = projection else {
-        return None;
-    };
-    let func_name = base_function_name(name).to_uppercase();
-    if !is_aggregate_function(&func_name) {
-        return None;
-    }
-
-    let signature = aggregate_projection_signature(&func_name, args);
-    let col_name = aggregate_argument_key(args)?;
-    Some((
-        signature,
-        aggregate_output_name(projection, &func_name, &col_name),
-    ))
-}
-
-fn rewrite_aggregate_order_by_refs(
-    clause: &OrderByClause,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> OrderByClause {
-    OrderByClause {
-        field: clause.field.clone(),
-        expr: clause
-            .expr
-            .as_ref()
-            .map(|expr| rewrite_aggregate_expr_refs(expr, visible_outputs, hidden)),
-        ascending: clause.ascending,
-        nulls_first: clause.nulls_first,
-    }
-}
-
-fn rewrite_aggregate_filter_refs(
-    filter: &Filter,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> Filter {
-    match filter {
-        Filter::CompareExpr { lhs, op, rhs } => Filter::CompareExpr {
-            lhs: rewrite_aggregate_expr_refs(lhs, visible_outputs, hidden),
-            op: *op,
-            rhs: rewrite_aggregate_expr_refs(rhs, visible_outputs, hidden),
+    reddb_engine::query::runtime::aggregate_results::finish_aggregate_results_with_host(
+        &NativeAggregateResultHost { db },
+        reddb_engine::query::runtime::aggregate_results::AggregateResultContext {
+            query,
+            visible_projections: &effective_projections,
+            runtime_plan: &runtime_plan,
+            slots: &agg_plan,
+            sensitivity_source: sensitive_query.then_some(&sensitivity_source),
         },
-        Filter::And(left, right) => Filter::And(
-            Box::new(rewrite_aggregate_filter_refs(left, visible_outputs, hidden)),
-            Box::new(rewrite_aggregate_filter_refs(
-                right,
-                visible_outputs,
-                hidden,
-            )),
-        ),
-        Filter::Or(left, right) => Filter::Or(
-            Box::new(rewrite_aggregate_filter_refs(left, visible_outputs, hidden)),
-            Box::new(rewrite_aggregate_filter_refs(
-                right,
-                visible_outputs,
-                hidden,
-            )),
-        ),
-        Filter::Not(inner) => Filter::Not(Box::new(rewrite_aggregate_filter_refs(
-            inner,
-            visible_outputs,
-            hidden,
-        ))),
-        other => other.clone(),
-    }
-}
-
-fn rewrite_aggregate_expr_refs(
-    expr: &Expr,
-    visible_outputs: &std::collections::HashMap<String, String>,
-    hidden: &mut HiddenAggregateRegistry,
-) -> Expr {
-    match expr {
-        Expr::FunctionCall { name, args, span } => {
-            let func_name = name.to_uppercase();
-            if is_aggregate_function(&func_name) {
-                if let Some(signature) = aggregate_expr_signature(&func_name, args) {
-                    if let Some(output_name) = visible_outputs.get(&signature) {
-                        return aggregate_output_expr(output_name.clone(), *span);
-                    }
-                }
-                if let Some(output_name) = hidden.ensure_output_name(&func_name, args) {
-                    return aggregate_output_expr(output_name, *span);
-                }
+        groups.values().map(|group| {
+            reddb_engine::query::runtime::aggregate_results::AggregateGroupRef {
+                group_values: &group.group_values,
+                state: &group.state,
             }
-
-            Expr::FunctionCall {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|arg| rewrite_aggregate_expr_refs(arg, visible_outputs, hidden))
-                    .collect(),
-                span: *span,
-            }
-        }
-        Expr::BinaryOp { op, lhs, rhs, span } => Expr::BinaryOp {
-            op: *op,
-            lhs: Box::new(rewrite_aggregate_expr_refs(lhs, visible_outputs, hidden)),
-            rhs: Box::new(rewrite_aggregate_expr_refs(rhs, visible_outputs, hidden)),
-            span: *span,
-        },
-        Expr::UnaryOp { op, operand, span } => Expr::UnaryOp {
-            op: *op,
-            operand: Box::new(rewrite_aggregate_expr_refs(
-                operand,
-                visible_outputs,
-                hidden,
-            )),
-            span: *span,
-        },
-        Expr::Cast {
-            inner,
-            target,
-            span,
-        } => Expr::Cast {
-            inner: Box::new(rewrite_aggregate_expr_refs(inner, visible_outputs, hidden)),
-            target: *target,
-            span: *span,
-        },
-        Expr::Case {
-            branches,
-            else_,
-            span,
-        } => Expr::Case {
-            branches: branches
-                .iter()
-                .map(|(cond, value)| {
-                    (
-                        rewrite_aggregate_expr_refs(cond, visible_outputs, hidden),
-                        rewrite_aggregate_expr_refs(value, visible_outputs, hidden),
-                    )
-                })
-                .collect(),
-            else_: else_
-                .as_ref()
-                .map(|expr| Box::new(rewrite_aggregate_expr_refs(expr, visible_outputs, hidden))),
-            span: *span,
-        },
-        Expr::IsNull {
-            operand,
-            negated,
-            span,
-        } => Expr::IsNull {
-            operand: Box::new(rewrite_aggregate_expr_refs(
-                operand,
-                visible_outputs,
-                hidden,
-            )),
-            negated: *negated,
-            span: *span,
-        },
-        Expr::InList {
-            target,
-            values,
-            negated,
-            span,
-        } => Expr::InList {
-            target: Box::new(rewrite_aggregate_expr_refs(target, visible_outputs, hidden)),
-            values: values
-                .iter()
-                .map(|value| rewrite_aggregate_expr_refs(value, visible_outputs, hidden))
-                .collect(),
-            negated: *negated,
-            span: *span,
-        },
-        Expr::Between {
-            target,
-            low,
-            high,
-            negated,
-            span,
-        } => Expr::Between {
-            target: Box::new(rewrite_aggregate_expr_refs(target, visible_outputs, hidden)),
-            low: Box::new(rewrite_aggregate_expr_refs(low, visible_outputs, hidden)),
-            high: Box::new(rewrite_aggregate_expr_refs(high, visible_outputs, hidden)),
-            negated: *negated,
-            span: *span,
-        },
-        other => other.clone(),
-    }
-}
-
-fn aggregate_output_expr(output_name: String, span: Span) -> Expr {
-    Expr::Column {
-        field: FieldRef::TableColumn {
-            table: String::new(),
-            column: output_name,
-        },
-        span,
-    }
-}
-
-fn aggregate_projection_signature(func_name: &str, args: &[Projection]) -> String {
-    let rendered = args
-        .iter()
-        .map(render_projection_signature)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{func_name}({rendered})")
-}
-
-fn aggregate_expr_signature(func_name: &str, args: &[Expr]) -> Option<String> {
-    let rendered = args
-        .iter()
-        .map(render_expr_signature)
-        .collect::<Option<Vec<_>>>()?
-        .join(",");
-    Some(format!("{func_name}({rendered})"))
-}
-
-fn render_projection_signature(projection: &Projection) -> String {
-    match projection {
-        Projection::All => "*".to_string(),
-        Projection::Column(column) => column
-            .strip_prefix("LIT:")
-            .map(str::to_string)
-            .unwrap_or_else(|| column.clone()),
-        Projection::Alias(_, alias) => alias.clone(),
-        Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
-        Projection::Function(name, args) => format!(
-            "{}({})",
-            base_function_name(name),
-            args.iter()
-                .map(render_projection_signature)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Projection::Expression(filter, alias) => alias
-            .clone()
-            .unwrap_or_else(|| render_filter_signature(filter)),
-        Projection::Window {
-            name, args, alias, ..
-        } => alias.clone().unwrap_or_else(|| {
-            format!(
-                "{}({}) OVER (...)",
-                name,
-                args.iter()
-                    .map(render_projection_signature)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
         }),
-    }
-}
-
-fn render_filter_signature(filter: &Filter) -> String {
-    match filter {
-        Filter::Compare { field, op, value } => format!(
-            "({}{}{})",
-            field_ref_name(field),
-            op,
-            render_value_signature(value)
-        ),
-        Filter::CompareFields { left, op, right } => {
-            format!("({}{}{})", field_ref_name(left), op, field_ref_name(right))
-        }
-        Filter::CompareExpr { lhs, op, rhs } => format!(
-            "({}{}{})",
-            render_expr_signature(lhs).unwrap_or_else(|| "expr".to_string()),
-            op,
-            render_expr_signature(rhs).unwrap_or_else(|| "expr".to_string())
-        ),
-        Filter::And(left, right) => format!(
-            "({}AND{})",
-            render_filter_signature(left),
-            render_filter_signature(right)
-        ),
-        Filter::Or(left, right) => format!(
-            "({}OR{})",
-            render_filter_signature(left),
-            render_filter_signature(right)
-        ),
-        Filter::Not(inner) => format!("(NOT{})", render_filter_signature(inner)),
-        Filter::IsNull(field) => format!("({}ISNULL)", field_ref_name(field)),
-        Filter::IsNotNull(field) => format!("({}ISNOTNULL)", field_ref_name(field)),
-        Filter::In { field, values } => format!(
-            "{}IN({})",
-            field_ref_name(field),
-            values
-                .iter()
-                .map(render_value_signature)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        Filter::Between { field, low, high } => format!(
-            "{}BETWEEN({},{})",
-            field_ref_name(field),
-            render_value_signature(low),
-            render_value_signature(high)
-        ),
-        Filter::Like { field, pattern } => format!("{}LIKE({pattern})", field_ref_name(field)),
-        Filter::StartsWith { field, prefix } => {
-            format!("{}STARTSWITH({prefix})", field_ref_name(field))
-        }
-        Filter::EndsWith { field, suffix } => {
-            format!("{}ENDSWITH({suffix})", field_ref_name(field))
-        }
-        Filter::Contains { field, substring } => {
-            format!("{}CONTAINS({substring})", field_ref_name(field))
-        }
-    }
-}
-
-fn render_expr_signature(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Literal { value, .. } => Some(render_value_signature(value)),
-        Expr::Column { field, .. } => Some(field_ref_name(field)),
-        Expr::Parameter { index, .. } => Some(format!("${index}")),
-        Expr::BinaryOp { op, lhs, rhs, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
-                Some(format!(
-                    "{}({},{})",
-                    render_binop_signature_name(*op),
-                    render_expr_signature(lhs)?,
-                    render_expr_signature(rhs)?
-                ))
-            }
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(format!(
-                "({}{}{})",
-                render_expr_signature(lhs)?,
-                render_binop_compare_symbol(*op),
-                render_expr_signature(rhs)?
-            )),
-            BinOp::And => Some(format!(
-                "({}AND{})",
-                render_expr_signature(lhs)?,
-                render_expr_signature(rhs)?
-            )),
-            BinOp::Or => Some(format!(
-                "({}OR{})",
-                render_expr_signature(lhs)?,
-                render_expr_signature(rhs)?
-            )),
-        },
-        Expr::UnaryOp { op, operand, .. } => match op {
-            UnaryOp::Neg => Some(format!("NEG({})", render_expr_signature(operand)?)),
-            UnaryOp::Not => Some(format!("NOT({})", render_expr_signature(operand)?)),
-        },
-        Expr::Cast { inner, target, .. } => Some(format!(
-            "CAST({},TYPE:{target})",
-            render_expr_signature(inner)?
-        )),
-        Expr::FunctionCall { name, args, .. } => Some(format!(
-            "{}({})",
-            name.to_uppercase(),
-            args.iter()
-                .map(render_expr_signature)
-                .collect::<Option<Vec<_>>>()?
-                .join(",")
-        )),
-        Expr::Case {
-            branches, else_, ..
-        } => {
-            let mut parts = Vec::with_capacity(branches.len() * 2 + usize::from(else_.is_some()));
-            for (cond, value) in branches {
-                parts.push(render_expr_signature(cond)?);
-                parts.push(render_expr_signature(value)?);
-            }
-            if let Some(else_expr) = else_ {
-                parts.push(render_expr_signature(else_expr)?);
-            }
-            Some(format!("CASE({})", parts.join(",")))
-        }
-        Expr::IsNull {
-            operand, negated, ..
-        } => Some(format!(
-            "{}({})",
-            if *negated { "IS_NOT_NULL" } else { "IS_NULL" },
-            render_expr_signature(operand)?
-        )),
-        Expr::InList {
-            target,
-            values,
-            negated,
-            ..
-        } => Some(format!(
-            "{}({},{})",
-            if *negated { "NOT_IN" } else { "IN" },
-            render_expr_signature(target)?,
-            values
-                .iter()
-                .map(render_expr_signature)
-                .collect::<Option<Vec<_>>>()?
-                .join(",")
-        )),
-        Expr::Between {
-            target,
-            low,
-            high,
-            negated,
-            ..
-        } => Some(format!(
-            "{}({},{},{})",
-            if *negated { "NOT_BETWEEN" } else { "BETWEEN" },
-            render_expr_signature(target)?,
-            render_expr_signature(low)?,
-            render_expr_signature(high)?
-        )),
-        Expr::Subquery { .. } => None,
-        Expr::WindowFunctionCall { .. } => None,
-    }
-}
-
-fn render_binop_signature_name(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "ADD",
-        BinOp::Sub => "SUB",
-        BinOp::Mul => "MUL",
-        BinOp::Div => "DIV",
-        BinOp::Mod => "MOD",
-        BinOp::Concat => "CONCAT",
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "CMP",
-        BinOp::And => "AND",
-        BinOp::Or => "OR",
-    }
-}
-
-fn render_binop_compare_symbol(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Eq => "=",
-        BinOp::Ne => "<>",
-        BinOp::Lt => "<",
-        BinOp::Le => "<=",
-        BinOp::Gt => ">",
-        BinOp::Ge => ">=",
-        _ => "?",
-    }
-}
-
-fn render_value_signature(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Boolean(value) => value.to_string(),
-        Value::Integer(value) => value.to_string(),
-        Value::UnsignedInteger(value) => value.to_string(),
-        Value::Float(value) => value.to_string(),
-        Value::BigInt(value) => value.to_string(),
-        Value::Decimal(value) => value.to_string(),
-        Value::Text(value) => value.to_string(),
-        other => other.display_string(),
-    }
+    )
 }
 
 fn projection_from_expr(expr: &Expr) -> Option<Projection> {
     lower_expr_to_projection(expr)
-}
-
-fn aggregate_projection_result_slotted(
-    projection: &Projection,
-    state: &SlottedAggState,
-    plan: &CompiledAggPlan,
-) -> Option<(String, Value)> {
-    let Projection::Function(func, args) = projection else {
-        return None;
-    };
-    let func_name = base_function_name(func);
-    if !is_aggregate_function(func_name) {
-        return None;
-    }
-
-    let col_name = aggregate_argument_key(args)?;
-    let result_name = aggregate_output_name(projection, func_name, &col_name);
-
-    let result_value = match func_name {
-        "COUNT" => {
-            if col_name == "*" {
-                Value::Integer(state.count as i64)
-            } else {
-                let idx = plan.slot_for(AggStorageGroup::Count, &col_name)?;
-                Value::Integer(state.count_only[idx] as i64)
-            }
-        }
-        "SUM" => {
-            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
-            if state.sum_agg_counts[idx] == 0 {
-                Value::Null
-            } else {
-                sum_f64_to_value(state.sums[idx])
-            }
-        }
-        "AVG" => {
-            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
-            let count = state.sum_agg_counts[idx];
-            if count > 0 {
-                Value::Float(state.sums[idx] / count as f64)
-            } else {
-                Value::Null
-            }
-        }
-        "MIN" => {
-            let idx = plan.slot_for(AggStorageGroup::Min, &col_name)?;
-            state.mins[idx].clone().unwrap_or(Value::Null)
-        }
-        "MAX" => {
-            let idx = plan.slot_for(AggStorageGroup::Max, &col_name)?;
-            state.maxs[idx].clone().unwrap_or(Value::Null)
-        }
-        "VARIANCE" => {
-            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
-            let n = state.sum_agg_counts[idx] as f64;
-            if n > 0.0 {
-                let sum = state.sums[idx];
-                let sum_sq = state.sum_squares[idx];
-                Value::Float(sum_sq / n - (sum / n).powi(2))
-            } else {
-                Value::Null
-            }
-        }
-        "STDDEV" => {
-            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
-            let n = state.sum_agg_counts[idx] as f64;
-            if n > 0.0 {
-                let sum = state.sums[idx];
-                let sum_sq = state.sum_squares[idx];
-                let variance = sum_sq / n - (sum / n).powi(2);
-                Value::Float(variance.max(0.0).sqrt())
-            } else {
-                Value::Null
-            }
-        }
-        "MEDIAN" => {
-            let idx = plan.slot_for(AggStorageGroup::AllValues, &col_name)?;
-            let mut values = state.all_values[idx].clone();
-            if values.is_empty() {
-                Value::Null
-            } else {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mid = values.len() / 2;
-                if values.len().is_multiple_of(2) {
-                    Value::Float((values[mid - 1] + values[mid]) / 2.0)
-                } else {
-                    Value::Float(values[mid])
-                }
-            }
-        }
-        "PERCENTILE" => {
-            let pct = resolve_static_projection_number(args.get(1))
-                .unwrap_or(0.5)
-                .clamp(0.0, 1.0);
-            let idx = plan.slot_for(AggStorageGroup::AllValues, &col_name)?;
-            let mut values = state.all_values[idx].clone();
-            if values.is_empty() {
-                Value::Null
-            } else {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let index =
-                    ((pct * (values.len() as f64 - 1.0)).round() as usize).min(values.len() - 1);
-                Value::Float(values[index])
-            }
-        }
-        "GROUP_CONCAT" | "STRING_AGG" => {
-            let idx = plan.slot_for(AggStorageGroup::Concat, &col_name)?;
-            let values = &state.concat_values[idx];
-            if values.is_empty() {
-                Value::Null
-            } else {
-                let separator =
-                    resolve_static_projection_text(args.get(1)).unwrap_or_else(|| ", ".to_string());
-                Value::text(values.join(separator.as_str()))
-            }
-        }
-        "FIRST" => {
-            let idx = plan.slot_for(AggStorageGroup::First, &col_name)?;
-            state.first_values[idx].clone().unwrap_or(Value::Null)
-        }
-        "LAST" => {
-            let idx = plan.slot_for(AggStorageGroup::Last, &col_name)?;
-            state.last_values[idx].clone().unwrap_or(Value::Null)
-        }
-        "ARRAY_AGG" => {
-            let idx = plan.slot_for(AggStorageGroup::Array, &col_name)?;
-            let values = state.array_values[idx].clone();
-            if values.is_empty() {
-                Value::Null
-            } else {
-                Value::Array(values)
-            }
-        }
-        "COUNT_DISTINCT" => {
-            let idx = plan.slot_for(AggStorageGroup::Distinct, &col_name)?;
-            Value::Integer(
-                state.distinct_sets[idx]
-                    .as_ref()
-                    .map(|s| s.len())
-                    .unwrap_or(0) as i64,
-            )
-        }
-        _ => Value::Null,
-    };
-
-    Some((result_name, result_value))
-}
-
-fn empty_aggregate_projection_result_slotted(
-    projection: &Projection,
-    state: &SlottedAggState,
-    plan: &CompiledAggPlan,
-) -> Option<(String, Value)> {
-    aggregate_projection_result_slotted(projection, state, plan)
-}
-
-fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
-    args.first().map(render_aggregate_argument_key)
-}
-
-fn having_matches(
-    db: &RedDB,
-    having: Option<&reddb_rql::ast::Filter>,
-    record: &UnifiedRecord,
-) -> bool {
-    match having {
-        Some(filter) => evaluate_runtime_filter_with_db(Some(db), record, filter, None, None),
-        None => true,
-    }
 }
 
 fn resolve_aggregate_argument_value(
@@ -1554,89 +679,6 @@ fn resolve_aggregate_argument_value(
         Some(arg) => eval_projection_value_with_db(Some(db), arg, record),
         _ => None,
     }
-}
-
-fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: &str) -> String {
-    if let Projection::Function(name, _) = projection {
-        if let Some((_, alias)) = name.split_once(':') {
-            return alias.to_string();
-        }
-    }
-
-    if column_name == "*" {
-        format!("{}(*)", func_name.to_lowercase())
-    } else {
-        format!("{}({})", func_name.to_lowercase(), column_name)
-    }
-}
-
-fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
-    let effective_projections = effective_table_projections(query);
-    let effective_group_by = resolve_group_by_aliases(query, effective_table_group_by_exprs(query));
-    let has_group_by = !effective_group_by.is_empty();
-
-    for projection in &effective_projections {
-        validate_h3_projection_resolutions(projection)?;
-
-        if matches!(
-            projection,
-            Projection::Function(name, _)
-                if is_aggregate_function(base_function_name(name))
-        ) {
-            continue;
-        }
-
-        if has_group_by
-            && projection_group_key(projection).is_some_and(|group_key| {
-                effective_group_by
-                    .iter()
-                    .filter_map(group_expr_key)
-                    .any(|entry| entry.eq_ignore_ascii_case(&group_key))
-            })
-        {
-            continue;
-        }
-
-        let label = projection_name(projection);
-        let message = if has_group_by {
-            format!("projection `{label}` must appear in GROUP BY or be an aggregate")
-        } else {
-            format!(
-                "projection `{label}` must be an aggregate because the query contains aggregate functions"
-            )
-        };
-        return Err(RedDBError::Query(message));
-    }
-
-    for group_expr in &effective_group_by {
-        validate_h3_expr_resolutions(group_expr)?;
-    }
-
-    Ok(())
-}
-
-fn resolve_group_by_aliases(query: &TableQuery, group_by: Vec<Expr>) -> Vec<Expr> {
-    let projections = effective_table_projections(query);
-    group_by
-        .into_iter()
-        .map(|expr| {
-            let Expr::Column {
-                field: FieldRef::TableColumn { table, column },
-                ..
-            } = &expr
-            else {
-                return expr;
-            };
-            if !table.is_empty() {
-                return expr;
-            }
-            projections
-                .iter()
-                .find(|projection| projection_name(projection).eq_ignore_ascii_case(column))
-                .and_then(|projection| projection_to_expr(projection).map(|(expr, _)| expr))
-                .unwrap_or(expr)
-        })
-        .collect()
 }
 
 fn validate_h3_projection_resolutions(projection: &Projection) -> RedDBResult<()> {
@@ -1772,99 +814,14 @@ fn validate_h3_resolution_value(function_name: &str, resolution: i64) -> RedDBRe
     )))
 }
 
-fn render_aggregate_argument_key(arg: &Projection) -> String {
-    match arg {
-        Projection::Column(column) => column
-            .strip_prefix("LIT:")
-            .map(str::to_string)
-            .unwrap_or_else(|| column.clone()),
-        Projection::All => "*".to_string(),
-        Projection::Alias(_, alias) => alias.clone(),
-        Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
-        Projection::Function(name, args) => {
-            let rendered = args
-                .iter()
-                .map(render_aggregate_argument_key)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{}({rendered})", base_function_name(name))
-        }
-        Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
-        Projection::Window { name, alias, .. } => alias.clone().unwrap_or_else(|| name.clone()),
-    }
-}
-
-fn resolve_static_projection_number(arg: Option<&Projection>) -> Option<f64> {
-    let record = UnifiedRecord::new();
-    let value = eval_projection_value_with_db(None, arg?, &record)?;
-    super::aggregate_value_to_f64(&value)
-}
-
-fn resolve_static_projection_text(arg: Option<&Projection>) -> Option<String> {
-    let record = UnifiedRecord::new();
-    let value = eval_projection_value_with_db(None, arg?, &record)?;
-    Some(match value {
-        Value::Null => String::new(),
-        Value::Text(text) => text.to_string(),
-        other => other.display_string(),
-    })
-}
-
-fn group_output_label(query: &TableQuery, group_expr: &Expr) -> String {
-    effective_table_projections(query)
-        .iter()
-        .find_map(|projection| {
-            let key = projection_group_key(projection)?;
-            if group_expr_key(group_expr)
-                .is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key))
-            {
-                Some(projection_name(projection))
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| group_expr_key(group_expr).unwrap_or_else(|| "group".to_string()))
-}
-
-fn projection_group_key(projection: &Projection) -> Option<String> {
-    match projection {
-        Projection::Column(column) => Some(column.clone()),
-        Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
-            Some(column.clone())
-        }
-        Projection::Field(field, _) => Some(field_ref_name(field)),
-        Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
-            render_time_bucket_group_expr(args)
-        }
-        Projection::Function(_, _) => Some(render_projection_signature(projection)),
-        _ => None,
-    }
-}
-
-fn render_time_bucket_group_expr(args: &[Projection]) -> Option<String> {
-    let rendered = args
-        .iter()
-        .map(render_group_by_argument)
-        .collect::<Option<Vec<_>>>()?;
-    Some(format!("TIME_BUCKET({})", rendered.join(",")))
-}
-
-fn render_group_by_argument(arg: &Projection) -> Option<String> {
-    match arg {
-        Projection::Column(column) => Some(
-            column
-                .strip_prefix("LIT:")
-                .map(str::to_string)
-                .unwrap_or_else(|| column.clone()),
-        ),
-        Projection::All => Some("*".to_string()),
-        _ => None,
-    }
-}
-
-fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
+fn resolve_group_by_value(
+    db: &RedDB,
+    binding: &AggregateGroupBinding,
+    record: &UnifiedRecord,
+) -> Option<Value> {
+    let group_expr = &binding.expression;
     if let Some((bucket_ns, timestamp_column)) =
-        parse_time_bucket_group_expr(&group_expr_key(group_expr).unwrap_or_default())
+        parse_time_bucket_group_expr(binding.key.as_deref().unwrap_or_default())
     {
         let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
         let bucket_start = timestamp_ns
@@ -1895,13 +852,6 @@ fn h3_group_expr_yields_null_drop(group_expr: &Expr) -> bool {
         Expr::FunctionCall { name, .. }
             if matches!(name.to_ascii_uppercase().as_str(), "H3_CELL" | "H3_PARENT")
     )
-}
-
-fn group_expr_key(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Column { field, .. } => Some(field_ref_name(field)),
-        _ => render_expr_signature(expr),
-    }
 }
 
 fn parse_time_bucket_group_expr(expr: &str) -> Option<(u64, Option<String>)> {
@@ -1961,304 +911,10 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     }
 }
 
-fn build_aggregate_group_key(values: &[Value]) -> AggregateGroupKey {
-    values
-        .iter()
-        .map(|value| {
-            value_to_canonical_key(value)
-                .map(GroupKeyPart::Canonical)
-                .unwrap_or_else(|| GroupKeyPart::Rendered(group_value_key(value)))
-        })
-        .collect()
-}
-
-fn group_value_key(value: &Value) -> String {
-    use std::fmt::Write;
-    let mut buf = String::with_capacity(32);
-    match value {
-        Value::Null => buf.push_str("null"),
-        Value::Boolean(v) => {
-            buf.push_str("b:");
-            let _ = write!(buf, "{v}");
-        }
-        Value::Integer(v) => {
-            buf.push_str("i:");
-            let _ = write!(buf, "{v}");
-        }
-        Value::UnsignedInteger(v) => {
-            buf.push_str("u:");
-            let _ = write!(buf, "{v}");
-        }
-        Value::Float(v) => {
-            buf.push_str("f:");
-            let _ = write!(buf, "{:016x}", v.to_bits());
-        }
-        Value::Text(v) => {
-            buf.push_str("t:");
-            buf.push_str(v);
-        }
-        other => {
-            buf.push_str("o:");
-            let _ = write!(buf, "{other:?}");
-        }
-    }
-    buf
-}
-
-type AggregateGroupKey = Vec<GroupKeyPart>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum GroupKeyPart {
-    Canonical(CanonicalKey),
-    Rendered(String),
-}
-
-// ── Slot-indexed aggregate state ─────────────────────────────────────────────
-//
-// Replaces the HashMap<String, T> fields in the old AggState with Vec<T>
-// indexed by pre-assigned compile-time slot indices. The "plan" is compiled
-// once from `all_aggregate_projections` before the hot loop; thereafter every
-// accumulation step is a single array write — zero String allocation,
-// zero hash lookup.
-//
-// Slot assignment is deduplicated by (storage_group, col_name): SUM(age) and
-// AVG(age) share the same SumCount slot; MIN(price) and MAX(price) get
-// separate Min and Max slots for the same column.
-
-/// Which backing Vec within `SlottedAggState` stores a given function's data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(usize)]
-enum AggStorageGroup {
-    SumCount = 0, // sums + sum_agg_counts (+sum_squares for STDDEV/VARIANCE)
-    Count = 1,    // count_only (COUNT(col))
-    Min = 2,
-    Max = 3,
-    AllValues = 4, // MEDIAN, PERCENTILE
-    Concat = 5,    // GROUP_CONCAT, STRING_AGG
-    First = 6,
-    Last = 7,
-    Array = 8,    // ARRAY_AGG
-    Distinct = 9, // COUNT_DISTINCT
-}
-
-fn func_storage_group(func_name: &str) -> Option<AggStorageGroup> {
-    match func_name {
-        "SUM" | "AVG" | "STDDEV" | "VARIANCE" => Some(AggStorageGroup::SumCount),
-        "COUNT" => Some(AggStorageGroup::Count),
-        "MIN" => Some(AggStorageGroup::Min),
-        "MAX" => Some(AggStorageGroup::Max),
-        "MEDIAN" | "PERCENTILE" => Some(AggStorageGroup::AllValues),
-        "GROUP_CONCAT" | "STRING_AGG" => Some(AggStorageGroup::Concat),
-        "FIRST" => Some(AggStorageGroup::First),
-        "LAST" => Some(AggStorageGroup::Last),
-        "ARRAY_AGG" => Some(AggStorageGroup::Array),
-        "COUNT_DISTINCT" => Some(AggStorageGroup::Distinct),
-        _ => None,
-    }
-}
-
-/// Per-projection slot reference: tells the hot loop exactly which Vec index
-/// to write for each aggregate projection.
-#[derive(Debug, Clone, Copy)]
-enum ProjSlot {
-    /// COUNT(*) — just increment the global `state.count`.
-    CountStar,
-    /// sums[idx] + sum_agg_counts[idx] — SUM, AVG.
-    SumCount(usize),
-    /// SumCount + sum_squares[idx] — STDDEV, VARIANCE.
-    SumCountSq(usize),
-    /// count_only[idx] — COUNT(col).
-    CountOnly(usize),
-    Min(usize),
-    Max(usize),
-    AllValues(usize),
-    Concat(usize),
-    First(usize),
-    Last(usize),
-    Array(usize),
-    Distinct(usize),
-}
-
-/// Compiled per-query aggregation plan: slot assignments for all projections.
-struct CompiledAggPlan {
-    /// One slot per entry in `all_aggregate_projections`.
-    proj_slots: Vec<ProjSlot>,
-    /// Vec sizes for `SlottedAggState` allocation.
-    n_sum_count: usize,
-    n_count: usize,
-    n_min: usize,
-    n_max: usize,
-    n_all_values: usize,
-    n_concat: usize,
-    n_first: usize,
-    n_last: usize,
-    n_array: usize,
-    n_distinct: usize,
-    /// Reverse lookup for result building: (group, col_name) → slot_idx.
-    result_slot_map: std::collections::HashMap<(AggStorageGroup, String), usize>,
-}
-
-impl CompiledAggPlan {
-    fn compile(projections: &[Projection]) -> Self {
-        use std::collections::HashMap;
-        let mut slot_key_to_idx: HashMap<(AggStorageGroup, String), usize> = HashMap::new();
-        let mut counters = [0usize; 10];
-        let mut proj_slots = Vec::with_capacity(projections.len());
-        // Tracks whether each SumCount slot needs sum_squares.
-        let mut sum_count_needs_sq: Vec<bool> = Vec::new();
-
-        for proj in projections {
-            let Projection::Function(func, args) = proj else {
-                proj_slots.push(ProjSlot::CountStar);
-                continue;
-            };
-            let func_name = base_function_name(func);
-            let col_name = aggregate_argument_key(args).unwrap_or_default();
-
-            if func_name == "COUNT" && col_name == "*" {
-                proj_slots.push(ProjSlot::CountStar);
-                continue;
-            }
-
-            let Some(group) = func_storage_group(func_name) else {
-                proj_slots.push(ProjSlot::CountStar);
-                continue;
-            };
-
-            let key = (group, col_name);
-            let idx = *slot_key_to_idx.entry(key).or_insert_with(|| {
-                let i = counters[group as usize];
-                counters[group as usize] += 1;
-                if group == AggStorageGroup::SumCount {
-                    sum_count_needs_sq.push(false);
-                }
-                i
-            });
-
-            // STDDEV/VARIANCE need sum_squares for this slot.
-            if group == AggStorageGroup::SumCount
-                && (func_name == "STDDEV" || func_name == "VARIANCE")
-                && idx < sum_count_needs_sq.len()
-            {
-                sum_count_needs_sq[idx] = true;
-            }
-
-            let ps = match group {
-                AggStorageGroup::SumCount => {
-                    if func_name == "STDDEV" || func_name == "VARIANCE" {
-                        ProjSlot::SumCountSq(idx)
-                    } else {
-                        ProjSlot::SumCount(idx)
-                    }
-                }
-                AggStorageGroup::Count => ProjSlot::CountOnly(idx),
-                AggStorageGroup::Min => ProjSlot::Min(idx),
-                AggStorageGroup::Max => ProjSlot::Max(idx),
-                AggStorageGroup::AllValues => ProjSlot::AllValues(idx),
-                AggStorageGroup::Concat => ProjSlot::Concat(idx),
-                AggStorageGroup::First => ProjSlot::First(idx),
-                AggStorageGroup::Last => ProjSlot::Last(idx),
-                AggStorageGroup::Array => ProjSlot::Array(idx),
-                AggStorageGroup::Distinct => ProjSlot::Distinct(idx),
-            };
-            proj_slots.push(ps);
-        }
-
-        CompiledAggPlan {
-            proj_slots,
-            n_sum_count: counters[0],
-            n_count: counters[1],
-            n_min: counters[2],
-            n_max: counters[3],
-            n_all_values: counters[4],
-            n_concat: counters[5],
-            n_first: counters[6],
-            n_last: counters[7],
-            n_array: counters[8],
-            n_distinct: counters[9],
-            result_slot_map: slot_key_to_idx,
-        }
-    }
-
-    /// Look up the slot index for a result-building call.
-    fn slot_for(&self, group: AggStorageGroup, col_name: &str) -> Option<usize> {
-        self.result_slot_map
-            .get(&(group, col_name.to_string()))
-            .copied()
-    }
-}
-
-/// Vec-indexed replacement for the old HashMap-based `AggState`.
-/// Allocated once per group; hot-path writes are direct array assignments.
-#[derive(Clone)]
-struct SlottedAggState {
-    count: u64,
-    sums: Vec<f64>,
-    sum_agg_counts: Vec<u64>,
-    sum_squares: Vec<f64>,
-    count_only: Vec<u64>,
-    mins: Vec<Option<Value>>,
-    maxs: Vec<Option<Value>>,
-    all_values: Vec<Vec<f64>>,
-    concat_values: Vec<Vec<String>>,
-    first_values: Vec<Option<Value>>,
-    last_values: Vec<Option<Value>>,
-    array_values: Vec<Vec<Value>>,
-    distinct_sets: Vec<Option<std::collections::HashSet<String>>>,
-}
-
-impl SlottedAggState {
-    fn new(plan: &CompiledAggPlan) -> Self {
-        Self {
-            count: 0,
-            sums: vec![0.0; plan.n_sum_count],
-            sum_agg_counts: vec![0; plan.n_sum_count],
-            sum_squares: vec![0.0; plan.n_sum_count],
-            count_only: vec![0; plan.n_count],
-            mins: vec![None; plan.n_min],
-            maxs: vec![None; plan.n_max],
-            all_values: vec![Vec::new(); plan.n_all_values],
-            concat_values: vec![Vec::new(); plan.n_concat],
-            first_values: vec![None; plan.n_first],
-            last_values: vec![None; plan.n_last],
-            array_values: vec![Vec::new(); plan.n_array],
-            distinct_sets: vec![None; plan.n_distinct],
-        }
-    }
-}
-
 #[derive(Clone)]
 struct AggregateGroup {
     group_values: Vec<Value>,
     state: SlottedAggState,
-}
-
-pub(super) fn update_extreme_value_slot(
-    slot: &mut Option<Value>,
-    candidate: &Value,
-    ordering: std::cmp::Ordering,
-) {
-    if matches!(candidate, Value::Null) {
-        return;
-    }
-    match slot {
-        Some(current) => {
-            if runtime_partial_cmp(candidate, current).is_some_and(|ord| ord == ordering) {
-                *current = candidate.clone();
-            }
-        }
-        None => {
-            *slot = Some(candidate.clone());
-        }
-    }
-}
-
-fn sum_f64_to_value(f: f64) -> Value {
-    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-        Value::Integer(f as i64)
-    } else {
-        Value::Float(f)
-    }
 }
 
 // ── SpillCodec / Mergeable for SlottedAggState + AggregateGroup ─────────────
@@ -2986,85 +1642,7 @@ mod agg_spill_codec {
             // group_values identical (same GROUP BY key) — keep self's copy.
             let s = &mut self.state;
             let o = other.state;
-            s.count += o.count;
-            for (i, v) in o.sums.into_iter().enumerate() {
-                if i < s.sums.len() {
-                    s.sums[i] += v;
-                }
-            }
-            for (i, v) in o.sum_agg_counts.into_iter().enumerate() {
-                if i < s.sum_agg_counts.len() {
-                    s.sum_agg_counts[i] += v;
-                }
-            }
-            for (i, v) in o.sum_squares.into_iter().enumerate() {
-                if i < s.sum_squares.len() {
-                    s.sum_squares[i] += v;
-                }
-            }
-            for (i, v) in o.count_only.into_iter().enumerate() {
-                if i < s.count_only.len() {
-                    s.count_only[i] += v;
-                }
-            }
-            for (i, candidate) in o.mins.into_iter().enumerate() {
-                if i < s.mins.len() {
-                    if let Some(c) = candidate {
-                        super::update_extreme_value_slot(
-                            &mut s.mins[i],
-                            &c,
-                            std::cmp::Ordering::Less,
-                        );
-                    }
-                }
-            }
-            for (i, candidate) in o.maxs.into_iter().enumerate() {
-                if i < s.maxs.len() {
-                    if let Some(c) = candidate {
-                        super::update_extreme_value_slot(
-                            &mut s.maxs[i],
-                            &c,
-                            std::cmp::Ordering::Greater,
-                        );
-                    }
-                }
-            }
-            for (i, v) in o.all_values.into_iter().enumerate() {
-                if i < s.all_values.len() {
-                    s.all_values[i].extend(v);
-                }
-            }
-            for (i, v) in o.concat_values.into_iter().enumerate() {
-                if i < s.concat_values.len() {
-                    s.concat_values[i].extend(v);
-                }
-            }
-            // FIRST: keep self (first batch wins)
-            for (i, v) in o.first_values.into_iter().enumerate() {
-                if i < s.first_values.len() && s.first_values[i].is_none() {
-                    s.first_values[i] = v;
-                }
-            }
-            // LAST: overwrite with other (later batch)
-            for (i, v) in o.last_values.into_iter().enumerate() {
-                if i < s.last_values.len() && v.is_some() {
-                    s.last_values[i] = v;
-                }
-            }
-            for (i, v) in o.array_values.into_iter().enumerate() {
-                if i < s.array_values.len() {
-                    s.array_values[i].extend(v);
-                }
-            }
-            for (i, set_opt) in o.distinct_sets.into_iter().enumerate() {
-                if i < s.distinct_sets.len() {
-                    if let Some(set) = set_opt {
-                        s.distinct_sets[i]
-                            .get_or_insert_with(std::collections::HashSet::new)
-                            .extend(set);
-                    }
-                }
-            }
+            s.merge_with_host(&super::NativeAggregateHost, o);
         }
     }
 }
@@ -3888,6 +2466,185 @@ mod aggregate_numeric_route_parity_tests {
     }
 
     #[test]
+    fn shared_group_bindings_preserve_aliases_and_output_columns() {
+        let runtime = runtime_with_table("INTEGER");
+        for (bucket, value) in [("red", -10), ("red", 10), ("blue", 20)] {
+            insert(&runtime, bucket, Value::Integer(value));
+        }
+        let grouped = runtime.execute_query("SELECT bucket AS tenant, SUM(value) AS amount FROM samples GROUP BY TENANT HAVING COUNT(*) > 0 ORDER BY tenant ASC").expect("case-insensitive SELECT alias grouping");
+        assert_eq!(grouped.result.columns, ["tenant", "amount"]);
+        assert_eq!(grouped.result.records.len(), 2);
+        for (record, (tenant, amount)) in grouped
+            .result
+            .records
+            .iter()
+            .zip([("blue", 20.0), ("red", 0.0)])
+        {
+            assert_eq!(record.get("tenant"), Some(&Value::text(tenant)));
+            assert_eq!(record.get("bucket"), Some(&Value::text(tenant)));
+            assert_eq!(number(record.get("amount").expect("sum alias")), amount);
+        }
+        let grouped = runtime.execute_query("SELECT SUM(value) AS amount, bucket AS tenant, ABS(value) AS magnitude FROM samples GROUP BY tenant, magnitude HAVING COUNT(*) > 0 ORDER BY tenant ASC").expect("multiple group aliases including a function");
+        assert_eq!(grouped.result.columns, ["tenant", "magnitude", "amount"]);
+        assert_eq!(grouped.result.records.len(), 2);
+        for (record, (tenant, magnitude, amount)) in grouped
+            .result
+            .records
+            .iter()
+            .zip([("blue", 20.0, 20.0), ("red", 10.0, 0.0)])
+        {
+            assert_eq!(record.get("tenant"), Some(&Value::text(tenant)));
+            assert_eq!(
+                number(record.get("magnitude").expect("function alias")),
+                magnitude
+            );
+            assert_eq!(number(record.get("amount").expect("sum alias")), amount);
+        }
+        let error = runtime.execute_query("SELECT bucket AS tenant, SUM(value) FROM samples AS s GROUP BY s.tenant HAVING COUNT(*) > 0").expect_err("qualified name cannot resolve to SELECT alias");
+        assert!(error.to_string().contains("must appear in GROUP BY"));
+    }
+
+    #[test]
+    fn shared_shape_validation_retains_native_h3_admission() {
+        let runtime = runtime_with_table("BIGINT");
+        for sql in [
+            "SELECT H3_PARENT(bucket, 16) AS cell, COUNT(*) FROM samples GROUP BY cell",
+            "SELECT COUNT(*) FROM samples GROUP BY H3_PARENT(bucket, 16)",
+        ] {
+            let error = runtime
+                .execute_query(sql)
+                .expect_err("invalid native H3 resolution");
+            assert!(error
+                .to_string()
+                .contains("H3_PARENT H3 resolution 16 is invalid"));
+        }
+    }
+
+    #[test]
+    fn hidden_aggregate_parameters_and_visible_aliases_do_not_collide() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, values) in [("red", [10, 10, 20, 90]), ("blue", [10, 10, 50, 60])] {
+            for value in values {
+                insert(&runtime, bucket, Value::BigInt(value));
+            }
+        }
+        let percentiles = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples GROUP BY bucket HAVING PERCENTILE(value, 0.25) = 10 ORDER BY PERCENTILE(value, 0.75) DESC, bucket ASC LIMIT 1 OFFSET 1").expect("independent hidden percentile outputs");
+        assert_eq!(percentiles.result.columns, vec!["bucket", "n"]);
+        assert_eq!(percentiles.result.records.len(), 1);
+        assert_eq!(
+            percentiles.result.records[0].get("bucket"),
+            Some(&Value::text("red"))
+        );
+        assert_eq!(
+            number(
+                percentiles.result.records[0]
+                    .get("n")
+                    .expect("visible count")
+            ),
+            4.0
+        );
+        let alias = runtime.execute_query(r#"SELECT bucket, COUNT(*) AS "sum(value)" FROM samples GROUP BY bucket HAVING SUM(value) >= 15 ORDER BY SUM(value) DESC, bucket ASC LIMIT 1 OFFSET 1"#).expect("hidden sum must not overwrite visible count alias");
+        assert_eq!(alias.result.columns, vec!["bucket", "sum(value)"]);
+        assert_eq!(alias.result.records.len(), 1);
+        assert_eq!(
+            alias.result.records[0].get("bucket"),
+            Some(&Value::text("red"))
+        );
+        assert_eq!(
+            number(
+                alias.result.records[0]
+                    .get("sum(value)")
+                    .expect("visible count alias")
+            ),
+            4.0
+        );
+    }
+
+    #[test]
+    fn shared_result_phase_preserves_empty_aggregates_and_wide_pages() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, value) in [("red", 10), ("red", 20), ("blue", 5), ("blue", 10)] {
+            insert(&runtime, bucket, Value::BigInt(value));
+        }
+        for limit in [1u64 << 32, (1u64 << 32) + 1, i64::MAX as u64] {
+            let sql = format!("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING MAX(value) > 0 ORDER BY SUM(value) DESC LIMIT {limit}");
+            let result = runtime.execute_query(&sql).expect("wide aggregate page");
+            assert_eq!(result.result.columns, vec!["bucket", "amount"]);
+            assert_eq!(result.result.records.len(), 2);
+            assert_eq!(
+                result.result.records[0].get("bucket"),
+                Some(&Value::text("red"))
+            );
+        }
+        let result = runtime.execute_query("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING MAX(value) > 0 ORDER BY SUM(value) DESC LIMIT 1 OFFSET 4294967296").expect("wide aggregate offset");
+        assert!(result.result.records.is_empty());
+        // MEDIAN keeps this outside the basic count/sum pushdown envelope.
+        let empty = runtime.execute_query("SELECT COUNT(*) AS n, SUM(value) AS amount, MEDIAN(value) AS middle FROM samples WHERE value > 1000").expect("empty scalar aggregate result");
+        assert_eq!(empty.result.records.len(), 1);
+        assert_eq!(
+            number(empty.result.records[0].get("n").expect("empty count")),
+            0.0
+        );
+        assert_eq!(empty.result.records[0].get("amount"), Some(&Value::Null));
+        assert_eq!(empty.result.records[0].get("middle"), Some(&Value::Null));
+        let empty = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples WHERE value > 1000 GROUP BY bucket HAVING MAX(value) > 0").expect("empty grouped aggregate result");
+        assert!(empty.result.records.is_empty());
+    }
+
+    #[test]
+    fn shared_planning_reuses_aliases_and_hidden_aggregates() {
+        let runtime = runtime_with_table("BIGINT");
+        for (bucket, value) in [("red", 10), ("red", 20), ("blue", 5), ("blue", 10)] {
+            insert(&runtime, bucket, Value::BigInt(value));
+        }
+        let visible = runtime.execute_query("SELECT bucket, SUM(value) AS amount FROM samples GROUP BY bucket HAVING SUM(value) >= 10 ORDER BY SUM(value) DESC, bucket ASC").expect("visible aggregate alias references");
+        assert_eq!(visible.result.columns, vec!["bucket", "amount"]);
+        assert_eq!(visible.result.records.len(), 2);
+        for (record, (bucket, amount)) in visible
+            .result
+            .records
+            .iter()
+            .zip([("red", 30.0), ("blue", 15.0)])
+        {
+            assert_eq!(record.get("bucket"), Some(&Value::text(bucket)));
+            assert_eq!(
+                number(record.get("amount").expect("aggregate alias")),
+                amount
+            );
+        }
+        let hidden = runtime.execute_query("SELECT bucket, COUNT(*) AS n FROM samples GROUP BY bucket HAVING SUM(value) >= 10 ORDER BY SUM(value) DESC, bucket ASC LIMIT 1 OFFSET 1").expect("hidden HAVING/ORDER BY aggregate references");
+        assert_eq!(hidden.result.columns, vec!["bucket", "n"]);
+        assert_eq!(hidden.result.records.len(), 1);
+        assert_eq!(
+            hidden.result.records[0].get("bucket"),
+            Some(&Value::text("blue"))
+        );
+        assert_eq!(
+            number(hidden.result.records[0].get("n").expect("count")),
+            2.0
+        );
+    }
+
+    #[test]
+    fn shared_numeric_slots_accumulate_each_row_once() {
+        let runtime = runtime_with_table("BIGINT");
+        insert(&runtime, "all", Value::BigInt(10));
+        insert(&runtime, "all", Value::BigInt(20));
+        for select in [
+            "SUM(value) AS total, AVG(value) AS mean, VARIANCE(value) AS variance, STDDEV(value) AS deviation",
+            "STDDEV(value) AS deviation, VARIANCE(value) AS variance, AVG(value) AS mean, SUM(value) AS total",
+        ] {
+            let sql = format!("SELECT bucket, {select} FROM samples GROUP BY bucket HAVING COUNT(*) > 0");
+            let result = runtime.execute_query(&sql).expect("generic shared aggregate slots");
+            assert_eq!(result.result.records.len(), 1);
+            let record = &result.result.records[0];
+            for (name, expected) in [("total", 30.0), ("mean", 15.0), ("variance", 25.0), ("deviation", 5.0)] {
+                assert_eq!(number(record.get(name).expect("aggregate output")), expected);
+            }
+        }
+    }
+
+    #[test]
     fn sum_and_avg_bigint_agree_on_planner_and_legacy_routes() {
         let runtime = runtime_with_table("BIGINT");
         insert(&runtime, "all", Value::BigInt(10));
@@ -4106,5 +2863,74 @@ mod materialization_limit_tests {
             .execute_query("SELECT COUNT(*), city FROM big_table GROUP BY city")
             .expect("raised ceiling should let the same query through");
         assert_eq!(after.result.records.len(), 25);
+    }
+}
+
+#[cfg(test)]
+mod shared_kernel_spill_tests {
+    use super::*;
+    use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec};
+
+    #[test]
+    fn shared_state_round_trips_the_native_spill_codec_and_merges() {
+        let projections = [
+            "SUM",
+            "AVG",
+            "VARIANCE",
+            "STDDEV",
+            "FIRST",
+            "LAST",
+            "ARRAY_AGG",
+            "COUNT_DISTINCT",
+        ]
+        .map(|name| Projection::Function(name.into(), vec![Projection::Column("value".into())]));
+        let plan = CompiledAggPlan::compile(&projections).expect("bounded spill plan");
+        let group = |values: &[Value]| {
+            let mut state = SlottedAggState::new(&plan);
+            for value in values {
+                state.count += 1;
+                for slot in &plan.proj_slots {
+                    state.accumulate(&NativeAggregateHost, slot, value.clone());
+                }
+            }
+            AggregateGroup {
+                group_values: vec![Value::text("fixture")],
+                state,
+            }
+        };
+        let source = [
+            Value::Null,
+            Value::Integer(10),
+            Value::Integer(20),
+            Value::Integer(30),
+        ];
+        let expected = group(&source);
+        let first = group(&source[..2]);
+        let mut encoded = Vec::new();
+        first.encode(&mut encoded).expect("native spill encode");
+        let mut input = encoded.as_slice();
+        let mut decoded = AggregateGroup::decode(&mut input)
+            .expect("native spill decode")
+            .expect("one native group");
+        assert!(input.is_empty(), "codec consumes the complete native group");
+        decoded.merge(group(&source[2..]));
+        assert_eq!(decoded.group_values, expected.group_values);
+        assert_eq!(decoded.state.count, expected.state.count);
+        for projection in &projections {
+            assert_eq!(
+                reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
+                    &NativeAggregateHost,
+                    projection,
+                    &decoded.state,
+                    &plan
+                ),
+                reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
+                    &NativeAggregateHost,
+                    projection,
+                    &expected.state,
+                    &plan
+                )
+            );
+        }
     }
 }

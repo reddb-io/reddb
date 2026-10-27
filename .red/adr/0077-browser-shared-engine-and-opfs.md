@@ -1,7 +1,30 @@
 # ADR 0077 — RedDB Browser, shared engine and OPFS
 
-Status: accepted architecture; persistence, portable query operators, B-tree/pager, live MVCC and snapshot decoding shared; storage-backed runtime and sync pending
+Status: accepted architecture; shared native/WASM storage and query core; public local table SQL and single-owner transactions in source builds; other models and sync pending
 Date: 2026-10-22
+
+## Native database backups (Browser 0.4.0)
+
+The JS/TS database handle exports the complete `.rdb` through its owning Worker.
+The operation is serialized with queries and holds both Web Locks and the OPFS
+exclusive access handle, so the physical image cannot change during the copy.
+Pending SQL transactions remain in resident memory and are excluded from export.
+Export checks the Rust publication fence before touching the file. An export
+read/flush failure closes its owner until reopen; a size rejection does not.
+Restore requires a new file, flushes its bytes and validates it through the same
+Rust `BrowserDatabase::open` used for normal recovery. Existing destinations are
+never overwritten. Ordinary rejected restores remove their newly created file
+before the SDK terminates the Worker; termination during restore can leave a new
+incomplete file, which is not silently recreated on retry.
+
+This boundary does not redeclare any storage codec, execute generated SQL or
+change publication barriers. Both export and restore are bounded at 256 MiB.
+Physical copies can retain historical/deleted bytes and supply no encryption,
+tenant filtering or redaction. Hosts own download, file selection and retention.
+Cost sketch: N file bytes require O(N) reads/writes and a full JS buffer; export
+transfers its output buffer, while restore also materializes the resident engine
+state. Native file integrity/recovery rules remain authoritative; no speed claim
+is made.
 
 ## Decision
 
@@ -864,3 +887,542 @@ Cost sketch: each temporal scalar retains constant-size conversion/arithmetic,
 O(B) parsing for a B-byte duration and at most three raw fallback field probes;
 clock scalars perform one host clock read. No scan, storage write, network call
 or new dependency is added, and no measured speedup is claimed.
+
+
+## Shared geographic computation and projection scalars
+
+`reddb-engine::geo` owns the existing native geographic recognition, WGS-84 and
+spherical distance/bearing/midpoint/destination helpers, bounding boxes and
+polygon algorithms. The native `geo` module re-exports these same implementations;
+its H3 child remains native. Existing native property/unit tests move with the
+pure code, while portable native/WASM assertions exercise the same algorithms.
+No new dependency or JavaScript geographic implementation is introduced.
+
+The common scalar dispatcher owns GEO_DISTANCE/HAVERSINE,
+GEO_DISTANCE_VINCENTY/VINCENTY, GEO_BEARING and GEO_MIDPOINT. Shared legacy
+argument resolution retains 2/3/4-argument forms, POINT sentinel parsing,
+column/document lookup, legacy longitude-sibling priority and existing numeric
+coercion. Direct column/sentinel reads retain native admission behavior; other
+projections and numeric arguments use the host resolver. Raw secret wrappers
+are not recognized as coordinates. No new point validation policy is imposed.
+The native H3_CELL wrapper delegates argument resolution to this same helper.
+
+GeoJSON coordinate order, exact decimal coordinate recognition, range checks,
+polygon boundary inclusion and bounded Vincenty iteration/fallback are preserved.
+Geographic JSON uses the existing canonical parser and its depth-128 cap.
+Comparisons in browser fixtures allow floating-point tolerances appropriate to
+native/WASM transcendental implementations; no bitwise float parity is claimed.
+
+The offline OPFS fixture now projects distances, bearings and midpoints from
+recovered quantities after filtering/ordering, WAL recovery, update and checkpoint,
+with full browser restarts and the HTTP listener stopped. Its scalar host is
+still partial; public stored-query and application-transaction flags stay false.
+
+Cost sketch: each distance/bearing call keeps constant-size numeric work;
+Vincenty retains at most 100 iterations, JSON point recognition parses its
+existing B-byte input and polygon operations remain O(V) in vertices. The move
+adds no storage scan/write, network call or IPC; no speedup or size gain is claimed.
+
+
+## Shared canonical table-plan traversal
+
+`reddb-engine::query::logical_plan` owns the existing CanonicalLogicalNode and
+CanonicalLogicalPlan data types; the native planner retains re-export shims and
+its existing construction/cost/access-path logic. The shared table-plan runtime
+walks the same scan/filter/document-filter/sort/offset/limit/search/top-K/projection
+operator names used by the native canonical executor. The native executor now
+delegates to that walk rather than maintaining another operator dispatcher.
+
+The host retains physical scans and entity-ID shortcuts, MVCC/replica visibility,
+tenancy/RLS and document-root admission, resource guards, computed ordering keys,
+ranking, window evaluation and output policy. Filter lookup still precedes child
+execution and may bypass a missing child; document filters never take that shortcut.
+Callbacks preserve their native ordering, first-child behavior, errors and effects.
+Unsupported/missing-child diagnostics keep their native text and query-error kind.
+
+Visited plan depth is bounded by the canonical RQL nesting cap (root at zero).
+OFFSET/LIMIT and explicit top-K bounds saturate on wasm32 rather than truncating
+or falling back to a smaller query limit. Native scan-cap pushdown uses the same
+shared saturated offset-plus-limit helper, preventing an overflowing sum while
+retaining the rule that ORDER BY scans cannot push down a finite row cap.
+
+Native/WASM cases cover callback order, operator aliases, fast lookup, empty
+results, error propagation, wide bounds/top-K and depth boundaries. The offline
+OPFS fixture additionally runs a fixed canonical plan through shared filtering,
+ordering and projection over recovered rows after WAL recovery, update and
+checkpoint with full browser restarts and the HTTP listener stopped. The fixture
+host and fixed plan are test-only; there is no new browser planner or complete
+public stored-query dispatcher here. Stored-query/transaction flags remain false.
+
+Cost sketch: D visited operators retain O(D) dispatch plus existing host scan,
+filter, sort, projection/window work and record buffers. The visited stack is
+bounded at depth 128; no new scan, file write, network request or IPC is added.
+The extraction makes no measured performance claim.
+
+## Shared canonical table-plan construction
+
+`reddb-engine::query::planning` now constructs the native canonical table plan
+from the canonical TableQuery AST. The native planner delegates its table arm to
+this implementation. AccessPathDecision and CardinalityEstimate retain their
+native import paths through re-exports of the shared types. The host still owns
+index availability/lifecycle, catalog document admission and live/statistical
+cardinality decisions; no native optimizer, index selection or RLS rule is replaced.
+
+The same construction preserves scan metadata, filter/sort/offset/limit/projection
+order, universal entity access and implicit ranked sorting, document operator
+precedence, effective SQL projections/predicates, row estimates and operator costs.
+Shared metadata helpers keep their existing summaries, including secret/password
+redaction. The recursive predicate summary is capped at the canonical RQL nesting
+limit; deeper descriptive metadata uses `<maximum filter depth>` without changing
+the query or its execution predicates.
+
+The offline OPFS test host now supplies recovered rows and scan statistics to this
+canonical planner and executes its generated tree through the shared table runtime,
+replacing the hand-built operator chain. Native/WASM cases verify metadata, host
+callback ordering, estimates/costs, document/universal routes, zero pagination and
+the metadata depth boundary. Native integration additionally checks the live
+collection count and SQL results. The fixture remains test-only: the public browser
+stored-query/transaction capabilities remain false until the complete production
+host, dispatch and durable transaction boundary are wired and qualified.
+
+Cost sketch: construction emits at most six table operators plus existing AST
+summary work; predicate summary recursion is capped at depth 128. No per-row
+planning, additional scan, file write, network request or IPC is introduced, and
+no measured speedup is claimed.
+
+## Shared runtime expression traversal
+
+`reddb-engine::query::runtime::expression` now owns the native optional-value
+Expr walk used by ORDER BY and the existing runtime expression fallback. This
+is the legacy runtime contract, distinct from the typed scalar evaluator:
+missing values remain `None`, legacy arithmetic/coercion/casts retain their
+behavior, boolean/CASE branches short-circuit, and ordinary function arguments
+are evaluated eagerly from left to right with misses supplied as SQL NULL.
+
+The native adapter retains record bindings, secret input policy, value-function
+dispatch, session identity, advisory locks, catalog/config/KV authorization and
+all database/AI/model effects. CONFIG/KV/internal reference calls receive raw AST
+arguments before ordinary argument evaluation. Evaluated special defaults use
+the callback supplied by the shared walk so they cannot reset its depth counter;
+bare-column defaults retain the existing native path-text interpretation.
+
+Visited expression depth is capped at the canonical RQL nesting limit, returning
+`None` before host effects on an over-depth node. Unvisited lazy branches remain
+unvisited. Negation of the signed minimum Integer/BigInt now returns `None`
+instead of panicking or wrapping. Existing optional-key ordering/error admission
+remains in the host; this does not replace the typed evaluator's diagnostic API.
+
+Native/WASM cases cover lazy branches, eager function callbacks, raw special
+arguments, missing values, casts, exact integer comparisons, secret admission,
+unsupported nodes, checked negation and depth boundaries including special
+defaults. The recovered-row ordering fixture now uses this same Expr walk; its
+function host remains test-only and deliberately supports only its COALESCE
+callback. Its generated canonical plan orders using CASE, negation and CAST after
+WAL recovery, update, checkpoint and a full offline browser restart. Native tests
+also exercise special-default semantics and that SQL ordering path.
+
+Public browser stored-query/transaction flags remain false. The production
+browser host and complete durable SQL dispatch are still pending; no new public
+JS/TS query surface or persistence format is introduced by this extraction.
+
+Cost sketch: E visited expressions keep O(E) traversal plus existing argument
+buffers and host work, with stack depth capped at 128. The move adds no scan,
+file write, network request or IPC and makes no measured speedup claim.
+
+## Shared resolved-value scalar dispatch
+
+`reddb-engine::query::runtime::value_functions` now owns the native builtin
+function dispatcher over already-resolved Value arguments. The native Expr host
+and its existing scalar shim delegate to this implementation; the recovered-row
+ordering fixture also uses it instead of its handwritten COALESCE callback.
+Existing missing/NULL behavior, case-sensitive dispatcher names, value coercion,
+JSON result representations and text/time/money/geo algorithms are retained.
+
+The host supplies Unix milliseconds and retains session identity/tenancy,
+advisory locks, H3, password verification and unknown functions. Native model,
+AI, configuration/KV authorization and raw special references remain in their
+existing expression callbacks. No crypto/auth/server dependency enters WASM.
+The shared JSON helpers decode binary document bodies through the canonical
+keystone codec; no alternate JSON/storage format is introduced.
+
+Recursive CONTAINS walks and JSON paths/updates use the canonical RQL depth cap.
+JSON path indices parse as u64 and convert explicitly at array access, so a
+valid out-of-range read is SQL NULL on native and wasm32. JSON_SET rejects
+oversized growth before reserving memory or adding one to an unchecked index.
+One call shares a padding budget of JSON_LITERAL_MAX_BYTES / 5 new array slots,
+using the existing 16 MiB literal-byte budget and the serialized ",null" cost;
+nested arrays cannot reset that budget. Reservations are fallible and exact.
+Rejected growth returns SQL NULL without mutating the input. Too-deep or invalid
+paths keep the existing unresolved-result convention. Integer ABS at the signed
+minimum now returns None instead of panicking/wrapping; bit lengths multiply
+a checked i64 count rather than a target-width usize.
+
+Native/WASM cases cover pure function results, missing arguments, Unicode and
+wide text bounds, deterministic clock values, money and geo inputs, binary JSON
+reads, JSON construction/update, depth/wide-index bounds and host fallback.
+The recovered canonical plan additionally calls JSON_EXTRACT_TEXT on the binary
+body in its CASE sort key after WAL recovery, update, checkpoint and a full
+offline browser restart. Native SQL composes JSON_OBJECT/extraction/casts through
+the same dispatch. The fixture still rejects native-only effects; public browser
+stored-query/transaction flags remain false pending complete production wiring.
+
+Cost sketch: value dispatch is constant-size selection plus existing argument,
+text/JSON and geometry work; JSON_SET growth is O(new slots) under one bounded
+padding budget and recursion is capped at 128. No new scan, persistence write,
+network request or IPC is added. No measured speedup is claimed.
+
+## Shared window phase
+
+`reddb-engine::query::runtime::window_phase` owns the active native algorithm for
+ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD and SUM/COUNT/AVG/MIN/MAX OVER. The native
+adapter delegates to it and keeps materialization admission, typed expression
+execution with secret-aware inputs, the existing db-less legacy fallback, error
+conversion and secret output policy. The shared phase retains canonical keys,
+stable partition ordering, native Value variants, supported frame diagnostics,
+per-column publication and cross-row secret sensitivity. Its position in the
+native table plan is unchanged, including existing LIMIT/OFFSET placement.
+
+LAG/LEAD offsets remain nonnegative u64 until checked index arithmetic; a target
+outside the partition uses the default on native and wasm32. ROWS PRECEDING
+saturates offsets beyond usize instead of truncating on wasm32. Lowered constant
+subtraction is checked. Projection argument recursion is capped at the canonical
+128-level limit before sensitivity/lowering; embedded Expr/Filter trees and
+window specs retain their parser/AST admission limits. No new query parser,
+JavaScript evaluator or storage format is introduced.
+
+Eight native/WASM case groups cover partitions/ties, retained rich values,
+aggregate peers/frames, wide offsets, errors/publication, admission and cross-row
+secret policy. The recovered table-plan fixture exercises ROW_NUMBER, LAG and
+SUM OVER after WAL recovery, update, checkpoint and an offline OPFS restart.
+Public browser storedQueries and transactions remain false until production
+catalog/admission/SQL dispatch and complete durable transaction wiring land.
+
+Cost sketch: for N rows and K key dimensions, each window keeps O(N*K) key memory
+plus O(N) indices/results and O(N log N) sorting; existing aggregate frame walks
+can cost O(N^2). The extraction adds no network request, disk write or IPC and
+makes no measured speedup claim.
+
+## Shared aggregate kernels
+
+`reddb-engine::query::runtime::aggregation` now owns the native slot compiler,
+accumulators, batch merging, typed group keys, numeric coercion and result
+construction for COUNT, SUM, AVG, MIN, MAX, VARIANCE, STDDEV, MEDIAN, PERCENTILE,
+GROUP_CONCAT, STRING_AGG, FIRST, LAST, ARRAY_AGG and COUNT_DISTINCT. Native generic
+aggregation delegates to these kernels. Its fast routes reuse the same numeric
+coercion and sum conversion. The host retains value comparison/secret policy and
+static projection evaluation; scan/visibility, grouping orchestration, HAVING,
+ORDER BY, limits, authorization and spill I/O remain native responsibilities.
+The native spill codec and field order are unchanged; shared state fields remain
+available to that codec and are not exposed as public JS/TS bindings.
+
+A regression test reproduced a native shared-slot bug: SUM/AVG/VARIANCE/STDDEV on
+10 and 20 accumulated the source four times, returning SUM 120 instead of 30.
+The compiler now assigns one updating projection per storage slot and marks the
+other projections as shared reads. A later statistical projection upgrades the
+updating slot to collect squared values, so projection order cannot change the
+result. The same rule avoids duplicate collection for MEDIAN/PERCENTILE and
+GROUP_CONCAT/STRING_AGG. Output labels and parameter evaluation remain unchanged.
+
+Rendered labels cannot identify an argument: a field and a literal can render
+alike. Slot identity therefore uses the complete typed argument's derived Debug
+rendering, including source spans, as process-local compiler metadata. It is
+never persisted or returned as an output name; no storage/wire format depends on
+it. This distinguishes argument shapes and remains reflexive for NaN literals.
+Projection recursion is capped at the canonical 128-level limit before rendering
+or cloning. Embedded Expr/Filter trees retain existing parser/AST admission.
+
+Eight native/WASM case groups cover shared slots, NULL/empty input, rich ordered
+values, aggregate parameters/aliases and typed argument identity, merging,
+numeric/nonfinite coercion, exact group keys, depth and host callbacks. Native SQL
+regression tests force the generic aggregate route in both projection orders.
+The recovered fixture runs filtered COUNT/SUM/AVG/MEDIAN grouped by a JSON tenant
+field after WAL recovery, updates, checkpoint and offline OPFS restarts. These
+are test hosts: public storedQueries/transactions flags remain false pending
+production catalog/admission/dispatch and durable transaction integration.
+
+Cost sketch: N rows update U distinct admitted argument/storage slots in O(N*U),
+without re-evaluating shared projections; compiler metadata is O(total argument
+AST size). Existing list/statistic aggregates retain O(N) values per group and
+sort on result construction; host memory/spill policy remains required. No extra
+network request, persistent write or IPC is added; no measured speedup is claimed.
+
+## Shared aggregate reference planning
+
+`reddb-engine::query::planning::aggregation` owns the active native preparation
+of aggregate references in HAVING and ORDER BY. It reuses visible output aliases,
+registers hidden aggregates, rewrites nested expression references and deduplicates
+the complete aggregate projection list before slot compilation. The native
+executor delegates to this plan; its grouping/scan, H3 admission, authorization,
+secret policies, spill, result construction, pagination and resource admission
+remain in the native host. Legacy signature rendering and canonical/legacy AST
+field precedence are retained.
+
+A new regression reproduced hidden-result label aliasing: PERCENTILE(x, 0.25)
+in HAVING and PERCENTILE(x, 0.75) in ORDER BY both wrote `percentile(x)`, causing
+otherwise qualifying groups to disappear. Hidden results now keep the existing
+label when available and receive distinct private aliases on collision. The
+allocator reserves visible labels, source-column/group labels and previously
+registered hidden labels; user aliases that already resemble generated names
+are skipped. Native visible result columns are unchanged. Colliding hidden
+materialization names are intentionally different; no storage/wire format or
+public JS/TS binding depends on this compiler metadata.
+
+An iterative guard bounds the planning paths across Expr, Filter, Projection,
+window keys and frame expressions before recursive lowering/rendering/cloning.
+Lowered projections/filters and newly materialized hidden arguments are checked
+again to catch expansion. Native admission invokes the source guard before its
+own recursive shape/H3 work. Limits use the canonical 128-level RQL constant;
+opaque subquery bodies, literal-container contents and source resolution retain
+the host's existing parser/value admission bounds. Oversized planning trees fail
+with a query error, without publishing a partially prepared plan.
+
+Six native/WASM case groups cover aliases and hidden reuse, legacy AST authority,
+projection deduplication, CASE/casts/predicates, aggregate parameters, pagination,
+label collisions, signatures, unsupported outer functions and depth bounds.
+Native SQL covers alias reuse and hidden references as well as parameter/alias
+collisions. The recovered-row fixture now compiles the shared plan and evaluates
+hidden MAX references in HAVING/ORDER BY with LIMIT/OFFSET after WAL recovery,
+updates, checkpoint and an offline OPFS restart. Public storedQueries and
+transactions remain false until production SQL/catalog/admission and durable
+transaction integration are wired.
+
+Cost sketch: for E visited AST nodes and A aggregate references, planning retains
+O(E) AST/metadata space plus the existing rendered signatures; nested signature
+construction retains its existing bounded rendering cost. New label reservation
+uses O(A + visible/group labels) metadata and adds no per-row work, persistent
+write, network call or IPC. No measured speedup is claimed.
+
+## Shared aggregate result assembly
+
+`reddb-engine::query::runtime::aggregate_results` now owns the active native
+post-group result phase: group/aggregate columns, hidden values, empty-input
+behavior, HAVING, sort dispatch, pagination and sensitivity traversal before
+secret output. The native generic executor delegates to it. The host retains
+materialization limits, group label/key policy, typed/legacy HAVING and ORDER BY
+effects, comparison/static-expression callbacks and secret output policy. The
+phase consumes borrowed group views and prepared metadata; callers must supply
+admitted query trees and states belonging to the same compiled slot plan.
+
+The original ordering is retained: guard the full merged group cardinality,
+materialize/evaluate HAVING, sort, apply OFFSET/LIMIT, then protect secret output
+for retained rows. Errors propagate without conversion or a partial returned
+result. Hidden values stay outside the visible column vector. Native column
+ordering and empty grouped schemas are preserved, as is the scalar empty-input
+row (COUNT 0, other aggregates using their existing NULL rules), including its
+HAVING evaluation. No new SQL admission, spill or persistence format is added.
+
+LIMIT/OFFSET now use checked target-width conversion with saturation instead of
+`as usize`. A 2^32 limit must retain a small result on wasm32, while a 2^32 offset
+must exhaust it. Native and WASM cases cover those bounds, i64::MAX literals and
+u64::MAX AST metadata; the SQL literal grammar is unchanged. Four case groups
+cover grouped/hidden columns, empty-input semantics, pagination and resource/
+secret callback order and failures. Native SQL adds empty and wide-page
+regressions; existing native secret/transaction/persistence checks remain gates.
+
+The recovered OPFS fixture replaces its manual output-row construction and
+post-group processing with the shared phase, using actual recovered group
+values/states after WAL recovery, updates, checkpoint and offline restart.
+The fixture's host admits its fixed tenant labels and pure predicates only;
+production browser catalog/admission and query/transaction dispatch remain
+pending, with public storedQueries/transactions flags still false.
+
+Cost sketch: G groups with P projections retain the existing O(G*P) result walk
+plus existing finalization/sort costs and result memory. Borrowed group views
+add no aggregate-buffer copies. No extra scan, persistent write, network call
+or IPC is introduced; no measured speedup is claimed.
+
+## Shared aggregate group bindings and shape validation
+
+`reddb-engine::query::planning::aggregation` owns native GROUP BY alias
+resolution, structural projection validation and prepared group bindings. Each
+binding retains the resolved expression, raw record key and visible output
+label. Generic native grouping and shared result assembly reuse these bindings;
+result construction and secret sensitivity traversal no longer call the host to
+lower projections or render group names per output group. The original native
+helpers moved into the engine; there is no separate JavaScript implementation.
+
+Only unqualified group names resolve SELECT aliases, with the existing
+case-insensitive match. Qualified fields, canonical/legacy AST precedence,
+function/JSON keys, TIME_BUCKET rendering and structural diagnostics retain
+native behavior. Source, lowered and alias-resolved trees are depth-checked
+before recursive rendering. Native H3 admission remains a host callback, in its
+original projection-before-group order; expression effects, resource admission,
+secrets, tenancy and persistence stay with their existing hosts. No H3 runtime
+or dependency is added to WASM.
+
+Five native/WASM case groups cover aliases, qualified names, expression labels,
+legacy metadata, depth limits, structural/host errors and multiple result
+bindings. Native SQL regressions force the generic path for alias/function
+binding and check H3 admission. The recovered OPFS fixture now groups by the
+SELECT alias of its JSON tenant expression and consumes canonical labels without
+hardcoded host naming callbacks. These fixtures do not publish SQL/catalog or
+durable transactions through the public browser SDK; storedQueries and
+transactions remain false.
+
+Cost sketch: for G groups, K group expressions and P projections, group naming
+moves its projection matching/rendering from O(G*K*P) to query preparation
+O(K*P), retaining O(K) bindings plus resolved expression trees; result insertion
+remains O(G*K). Structural admission and execution each prepare metadata once.
+There is no added network request, disk write or IPC, and no measured speedup
+is claimed.
+
+## Public read-only table SELECT
+
+Source JS/TS builds expose `openDatabase({ name, worker? })` and `query(sql)` over
+an existing OPFS artifact. `BrowserDatabase` delegates to
+`reddb-engine::query::local_read::LocalReadDatabase`, which owns the canonical
+`EmbeddedResidentStore` recovery controller and decodes its authoritative
+collection-contract blob once. Snapshot and committed WAL replay, entity scan
+visibility, record materialization, unary table planning/execution, projection,
+ordering and scalar evaluation retain their existing Rust authorities. There
+is no JavaScript evaluator, alternate snapshot or WAL codec. Native server
+hosts retain their current transaction, tenancy/RLS and secret policies.
+
+A canonical-expression callback in shared projection defaults to the original
+native lowering/fallback behavior. The local host supplies its admitted original
+SELECT expressions by projection index. This avoids reconstructing arithmetic
+as legacy MUL/ADD function calls while preserving checked evaluator failures.
+No native host opts into different evaluation behavior as part of this change.
+
+The first public stored-query surface is read-only, local file-owner access to
+one table: scalar projections, aliases/JSON paths, WHERE, source-expression
+ORDER BY, and literal LIMIT/OFFSET. Admission checks query shape and every
+expression before scanning, including empty tables. Unsupported statements,
+functions, parameters, grouping/windows/joins, DISTINCT, system/universal
+sources, other models and TTL/retention fail explicitly. Missing or corrupt
+catalogs are never inferred. Visible source materialization is bounded at
+100,000 rows independently of SQL LIMIT. Native committed scans hide superseded
+and moderated rows. Secret expressions are rejected; wildcard secret output
+retains canonical redaction. This API is not a server principal/tenant session:
+applications must export authorized subsets before offline file-owner access.
+
+Database and raw artifact handles share the exact same Web Lock and exclusive
+OPFS sync-handle lifetime. A missing database is not created; read-only open,
+SELECT and failed writes never append, checkpoint or alter file bytes. Mutation
+and transaction APIs are absent. Engine metadata reports storedQueries true
+with storedQueryMode read-only-tables; transactions and sync remain false.
+Storage-independent and foreign-language bridges retain their scalar-only
+operation lists. The published 0.1.0 package predates this source API; publishing
+another browser version is a separate release step.
+
+Native tests cover snapshot/WAL update/delete recovery, moderation/history,
+nullable and JSON fields, exact integers, data errors at each query phase,
+wide pages, unsupported empty-table queries and authoritative catalog errors.
+Real browser and installed TypeScript/Vite consumers import a native artifact
+and query it through production bindings after a full offline browser restart,
+with the HTTP listener stopped. Read-only bytes and exclusion of raw/SQL owners
+are checked through the public SDK; no test-only executor supplies the results.
+
+Cost sketch: open reconstructs O(snapshot + committed WAL) bytes once; each query
+walks physical source rows until exhaustion or its 100,001st visible candidate, retains
+O(N * row size + projection/order keys) memory and uses existing O(N log N) sort.
+Recovered resident state remains in the owning worker between queries. There
+is one worker request/response per query and no query-time file write, flush,
+network call or measured performance claim.
+
+The dependency audit for this integration exposed existing zstd advisories,
+including RUSTSEC-2026-0410 in the WebAssembly allocator shim. Direct RedDB
+compression users now require zstd 0.14.3 with zstd-safe 8.2.0 and zstd-sys
+2.1.2; workspace and standalone Node/Python locks retain that resolution.
+The bundled Zstandard library remains 1.5.7, with existing native
+compressed-frame/value/entity fixtures serving as compatibility gates.
+
+Published Tonic 0.14.6 still requires zstd 0.13. RedDB therefore ships MIT-licensed
+compatibility distributions of the unchanged Tonic/Prost Rust sources as
+reddb-io-tonic and reddb-io-tonic-prost, using zstd 0.14.3 and one shared runtime
+identity. Builders remain upstream; generated stubs retain their existing Rust
+aliases. The three lockfiles no longer retain the old zstd/safe binding. The
+workspace, Node and Python audits run with the existing deny-warnings policy.
+
+These packages track the RedDB release version and publish before grpc-proto.
+Registry-normalized manifests keep their package names and fixed dependency;
+the fix does not rely on a consumer's root-only Cargo patch. Upstream archive
+checksums, unmodified Rust source digests, original manifests and MIT licenses
+are retained in the compatibility packages.
+
+The protocol/compression contract is preserved, including zstd, gzip and identity
+negotiation. Existing low-level Rust callers using upstream Tonic types directly
+must import the matching types through reddb_grpc_proto::tonic or use the
+compatibility package alias. This is a source-level migration for that API;
+high-level client and non-Rust wire interfaces remain unchanged.
+
+
+## Local table SQL and single-owner transaction integration
+
+Source builds expose `openDatabase({ name, create?: boolean, worker? })` and
+`query(sql)` for CREATE TABLE, SELECT, INSERT, UPDATE, DELETE and plain
+BEGIN/COMMIT/ROLLBACK. Creation is explicit and never repairs a corrupt existing
+file. The parser, table contract builder, schema/default/generated/CHECK/unique
+rules, visible scans, expression evaluation and artifact formats are shared with
+native Rust. Native DDL calls the same table-contract builder with its host clock;
+portable table definitions accept an explicit Unix-seconds creation timestamp.
+
+The exclusively locked worker is the complete session boundary. Autocommit DML
+prepares every row and validates the final unique-key set before publishing one
+native WAL batch. BEGIN reconstructs a private resident snapshot. Transaction
+reads observe that private state, and all row actions publish together on COMMIT.
+A statement error aborts the transaction until ROLLBACK; close/worker death drops
+uncommitted state. Ambiguous I/O fences reads and writes until recovery.
+
+Catalog changes cannot be split from row publication: CREATE TABLE stages the
+collection and authoritative contract together, then publishes one complete
+canonical snapshot root. A transaction containing DDL commits its entire private
+catalog/data snapshot with the same root barriers. This extends no persisted WAL
+codec and introduces no second storage system. Existing formats remain readable
+by native file/query APIs. Tests interrupt each write/flush of both row-only WAL
+commit and catalog/data snapshot commit, accepting only complete old/new states.
+
+This API supplies single-owner transactions, not the complete native concurrent
+MVCC/savepoint surface. It rejects explicit isolation options, savepoints, other
+models, TTL/retention, AI/event effects, context indexes and encrypted writes.
+SELECT restrictions from the initial table surface remain. Transaction pending
+row actions and visible source tables are capped at 100,000 independently of
+query pagination. Compiled capabilities report read-write-tables, sqlWrites and
+transactions true; storage-independent and foreign-language handles remain scalar
+only. Browser 0.2.0 and the public playground expose this table surface;
+Browser 0.3.0 adds positional parameter binding as described below.
+
+Cost sketch: autocommit scans O(N) candidates for uniqueness and emits O(changed
+row bytes) through the native WAL; BEGIN copies O(database snapshot bytes) once;
+DDL commits write O(database snapshot bytes). Ordinary transaction commits emit
+one O(pending row bytes) WAL batch. No measured performance improvement is claimed.
+
+Production package tests create databases and run CRUD, commit and rollback from
+installed TypeScript/Vite consumers in Chromium and Firefox. Two full offline
+browser restarts with the HTTP listener stopped verify both offline writes and
+their subsequent recovery. Public SDK tests also terminate a worker with an open
+transaction and verify that only committed rows survive, and preserve corrupt
+existing artifacts even with create enabled.
+
+## Shared positional SQL parameter binding
+
+`reddb-engine::query::parameters` and `query::planning::shape` own the native
+positional binder and parameterized-query shape helpers. The native
+`storage::query::user_params` and `storage::query::planner::shape` paths re-export
+them. Their existing tests move with the implementations; metadata filter types
+already belong to `reddb-types`. Native prepared-query cache behavior stays with
+the native host while using the same helpers.
+
+`LocalDatabase::query_with_params` parses and binds per call, then dispatches the
+bound AST directly. SELECT admission and execution consume the bound TableQuery,
+so parameter values never need SQL quoting or reparsing. Arity and contiguous
+one-based index rules, reused positions, INSERT/UPDATE/DELETE expression binding
+and LIMIT/OFFSET validation reuse the native implementation. Binding failures
+follow the same aborted-transaction-until-ROLLBACK rule as statement failures.
+
+JS/TS `query(sql, params)` uses a dedicated queryWithParams worker operation and
+WASM method. Structured clone retains bigint values. The host maps scalar null,
+boolean, text and numeric inputs to canonical Values; integer numbers must be
+safe and bigints fit i64/u64. Argument conversion happens before SQL execution.
+Objects, arrays and binary parameters remain outside this JS surface. SDK,
+Worker and native entrypoints bound the parameter count at 65,536. The
+queryParameters capability prevents a new SQL SDK from opening storage with
+an older Worker/WASM that could ignore the new operation. File formats and ABI 1
+remain unchanged.
+
+Cost sketch: parameter binding walks O(AST nodes), retains the existing typed
+literal representation, and does not generate a second SQL text for SELECT.
+No prepared-statement cache or measured browser speedup is claimed here.
+Native tests and installed TS/Vite consumers cover SQL-looking text, embedded
+NUL/Unicode, exact integers, repeated indexes, invalid arity/gaps, transaction
+failure semantics and recovery of bound writes across full offline restarts.

@@ -18,7 +18,25 @@ use std::{
     sync::Arc,
 };
 
+#[path = "table_plan_projection.rs"]
+mod table_plan_projection;
+
+#[path = "geographic_projection.rs"]
+mod geographic_projection;
+
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "scalar_geo_aliases_and_operations",
+        geographic_projection::aliases_and_operations,
+    ),
+    (
+        "scalar_geo_argument_forms",
+        geographic_projection::argument_forms,
+    ),
+    (
+        "scalar_geo_input_policy",
+        geographic_projection::input_policy,
+    ),
     ("scalar_dispatch_clock_values", scalar_clock_values),
     (
         "scalar_dispatch_time_bucket_inputs",
@@ -1587,6 +1605,8 @@ fn output_policy_and_redaction() {
 }
 
 pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract, updated: bool) {
+    table_plan_projection::verify_recovered(records, contract, updated);
+    super::aggregation::verify_recovered(records, contract, updated);
     let sql = "SELECT o.rid AS identity, total AS amount, ABS(quantity) AS magnitude, COALESCE(nickname, 'none') AS display, payload.score AS score FROM orders AS o WHERE total >= 10 ORDER BY total DESC LIMIT 2 OFFSET 1";
     let query = super::record_filters::table_query(sql);
     let columns = reddb_rql::sql_lowering::effective_table_projections(&query);
@@ -1706,5 +1726,23 @@ pub fn verify_recovered(records: &[UnifiedRecord], contract: &CollectionContract
         );
         assert_eq!(projected.get("today"), Some(&Value::Date(2)));
         assert_eq!(projected.get("utc_time"), Some(&Value::Time(123)));
+    }
+    geographic_projection::verify_recovered(&host, &selected, updated);
+}
+
+impl reddb_engine::query::runtime::window_phase::WindowHost for Host<'_> {
+    type Error = String;
+    fn guard_materialization(&self, rows: usize) -> Result<(), String> {
+        assert!(rows <= 4, "recovered fixture row bound");
+        Ok(())
+    }
+    fn evaluate_expression(&self, expression: &Expr, source: &UnifiedRecord) -> Option<Value> {
+        ProjectionHost::evaluate_expression(self, expression, source).ok()
+    }
+    fn secret_query_output(&self, value: Value) -> Result<Value, String> {
+        ProjectionHost::secret_query_output(self, value)
+    }
+    fn query_error(&self, message: String) -> String {
+        message
     }
 }

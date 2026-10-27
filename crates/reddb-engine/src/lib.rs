@@ -20,6 +20,8 @@ pub mod catalog;
 mod clock;
 #[doc(hidden)]
 pub mod execution;
+#[doc(hidden)]
+pub mod geo;
 pub mod query;
 pub mod storage;
 pub mod transaction;

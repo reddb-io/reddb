@@ -33,8 +33,11 @@ before(async () => {
       if (relative === 'service-worker.js' && updateRevision) {
         body = Buffer.from(body.toString().replace(/(const current = prefix \+ '[^']*)'/, "$1-update-test'"))
       }
+      if (relative === 'index.html') {
+        body = Buffer.from(body.toString().replace('</head>', `<meta name="test-build" content="${updateRevision ? 'updated' : 'initial'}"></head>`))
+      }
       const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' }[extname(path)] || 'application/octet-stream'
-      response.writeHead(200, { 'Content-Type': type }).end(body)
+      response.writeHead(200, { 'Content-Type': type, ...(relative === 'index.html' ? { 'Cache-Control': 'public, max-age=600' } : {}) }).end(body)
     } catch { response.writeHead(404).end() }
   })
   server.listen(0, '127.0.0.1')
@@ -52,40 +55,100 @@ async function ready(page) {
   await page.waitForFunction(() => document.querySelector('#engine-state').textContent.includes('WASM ativo'))
   await page.waitForFunction(() => !document.querySelector('#reload').disabled)
   await page.getByRole('tab', { name: 'JSON', exact: true }).click()
-  await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('42'))
-  assert.deepEqual(JSON.parse(await page.locator('#query-result code').textContent()), { columns: ['resposta'], rows: [[42]] })
+  const result = await response(page)
+  assert.deepEqual(result.columns, ['id', 'body'])
+  assert.equal(Array.isArray(result.rows), true)
+}
+
+async function response(page) {
+  return JSON.parse(await page.locator('#query-result code').textContent())
+}
+
+async function execute(page, sql, fails = false, parameters = []) {
+  await page.getByRole('textbox', { name: 'Consulta RQL' }).fill(sql)
+  await page.getByRole('textbox', { name: 'Parâmetros (JSON)', exact: true }).fill(JSON.stringify(parameters))
+  await page.getByRole('button', { name: 'Executar consulta' }).click()
+  await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+  assert.equal(await page.locator('#error').isVisible(), fails, await page.locator('#error').textContent())
+  return fails ? await page.locator('#error').textContent() : await response(page)
+}
+
+async function preset(page, label) {
+  await page.getByRole('button', { name: label, exact: true }).click()
+  return execute(page, await page.locator('#sql').inputValue(), false, JSON.parse(await page.locator('#parameters').inputValue()))
+}
+
+async function transaction(page, command, fails = false) {
+  await page.getByRole('button', { name: command, exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+  assert.equal(await page.locator('#error').isVisible(), fails, await page.locator('#error').textContent())
+  return fails ? await page.locator('#error').textContent() : await response(page)
 }
 
 for (const [name, browser] of Object.entries({ chromium, firefox })) {
-  test(`${name}: published-package UI, errors, ownership and a full offline restart`, async () => {
+  test(`${name}: local SQL CRUD, transactions, ownership and two full offline restarts`, async () => {
     const profile = resolve(temporary, `${name}-profile`)
     let context = await browser.launchPersistentContext(profile, { headless: true })
     try {
       let page = await context.newPage()
+      await page.route(origin, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Storage setup</title>' }))
+      await page.goto(origin)
+      await page.evaluate(async () => {
+        const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser', { create: true })
+        const file = await directory.getFileHandle('reddb-browser-playground-v1.rdb', { create: true })
+        const writer = await file.createWritable()
+        await writer.write(new Uint8Array([82, 68, 66, 1]))
+        await writer.close()
+      })
+      await page.unroute(origin)
       await ready(page)
-      assert.equal(await page.locator('#record-count').textContent(), '0')
-      await page.getByRole('button', { name: 'Texto', exact: true }).click()
-      await page.getByRole('button', { name: 'Executar consulta' }).click()
-      await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('sem rede'))
-      assert.deepEqual(JSON.parse(await page.locator('#query-result code').textContent()), { columns: ['modo', 'resposta'], rows: [['sem rede', 42]] })
-      await page.getByRole('button', { name: 'Limite atual' }).click()
-      await page.getByRole('button', { name: 'Executar consulta' }).click()
-      await page.waitForFunction(() => !document.querySelector('#error').hidden)
-      assert.match(await page.locator('#error').textContent(), /QUERY_UNSUPPORTED/)
-      await page.getByRole('button', { name: 'Cálculo', exact: true }).click()
-      await page.getByRole('button', { name: 'Executar consulta' }).click()
-      await page.waitForFunction(() => document.querySelector('#query-result code').textContent.includes('42'))
-      assert.equal(await page.locator('#error').isHidden(), true)
-      await page.getByRole('button', { name: 'Gravar marcador' }).click()
-      await page.waitForFunction(() => document.querySelector('#record-count').textContent === '1')
-      await page.getByRole('button', { name: 'Reabrir arquivo' }).click()
-      await page.waitForFunction(() => document.querySelector('#storage-status').textContent.includes('Arquivo reaberto'))
-      assert.equal(await page.locator('#record-count').textContent(), '1')
+      assert.deepEqual((await response(page)).rows, [])
+      await preset(page, 'Criar tabela')
+      assert.deepEqual(await preset(page, 'Inserir'), { columns: ['affectedRows'], rows: [[1]] })
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Minha nota offline']])
+      await preset(page, 'Alterar')
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Nota atualizada offline']])
+      await preset(page, 'Excluir')
+      assert.deepEqual((await preset(page, 'Ler')).rows, [])
+      await preset(page, 'Inserir')
+
+      await transaction(page, 'BEGIN')
+      await execute(page, 'CREATE TABLE history (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+      await execute(page, "INSERT INTO history VALUES (1, 'Catálogo offline')")
+      await transaction(page, 'COMMIT')
+      assert.deepEqual((await execute(page, 'SELECT id, body FROM history')).rows, [[1, 'Catálogo offline']])
+
+      await transaction(page, 'BEGIN')
+      await execute(page, "INSERT INTO notes VALUES (2, 'Pendente')")
+      assert.equal((await preset(page, 'Ler')).rows.length, 2)
+      await transaction(page, 'ROLLBACK')
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Minha nota offline']])
+      await transaction(page, 'BEGIN')
+      await execute(page, "UPDATE notes SET body = 'Confirmada offline' WHERE id = 1")
+      await transaction(page, 'COMMIT')
+      assert.match(await page.locator('#storage-status').textContent(), /confirmadas no OPFS/)
+
+      await transaction(page, 'BEGIN')
+      await execute(page, "UPDATE notes SET body = 'Descartar ao reabrir' WHERE id = 1")
+      await page.getByRole('button', { name: 'Reabrir banco' }).click()
+      await page.waitForFunction(() => document.querySelector('#storage-status').textContent.includes('Banco reaberto'))
+      assert.deepEqual((await response(page)).rows, [[1, 'Confirmada offline']])
+
+      await transaction(page, 'BEGIN')
+      await execute(page, "INSERT INTO notes VALUES (1, 'Duplicada')", true)
+      assert.match(await transaction(page, 'COMMIT', true), /ROLLBACK/)
+      assert.match(await execute(page, 'SELECT id, body FROM notes', true), /ROLLBACK/)
+      await transaction(page, 'ROLLBACK')
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Confirmada offline']])
+      assert.match(await execute(page, 'SELECT COUNT(*) FROM notes', true), /QUERY_UNSUPPORTED/)
+      await preset(page, 'Ler')
+
       const second = await context.newPage()
       await second.goto(origin)
       await second.waitForFunction(() => !document.querySelector('#error').hidden)
       assert.match(await second.locator('#error').textContent(), /FILE_BUSY/)
-      assert.equal(await second.getByRole('button', { name: 'Gravar marcador' }).isDisabled(), true)
+      assert.equal(await second.getByRole('button', { name: 'BEGIN', exact: true }).isDisabled(), true)
+      assert.equal(await second.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
       await second.close()
       await page.setViewportSize({ width: 390, height: 844 })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true)
@@ -97,19 +160,170 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
         context = await browser.launchPersistentContext(profile, { headless: true, offline: true })
         page = await context.newPage()
         await ready(page)
-        assert.equal(await page.locator('#record-count').textContent(), '1')
-        await page.getByRole('button', { name: 'Gravar marcador' }).click()
-        await page.waitForFunction(() => document.querySelector('#record-count').textContent === '2')
-        await page.getByRole('button', { name: 'Reabrir arquivo' }).click()
-        await page.waitForFunction(() => document.querySelector('#storage-status').textContent.includes('Arquivo reaberto'))
-        assert.equal(await page.locator('#record-count').textContent(), '2')
+        assert.deepEqual((await response(page)).rows, [[1, 'Confirmada offline']])
+        await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Gravada sem rede', 1])
+        await page.reload()
+        await page.getByRole('gridcell', { name: 'Gravada sem rede', exact: true }).waitFor()
+        await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+        await transaction(page, 'BEGIN')
+        await execute(page, "INSERT INTO notes VALUES (2, 'Descartar ao fechar')")
+        await context.close()
+        context = await browser.launchPersistentContext(profile, { headless: true, offline: true })
+        page = await context.newPage()
+        await ready(page)
+        assert.deepEqual((await response(page)).rows, [[1, 'Gravada sem rede']])
+        assert.deepEqual((await execute(page, 'SELECT id, body FROM history')).rows, [[1, 'Catálogo offline']])
+        const legacy = await page.evaluate(async () => {
+          const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser')
+          const file = await (await directory.getFileHandle('reddb-browser-playground-v1.rdb')).getFile()
+          return [...new Uint8Array(await file.arrayBuffer())]
+        })
+        assert.deepEqual(legacy, [82, 68, 66, 1], 'the old marker file must remain byte-identical')
         assert.equal(requests, before, 'offline restart must not reach the HTTP host')
       } finally {
         if (server) { server.listen(port, '127.0.0.1'); await once(server, 'listening') }
       }
     } finally { await context.close() }
   })
+
+  test(`${name}: parameter editing preserves text, validates arguments and recovers commits after refresh`, async () => {
+    const context = await browser.launchPersistentContext(resolve(temporary, `${name}-parameters`), { headless: true })
+    try {
+      const page = await context.newPage()
+      await ready(page)
+      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: /^0\.4\.0$/ }).isVisible(), true)
+      const text = "O'Reilly'); DELETE FROM notes; --\0🦊"
+      await execute(page, 'INSERT INTO notes (id, body) VALUES ($1, $2)', false, [1, text])
+      assert.deepEqual((await execute(page, 'SELECT body FROM notes WHERE id = ?1', false, [1])).rows, [[text]])
+      assert.match(await execute(page, 'SELECT body FROM notes WHERE id = $1', true), /INVALID_PARAMS/)
+      assert.match(await execute(page, 'SELECT body FROM notes WHERE id = $1', true, [{}]), /INVALID_ARGUMENT/)
+      await page.locator('#parameters').fill('[invalid JSON]')
+      await page.getByRole('button', { name: 'Executar consulta' }).click()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(await page.locator('#error').textContent(), /INVALID_ARGUMENT.*array JSON válido/)
+      await transaction(page, 'BEGIN')
+      await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Pendente', 1])
+      await page.reload()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.deepEqual((await response(page)).rows, [[1, text]])
+    } finally { await context.close() }
+  })
 }
+
+for (const [name, browser] of Object.entries({ chromium, firefox })) {
+  test(`${name}: downloaded backups restore to new files and survive offline refresh`, async () => {
+    const context = await browser.launchPersistentContext(resolve(temporary, `${name}-backup`), { headless: true })
+    try {
+      const page = await context.newPage()
+      await ready(page)
+      await preset(page, 'Inserir')
+      await transaction(page, 'BEGIN')
+      await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Uncommitted', 1])
+      const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.getByRole('button', { name: 'Baixar backup .rdb', exact: true }).click(),
+      ])
+      assert.equal(download.suggestedFilename(), 'reddb-browser-sql-playground-v1.rdb')
+      const backup = await readFile(await download.path())
+      assert.ok(backup.length > 0)
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Uncommitted']])
+      await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'invalid.rdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32) })
+      await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(await page.locator('#error').textContent(), /DATABASE_ERROR/)
+      assert.equal(new URL(page.url()).searchParams.has('database'), false)
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Uncommitted']])
+      await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'notes.rdb', mimeType: 'application/octet-stream', buffer: backup })
+      await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('#storage-status').textContent.includes('Backup restaurado'))
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(new URL(page.url()).searchParams.get('database'), /^reddb-browser-restored-/)
+      assert.equal(await page.locator('#restore-backup').isDisabled(), true)
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+      await context.setOffline(true)
+      await page.reload()
+      await page.waitForFunction(() => document.querySelector('#execute')?.disabled === false)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+      await page.getByRole('link', { name: 'Abrir banco original do playground', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('#execute')?.disabled === false)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.equal(new URL(page.url()).searchParams.has('database'), false)
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+    } finally { await context.close() }
+  })
+}
+
+test('a backup can recover a corrupt default database without overwriting its file', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    let context = await browser.newContext()
+    let page = await context.newPage()
+    await ready(page)
+    await preset(page, 'Inserir')
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: 'Baixar backup .rdb', exact: true }).click(),
+    ])
+    const backup = await readFile(await download.path())
+    await context.close()
+    context = await browser.newContext()
+    page = await context.newPage()
+    await page.route(origin, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Recovery setup</title>' }))
+    await page.goto(origin)
+    await page.evaluate(async () => {
+      const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser', { create: true })
+      const file = await directory.getFileHandle('reddb-browser-sql-playground-v1.rdb', { create: true })
+      const writer = await file.createWritable()
+      await writer.write(new Uint8Array(32))
+      await writer.close()
+    })
+    await page.unroute(origin)
+    await page.goto(origin)
+    await page.waitForFunction(() => document.querySelector('#error')?.textContent.includes('DATABASE_ERROR'))
+    await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'recovery.rdb', mimeType: 'application/octet-stream', buffer: backup })
+    assert.equal(await page.locator('#restore-backup').isEnabled(), true)
+    await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+    await page.getByRole('gridcell', { name: 'Minha nota offline', exact: true }).waitFor()
+    assert.equal(await page.locator('#error').isVisible(), false)
+    const original = await page.evaluate(async () => {
+      const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser')
+      return [...new Uint8Array(await (await (await directory.getFileHandle('reddb-browser-sql-playground-v1.rdb')).getFile()).arrayBuffer())]
+    })
+    assert.deepEqual(original, Array(32).fill(0))
+  } finally { await browser.close() }
+})
+
+test('storage retention reports the browser decision and origin quota without promising a grant', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    for (const grant of [false, true]) {
+      const context = await browser.newContext()
+      await context.addInitScript(grant => {
+        let persisted = false
+        Object.defineProperties(navigator.storage, {
+          persisted: { value: async () => persisted },
+          persist: { value: async () => { persisted = grant; return grant } },
+          estimate: { value: async () => ({ usage: 1048576, quota: 104857600 }) },
+        })
+      }, grant)
+      try {
+        const page = await context.newPage()
+        await ready(page)
+        await page.locator('#storage-estimate').waitFor()
+        assert.match(await page.locator('#storage-estimate').textContent(), /desta origem: 1 MB de 100 MB/)
+        await page.getByRole('button', { name: 'Solicitar armazenamento persistente' }).click()
+        await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+        assert.match(await page.locator('#storage-retention').textContent(), grant ? /persistente concedido/ : /não concedeu/)
+        assert.equal(await page.locator('#persist-storage').isDisabled(), grant)
+        await preset(page, 'Inserir')
+        assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Minha nota offline']])
+      } finally { await context.close() }
+    }
+  } finally { await browser.close() }
+})
 
 test('unsupported storage remains explicit and does not enable write controls', async () => {
   const browser = await chromium.launch({ headless: true })
@@ -120,8 +334,11 @@ test('unsupported storage remains explicit and does not enable write controls', 
     await page.goto(origin)
     await page.waitForFunction(() => !document.querySelector('#error').hidden)
     assert.match(await page.locator('#error').textContent(), /STORAGE_UNSUPPORTED/)
-    assert.equal(await page.getByRole('button', { name: 'Gravar marcador' }).isDisabled(), true)
+    assert.equal(await page.getByRole('button', { name: 'BEGIN', exact: true }).isDisabled(), true)
     assert.equal(await page.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
+    assert.equal(await page.locator('#export-backup').isDisabled(), true)
+    await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'test.rdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32) })
+    assert.equal(await page.locator('#restore-backup').isDisabled(), true)
   } finally { await browser.close() }
 })
 
@@ -181,8 +398,7 @@ test('query workspace follows the DS reference with a code editor, real result g
     await page.keyboard.press('Enter')
     assert.equal(await page.evaluate(() => document.activeElement.id), 'main-content')
     await page.getByRole('tab', { name: 'Resultado', exact: true }).click()
-    assert.equal(await page.getByRole('columnheader', { name: 'resposta', exact: true }).isVisible(), true)
-    assert.equal(await page.getByRole('gridcell', { name: '42', exact: true }).isVisible(), true)
+    assert.equal(await page.getByRole('columnheader', { name: 'id', exact: true }).isVisible(), true)
     assert.equal(await page.locator('[data-code-field]').count(), 1)
     assert.ok(await page.locator('[data-code-field] [data-token-kind="keyword"]').count() > 0)
     const editor = await page.locator('#sql').boundingBox()
@@ -193,7 +409,11 @@ test('query workspace follows the DS reference with a code editor, real result g
     assert.ok(file.x + file.width <= editor.x, 'the local artifact panel sits on the leading side')
     const status = await page.locator('#engine-state').boundingBox()
     assert.ok(status.y + status.height <= 1000, 'the runtime status stays within the desktop viewport')
-    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta")
+    await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+    await preset(page, 'Inserir')
+    await page.getByRole('tab', { name: 'Resultado', exact: true }).click()
+    await page.locator('#parameters').fill('[]')
+    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta FROM notes")
     await page.keyboard.press('Control+Enter')
     await page.getByRole('gridcell', { name: 'sem rede', exact: true }).waitFor()
     assert.equal(await page.getByRole('columnheader', { name: 'modo', exact: true }).isVisible(), true)
@@ -201,7 +421,7 @@ test('query workspace follows the DS reference with a code editor, real result g
     assert.equal(await page.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
     await page.keyboard.press('Control+Enter')
     await page.waitForFunction(() => document.querySelector('#error').textContent.includes('10.000'))
-    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta")
+    await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta FROM notes")
     await page.keyboard.press('Control+Enter')
     await page.getByRole('gridcell', { name: 'sem rede', exact: true }).waitFor()
     await page.getByRole('switch', { name: 'Tema escuro' }).click()
@@ -229,14 +449,20 @@ test('query workspace follows the DS reference with a code editor, real result g
 })
 
 
-test('an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline', { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, async () => {
-  const browser = await chromium.launch({ headless: true })
+for (const [name, browserType] of Object.entries({ chromium, firefox })) {
+  test(`${name}: an installed update waits for explicit activation, retains OPFS and supports a versioned URL offline`, { skip: !!process.env.REDDB_BROWSER_EXAMPLE_URL }, () => installedUpdate(browserType))
+}
+
+async function installedUpdate(browserType) {
+  const browser = await browserType.launch({ headless: true })
   try {
     const context = await browser.newContext()
     const page = await context.newPage()
     await ready(page)
-    await page.getByRole('button', { name: 'Gravar marcador' }).click()
-    await page.waitForFunction(() => document.querySelector('#record-count').textContent === '1')
+    assert.equal(await page.locator('meta[name="test-build"]').getAttribute('content'), 'initial')
+    await preset(page, 'Inserir')
+    await transaction(page, 'BEGIN')
+    await execute(page, "INSERT INTO notes VALUES (2, 'Descartar ao atualizar')")
     updateRevision = true
     await page.evaluate(async () => (await navigator.serviceWorker.getRegistration()).update())
     await page.locator('#app-update').waitFor({ state: 'visible' })
@@ -246,9 +472,11 @@ test('an installed update waits for explicit activation, retains OPFS and suppor
       page.waitForEvent('load'),
       page.getByRole('button', { name: 'Atualizar aplicação' }).click(),
     ])
-    await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+    assert.equal(await page.locator('meta[name="test-build"]').getAttribute('content'), 'updated', 'a new worker must not recache stale HTTP-cached HTML')
+    await page.getByRole('gridcell', { name: 'Minha nota offline', exact: true }).waitFor()
+    await page.getByRole('tab', { name: 'JSON', exact: true }).click()
     await page.waitForFunction(() => !document.querySelector('#reload').disabled)
-    assert.equal(await page.locator('#record-count').textContent(), '1')
+    assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
     assert.equal(await page.locator('#app-update').isHidden(), true)
     const port = server.address().port
     await new Promise(resolve => server.close(resolve))
@@ -256,15 +484,16 @@ test('an installed update waits for explicit activation, retains OPFS and suppor
     try {
       await context.setOffline(true)
       await page.goto(`${origin}?v=update-test`)
-      await page.getByRole('gridcell', { name: '42', exact: true }).waitFor()
+      await page.getByRole('gridcell', { name: 'Minha nota offline', exact: true }).waitFor()
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
       await page.waitForFunction(() => !document.querySelector('#reload').disabled)
-      assert.equal(await page.locator('#record-count').textContent(), '1')
-      await page.getByRole('button', { name: 'Gravar marcador' }).click()
-      await page.waitForFunction(() => document.querySelector('#record-count').textContent === '2')
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+      await execute(page, "UPDATE notes SET body = 'Atualizada offline' WHERE id = 1")
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Atualizada offline']])
       assert.equal(requests, before, 'the versioned navigation must use the offline cache')
     } finally {
       server.listen(port, '127.0.0.1')
       await once(server, 'listening')
     }
   } finally { updateRevision = false; await browser.close() }
-})
+}

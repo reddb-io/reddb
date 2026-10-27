@@ -1,0 +1,148 @@
+//! Test-only host over recovered records using the canonical planner and executor.
+use super::*;
+use reddb_engine::query::{
+    logical_plan::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate},
+    planning::{build_table_plan_with_host, TablePlanningHost},
+    runtime::table_plan::{execute_table_plan_with_host, TablePlanHost},
+};
+use reddb_rql::ast::TableQuery;
+
+struct TableHost<'a> {
+    records: &'a [UnifiedRecord],
+    query: &'a TableQuery,
+    contract: &'a CollectionContract,
+    projections: Host<'a>,
+}
+impl TablePlanHost for TableHost<'_> {
+    type Error = String;
+    fn scan(&self, _: &CanonicalLogicalNode) -> Result<Vec<UnifiedRecord>, String> {
+        Ok(self.records.to_vec())
+    }
+    fn try_filter_lookup(&self) -> Result<Option<Vec<UnifiedRecord>>, String> {
+        Ok(None)
+    }
+    fn filter_records(
+        &self,
+        records: Vec<UnifiedRecord>,
+        document_gate: bool,
+    ) -> Result<Vec<UnifiedRecord>, String> {
+        assert!(!document_gate, "fixture admits plain table plans only");
+        let mut output = Vec::with_capacity(records.len());
+        for record in records {
+            if super::super::record_filters::matches_where(&record, self.query, Some(self.contract))
+                .map_err(|error| error.to_string())?
+            {
+                output.push(record);
+            }
+        }
+        Ok(output)
+    }
+    fn sort_records(
+        &self,
+        node: &CanonicalLogicalNode,
+        records: &mut Vec<UnifiedRecord>,
+    ) -> Result<(), String> {
+        assert_eq!(
+            node.operator, "sort",
+            "fixture admits plain table plans only"
+        );
+        super::super::record_ordering::sort_records(records, self.query, Some(self.contract));
+        Ok(())
+    }
+    fn rank_records(&self, _: &mut Vec<UnifiedRecord>) {
+        panic!("fixture does not admit ranked plans")
+    }
+    fn project_records(
+        &self,
+        node: &CanonicalLogicalNode,
+        mut records: Vec<UnifiedRecord>,
+    ) -> Result<Vec<UnifiedRecord>, String> {
+        assert_eq!(
+            node.operator, "projection",
+            "fixture admits plain table plans only"
+        );
+        let columns = reddb_rql::sql_lowering::effective_table_projections(self.query);
+        reddb_engine::query::runtime::window_phase::apply_with_host(
+            &self.projections,
+            &mut records,
+            &columns,
+            Some("orders"),
+            Some("o"),
+        )?;
+        records
+            .iter()
+            .map(|record| project(&self.projections, record, &columns))
+            .collect()
+    }
+    fn query_error(&self, message: String) -> String {
+        message
+    }
+}
+
+pub(super) fn verify_recovered(
+    records: &[UnifiedRecord],
+    contract: &CollectionContract,
+    updated: bool,
+) {
+    let query = super::super::record_filters::table_query("SELECT o.rid AS identity, total AS amount, quantity * 2 AS doubled, ROW_NUMBER() OVER (ORDER BY quantity DESC) AS position, LAG(total, 1, -1) OVER (ORDER BY quantity DESC) AS previous, SUM(total) OVER () AS selected_sum FROM orders AS o WHERE total >= 10 ORDER BY CASE WHEN JSON_EXTRACT_TEXT(payload, '$.score') IS NOT NULL THEN -CAST(quantity AS BIGINT) ELSE 0 END ASC LIMIT 2 OFFSET 1");
+    let host = TableHost {
+        records,
+        query: &query,
+        contract,
+        projections: Host::new(Some(contract)),
+    };
+    let plan = build_table_plan_with_host(&host, &query);
+    let projected =
+        execute_table_plan_with_host(&host, &plan, &query).expect("recovered canonical table plan");
+    let expected = if updated {
+        [(3, 20, 8), (2, 15, 6)]
+    } else {
+        [(2, 15, 6), (9_007_199_254_740_992, 10, 4)]
+    };
+    assert_eq!(projected.len(), expected.len());
+    for (index, (record, (id, amount, doubled))) in projected.iter().zip(expected).enumerate() {
+        assert_eq!(record.get("identity"), Some(&Value::UnsignedInteger(id)));
+        assert_eq!(record.get("amount"), Some(&Value::Integer(amount)));
+        assert_eq!(record.get("doubled"), Some(&Value::Integer(doubled)));
+        assert_eq!(
+            record.get("position"),
+            Some(&Value::Integer(index as i64 + 1))
+        );
+        assert_eq!(
+            record.get("previous"),
+            Some(&Value::Integer(if index == 0 { -1 } else { expected[0].1 }))
+        );
+        assert_eq!(
+            record.get("selected_sum"),
+            Some(&Value::Integer(if updated { 35 } else { 25 }))
+        );
+    }
+}
+
+impl TablePlanningHost for TableHost<'_> {
+    fn access_path(&self, query: &TableQuery) -> AccessPathDecision {
+        assert_eq!(
+            query.table, "orders",
+            "fixture admits its recovered table only"
+        );
+        AccessPathDecision {
+            path: "table_scan",
+            index_hint: None,
+            reason: "fixture scans recovered records".into(),
+            warning: None,
+        }
+    }
+    fn scan_cardinality(&self, _: &TableQuery, _: &AccessPathDecision) -> CardinalityEstimate {
+        CardinalityEstimate::full_scan(self.records.len() as f64)
+    }
+    fn uses_document_path_filter(&self, _: &TableQuery) -> bool {
+        false
+    }
+    fn filter_cardinality(&self, _: &TableQuery, document_path: bool) -> CardinalityEstimate {
+        assert!(!document_path, "fixture admits plain table plans only");
+        CardinalityEstimate::full_scan(self.records.len() as f64)
+    }
+    fn is_document_projection(&self, _: &TableQuery) -> bool {
+        false
+    }
+}

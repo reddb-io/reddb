@@ -1,9 +1,9 @@
 {
   "name": "@reddb-io/browser",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": false,
   "type": "module",
-  "description": "RedDB browser persistence and shared scalar execution; stored-data queries and sync remain pending.",
+  "description": "RedDB local browser table SQL, transactions and offline OPFS persistence through a shared Rust/WASM engine.",
   "exports": {
     ".": {
       "types": "./src/index.d.ts",

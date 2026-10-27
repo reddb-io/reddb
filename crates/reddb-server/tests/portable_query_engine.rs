@@ -58,6 +58,99 @@ fn native_storage_error_paths_keep_shared_type_authority() {
 }
 
 #[test]
+fn native_parameter_paths_keep_shared_types_and_execution() {
+    use reddb_engine::query::{local_database::LocalDatabase, parameters, planning::shape};
+    use reddb_file::{OpenMode, StdVfs, Vfs};
+    use reddb_server::storage::query::user_params as native;
+
+    let parsed = reddb_rql::parse_frontend("SELECT id FROM bindings WHERE id = $1")
+        .expect("parameter AST")
+        .into_query_expr();
+    let parameter: parameters::ParameterRef = native::scan_parameters(&parsed)[0];
+    assert_eq!(parameter.index, 0);
+    let error: parameters::BindError = native::bind(&parsed, &[]).expect_err("missing argument");
+    assert!(matches!(
+        error,
+        parameters::UserParamError::Arity {
+            expected: 1,
+            got: 0
+        }
+    ));
+    let _: shape::ParameterizedQuery =
+        reddb_server::storage::query::planner::shape::parameterize_query_expr(&parsed)
+            .expect("native shape helper returns the shared type");
+
+    let directory = tempfile::tempdir().expect("local parameter database");
+    let path = directory.path().join("parameters.rdb");
+    let file = StdVfs
+        .open(&path, OpenMode::create_keep())
+        .expect("open local file");
+    let mut local = LocalDatabase::create(file, &path, 1000).expect("create portable database");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
+    let create = "CREATE TABLE bindings (id INTEGER PRIMARY KEY, body TEXT)";
+    runtime.execute_query(create).expect("native schema");
+    local.query(create, 1000).expect("portable schema");
+    let text = "O'Reilly'); DELETE FROM bindings; --\0🦊";
+    for (sql, values) in [
+        (
+            "INSERT INTO bindings (id, body) VALUES ($1, $2), ($3, $4)",
+            vec![
+                Value::Integer(1),
+                Value::text("before"),
+                Value::Integer(2),
+                Value::text("delete"),
+            ],
+        ),
+        (
+            "UPDATE bindings SET body = $1 WHERE id = $2",
+            vec![Value::text(text), Value::Integer(1)],
+        ),
+        (
+            "DELETE FROM bindings WHERE id = $1",
+            vec![Value::Integer(2)],
+        ),
+    ] {
+        runtime.execute_query_with_params(sql, &values).expect(sql);
+        local.query_with_params(sql, &values, 2000).expect(sql);
+    }
+    let sql = "SELECT $1 AS label, id, body FROM bindings WHERE id = $2 LIMIT $3 OFFSET $4";
+    let values = [
+        Value::text("bound"),
+        Value::Integer(1),
+        Value::Integer(10),
+        Value::Integer(0),
+    ];
+    let native = runtime
+        .execute_query_with_params(sql, &values)
+        .expect("native parameters")
+        .result;
+    let portable = local
+        .query_with_params(sql, &values, 2000)
+        .expect("portable parameters");
+    assert_eq!(native.columns, portable.columns);
+    let native_rows: Vec<Vec<Value>> = native
+        .records
+        .iter()
+        .map(|record| {
+            native
+                .columns
+                .iter()
+                .map(|column| record.get(column).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
+    assert_eq!(native_rows, portable.rows);
+    assert_eq!(
+        portable.rows,
+        [vec![
+            Value::text("bound"),
+            Value::Integer(1),
+            Value::text(text)
+        ]]
+    );
+}
+
+#[test]
 fn portable_scalar_corpus_matches_the_native_runtime() {
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
         .expect("native in-memory runtime opens");
@@ -784,4 +877,65 @@ fn native_store_read_indexes_keep_the_shared_types() {
         .expect("native collection drop");
     assert!(index.search("alice", 10, None).is_empty());
     assert_eq!(store.entity_cache_stats().entries, 0);
+}
+
+#[test]
+fn native_table_planning_keeps_catalog_estimates_and_shared_type_authority() {
+    use reddb_engine::query::logical_plan::{CanonicalLogicalPlan, CardinalityEstimate};
+    use reddb_server::storage::query::planner::build_canonical_plan;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
+    for sql in [
+        "CREATE TABLE shared_plan (id INT, total INT)",
+        "INSERT INTO shared_plan (id, total) VALUES (1, 10), (2, 20), (3, 30)",
+    ] {
+        runtime.execute_query(sql).expect(sql);
+    }
+    let expression = reddb_rql::parse_frontend(
+        "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY total DESC LIMIT 1 OFFSET 1",
+    )
+    .expect("canonical frontend")
+    .into_query_expr();
+    let plan: CanonicalLogicalPlan = build_canonical_plan(&runtime.db(), &expression);
+    let mut node = &plan.root;
+    let mut operators = Vec::new();
+    loop {
+        operators.push(node.operator.as_str());
+        let Some(child) = node.children.first() else {
+            break;
+        };
+        node = child;
+    }
+    assert_eq!(
+        operators,
+        [
+            "projection",
+            "limit",
+            "offset",
+            "sort",
+            "filter",
+            "table_scan"
+        ]
+    );
+    assert_eq!(
+        node.estimated_rows, 3.0,
+        "native host reads the live collection count"
+    );
+    assert_eq!(node.estimated_confidence, 0.85);
+    assert_eq!(node.source.as_deref(), Some("shared_plan"));
+    assert_eq!(node.details["access_path"], "table_scan");
+    assert_eq!(node.details["universal"], "false");
+    let native: reddb_server::storage::query::planner::CardinalityEstimate =
+        CardinalityEstimate::full_scan(3.0);
+    assert_eq!(native.rows, 3.0);
+    // The generated plan also executes through the production native adapter.
+    let result = runtime
+        .execute_query(
+            "SELECT total FROM shared_plan WHERE total >= 10 ORDER BY -CAST(JSON_EXTRACT_TEXT(JSON_OBJECT('total', total), '$.total') AS BIGINT) ASC LIMIT 1 OFFSET 1",
+        )
+        .expect("native shared plan and runtime expression execution");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("total"),
+        Some(&Value::Integer(20))
+    );
 }
