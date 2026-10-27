@@ -413,7 +413,9 @@ for (const browser of browsers) {
           } finally { await native.close() }
           const database = await RedDBBrowser.openDatabase({ name: 'backup-source', create: true })
           const errors = []
-          const text = "O'Reilly\0🦊" + 'x'.repeat(1200000)
+          const chunks = []
+          for (let index = 0; index < 48; index++) chunks.push(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32768))))
+          const text = "O'Reilly\0🦊" + btoa(chunks.join(''))
           let backup, pendingExcluded, stillPending
           try {
             await database.query('CREATE TABLE backups (id INTEGER PRIMARY KEY, body TEXT NOT NULL, revision INTEGER DEFAULT = 7)')
