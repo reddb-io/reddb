@@ -126,28 +126,38 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+function requireStorage() {
+  if (!globalThis.isSecureContext || !globalThis.Worker || !globalThis.navigator?.storage?.getDirectory || !globalThis.navigator?.locks) {
+    throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
+  }
+}
+
+function validateFileOptions(name, create) {
   if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
-  if (!globalThis.isSecureContext || !globalThis.Worker || !globalThis.navigator?.storage?.getDirectory || !globalThis.navigator?.locks) {
-    throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
+  requireStorage()
+}
+
+async function openClientFile(client, name, create, backup, method) {
+  const info = await client.ready
+  const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
+  if (sqlDatabase && (info.capabilities.storedQueries !== true
+    || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
+    || info.capabilities.queryParameters !== true)) {
+    throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
   }
+  if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
+    throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
+  }
+  await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
+}
+
+async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+  validateFileOptions(name, create)
   const client = createClient(worker)
-  try {
-    const info = await client.ready
-    const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
-    if (sqlDatabase && (info.capabilities.storedQueries !== true
-      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
-      || info.capabilities.queryParameters !== true)) {
-      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
-    }
-    if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
-      throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
-    }
-    await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
-  }
+  try { await openClientFile(client, name, create, backup, method) }
   catch (error) { client.shutdown(error); throw error }
   return client
 }
@@ -170,6 +180,55 @@ export async function openArtifact(options) {
 /** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
 export async function openDatabase(options) {
   return databaseMethods(await openFile(options, 'openDatabase'))
+}
+
+/** Reuse one initialized Worker across sequential, independently owned database handles. */
+export async function createDatabaseSession({ worker } = {}) {
+  requireStorage()
+  const client = createClient(worker)
+  await client.ready
+  let active = false
+  let closed = false
+  let closing
+  return {
+    async openDatabase({ name, create = false } = {}) {
+      if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      validateFileOptions(name, create)
+      if (active) throw new BrowserError('INVALID_ARGUMENT', 'Close the current database before opening another in this session')
+      active = true
+      try {
+        await openClientFile(client, name, create, undefined, 'openDatabase')
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      } catch (error) { active = false; throw error }
+      let released = false
+      let fileClosing
+      return databaseMethods({
+        call(method, params) {
+          if (released || closed) return Promise.reject(new BrowserError('CLOSED', 'This database handle is closed'))
+          return client.call(method, params)
+        },
+        closeFile() {
+          if (!fileClosing) {
+            released = true
+            fileClosing = closed ? closing : client.call('close').then(() => { active = false }).catch(error => {
+              // A failed release cannot lend this Worker to another file owner.
+              closed = true
+              client.shutdown(error)
+              throw error
+            })
+          }
+          return fileClosing
+        },
+      })
+    },
+    close() {
+      if (!closing) {
+        closed = true
+        closing = client.closeFile()
+      }
+      return closing
+    },
+  }
 }
 
 /** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */

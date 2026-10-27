@@ -74,7 +74,7 @@ export interface Database extends Runtime {
   query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Complete native .rdb image of committed state, at most 256 MiB. Pending SQL changes are excluded. */
   exportBackup(): Promise<Uint8Array>
-  /** Release exclusive ownership of the local file and terminate its worker. */
+  /** Release file ownership; standalone handles also terminate their Worker. */
   close(): Promise<void>
 }
 
@@ -85,6 +85,17 @@ export function openDatabase(options: {
   create?: boolean
   worker?: Worker
 }): Promise<Database>
+
+/** One initialized Worker, with at most one open database at a time. */
+export interface DatabaseSession {
+  /** The returned handle releases its file, but retains this session's Worker, on close. */
+  openDatabase(options: { name: string; create?: boolean }): Promise<Database>
+  /** Close the current file, discard uncommitted changes, and terminate the Worker. */
+  close(): Promise<void>
+}
+
+/** Retain WASM initialization between file owners; callers must close the session when finished. */
+export function createDatabaseSession(options?: { worker?: Worker }): Promise<DatabaseSession>
 
 /** Restore a native .rdb image to a new name. Existing files are never overwritten. */
 export function restoreDatabase(options: {

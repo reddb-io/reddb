@@ -60,6 +60,8 @@ jobs:
           printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Build bundled JS, worker and WASM
         run: pnpm --filter @reddb-io/browser build
+      - name: Verify reusable Worker ownership and I/O failure boundaries
+        run: REDDB_BROWSER_BROWSERS=chromium,firefox node --test packages/browser/test/runtime.test.mjs packages/browser/test/session.test.mjs
       - name: Verify packaged TypeScript/Vite application and offline OPFS restart
         run: pnpm --filter @reddb-io/browser test:distribution
       - name: Pack immutable release asset
