@@ -29,7 +29,8 @@ use reddb_types::encoding::base64_encode;
 use reddb_types::Value;
 use reddb_wire::redwire::operations::encode_query_result_summary_payload;
 use reddb_wire::redwire::{
-    build_dispatch_reply_frame, build_error_frame_lossy, Frame, MessageKind,
+    build_dispatch_reply_frame, build_error_frame_lossy, Frame, MessageKind, FRAME_HEADER_SIZE,
+    MAX_FRAME_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,11 +51,24 @@ pub(crate) fn envelope_frame(
     outcome: Result<&RuntimeQueryResult, String>,
 ) -> Frame {
     match outcome {
-        Ok(result) => build_dispatch_reply_frame(
-            correlation_id,
-            MessageKind::Result,
-            json(result, &None, &None).to_string_compact().into_bytes(),
-        ),
+        Ok(result) => match super::query_result_json::runtime_query_json_string_limited(
+            result,
+            &None,
+            &None,
+            MAX_FRAME_SIZE as usize - FRAME_HEADER_SIZE,
+        ) {
+            Some(body) => build_dispatch_reply_frame(
+                correlation_id,
+                MessageKind::Result,
+                body.into_bytes(),
+            ),
+            None => build_error_frame_lossy(
+                correlation_id,
+                &format!(
+                    "query response exceeds MAX_FRAME_SIZE ({MAX_FRAME_SIZE} bytes including header)"
+                ),
+            ),
+        },
         Err(message) => build_error_frame_lossy(correlation_id, &message),
     }
 }
@@ -683,6 +697,90 @@ mod tests {
             affected_rows,
             result_with(&["id", "name"], vec![Value::Integer(7), Value::text("Ada")]),
         )
+    }
+
+    #[test]
+    fn canonical_envelope_peak_memory_tracks_encoded_output() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+        let columns: Vec<String> = (0..12).map(|field| format!("f{field}")).collect();
+        let mut records = Vec::with_capacity(2_048);
+        for id in 0..2_048 {
+            let mut record = UnifiedRecord::new();
+            for column in &columns {
+                record.set(
+                    column,
+                    Value::text(format!("{id:08x}-{column}-{}", "x".repeat(20))),
+                );
+            }
+            records.push(record);
+        }
+        let mut result = finite_fixture("select", 0);
+        result.result.columns = columns;
+        result.result.records = records;
+
+        let _warmup = envelope_frame(1, Ok(&finite_fixture("select", 0)));
+        let (frame, allocations) = measure_allocations(|| envelope_frame(7, Ok(&result)));
+        let encoded_bytes = frame.payload.len();
+        eprintln!(
+            "canonical_envelope encoded_bytes={encoded_bytes} peak_extra_bytes={}",
+            allocations.peak_bytes
+        );
+        assert!(
+            allocations.peak_bytes <= encoded_bytes * 2 + 1024 * 1024,
+            "rendering must not retain a second JSON tree for every result row"
+        );
+        assert_eq!(
+            frame.payload,
+            json(&result, &None, &None).to_string_compact().into_bytes()
+        );
+    }
+
+    #[test]
+    fn incremental_canonical_json_preserves_payload_and_exact_byte_limits() {
+        use crate::presentation::query_result_json::{
+            runtime_query_json_string, runtime_query_json_string_limited,
+        };
+
+        for result in [
+            finite_fixture("select", 0),
+            exotic_fixture("select", 0),
+            non_finite_fixture(),
+            ask_fixture(),
+        ] {
+            let expected = json(&result, &None, &None).to_string_compact();
+            assert_eq!(runtime_query_json_string(&result, &None, &None), expected);
+            assert_eq!(
+                runtime_query_json_string_limited(&result, &None, &None, expected.len()),
+                Some(expected.clone())
+            );
+            assert!(
+                runtime_query_json_string_limited(&result, &None, &None, expected.len() - 1)
+                    .is_none()
+            );
+            assert!(runtime_query_json_string_limited(&result, &None, &None, 0).is_none());
+        }
+    }
+
+    #[test]
+    fn oversized_canonical_frame_stops_at_existing_protocol_limit() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use reddb_wire::redwire::MAX_FRAME_SIZE;
+
+        let mut record = UnifiedRecord::new();
+        record.set("payload", Value::text("x".repeat(16 * 1024)));
+        let mut result = finite_fixture("select", 0);
+        result.result.columns = vec!["payload".into()];
+        result.result.records = vec![record; 4096];
+
+        let (frame, allocations) = measure_allocations(|| envelope_frame(19, Ok(&result)));
+        assert_eq!(frame.kind, MessageKind::Error);
+        assert_eq!(frame.correlation_id, 19);
+        assert!(String::from_utf8_lossy(&frame.payload).contains("MAX_FRAME_SIZE"));
+        assert!(
+            allocations.peak_bytes < 3 * MAX_FRAME_SIZE as usize + 1024 * 1024,
+            "an oversized reply must stop encoding before buffering the complete result"
+        );
     }
 
     fn non_finite_fixture() -> RuntimeQueryResult {

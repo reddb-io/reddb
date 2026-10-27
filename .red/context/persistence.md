@@ -37,6 +37,15 @@ HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
 empty beyond-end pages describe the same physical scan, including historical
 versions; this does not introduce logical MVCC filtering or a transaction snapshot.
 
+Canonical HTTP and RedWire query envelopes encode records one at a time using
+the shared record renderer and envelope metadata. They do not retain a JSON
+value tree for the complete record set alongside the executor result. The
+executor result and encoded response buffer remain resident; this does not bound
+every executor intermediate. RedWire stops encoding at its existing frame limit,
+including the header. HTTP preserves `max_result_bytes` and rejects an oversized
+document instead of returning a truncated success. ASK retains its grounding
+envelope renderer.
+
 ## Checkpoint reuse
 
 Double-write page batches synchronize each frame's staging image before its
