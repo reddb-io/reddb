@@ -49,7 +49,7 @@ window.result = (async () => {
   const runtime = await createRuntime({ worker: new RedDBWorker() })
   try {
     const info = await runtime.info()
-    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.queryParameters) throw new Error('Incorrect runtime capabilities')
+    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.queryParameters || !info.capabilities.databaseBackups) throw new Error('Incorrect runtime capabilities')
     const result = await runtime.executeScalar('SELECT 6 * 7 AS answer')
     if (result.rows[0][0] !== 42) throw new Error('Incorrect scalar result')
   } finally { await runtime.close() }
