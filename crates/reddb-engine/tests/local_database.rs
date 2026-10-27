@@ -213,6 +213,10 @@ fn catalog_transaction_survives_every_interrupted_publication_barrier() {
             database.query("SELECT * FROM people", 2000).is_err(),
             "failed I/O must fence the handle"
         );
+        assert!(
+            database.check_healthy().is_err(),
+            "host backup reads must honor the publication fence"
+        );
         let file = database.into_inner();
         for bytes in [file.bytes.into_inner(), file.durable.into_inner()] {
             let mut recovered = Database::open(pager::MemoryFile::from_bytes(bytes), "sql.rdb")

@@ -87,6 +87,12 @@ impl<F: VfsFile> LocalDatabase<F> {
         self.query_with_params(sql, &[], now_ms)
     }
 
+    /// Host-side read operations must honor the same interrupted-publication fence.
+    pub fn check_healthy(&self) -> Result<()> {
+        self.store.committed_resident()?;
+        Ok(())
+    }
+
     pub fn query_with_params(
         &mut self,
         sql: &str,
@@ -109,7 +115,7 @@ impl<F: VfsFile> LocalDatabase<F> {
         now_ms: u64,
     ) -> Result<ScalarResult> {
         // Also fence staged reads after an ambiguous durable commit.
-        self.store.committed_resident()?;
+        self.check_healthy()?;
         if parameters.len() > MAX_QUERY_PARAMETERS {
             return Err(query_error("local SQL accepts at most 65536 parameters"));
         }

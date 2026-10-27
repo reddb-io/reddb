@@ -9,6 +9,8 @@ The JS/TS database handle exports the complete `.rdb` through its owning Worker.
 The operation is serialized with queries and holds both Web Locks and the OPFS
 exclusive access handle, so the physical image cannot change during the copy.
 Pending SQL transactions remain in resident memory and are excluded from export.
+Export checks the Rust publication fence before touching the file. An export
+read/flush failure closes its owner until reopen; a size rejection does not.
 Restore requires a new file, flushes its bytes and validates it through the same
 Rust `BrowserDatabase::open` used for normal recovery. Existing destinations are
 never overwritten. Ordinary rejected restores remove their newly created file

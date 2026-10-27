@@ -282,6 +282,9 @@ these primitives do not promise that a browser will grant it or sync after closi
 exclusive ownership while reading the file and transfers the resulting buffer
 to the caller. No SQL is generated and no storage format is reimplemented in JS.
 An active transaction stays active; its uncommitted changes are excluded.
+The Rust publication fence is checked before copying. A backup read/flush failure
+closes the owner; reopen and recover before issuing more operations. A size-limit
+rejection leaves the handle usable.
 
 ```ts
 import { restoreDatabase } from '@reddb-io/browser'

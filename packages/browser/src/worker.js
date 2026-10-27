@@ -125,6 +125,7 @@ function backupBytes(value) {
 }
 
 function exportBackup() {
+  database.checkHealthy()
   const size = synchronous(access.getSize())
   if (!Number.isSafeInteger(size) || size < 1 || size > MAX_DATABASE_BACKUP_BYTES) {
     throw error('BACKUP_SIZE_LIMIT', 'Database backups must fit within 256 MiB')
@@ -160,7 +161,16 @@ async function execute(method, params) {
     return
   }
   if (database) {
-    if (method === 'exportBackup') return exportBackup()
+    if (method === 'exportBackup') {
+      try { return exportBackup() }
+      catch (failure) {
+        if (failure.code !== 'DATABASE_ERROR' && failure.code !== 'BACKUP_SIZE_LIMIT') {
+          release()
+          await ownership
+        }
+        throw failure
+      }
+    }
     if (method !== 'query' && method !== 'queryWithParams') throw error('QUERY_UNSUPPORTED', 'This database handle exposes local SQL')
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
     if (method === 'queryWithParams') {

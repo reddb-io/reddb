@@ -461,6 +461,40 @@ for (const browser of browsers) {
       } finally { await current.close() }
     })
 
+    storageTest('database backup reads honor the native publication failure fence', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const worker = new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' })
+          const database = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', create: true, worker })
+          const errors = []
+          try {
+            await database.query('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)')
+            await database.query("INSERT INTO notes (id, body) VALUES (1, 'before')")
+            for (const operation of [
+              () => database.query("UPDATE notes SET body = 'failed' WHERE id = 1"),
+              () => database.exportBackup(),
+              () => database.query('SELECT body FROM notes'),
+            ]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await database.close() }
+          const reopened = await RedDBBrowser.openDatabase({ name: 'backup-failed-io' })
+          let rows
+          try { rows = (await reopened.query('SELECT body FROM notes')).rows }
+          finally { await reopened.close() }
+          const failing = await RedDBBrowser.openDatabase({ name: 'backup-failed-io', worker: new Worker('/packages/browser/test/backup-failure-worker.js', { type: 'module' }) })
+          try {
+            for (const operation of [() => failing.exportBackup(), () => failing.query('SELECT body FROM notes')]) {
+              try { await operation() } catch (error) { errors.push(error.code) }
+            }
+          } finally { await failing.close().catch(error => { if (error.code !== 'CLOSED') throw error }) }
+          return { errors, rows }
+        })
+        assert.deepEqual(result, { errors: ['DATABASE_ERROR', 'DATABASE_ERROR', 'DATABASE_ERROR', 'ARTIFACT_ERROR', 'CLOSED'], rows: [['before']] })
+      } finally { await current.close() }
+    })
+
     storageTest('public SQL creates a database and worker termination rolls back uncommitted writes', async () => {
       const current = await page()
       try {
