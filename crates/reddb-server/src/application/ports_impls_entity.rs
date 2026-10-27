@@ -2014,9 +2014,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             })
             .collect();
 
-        let result = engine
-            .apply(collection.clone(), mutation_rows)
-            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+        let result = engine.apply(collection.clone(), mutation_rows)?;
 
         let store = db.store();
         Ok(result
@@ -2186,9 +2184,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 engine
             }
         };
-        let result = engine
-            .apply(collection.clone(), mutation_rows)
-            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+        let result = engine.apply(collection.clone(), mutation_rows)?;
         let store = db.store();
         Ok(result
             .ids

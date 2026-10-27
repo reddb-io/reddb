@@ -133,6 +133,10 @@ fn context_bulk_admission_rejects_the_entire_statement() {
         ))
         .expect_err("reserve the full statement before publication");
     assert!(error.to_string().contains("over budget"), "{error}");
+    assert!(matches!(
+        error,
+        reddb_server::RedDBError::InvalidOperation(_)
+    ));
     assert!(runtime
         .execute_query("SELECT id FROM context_rows")
         .expect("readback")

@@ -23,6 +23,11 @@ document before admission. Reservations share the existing runtime budget and
 remain held through publication and cleanup. Rejection preserves the existing
 row; a rejected bulk insert publishes no rows.
 
+Both row-batch application adapters preserve the runtime's typed error. Wrapping
+an admission failure in `Internal` hid the actionable limit from network clients
+in the published persistent-store reproduction. The persistent regression checks
+the error variant, client-facing message and accepted row count explicitly.
+
 This is containment and accounting, not disk residency. Conservative bounds can
 reject an operation before actual heap usage reaches the configured limit.
 The budget also does not represent all process RSS, allocator fragmentation,
