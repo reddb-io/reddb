@@ -7,7 +7,7 @@
 //! Callers must fence writers or supply an immutable published generation.
 use super::{
     btree::{BTree, BTreeCursor, BTreeError},
-    entity::{EntityId, UnifiedEntity},
+    entity::{EntityId, EntityKind, UnifiedEntity},
     error::{StorageIntegrityError, StoreError},
     metadata::Metadata,
     metadata_codec::deserialize_entity_record,
@@ -18,6 +18,15 @@ use std::sync::Arc;
 pub struct PagedEntityRecord {
     pub entity: UnifiedEntity,
     pub metadata: Option<Metadata>,
+}
+
+/// Raw physical observations. This is not a visible-row count, a schema, or
+/// an allocator history: durable floors and WAL must still be merged by boot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PagedBootstrapSummary {
+    pub physical_count: u64,
+    pub max_entity_id: Option<EntityId>,
+    pub max_row_id: Option<u64>,
 }
 
 /// Physical versions are returned unchanged. MVCC visibility belongs to the caller.
@@ -71,6 +80,16 @@ impl<P: PageStore> PagedCollectionReader<P> {
         })
     }
 
+    /// Observe a complete physical generation without retaining its payloads.
+    /// As with a normal cursor, the host must fence writes to the source.
+    pub fn bootstrap_cursor(&self) -> Result<PagedBootstrapCursor<P>, StoreError> {
+        Ok(PagedBootstrapCursor {
+            source: self.cursor()?,
+            summary: PagedBootstrapSummary::default(),
+            complete: false,
+        })
+    }
+
     fn tree_error(&self, error: BTreeError) -> StoreError {
         // The current B-tree erases the pager's concrete error type, including
         // checksum failures. Retain native open's integrity classification and
@@ -101,6 +120,50 @@ impl<P: PageStore> PagedCollectionReader<P> {
             )));
         }
         Ok(PagedEntityRecord { entity, metadata })
+    }
+}
+
+/// Summaries become available only after a clean EOF. Source failures and
+/// partial iteration never yield a count that could masquerade as complete.
+pub struct PagedBootstrapCursor<P: PageStore> {
+    source: PagedCollectionCursor<P>,
+    summary: PagedBootstrapSummary,
+    complete: bool,
+}
+
+impl<P: PageStore> PagedBootstrapCursor<P> {
+    pub fn next(&mut self) -> Result<Option<PagedEntityRecord>, StoreError> {
+        if self.complete {
+            return Ok(None);
+        }
+        let record = self.source.next()?;
+        if let Some(record) = &record {
+            self.summary.physical_count += 1;
+            self.summary.max_entity_id = Some(
+                self.summary
+                    .max_entity_id
+                    .map_or(record.entity.id, |id| id.max(record.entity.id)),
+            );
+            if let EntityKind::TableRow { row_id, .. } = &record.entity.kind {
+                self.summary.max_row_id = Some(
+                    self.summary
+                        .max_row_id
+                        .map_or(*row_id, |id| id.max(*row_id)),
+                );
+            }
+        } else {
+            self.complete = true;
+        }
+        Ok(record)
+    }
+
+    pub fn finish(self) -> Result<PagedBootstrapSummary, StoreError> {
+        if !self.complete {
+            return Err(StoreError::Internal(
+                "paged bootstrap did not reach clean EOF".into(),
+            ));
+        }
+        Ok(self.summary)
     }
 }
 

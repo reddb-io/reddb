@@ -1006,7 +1006,7 @@ impl UnifiedStore {
                                 name.as_str(),
                                 format_version,
                             )?;
-                        let mut cursor = reader.cursor()?;
+                        let mut cursor = reader.bootstrap_cursor()?;
                         let manager = self.get_collection(&name);
                         while let Some(record) = cursor.next()? {
                             let reddb_engine::storage::paged_collection::PagedEntityRecord {
@@ -1015,18 +1015,23 @@ impl UnifiedStore {
                             } = record;
                             if let Some(m) = &manager {
                                 let id = entity.id;
-                                if let EntityKind::TableRow { row_id, .. } = &entity.kind {
-                                    m.register_row_id(*row_id);
-                                }
                                 self.resident.context_index.index_entity(&name, &entity);
-                                m.restore_snapshot_entity(entity.clone())?;
-                                if let Some(metadata) = metadata {
-                                    let _ = m.set_metadata(id, metadata);
-                                }
-                                self.register_entity_id(id);
                                 if self.config.auto_index_refs {
                                     self.index_cross_refs(&entity, &name)?;
                                 }
+                                m.restore_snapshot_entity(entity)?;
+                                if let Some(metadata) = metadata {
+                                    let _ = m.set_metadata(id, metadata);
+                                }
+                            }
+                        }
+                        let observed = cursor.finish()?;
+                        if let Some(m) = &manager {
+                            if let Some(row_id) = observed.max_row_id {
+                                m.register_row_id(row_id);
+                            }
+                            if let Some(id) = observed.max_entity_id {
+                                self.register_entity_id(id);
                             }
                         }
 

@@ -30,6 +30,10 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_read_fold_visibility_and_failure",
         fold_visibility_and_failure,
     ),
+    (
+        "collection_bootstrap_is_complete_or_fails",
+        bootstrap_is_complete_or_fails,
+    ),
 ];
 
 struct ReadPages {
@@ -79,6 +83,12 @@ fn record(id: u64, revision: i64) -> Arc<PagedEntityRecord> {
 }
 
 fn base() -> (Arc<ReadPages>, Arc<PagedCollectionReader<ReadPages>>) {
+    base_from([10u64, 30, 50, 70].into_iter().map(|id| record(id, 1)))
+}
+
+fn base_from(
+    records: impl IntoIterator<Item = Arc<PagedEntityRecord>>,
+) -> (Arc<ReadPages>, Arc<PagedCollectionReader<ReadPages>>) {
     let config = PagerConfig {
         cache_size: 24,
         ..PagerConfig::default()
@@ -94,14 +104,14 @@ fn base() -> (Arc<ReadPages>, Arc<PagedCollectionReader<ReadPages>>) {
         .expect("fixture pager"),
     );
     let tree = BTree::new(pager.clone());
-    for id in [10u64, 30, 50, 70] {
-        let record = record(id, 1);
+    for record in records {
         let bytes = serialize_entity_record(
             &record.entity,
             record.metadata.as_ref(),
             reddb_file::STORE_VERSION_CURRENT,
         );
-        tree.insert(&id.to_be_bytes(), &bytes).expect("base row");
+        tree.insert(&record.entity.id.raw().to_be_bytes(), &bytes)
+            .expect("base row");
     }
     let root = tree.root_page_id();
     pager.flush().expect("durable fixture");
@@ -134,6 +144,73 @@ fn base() -> (Arc<ReadPages>, Arc<PagedCollectionReader<ReadPages>>) {
         .expect("framed source"),
     );
     (pages, source)
+}
+
+fn bootstrap_is_complete_or_fails() {
+    use reddb_engine::storage::entity::EntityKind;
+    let mut low_id_high_row = Arc::try_unwrap(record(10, 1)).ok().expect("unique row");
+    if let EntityKind::TableRow { row_id, .. } = &mut low_id_high_row.entity.kind {
+        *row_id = 900;
+    } else {
+        panic!("table row");
+    }
+    let mut high_id_low_row = Arc::try_unwrap(record(70, 1)).ok().expect("unique row");
+    if let EntityKind::TableRow { row_id, .. } = &mut high_id_low_row.entity.kind {
+        *row_id = 3;
+    } else {
+        panic!("table row");
+    }
+    let vector = PagedEntityRecord {
+        entity: UnifiedEntity::vector(EntityId::new(100), "rows", vec![1.0]),
+        metadata: None,
+    };
+    let (pages, source) = base_from([
+        Arc::new(low_id_high_row),
+        Arc::new(high_id_low_row),
+        Arc::new(vector),
+    ]);
+    let mut partial = source.bootstrap_cursor().expect("cursor");
+    assert!(partial.next().expect("first row").is_some());
+    assert!(
+        partial.finish().is_err(),
+        "partial counts must not be published"
+    );
+
+    let mut cursor = source.bootstrap_cursor().expect("cursor");
+    let mut observed = Vec::new();
+    while let Some(record) = cursor.next().expect("physical row") {
+        observed.push((record.entity.id.raw(), record.entity.sequence_id));
+    }
+    let summary = cursor.finish().expect("only EOF admits a summary");
+    assert_eq!(
+        summary.physical_count, 3,
+        "historical rows remain physical records"
+    );
+    assert_eq!(summary.max_entity_id, Some(EntityId::new(100)));
+    assert_eq!(
+        summary.max_row_id,
+        Some(900),
+        "row IDs are independent of physical IDs"
+    );
+    assert_eq!(
+        observed.iter().map(|v| v.0).collect::<Vec<_>>(),
+        [10, 70, 100]
+    );
+    assert_eq!(
+        (observed[0].1, observed[1].1),
+        (110, 170),
+        "stored sequence stamps remain unchanged"
+    );
+
+    let mut failed = source.bootstrap_cursor().expect("cursor");
+    assert!(failed.next().expect("prefix").is_some());
+    pages.fail.set(true);
+    assert!(failed.next().is_err());
+    assert!(
+        failed.finish().is_err(),
+        "read failure cannot yield a partial summary"
+    );
+    pages.fail.set(false);
 }
 
 fn overlay_and_schema() {
