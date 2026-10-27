@@ -2040,7 +2040,10 @@ impl SegmentManager {
     /// callers that intentionally scan without a statement snapshot and keeps
     /// the documented resolver fallback — moderation gate plus hiding
     /// superseded physical versions — instead of showing every version.
-    fn scan_entity_visible(snapshot: Option<&SnapshotContext>, entity: &UnifiedEntity) -> bool {
+    pub(crate) fn scan_entity_visible(
+        snapshot: Option<&SnapshotContext>,
+        entity: &UnifiedEntity,
+    ) -> bool {
         match snapshot {
             Some(ctx) => entity_visible_with_context(Some(ctx), entity),
             None => {

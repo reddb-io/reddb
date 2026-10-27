@@ -130,8 +130,8 @@ pub(super) fn scan_runtime_table_source_records_window(
     }
 
     let store = db.store();
-    let manager = store
-        .get_collection(table)
+    let view = store
+        .collection_read_view(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
     let mut records =
         Vec::with_capacity(limit.min(crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK));
@@ -139,32 +139,29 @@ pub(super) fn scan_runtime_table_source_records_window(
         return Ok(records);
     }
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    let schema = manager.column_schema();
+    let schema = view.column_schema();
     let mut remaining_offset = offset;
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
-        |entity| {
-            if !db.replica_allows_entity_at_read(table, entity) {
+    crate::runtime::function_budget::scan_view(&view, snapshot.as_ref(), |entity| {
+        if !db.replica_allows_entity_at_read(table, entity) {
+            return true;
+        }
+        let hydrated =
+            crate::runtime::impl_timeseries::hydrate_timeseries_entity(store.as_ref(), entity);
+        if let Some(mut record) =
+            runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())
+        {
+            if remaining_offset > 0 {
+                remaining_offset -= 1;
                 return true;
             }
-            let hydrated =
-                crate::runtime::impl_timeseries::hydrate_timeseries_entity(store.as_ref(), entity);
-            if let Some(mut record) =
-                runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())
-            {
-                if remaining_offset > 0 {
-                    remaining_offset -= 1;
-                    return true;
-                }
-                set_source_collection(&mut record, table);
-                records.push(record);
-                if records.len() >= limit {
-                    return false;
-                }
+            set_source_collection(&mut record, table);
+            records.push(record);
+            if records.len() >= limit {
+                return false;
             }
-            true
-        },
-    )?;
+        }
+        true
+    })?;
     Ok(records)
 }
 

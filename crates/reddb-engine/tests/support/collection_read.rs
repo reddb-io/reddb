@@ -21,6 +21,11 @@ pub const CASES: &[(&str, fn())] = &[
         failure_is_not_absence,
     ),
     ("collection_read_early_stop", early_stop),
+    ("collection_read_id_iteration", id_iteration),
+    (
+        "collection_read_visibility_and_cancellation",
+        visibility_and_cancellation,
+    ),
 ];
 
 struct ReadPages {
@@ -219,4 +224,123 @@ fn early_stop() {
         })
         .expect("no source read after stopping"));
     assert_eq!(ids, [10]);
+}
+
+fn id_iteration() {
+    let (pages, base) = base();
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(50), None);
+    changes.insert(EntityId::new(30), Some(record(30, 2)));
+    let view = CollectionReadView::paged(base, Arc::new(changes), None);
+    let ids = [70, 9, 30, 50, 10, 30].map(EntityId::new);
+    let rows: Vec<_> = view
+        .read_ids(&ids)
+        .map(|row| row.expect("fallible lookup").map(|row| row.id.raw()))
+        .collect();
+    assert_eq!(rows, [Some(70), None, Some(30), None, Some(10), Some(30)]);
+    pages.fail.set(true);
+    let mut pending = view.read_ids(&ids); // Construction must be lazy for cold data.
+    assert!(pending.next().expect("read attempt").is_err());
+    assert!(pending.next().is_none(), "a failed ID iterator is fenced");
+    assert!(!view
+        .visit_ids(&ids, || false, |_, _| panic!("cancelled visitor"))
+        .expect("cancellation before I/O"));
+    pages.fail.set(false);
+    let mut seen = Vec::new();
+    assert!(!view
+        .visit_ids(
+            &ids,
+            || true,
+            |index, entity| {
+                seen.push((index, entity.id.raw()));
+                pages.fail.set(true);
+                false
+            }
+        )
+        .expect("stop before another ID lookup"));
+    assert_eq!(seen, [(0, 70)]);
+}
+
+fn visibility_and_cancellation() {
+    use reddb_engine::storage::entity::{EntityData, RowData};
+    use reddb_engine::storage::visibility::{MODERATION_STATUS_FIELD, MODERATION_STATUS_PENDING};
+    use reddb_engine::transaction::{
+        read::SnapshotContext,
+        snapshot::{Snapshot, SnapshotManager},
+    };
+    let (pages, base) = base();
+    let mut changes = CollectionReadChanges::new();
+    let mut hidden = Arc::try_unwrap(record(20, 2))
+        .ok()
+        .expect("unique record owner");
+    hidden.entity.data = EntityData::Row(RowData::with_names(
+        vec![Value::text(MODERATION_STATUS_PENDING)],
+        vec![MODERATION_STATUS_FIELD.into()],
+    ));
+    changes.insert(EntityId::new(20), Some(Arc::new(hidden)));
+    let view = CollectionReadView::paged(base, Arc::new(changes), None);
+    pages.fail.set(true);
+    assert!(!view
+        .scan_for_each(None, || false, |_| panic!("no I/O after cancellation"))
+        .expect("cancelled before constructing cursor"));
+    pages.fail.set(false);
+    let mut work = 0;
+    let mut count = 0;
+    assert!(view
+        .scan_for_each(
+            None,
+            || {
+                work += 1;
+                true
+            },
+            |_| {
+                count += 1;
+                true
+            }
+        )
+        .expect("physical work with hidden versions"));
+    assert_eq!(
+        count, 0,
+        "superseded versions stay hidden without an explicit snapshot"
+    );
+    assert!(
+        work >= 4,
+        "hidden source records still check work/cancellation"
+    );
+    let manager = Arc::new(SnapshotManager::new());
+    manager.observe_committed_xid(50);
+    let snapshot = SnapshotContext {
+        snapshot: Snapshot {
+            xid: 25,
+            in_progress: Default::default(),
+        },
+        manager: manager.clone(),
+        own_xids: Default::default(),
+        requires_index_fallback: true,
+        serializable_reader: None,
+    };
+    let mut visible = Vec::new();
+    assert!(view
+        .scan_for_each(
+            Some(&snapshot),
+            || true,
+            |entity| {
+                visible.push(entity.id.raw());
+                true
+            }
+        )
+        .expect("explicit old snapshot"));
+    assert_eq!(
+        visible,
+        [10, 30, 50, 70],
+        "moderation stays hidden while the old snapshot sees history"
+    );
+    manager.rollback(17);
+    assert!(view
+        .scan_for_each(
+            Some(&snapshot),
+            || true,
+            |_| panic!("aborted creator is hidden")
+        )
+        .expect("aborted outcomes checked after snapshot capture"));
 }

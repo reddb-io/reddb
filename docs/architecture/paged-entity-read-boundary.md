@@ -82,8 +82,10 @@ remain explicit paged-reader operations. Current native boot still restores
 every row, and its view factory selects only complete resident authority.
 The paged composition is not yet activated as runtime cold ownership.
 
-SQL/aggregate, batch, maintenance and index reads that still access resident
-managers must be migrated before that activation. Mutation, replay, allocator
+SQL table scans and indexed candidate hydration now use fallible views, with
+the same statement visibility and deadline checks. Aggregate, batch, maintenance
+and index reads that still access resident managers must be migrated before
+that activation. Mutation, replay, allocator
 high-water marks and checkpoint composition are also still pending. A captured
 overlay is immutable; an Arc to a B-tree alone does not stop in-place writes.
 The publisher must preserve the existing fencing and generation rules.
@@ -144,3 +146,43 @@ cargo test --locked -p reddb-io-server --test paged_open_memory_budget -- --noca
 Passing the fast cases does not qualify runtime memory, native host I/O, Auth,
 Platform or the historical source. Retain those later gates and the fixed data,
 limits, durability and recovery requirements.
+
+
+## Indexed candidate materialization
+
+The owned ID iterator now hydrates one candidate per `next()` for resident and
+paged authority. Indexed SQL projection paths stop requesting candidates when
+their output limit is satisfied; missing IDs and duplicates retain their input
+positions. An I/O failure fences the iterator and propagates to the query.
+The resident SELECT-star visitor retains its existing borrowed fast path.
+
+The native engine regression `collection_read_memory` uses an independent test
+allocator and 2,048 resident records with distinct physical IDs and 8 MiB of
+blob payload. Creating the previous iterator copied all candidates: 9,027,584
+extra bytes, with a 9,043,968-byte peak despite consuming only one row. With
+lazy hydration, construction adds zero bytes and the same consumed prefix peaks
+at 8,240 extra bytes; dropping it retains zero payload bytes. The unchanged
+workspace assertion is 128 KiB. This regression runs without compiling the
+server. It measures extra candidate ownership, not total process RSS, cold boot
+or arbitrary-value workspace admission.
+
+```sh
+cargo test --locked -p reddb-io-engine --test collection_read_memory -- --nocapture --test-threads=1
+```
+
+This bounds ownership of the unconsumed suffix, not the size of a single value,
+the ID candidate set or accumulated query results. Read-workspace admission and
+native cold ownership remain required before accepting the full runtime budget.
+
+
+The native SQL regression also caught hash-index results returning before
+ORDER BY, OFFSET and LIMIT finalization. Hash, bitmap-intersection and combined
+hash/range paths now use the same existing finalizer as sorted-index reads.
+Ordered/offset queries retain their complete matching input before slicing;
+sort-only source columns are removed by the existing projection finalizer.
+The regression checks projected and SELECT-star payloads, ascending/descending
+windows, offsets, hidden sort columns, update/delete and native checkpoint/reopen.
+All 38 selected native read/checkpoint/recovery tests passed. The unchanged
+full-runtime opening gate still fails at 10,543,588 accounted bytes for 8 MiB
+of payload and a 2,097,152-byte budget. Query ownership improvements therefore
+do not admit cold-runtime activation, historical qualification or fleet rollout.

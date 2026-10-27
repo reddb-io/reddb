@@ -20,6 +20,7 @@ use super::{
     page_store::PageStore,
     paged_collection::{PagedCollectionReader, PagedEntityRecord},
 };
+use crate::transaction::read::SnapshotContext;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Shared record owners let an admitted successor overlay retain unchanged
@@ -103,13 +104,24 @@ impl<P: PageStore> CollectionReadView<P> {
     /// snapshot; callers retain the existing visibility/publication boundaries.
     pub fn visit_records(
         &self,
+        visit: impl FnMut(&UnifiedEntity, Option<&Metadata>) -> bool,
+    ) -> Result<bool, StoreError> {
+        self.visit_records_checked(|| true, visit)
+    }
+
+    fn visit_records_checked(
+        &self,
+        mut before_work: impl FnMut() -> bool,
         mut visit: impl FnMut(&UnifiedEntity, Option<&Metadata>) -> bool,
     ) -> Result<bool, StoreError> {
+        if !before_work() {
+            return Ok(false);
+        }
         let (base, changes) = match &self.authority {
             ReadAuthority::Resident(manager) => {
                 let mut completed = true;
                 manager.for_each_entity_with_metadata_in_id_order(|entity, metadata| {
-                    completed = visit(entity, metadata.as_ref());
+                    completed = before_work() && visit(entity, metadata.as_ref());
                     completed
                 });
                 return Ok(completed);
@@ -118,12 +130,21 @@ impl<P: PageStore> CollectionReadView<P> {
         };
         let mut changes = changes.iter().peekable();
         let mut cursor = base.cursor()?;
-        while let Some(record) = cursor.next()? {
+        loop {
+            if !before_work() {
+                return Ok(false);
+            }
+            let Some(record) = cursor.next()? else {
+                break;
+            };
             while changes
                 .peek()
                 .is_some_and(|(id, _)| **id < record.entity.id)
             {
                 let (_, change) = changes.next().expect("peeked overlay entry exists");
+                if !before_work() {
+                    return Ok(false);
+                }
                 if let Some(change) = change {
                     if !visit(&change.entity, change.metadata.as_ref()) {
                         return Ok(false);
@@ -135,6 +156,9 @@ impl<P: PageStore> CollectionReadView<P> {
                 .is_some_and(|(id, _)| **id == record.entity.id)
             {
                 let (_, change) = changes.next().expect("matching overlay entry exists");
+                if !before_work() {
+                    return Ok(false);
+                }
                 if let Some(change) = change {
                     if !visit(&change.entity, change.metadata.as_ref()) {
                         return Ok(false);
@@ -145,8 +169,89 @@ impl<P: PageStore> CollectionReadView<P> {
             }
         }
         for (_, change) in changes {
+            if !before_work() {
+                return Ok(false);
+            }
             if let Some(change) = change {
                 if !visit(&change.entity, change.metadata.as_ref()) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Statement visibility matches resident scans, including moderation and
+    /// serializable read tracking. Check work before cold I/O, even when all
+    /// inspected physical versions are hidden. Resident scan order is retained.
+    pub fn scan_for_each(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        mut before_work: impl FnMut() -> bool,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<bool, StoreError> {
+        if !before_work() {
+            return Ok(false);
+        }
+        if let ReadAuthority::Resident(manager) = &self.authority {
+            let mut completed = true;
+            manager.for_each_entity(|entity| {
+                completed = before_work()
+                    && (!SegmentManager::scan_entity_visible(snapshot, entity) || visit(entity));
+                completed
+            });
+            return Ok(completed);
+        }
+        self.visit_records_checked(before_work, |entity, _| {
+            !SegmentManager::scan_entity_visible(snapshot, entity) || visit(entity)
+        })
+    }
+
+    pub fn column_schema(&self) -> Option<Arc<Vec<String>>> {
+        match &self.authority {
+            ReadAuthority::Resident(manager) => manager.column_schema(),
+            ReadAuthority::Paged { schema, .. } => schema.clone(),
+        }
+    }
+
+    /// Materialize one candidate per next() in either authority, preserving
+    /// input order, misses and duplicates. Creating or dropping the iterator
+    /// never hydrates the unconsumed suffix, including on LIMIT/cancellation.
+    /// Callers check work BEFORE next() and admit result/workspace ownership.
+    pub fn read_ids<'a>(&'a self, ids: &'a [EntityId]) -> CollectionIdReads<'a, P> {
+        CollectionIdReads {
+            view: self,
+            ids: ids.iter(),
+            failed: false,
+        }
+    }
+
+    /// Borrow the resident fast path. Callback/budget hooks must not re-enter
+    /// resident storage. Cold reads release page guards before callbacks.
+    pub fn visit_ids(
+        &self,
+        ids: &[EntityId],
+        mut before_work: impl FnMut() -> bool,
+        mut visit: impl FnMut(usize, &UnifiedEntity) -> bool,
+    ) -> Result<bool, StoreError> {
+        if !before_work() {
+            return Ok(false);
+        }
+        if let ReadAuthority::Resident(manager) = &self.authority {
+            let mut completed = true;
+            manager.for_each_id(ids, |index, entity| {
+                if completed {
+                    completed = before_work() && visit(index, entity);
+                }
+            });
+            return Ok(completed);
+        }
+        for (index, id) in ids.iter().enumerate() {
+            if !before_work() {
+                return Ok(false);
+            }
+            if let Some(entity) = self.get(*id)? {
+                if !visit(index, &entity) {
                     return Ok(false);
                 }
             }
@@ -188,5 +293,24 @@ impl<P: PageStore> CollectionReadView<P> {
             ReadAuthority::Resident(manager) => manager.column_schema(),
             ReadAuthority::Paged { schema, .. } => schema.clone(),
         };
+    }
+}
+
+pub struct CollectionIdReads<'a, P: PageStore> {
+    view: &'a CollectionReadView<P>,
+    ids: std::slice::Iter<'a, EntityId>,
+    failed: bool,
+}
+
+impl<P: PageStore> Iterator for CollectionIdReads<'_, P> {
+    type Item = Result<Option<UnifiedEntity>, StoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        let result = self.view.get(*self.ids.next()?);
+        self.failed = result.is_err();
+        Some(result)
     }
 }

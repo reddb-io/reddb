@@ -47,6 +47,76 @@ fn scalar(runtime: &RedDBRuntime, sql: &str, column: &str) -> String {
 }
 
 #[test]
+fn native_table_read_views_preserve_indexed_and_scanned_payloads_after_mutation() {
+    let (directory, runtime) = reopened_fixture();
+    runtime
+        .execute_query("CREATE INDEX probe_ordered_id ON probe (id) USING BTREE")
+        .expect("ordered lookup over reopened positional rows");
+    let queries = [
+        "SELECT id,payload FROM probe WHERE id BETWEEN 7 AND 17 AND bucket=7 ORDER BY id LIMIT 2",
+        "SELECT * FROM probe WHERE id BETWEEN 7 AND 17 AND bucket=7 ORDER BY id LIMIT 2",
+        "SELECT id,payload FROM probe WHERE bucket=7 ORDER BY id LIMIT 2",
+        "SELECT * FROM probe WHERE bucket=7 ORDER BY id LIMIT 2",
+        "SELECT id,payload FROM probe WHERE LENGTH(payload)>0 AND bucket+0=7 ORDER BY id LIMIT 2",
+        "SELECT * FROM probe WHERE LENGTH(payload)>0 AND bucket+0=7 ORDER BY id LIMIT 2",
+    ];
+    let check = |runtime: &RedDBRuntime, changed: bool| {
+        for sql in queries {
+            let result = runtime.execute_query(sql).expect(sql);
+            let expected: &[i64] = if changed { &[7] } else { &[7, 17] };
+            assert_eq!(result.result.records.len(), expected.len(), "{sql}");
+            for (row, id) in result.result.records.iter().zip(expected) {
+                assert_eq!(
+                    row.get("id").expect("physical payload id").to_string(),
+                    id.to_string(),
+                    "{sql}"
+                );
+                let payload = if changed {
+                    "changed".to_string()
+                } else {
+                    format!("value-{id}")
+                };
+                assert_eq!(
+                    row.get("payload"),
+                    Some(&reddb_types::Value::text(payload)),
+                    "{sql}"
+                );
+            }
+        }
+    };
+    check(&runtime, false);
+    for sql in [
+        "SELECT payload FROM probe WHERE bucket=7 ORDER BY id DESC LIMIT 1",
+        "SELECT payload FROM probe WHERE bucket=7 ORDER BY id LIMIT 1 OFFSET 1",
+        "SELECT payload FROM probe WHERE bucket=7 AND id BETWEEN 7 AND 17 ORDER BY id DESC LIMIT 1",
+        "SELECT payload FROM probe WHERE bucket=7 AND id BETWEEN 7 AND 17 ORDER BY id LIMIT 1 OFFSET 1",
+    ] {
+        let result = runtime.execute_query(sql).expect(sql);
+        assert_eq!(result.result.records.len(), 1, "{sql}");
+        let row = &result.result.records[0];
+        assert_eq!(row.get("payload"), Some(&reddb_types::Value::text("value-17")), "{sql}");
+        assert!(row.get("id").is_none(), "sort-only columns must not leak: {sql}");
+    }
+    runtime
+        .execute_query("UPDATE probe SET payload='changed' WHERE id=7")
+        .expect("replace payload");
+    runtime
+        .execute_query("DELETE FROM probe WHERE id=17")
+        .expect("delete second candidate");
+    check(&runtime, true);
+    runtime
+        .checkpoint()
+        .expect("publish changed source and indexes");
+    drop(runtime);
+    let options = RedDBOptions::persistent(directory.path().join("database.rdb"))
+        .with_memory_budget(256 * 1024 * 1024)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())
+        .expect("same native paged profile");
+    let reopened = RedDBRuntime::with_options(options).expect("reopen changed view");
+    check(&reopened, true);
+}
+
+#[test]
 fn native_filtered_count_resolves_reopened_column_names() {
     let (_directory, runtime) = reopened_fixture();
     let rows = runtime

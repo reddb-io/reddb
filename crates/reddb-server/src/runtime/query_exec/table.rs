@@ -216,43 +216,40 @@ fn execute_geo_candidate_scan(
     effective_projections: &[Projection],
     candidate_ids: &std::collections::HashSet<u64>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let manager = db
+    let view = db
         .store()
-        .get_collection(query.table.as_str())
+        .collection_read_view(query.table.as_str())
         .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
-        |entity| {
-            if !candidate_ids.contains(&entity.id.raw()) {
-                return true;
-            }
-            if !db.replica_allows_entity_at_read(&query.table, entity) {
-                return true;
-            }
-            let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
-                hydrate_store.as_ref(),
-                entity,
-            );
-            let Some(record) = runtime_table_record_from_entity(hydrated.into_owned()) else {
-                return true;
-            };
-            if super::super::join_filter::evaluate_runtime_filter_with_db(
-                Some(db),
-                &record,
-                filter,
-                Some(table_name),
-                Some(table_alias),
-            ) {
-                records.push(record);
-            }
-            true
-        },
-    )?;
+    crate::runtime::function_budget::scan_view(&view, snapshot.as_ref(), |entity| {
+        if !candidate_ids.contains(&entity.id.raw()) {
+            return true;
+        }
+        if !db.replica_allows_entity_at_read(&query.table, entity) {
+            return true;
+        }
+        let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
+            hydrate_store.as_ref(),
+            entity,
+        );
+        let Some(record) = runtime_table_record_from_entity(hydrated.into_owned()) else {
+            return true;
+        };
+        if super::super::join_filter::evaluate_runtime_filter_with_db(
+            Some(db),
+            &record,
+            filter,
+            Some(table_name),
+            Some(table_alias),
+        ) {
+            records.push(record);
+        }
+        true
+    })?;
 
     crate::runtime::window_phase::apply(
         Some(db),
@@ -660,6 +657,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
     let requires_mvcc_index_fallback =
         crate::runtime::impl_core::current_snapshot_requires_index_fallback();
+    // Ordered/offset results need the complete matching input before slicing.
+    let candidate_limit = if query.order_by.is_empty() && query.offset.is_none() {
+        query
+            .limit
+            .map(|limit| limit as usize)
+            .unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
 
     // ── GEO H3 CANDIDATE PATH ─────────────────────────────────────────────────
     // `WHERE GEO_DISTANCE(col, lat, lon) < r` over an H3-indexed column can
@@ -794,47 +800,49 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // `runtime_table_record_from_entity_projected` consumes the
             // entity.
             if lean {
-                let manager = match store.get_collection(&query.table) {
+                let view = match store.collection_read_view(&query.table) {
                     Some(m) => m,
                     None => return Ok(Vec::new()),
                 };
                 let mut records: Vec<UnifiedRecord> =
                     Vec::with_capacity(entity_ids.len().min(limit));
-                let mut stop = false;
                 let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
-                manager.for_each_id(&entity_ids, |_idx, entity| {
-                    if stop {
-                        return;
-                    }
-                    if records.len() >= limit {
-                        stop = true;
-                        return;
-                    }
-                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                        return;
-                    }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return;
-                    }
-                    if let Some(cf) = compiled_filter.as_ref() {
-                        if !compiled_entity_filter_matches(
-                            db,
-                            cf,
-                            entity,
-                            filter,
-                            table_name,
-                            table_alias,
-                        ) {
-                            return;
+                let budgeted = crate::runtime::function_budget::active();
+                view.visit_ids(
+                    &entity_ids,
+                    || !budgeted || crate::runtime::function_budget::charge(0).is_ok(),
+                    |_idx, entity| {
+                        if records.len() >= limit {
+                            return false;
                         }
-                    }
-                    if let Some(record) =
-                        super::super::record_search::runtime_table_record_lean_ref(entity)
-                    {
-                        records.push(record);
-                    }
-                });
+                        if table_row_resolver.resolve_read_candidate(entity).is_none() {
+                            return true;
+                        }
+                        if !db.replica_allows_entity_at_read(&query.table, entity) {
+                            return true;
+                        }
+                        if let Some(cf) = compiled_filter.as_ref() {
+                            if !compiled_entity_filter_matches(
+                                db,
+                                cf,
+                                entity,
+                                filter,
+                                table_name,
+                                table_alias,
+                            ) {
+                                return true;
+                            }
+                        }
+                        if let Some(record) =
+                            super::super::record_search::runtime_table_record_lean_ref(entity)
+                        {
+                            records.push(record);
+                        }
+                        true
+                    },
+                )?;
+                crate::runtime::function_budget::charge(0)?;
                 return finish_ordered_index_records(
                     db,
                     query,
@@ -847,14 +855,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
 
             // Projection path (explicit columns): keep owned-entity flow.
-            let entities = store.get_batch(&query.table, &entity_ids);
+            let view = store
+                .collection_read_view(&query.table)
+                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+            crate::runtime::function_budget::charge(0)?;
+            let mut entities = view.read_ids(&entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
+            while records.len() < limit {
+                crate::runtime::function_budget::charge(0)?;
+                let Some(result) = entities.next() else {
                     break;
-                }
+                };
+                let Some(entity_opt) = result? else {
+                    continue;
+                };
+                crate::runtime::function_budget::charge(1)?;
                 if table_row_resolver
                     .resolve_read_candidate(&entity_opt)
                     .is_none()
@@ -920,7 +936,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &eq_bytes)
                 {
                     if !hash_ids.is_empty() {
-                        let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                        let limit = candidate_limit;
                         // Build HashSet from the smaller (hash) candidate set
                         let hash_set: std::collections::HashSet<u64> =
                             hash_ids.iter().map(|id| id.raw()).collect();
@@ -954,18 +970,29 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                         table_alias,
                                     ),
                                 });
-                            let explicit_cols = extract_select_column_names(&effective_projections);
+                            let mut explicit_cols =
+                                extract_select_column_names(&effective_projections);
+                            let has_added_order_by_columns =
+                                append_order_by_columns(&mut explicit_cols, query);
 
                             let store = db.store();
-                            let entities = store.get_batch(&query.table, &intersection_ids);
+                            let view = store
+                                .collection_read_view(&query.table)
+                                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                            crate::runtime::function_budget::charge(0)?;
+                            let mut entities = view.read_ids(&intersection_ids);
                             let lean = explicit_cols.is_empty();
                             let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
                             let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                            for entity_opt in entities.into_iter().flatten() {
-                                crate::runtime::function_budget::charge(1)?;
-                                if records.len() >= limit {
+                            while records.len() < limit {
+                                crate::runtime::function_budget::charge(0)?;
+                                let Some(result) = entities.next() else {
                                     break;
-                                }
+                                };
+                                let Some(entity_opt) = result? else {
+                                    continue;
+                                };
+                                crate::runtime::function_budget::charge(1)?;
                                 if table_row_resolver
                                     .resolve_read_candidate(&entity_opt)
                                     .is_none()
@@ -1001,7 +1028,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                     }
                                 }
                             }
-                            return Ok(records);
+                            return finish_ordered_index_records(
+                                db,
+                                query,
+                                &effective_projections,
+                                records,
+                                table_name,
+                                table_alias,
+                                has_added_order_by_columns,
+                            );
                         }
                     }
                 }
@@ -1082,8 +1117,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 ),
             };
 
-            let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-            let explicit_cols = extract_select_column_names(&effective_projections);
+            let limit = candidate_limit;
+            let mut explicit_cols = extract_select_column_names(&effective_projections);
+            let has_added_order_by_columns = append_order_by_columns(&mut explicit_cols, query);
             let lean = explicit_cols.is_empty();
 
             // Optional: narrow via sorted range index filtered by the eq-intersection set.
@@ -1116,14 +1152,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             };
 
             let store = db.store();
-            let entities = store.get_batch(&query.table, &entity_ids);
+            let view = store
+                .collection_read_view(&query.table)
+                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+            crate::runtime::function_budget::charge(0)?;
+            let mut entities = view.read_ids(&entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
+            while records.len() < limit {
+                crate::runtime::function_budget::charge(0)?;
+                let Some(result) = entities.next() else {
                     break;
-                }
+                };
+                let Some(entity_opt) = result? else {
+                    continue;
+                };
+                crate::runtime::function_budget::charge(1)?;
                 if table_row_resolver
                     .resolve_read_candidate(&entity_opt)
                     .is_none()
@@ -1154,7 +1198,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     }
                 }
             }
-            return Ok(records);
+            return finish_ordered_index_records(
+                db,
+                query,
+                &effective_projections,
+                records,
+                table_name,
+                table_alias,
+                has_added_order_by_columns,
+            );
         }
     }
 
@@ -1174,7 +1226,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
                 if !entity_ids.is_empty() {
-                    let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                    let limit = candidate_limit;
 
                     // When the hash result is much larger than LIMIT and the filter has
                     // secondary predicates (e.g. AND(city='X', age>30)), fetching and
@@ -1240,16 +1292,26 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         });
                         let store = db.store();
                         // Batch fetch: single lock acquisition for the entire candidate set
-                        let entities = store.get_batch(&query.table, &entity_ids);
-                        let explicit_cols = extract_select_column_names(&effective_projections);
+                        let view = store
+                            .collection_read_view(&query.table)
+                            .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                        crate::runtime::function_budget::charge(0)?;
+                        let mut entities = view.read_ids(&entity_ids);
+                        let mut explicit_cols = extract_select_column_names(&effective_projections);
+                        let has_added_order_by_columns =
+                            append_order_by_columns(&mut explicit_cols, query);
                         let lean = explicit_cols.is_empty();
                         let mut records = Vec::with_capacity(entity_ids.len().min(limit));
                         let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                        for entity_opt in entities.into_iter().flatten() {
-                            crate::runtime::function_budget::charge(1)?;
-                            if records.len() >= limit {
+                        while records.len() < limit {
+                            crate::runtime::function_budget::charge(0)?;
+                            let Some(result) = entities.next() else {
                                 break;
-                            }
+                            };
+                            let Some(entity_opt) = result? else {
+                                continue;
+                            };
+                            crate::runtime::function_budget::charge(1)?;
                             if table_row_resolver
                                 .resolve_read_candidate(&entity_opt)
                                 .is_none()
@@ -1287,7 +1349,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 }
                             }
                         }
-                        return Ok(records);
+                        return finish_ordered_index_records(
+                            db,
+                            query,
+                            &effective_projections,
+                            records,
+                            table_name,
+                            table_alias,
+                            has_added_order_by_columns,
+                        );
                     } // end else (hash batch path)
                 }
             }
@@ -2032,9 +2102,9 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 && !uses_document_projection
                 && !is_universal_query_source(context.query.table.as_str())
             {
-                let manager = db
+                let view = db
                     .store()
-                    .get_collection(context.query.table.as_str())
+                    .collection_read_view(context.query.table.as_str())
                     .ok_or_else(|| RedDBError::NotFound(context.query.table.clone()))?;
 
                 let filter = effective_filter.as_ref().ok_or_else(|| {
@@ -2055,7 +2125,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 } else {
                     extract_select_column_names(&effective_projections)
                 };
-                let schema_arc = manager.column_schema();
+                let schema_arc = view.column_schema();
                 let compiled = match schema_arc.as_ref() {
                     Some(schema) => {
                         super::filter_compiled::CompiledEntityFilter::compile_with_schema(
@@ -2089,8 +2159,8 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+                crate::runtime::function_budget::scan_view(
+            &view, snapshot.as_ref(),
             |entity| {
                     if records.len() >= limit {
                         return false;

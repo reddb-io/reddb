@@ -106,10 +106,17 @@ pub(crate) fn graph_work_check(
 /// Ordinary queries take the original visitor without per-row budget checks.
 pub(crate) fn scan<T>(
     visit: impl FnOnce(&mut dyn FnMut(&UnifiedEntity) -> bool) -> T,
+    consume: impl FnMut(&UnifiedEntity) -> bool,
+) -> RedDBResult<T> {
+    try_scan(|consume| Ok::<T, RedDBError>(visit(consume)), consume)
+}
+
+pub(crate) fn try_scan<T, E: Into<RedDBError>>(
+    visit: impl FnOnce(&mut dyn FnMut(&UnifiedEntity) -> bool) -> Result<T, E>,
     mut consume: impl FnMut(&UnifiedEntity) -> bool,
 ) -> RedDBResult<T> {
     if !active() {
-        return Ok(visit(&mut consume));
+        return visit(&mut consume).map_err(Into::into);
     }
     charge(0)?;
     let mut failure = None;
@@ -119,12 +126,27 @@ pub(crate) fn scan<T>(
             return false;
         }
         consume(entity)
-    });
+    })
+    .map_err(Into::into)?;
     if let Some(cause) = failure {
         return Err(cause);
     }
     charge(0)?;
     Ok(result)
+}
+
+/// Keep query deadlines at the read boundary, including hidden cold versions.
+/// Storage errors retain their type; a cancelled visitor cannot become success.
+pub(crate) fn scan_view<P: reddb_engine::storage::page_store::PageStore>(
+    view: &reddb_engine::storage::collection_read::CollectionReadView<P>,
+    snapshot: Option<&reddb_engine::transaction::read::SnapshotContext>,
+    consume: impl FnMut(&UnifiedEntity) -> bool,
+) -> RedDBResult<bool> {
+    let budgeted = active();
+    try_scan(
+        |visit| view.scan_for_each(snapshot, || !budgeted || charge(0).is_ok(), visit),
+        consume,
+    )
 }
 
 #[cfg(test)]
