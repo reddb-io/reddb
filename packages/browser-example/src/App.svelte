@@ -1,19 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
-    Accordion, Alert, Badge, Button, CodeBlock, DescriptionList, Divider, Field, Heading,
+    Accordion, Alert, Badge, Button, CodeBlock, DescriptionList, Divider, Field, FileInput, Heading,
     Kbd, Link, LoadingIndicator, Logo, Navbar, Prose, Stack, StatusIndicator, Switch, Tabs, Text, Textarea,
   } from '@reddb-io/design-system/base'
   import { ApplicationShell, SidebarPanel, Toolbar } from '@reddb-io/design-system/app'
   import CodeField from '@reddb-io/design-system/data/CodeField'
   import Table from '@reddb-io/design-system/data/Table'
   import { sqlGrammar } from './sql-grammar'
-  import { BrowserError, openDatabase, type Database } from '@reddb-io/browser'
+  import { BrowserError, openDatabase, restoreDatabase, type Database } from '@reddb-io/browser'
   import RedDBWorker from '@reddb-io/browser/worker?worker'
   import { version as browserVersion } from '@reddb-io/browser/package.json'
 
   let darkScheme = $state(true)
-  const databaseName = 'reddb-browser-sql-playground-v1'
+  const defaultDatabaseName = 'reddb-browser-sql-playground-v1'
+  let databaseName = $state(defaultDatabaseName)
+  let backupFiles = $state<FileList | null>(null)
+  let backupUrl: string | undefined
   const createNotes = 'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)'
   const selectNotes = 'SELECT id, body FROM notes ORDER BY id'
   let sql = $state(selectNotes)
@@ -36,6 +39,7 @@
   let storageEstimate = $state('')
   let persistenceAvailable = $state(false)
   let persistenceGranted = $state(false)
+  let storageUnsupported = $state(false)
   let networkState = $state('')
   let offlineState = $state('Preparando o cache da aplicação…')
   let offlineReady = $state(false)
@@ -48,6 +52,7 @@
     try { await operation() }
     catch (failure) {
       const code = failure instanceof BrowserError ? failure.code : 'ERROR'
+      if (code === 'STORAGE_UNSUPPORTED' || code === 'RUNTIME_UNSUPPORTED') storageUnsupported = true
       const message = code === 'FILE_BUSY'
         ? 'Outra aba está usando este arquivo. Feche a outra aba e tente reabrir.'
         : code === 'STORAGE_UNSUPPORTED'
@@ -81,10 +86,11 @@
     if (previous) await previous.close()
     engineState = 'Abrindo o arquivo local…'
     engineTone = 'info'
+    storageUnsupported = false
     const worker = new RedDBWorker()
     try {
-      const opened = await openDatabase({ name: databaseName, create: true, worker })
-      try { await opened.query(createNotes) }
+      const opened = await openDatabase({ name: databaseName, create: databaseName === defaultDatabaseName, worker })
+      try { if (databaseName === defaultDatabaseName) await opened.query(createNotes) }
       catch (failure) { await opened.close(); throw failure }
       database = opened
       engineState = 'WASM ativo · banco OPFS aberto'
@@ -136,6 +142,42 @@
     const granted = await navigator.storage.persist()
     await inspectStorage()
     if (!granted) storageRetention = 'O navegador não concedeu armazenamento persistente. Os dados continuam locais, sujeitos a descarte.'
+  }
+
+  async function downloadBackup() {
+    if (!database) return
+    const backup = await database.exportBackup()
+    if (backupUrl) URL.revokeObjectURL(backupUrl)
+    backupUrl = URL.createObjectURL(new Blob([backup.slice().buffer], { type: 'application/octet-stream' }))
+    const link = document.createElement('a')
+    link.href = backupUrl
+    link.download = `${databaseName}.rdb`
+    link.click()
+    storageStatus = 'Backup dos commits exportado. A transação atual não foi alterada. Guarde o arquivo fora deste site.'
+  }
+
+  async function importBackup() {
+    const file = backupFiles?.[0]
+    if (!file || !file.size || file.size > 256 * 1024 * 1024) {
+      throw new BrowserError('INVALID_ARGUMENT', 'Selecione um backup .rdb com até 256 MiB.')
+    }
+    const name = `reddb-browser-restored-${crypto.randomUUID()}`
+    const restored = await restoreDatabase({ name, backup: new Uint8Array(await file.arrayBuffer()), worker: new RedDBWorker() })
+    try { await database?.close() }
+    catch (failure) { await restored.close(); throw failure }
+    database = restored
+    databaseName = name
+    const url = new URL(window.location.href)
+    url.searchParams.set('database', name)
+    window.history.replaceState(null, '', url)
+    engineState = 'WASM ativo · banco OPFS aberto'
+    engineTone = 'success'
+    backupFiles = null
+    sql = selectNotes
+    parameters = '[]'
+    try { await query() }
+    finally { storageStatus = 'Backup restaurado em outro arquivo. O arquivo anterior foi preservado.' }
+    await inspectStorage()
   }
 
   async function activateUpdate() {
@@ -214,6 +256,7 @@
   ]
 
   onMount(() => {
+    databaseName = new URL(window.location.href).searchParams.get('database') || defaultDatabaseName
     const network = () => { networkState = navigator.onLine ? 'Rede disponível' : 'Navegador sem rede' }
     window.addEventListener('online', network)
     window.addEventListener('offline', network)
@@ -226,6 +269,7 @@
       window.removeEventListener('online', network)
       window.removeEventListener('offline', network)
       void database?.close()
+      if (backupUrl) URL.revokeObjectURL(backupUrl)
     }
   })
 </script>
@@ -333,6 +377,18 @@
                 {#if storageEstimate}<Text id="storage-estimate" role="caption">{storageEstimate}</Text>{/if}
                 <Button id="persist-storage" size="sm" variant="ghost" disabled={busy || !persistenceAvailable || persistenceGranted} onclick={() => void action(requestPersistence)}>Solicitar armazenamento persistente</Button>
                 <Text role="caption">F5 preserva os commits. Use o mesmo site, navegador e perfil. A permissão de persistência é decidida pelo navegador.</Text>
+              </Stack>
+            </section>
+            <Divider />
+            <section aria-labelledby="backup-heading">
+              <Stack gap="sm">
+                <Heading id="backup-heading" level={3}>Backup do banco</Heading>
+                <Button id="export-backup" size="sm" disabled={busy || !database} onclick={() => void action(downloadBackup)}>Baixar backup .rdb</Button>
+                <Text role="caption">Inclui os commits de todas as tabelas. Alterações pendentes ficam fora do backup. O arquivo físico pode conter dados antigos ou excluídos; trate-o como sensível.</Text>
+                <FileInput id="backup-file" label="Arquivo de backup .rdb" accept=".rdb" bind:files={backupFiles} disabled={busy} help="Até 256 MiB. A restauração cria outro banco e preserva o arquivo anterior." />
+                <Text role="caption">Execute COMMIT antes de trocar de banco. Alterações pendentes do banco atual serão descartadas.</Text>
+                <Button id="restore-backup" size="sm" disabled={busy || storageUnsupported || !backupFiles?.length} onclick={() => void action(importBackup)}>Restaurar em novo banco</Button>
+                <Link href="./">Abrir banco original do playground</Link>
               </Stack>
             </section>
             <Divider />

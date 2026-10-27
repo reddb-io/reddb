@@ -188,7 +188,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     try {
       const page = await context.newPage()
       await ready(page)
-      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: /^0\.3\.0$/ }).isVisible(), true)
+      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: /^0\.4\.0$/ }).isVisible(), true)
       const text = "O'Reilly'); DELETE FROM notes; --\0🦊"
       await execute(page, 'INSERT INTO notes (id, body) VALUES ($1, $2)', false, [1, text])
       assert.deepEqual((await execute(page, 'SELECT body FROM notes WHERE id = ?1', false, [1])).rows, [[text]])
@@ -207,6 +207,91 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     } finally { await context.close() }
   })
 }
+
+for (const [name, browser] of Object.entries({ chromium, firefox })) {
+  test(`${name}: downloaded backups restore to new files and survive offline refresh`, async () => {
+    const context = await browser.launchPersistentContext(resolve(temporary, `${name}-backup`), { headless: true })
+    try {
+      const page = await context.newPage()
+      await ready(page)
+      await preset(page, 'Inserir')
+      await transaction(page, 'BEGIN')
+      await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Uncommitted', 1])
+      const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.getByRole('button', { name: 'Baixar backup .rdb', exact: true }).click(),
+      ])
+      assert.equal(download.suggestedFilename(), 'reddb-browser-sql-playground-v1.rdb')
+      const backup = await readFile(await download.path())
+      assert.ok(backup.length > 0)
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Uncommitted']])
+      await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'invalid.rdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32) })
+      await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(await page.locator('#error').textContent(), /DATABASE_ERROR/)
+      assert.equal(new URL(page.url()).searchParams.has('database'), false)
+      assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Uncommitted']])
+      await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'notes.rdb', mimeType: 'application/octet-stream', buffer: backup })
+      await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('#storage-status').textContent.includes('Backup restaurado'))
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(new URL(page.url()).searchParams.get('database'), /^reddb-browser-restored-/)
+      assert.equal(await page.locator('#restore-backup').isDisabled(), true)
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+      await context.setOffline(true)
+      await page.reload()
+      await page.waitForFunction(() => document.querySelector('#execute')?.disabled === false)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+      await page.getByRole('link', { name: 'Abrir banco original do playground', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('#execute')?.disabled === false)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.equal(new URL(page.url()).searchParams.has('database'), false)
+      assert.deepEqual((await response(page)).rows, [[1, 'Minha nota offline']])
+    } finally { await context.close() }
+  })
+}
+
+test('a backup can recover a corrupt default database without overwriting its file', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    let context = await browser.newContext()
+    let page = await context.newPage()
+    await ready(page)
+    await preset(page, 'Inserir')
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('button', { name: 'Baixar backup .rdb', exact: true }).click(),
+    ])
+    const backup = await readFile(await download.path())
+    await context.close()
+    context = await browser.newContext()
+    page = await context.newPage()
+    await page.route(origin, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Recovery setup</title>' }))
+    await page.goto(origin)
+    await page.evaluate(async () => {
+      const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser', { create: true })
+      const file = await directory.getFileHandle('reddb-browser-sql-playground-v1.rdb', { create: true })
+      const writer = await file.createWritable()
+      await writer.write(new Uint8Array(32))
+      await writer.close()
+    })
+    await page.unroute(origin)
+    await page.goto(origin)
+    await page.waitForFunction(() => document.querySelector('#error')?.textContent.includes('DATABASE_ERROR'))
+    await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'recovery.rdb', mimeType: 'application/octet-stream', buffer: backup })
+    assert.equal(await page.locator('#restore-backup').isEnabled(), true)
+    await page.getByRole('button', { name: 'Restaurar em novo banco', exact: true }).click()
+    await page.getByRole('gridcell', { name: 'Minha nota offline', exact: true }).waitFor()
+    assert.equal(await page.locator('#error').isVisible(), false)
+    const original = await page.evaluate(async () => {
+      const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('reddb-browser')
+      return [...new Uint8Array(await (await (await directory.getFileHandle('reddb-browser-sql-playground-v1.rdb')).getFile()).arrayBuffer())]
+    })
+    assert.deepEqual(original, Array(32).fill(0))
+  } finally { await browser.close() }
+})
 
 test('storage retention reports the browser decision and origin quota without promising a grant', async () => {
   const browser = await chromium.launch({ headless: true })
@@ -248,6 +333,9 @@ test('unsupported storage remains explicit and does not enable write controls', 
     assert.match(await page.locator('#error').textContent(), /STORAGE_UNSUPPORTED/)
     assert.equal(await page.getByRole('button', { name: 'BEGIN', exact: true }).isDisabled(), true)
     assert.equal(await page.getByRole('button', { name: 'Executar consulta' }).isDisabled(), true)
+    assert.equal(await page.locator('#export-backup').isDisabled(), true)
+    await page.getByLabel('Arquivo de backup .rdb', { exact: true }).setInputFiles({ name: 'test.rdb', mimeType: 'application/octet-stream', buffer: Buffer.alloc(32) })
+    assert.equal(await page.locator('#restore-backup').isDisabled(), true)
   } finally { await browser.close() }
 })
 

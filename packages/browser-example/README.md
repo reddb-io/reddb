@@ -3,7 +3,7 @@
 [Open the deployed example](https://reddb-io.github.io/reddb/browser/).
 
 This is a real Svelte 5/TypeScript/Vite application using the **published**
-`@reddb-io/browser@0.3.0` package, including its Worker and WASM.
+`@reddb-io/browser@0.4.0` package, including its Worker and WASM.
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
 
@@ -66,6 +66,32 @@ the decision. A grant does not prevent explicit site-data clearing, provide a
 backup or synchronize data between browsers, profiles or devices. Refresh/F5
 retains committed writes when reopening the same database name and origin.
 
+## Download and restore a backup
+
+**Baixar backup .rdb** downloads the complete native file, including committed
+catalog, snapshot and WAL for all tables. It excludes pending transaction changes
+without committing or rolling them back. Keep the file outside this site's
+storage. A physical backup may contain old/deleted bytes and is sensitive; the
+export adds no encryption or redaction.
+
+Select a `.rdb` in **Arquivo de backup .rdb**, then choose **Restaurar em novo banco**.
+The SDK restores into an unused generated name and validates through Rust. The
+current database is closed only after successful restoration; invalid backups
+leave it open, including its pending transaction. Switching after a successful
+restore discards the old handle's uncommitted changes, as the inline notice
+explains. Existing files are never overwritten. Both operations have a 256 MiB
+physical-file bound.
+Restoration also remains available when the original file cannot be opened;
+the corrupt source is preserved while the valid backup opens under a new name.
+
+The restored name is recorded in the page's `database` URL parameter, so refresh
+and offline navigation reopen that same file. The URL contains a name, not the
+database bytes, and cannot transfer the data to another browser/profile. Restored
+files are not automatically bootstrapped or recreated if missing. The example
+initially queries `notes`; for a backup containing different tables, use the SQL
+editor to query them. **Abrir banco original do playground** returns to the
+original, preserved database.
+
 ## Verify
 
 ```sh
@@ -82,6 +108,9 @@ of uncommitted changes on reopen, close, refresh and service-worker activation.
 Parameterized writes also recover after offline refresh/restart. The suite checks
 the real parameter editor, invalid JSON/arity/types, quotes/NUL/Unicode and the
 UI's response to granted/denied persistence requests.
+Download/upload tests round-trip real `.rdb` files through the UI in both browsers,
+reject invalid files while retaining the current transaction, recover restored
+files after offline refresh and return to the unchanged original database.
 Storage-unsupported hosts must show an error and keep query/write controls disabled.
 
 The same tests can target the deployed application:
