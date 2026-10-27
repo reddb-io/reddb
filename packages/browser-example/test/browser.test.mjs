@@ -61,8 +61,9 @@ async function response(page) {
   return JSON.parse(await page.locator('#query-result code').textContent())
 }
 
-async function execute(page, sql, fails = false) {
+async function execute(page, sql, fails = false, parameters = []) {
   await page.getByRole('textbox', { name: 'Consulta RQL' }).fill(sql)
+  await page.getByRole('textbox', { name: 'Parâmetros (JSON)', exact: true }).fill(JSON.stringify(parameters))
   await page.getByRole('button', { name: 'Executar consulta' }).click()
   await page.waitForFunction(() => !document.querySelector('#execute').disabled)
   assert.equal(await page.locator('#error').isVisible(), fails, await page.locator('#error').textContent())
@@ -71,7 +72,7 @@ async function execute(page, sql, fails = false) {
 
 async function preset(page, label) {
   await page.getByRole('button', { name: label, exact: true }).click()
-  return execute(page, await page.locator('#sql').inputValue())
+  return execute(page, await page.locator('#sql').inputValue(), false, JSON.parse(await page.locator('#parameters').inputValue()))
 }
 
 async function transaction(page, command, fails = false) {
@@ -157,7 +158,10 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
         page = await context.newPage()
         await ready(page)
         assert.deepEqual((await response(page)).rows, [[1, 'Confirmada offline']])
-        await execute(page, "UPDATE notes SET body = 'Gravada sem rede' WHERE id = 1")
+        await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Gravada sem rede', 1])
+        await page.reload()
+        await page.getByRole('gridcell', { name: 'Gravada sem rede', exact: true }).waitFor()
+        await page.getByRole('tab', { name: 'JSON', exact: true }).click()
         await transaction(page, 'BEGIN')
         await execute(page, "INSERT INTO notes VALUES (2, 'Descartar ao fechar')")
         await context.close()
@@ -178,7 +182,60 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
       }
     } finally { await context.close() }
   })
+
+  test(`${name}: parameter editing preserves text, validates arguments and recovers commits after refresh`, async () => {
+    const context = await browser.launchPersistentContext(resolve(temporary, `${name}-parameters`), { headless: true })
+    try {
+      const page = await context.newPage()
+      await ready(page)
+      assert.equal(await page.getByText('0.3.0', { exact: true }).isVisible(), true)
+      const text = "O'Reilly'); DELETE FROM notes; --\0🦊"
+      await execute(page, 'INSERT INTO notes (id, body) VALUES ($1, $2)', false, [1, text])
+      assert.deepEqual((await execute(page, 'SELECT body FROM notes WHERE id = ?1', false, [1])).rows, [[text]])
+      assert.match(await execute(page, 'SELECT body FROM notes WHERE id = $1', true), /INVALID_PARAMS/)
+      assert.match(await execute(page, 'SELECT body FROM notes WHERE id = $1', true, [{}]), /INVALID_ARGUMENT/)
+      await page.locator('#parameters').fill('[invalid JSON]')
+      await page.getByRole('button', { name: 'Executar consulta' }).click()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      assert.match(await page.locator('#error').textContent(), /INVALID_ARGUMENT.*array JSON válido/)
+      await transaction(page, 'BEGIN')
+      await execute(page, 'UPDATE notes SET body = $1 WHERE id = $2', false, ['Pendente', 1])
+      await page.reload()
+      await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+      await page.getByRole('tab', { name: 'JSON', exact: true }).click()
+      assert.deepEqual((await response(page)).rows, [[1, text]])
+    } finally { await context.close() }
+  })
 }
+
+test('storage retention reports the browser decision and origin quota without promising a grant', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    for (const grant of [false, true]) {
+      const context = await browser.newContext()
+      await context.addInitScript(grant => {
+        let persisted = false
+        Object.defineProperties(navigator.storage, {
+          persisted: { value: async () => persisted },
+          persist: { value: async () => { persisted = grant; return grant } },
+          estimate: { value: async () => ({ usage: 1048576, quota: 104857600 }) },
+        })
+      }, grant)
+      try {
+        const page = await context.newPage()
+        await ready(page)
+        await page.locator('#storage-estimate').waitFor()
+        assert.match(await page.locator('#storage-estimate').textContent(), /desta origem: 1 MB de 100 MB/)
+        await page.getByRole('button', { name: 'Solicitar armazenamento persistente' }).click()
+        await page.waitForFunction(() => !document.querySelector('#execute').disabled)
+        assert.match(await page.locator('#storage-retention').textContent(), grant ? /persistente concedido/ : /não concedeu/)
+        assert.equal(await page.locator('#persist-storage').isDisabled(), grant)
+        await preset(page, 'Inserir')
+        assert.deepEqual((await preset(page, 'Ler')).rows, [[1, 'Minha nota offline']])
+      } finally { await context.close() }
+    }
+  } finally { await browser.close() }
+})
 
 test('unsupported storage remains explicit and does not enable write controls', async () => {
   const browser = await chromium.launch({ headless: true })
@@ -264,6 +321,7 @@ test('query workspace follows the DS reference with a code editor, real result g
     await page.getByRole('tab', { name: 'JSON', exact: true }).click()
     await preset(page, 'Inserir')
     await page.getByRole('tab', { name: 'Resultado', exact: true }).click()
+    await page.locator('#parameters').fill('[]')
     await page.getByRole('textbox', { name: 'Consulta RQL' }).fill("SELECT 'sem rede' AS modo, 42 AS resposta FROM notes")
     await page.keyboard.press('Control+Enter')
     await page.getByRole('gridcell', { name: 'sem rede', exact: true }).waitFor()

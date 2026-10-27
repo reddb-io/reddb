@@ -3,7 +3,7 @@
 [Open the deployed example](https://reddb-io.github.io/reddb/browser/).
 
 This is a real Svelte 5/TypeScript/Vite application using the **published**
-`@reddb-io/browser@0.2.0` package, including its Worker and WASM.
+`@reddb-io/browser@0.3.0` package, including its Worker and WASM.
 No Rust build, RedDB server, CDN, account or external API is required at runtime.
 The build pins the registry distribution, not a link to unpublished workspace source.
 
@@ -13,6 +13,14 @@ CREATE TABLE, INSERT, UPDATE, DELETE and SELECT through the published `query` AP
 Examples fill the editor; use **Executar consulta** or Ctrl/Command+Enter to run
 one statement at a time. The INSERT example uses ID 1; update/delete it or supply
 a new ID before inserting again.
+
+INSERT, UPDATE and DELETE examples use positional `$1`/`$2` parameters. Edit the
+**Parâmetros (JSON)** array alongside the SQL, or use numbered `?1`/`?2` positions.
+Values stay data, including quotes, NUL and Unicode. Use `[]` for statements
+without parameters. The editor accepts JSON scalar values (null, boolean, text
+and finite numbers with safe integers), bounded at 10,000 source characters per
+field. Objects and arrays are rejected by the engine. The SDK also accepts i64/u64
+bigints directly from JS/TS; JSON cannot represent bigint values.
 
 BEGIN, COMMIT and ROLLBACK controls send real SQL to the engine. Reads within a
 transaction see staged writes; a successful COMMIT makes them durable. Statement
@@ -50,6 +58,14 @@ The development server intentionally does not register an offline service worker
 Close other tabs using this example if `FILE_BUSY` appears. Clearing this origin's
 site data removes the test file and its cached application assets.
 
+**Retenção dos dados** reports whether the browser granted persistent storage and
+shows the estimated usage/quota for the entire origin, including application
+caches. **Solicitar armazenamento persistente** calls `navigator.storage.persist()`;
+a denial leaves the database usable and is reported explicitly. The browser makes
+the decision. A grant does not prevent explicit site-data clearing, provide a
+backup or synchronize data between browsers, profiles or devices. Refresh/F5
+retains committed writes when reopening the same database name and origin.
+
 ## Verify
 
 ```sh
@@ -62,7 +78,10 @@ The tests serve the production build under `/reddb/browser/`, exercise query err
 file ownership and mobile layout, then shut down the complete browser and HTTP
 listener before two offline browser restarts. They verify CRUD, commit/rollback,
 aborted transactions, own-write visibility, offline write recovery and discard
-of uncommitted changes on reopen, close and service-worker activation.
+of uncommitted changes on reopen, close, refresh and service-worker activation.
+Parameterized writes also recover after offline refresh/restart. The suite checks
+the real parameter editor, invalid JSON/arity/types, quotes/NUL/Unicode and the
+UI's response to granted/denied persistence requests.
 Storage-unsupported hosts must show an error and keep query/write controls disabled.
 
 The same tests can target the deployed application:
