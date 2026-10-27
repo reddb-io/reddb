@@ -20,6 +20,10 @@ body {
 
 .browser-code-field { padding: var(--reddb-spatial-inset-sm); }
 
+.browser-parameters {
+  padding: 0 var(--reddb-spatial-inset-md) var(--reddb-spatial-inset-sm);
+}
+
 .browser-editor-note {
   padding: 0 var(--reddb-spatial-inset-md) var(--reddb-spatial-inset-sm);
 }

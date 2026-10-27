@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import {
-    Accordion, Alert, Badge, Button, CodeBlock, DescriptionList, Divider, Heading,
-    Kbd, Link, LoadingIndicator, Logo, Navbar, Prose, Stack, StatusIndicator, Switch, Tabs, Text,
+    Accordion, Alert, Badge, Button, CodeBlock, DescriptionList, Divider, Field, Heading,
+    Kbd, Link, LoadingIndicator, Logo, Navbar, Prose, Stack, StatusIndicator, Switch, Tabs, Text, Textarea,
   } from '@reddb-io/design-system/base'
   import { ApplicationShell, SidebarPanel, Toolbar } from '@reddb-io/design-system/app'
   import CodeField from '@reddb-io/design-system/data/CodeField'
@@ -17,6 +17,7 @@
   const createNotes = 'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)'
   const selectNotes = 'SELECT id, body FROM notes ORDER BY id'
   let sql = $state(selectNotes)
+  let parameters = $state('[]')
   let result = $state('Aguardando o engine…')
   let queryResult = $state<{ columns: string[]; rows: unknown[][] }>()
   let resultView = $state('table')
@@ -31,6 +32,10 @@
   let engineState = $state('Abrindo o arquivo local…')
   let engineTone = $state<'info' | 'success' | 'danger'>('info')
   let storageStatus = $state('O banco fica no OPFS deste navegador e desta origem.')
+  let storageRetention = $state('Consultando a política de armazenamento…')
+  let storageEstimate = $state('')
+  let persistenceAvailable = $state(false)
+  let persistenceGranted = $state(false)
   let networkState = $state('')
   let offlineState = $state('Preparando o cache da aplicação…')
   let offlineReady = $state(false)
@@ -58,7 +63,12 @@
     result = 'Executando no Worker…'
     try {
       if (sql.length > 10000) throw new Error('A consulta deve ter no máximo 10.000 caracteres.')
-      queryResult = await database.query(sql)
+      if (parameters.length > 10000) throw new BrowserError('INVALID_ARGUMENT', 'Os parâmetros devem ter no máximo 10.000 caracteres.')
+      let values: unknown
+      try { values = JSON.parse(parameters) }
+      catch { throw new BrowserError('INVALID_ARGUMENT', 'Os parâmetros devem ser um array JSON válido, como [1, "Minha nota"].') }
+      if (!Array.isArray(values)) throw new BrowserError('INVALID_ARGUMENT', 'Os parâmetros devem ser um array JSON, como [1, "Minha nota"].')
+      queryResult = await database.query(sql, values)
       result = JSON.stringify(queryResult, null, 2)
       storageStatus = 'Comando concluído. Dentro de BEGIN, use COMMIT para persistir as alterações.'
     }
@@ -90,6 +100,7 @@
 
   async function transaction(command: 'BEGIN' | 'COMMIT' | 'ROLLBACK') {
     sql = command
+    parameters = '[]'
     await query()
     storageStatus = command === 'BEGIN'
       ? 'BEGIN concluído. Use COMMIT ou ROLLBACK para encerrar a transação.'
@@ -101,8 +112,30 @@
   async function reopen() {
     await connect()
     sql = selectNotes
+    parameters = '[]'
     await query()
     storageStatus = 'Banco reaberto por um novo Worker. Alterações sem COMMIT foram descartadas.'
+  }
+
+  async function inspectStorage() {
+    persistenceAvailable = typeof navigator.storage?.persist === 'function'
+    try {
+      persistenceGranted = await navigator.storage?.persisted?.() ?? false
+      storageRetention = persistenceGranted
+        ? 'Armazenamento persistente concedido. Limpar os dados do site ainda apaga o banco.'
+        : 'O navegador pode descartar os dados sob pressão de espaço. Mantenha um backup.'
+      const estimate = await navigator.storage?.estimate?.()
+      if (estimate?.usage !== undefined && estimate.quota !== undefined) {
+        const format = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 })
+        storageEstimate = `Uso estimado desta origem: ${format.format(estimate.usage / 1048576)} MB de ${format.format(estimate.quota / 1048576)} MB.`
+      }
+    } catch { storageRetention = 'Não foi possível consultar a retenção e a quota do navegador.' }
+  }
+
+  async function requestPersistence() {
+    const granted = await navigator.storage.persist()
+    await inspectStorage()
+    if (!granted) storageRetention = 'O navegador não concedeu armazenamento persistente. Os dados continuam locais, sujeitos a descarte.'
   }
 
   async function activateUpdate() {
@@ -173,11 +206,11 @@
   }
 
   const examples = [
-    { label: 'Ler', sql: selectNotes },
-    { label: 'Inserir', sql: "INSERT INTO notes (id, body) VALUES (1, 'Minha nota offline')" },
-    { label: 'Alterar', sql: "UPDATE notes SET body = 'Nota atualizada offline' WHERE id = 1" },
-    { label: 'Excluir', sql: 'DELETE FROM notes WHERE id = 1' },
-    { label: 'Criar tabela', sql: createNotes },
+    { label: 'Ler', sql: selectNotes, params: [] },
+    { label: 'Inserir', sql: 'INSERT INTO notes (id, body) VALUES ($1, $2)', params: [1, 'Minha nota offline'] },
+    { label: 'Alterar', sql: 'UPDATE notes SET body = $1 WHERE id = $2', params: ['Nota atualizada offline', 1] },
+    { label: 'Excluir', sql: 'DELETE FROM notes WHERE id = $1', params: [1] },
+    { label: 'Criar tabela', sql: createNotes, params: [] },
   ]
 
   onMount(() => {
@@ -188,6 +221,7 @@
     busy = false
     void action(async () => { await connect(); await query() })
     void prepareOffline()
+    void inspectStorage()
     return () => {
       window.removeEventListener('online', network)
       window.removeEventListener('offline', network)
@@ -219,8 +253,8 @@
     </Navbar>
   {/snippet}
 
-  <div class="@container/browser h-full min-h-0">
-    <div class="browser-regions h-full min-h-0 grid-cols-1 @3xl/browser:grid-cols-[minmax(14rem,1fr)_minmax(0,4fr)] @3xl/browser:grid-rows-[minmax(0,1fr)]">
+  <div class="@container/browser h-full min-h-0 overflow-auto">
+    <div class="browser-regions min-h-full min-h-0 auto-rows-max grid-cols-1 @3xl/browser:h-full @3xl/browser:auto-rows-auto @3xl/browser:grid-cols-[minmax(14rem,1fr)_minmax(0,4fr)] @3xl/browser:grid-rows-[minmax(0,1fr)]">
       <section id="consulta" class="min-h-0 min-w-0 @3xl/browser:col-start-2 @3xl/browser:row-start-1" aria-label="Consulta RQL e resultado">
         <Stack gap="none" class="h-full min-h-0" onkeydown={(event) => {
           if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void action(query) }
@@ -236,13 +270,18 @@
               <h2 class="text-body font-medium">Consulta RQL</h2>
               <Stack direction="row" align="center" gap="sm" wrap>
                 <Toolbar label="Exemplos de consulta" size="sm" class="min-w-0 max-w-full flex-wrap" items={examples.map(example => ({
-                  id: example.label, label: example.label, onselect: () => { sql = example.sql },
+                  id: example.label, label: example.label, onselect: () => { sql = example.sql; parameters = JSON.stringify(example.params) },
                 }))} />
                 <Kbd keys={['Ctrl', 'Enter']} size="sm" />
-                <Button id="execute" variant="primary" size="sm" type="submit" disabled={busy || !database || sql.length > 10000}>Executar consulta</Button>
+                <Button id="execute" variant="primary" size="sm" type="submit" disabled={busy || !database || sql.length > 10000 || parameters.length > 10000}>Executar consulta</Button>
               </Stack>
             </Stack>
             <CodeField id="sql" label="Consulta RQL" bind:value={sql} grammar={sqlGrammar} gutter rows={6} class="browser-code-field [&>label]:sr-only" />
+            <Field id="parameters" label="Parâmetros (JSON)" help="Array de valores para $1, $2 ou ?1, ?2. Use [] sem parâmetros. Aceita texto, números seguros, booleanos e null." class="browser-parameters">
+              {#snippet children(control)}
+                <Textarea {...control} bind:value={parameters} rows={2} spellcheck={false} class="font-mono" />
+              {/snippet}
+            </Field>
             <Text role="caption" class="browser-editor-note">SQL local no WASM. Os exemplos preenchem o editor; execute um comando por vez. A tabela notes começa vazia.</Text>
           </form>
           <Alert id="error" tone="danger" hidden={!error}>{error}</Alert>
@@ -286,6 +325,16 @@
             <div id="storage-status" role="status"><Text role="caption">{storageStatus}</Text></div>
             <Text role="caption">Após um erro em BEGIN, execute ROLLBACK. Reabrir, atualizar ou fechar a página descarta alterações sem COMMIT.</Text>
             <Text role="caption">O arquivo de marcadores do exemplo anterior é preservado.</Text>
+            <Divider />
+            <section aria-labelledby="retention-heading">
+              <Stack gap="sm">
+                <Heading id="retention-heading" level={3}>Retenção dos dados</Heading>
+                <div id="storage-retention" role="status"><Text role="caption">{storageRetention}</Text></div>
+                {#if storageEstimate}<Text id="storage-estimate" role="caption">{storageEstimate}</Text>{/if}
+                <Button id="persist-storage" size="sm" variant="ghost" disabled={busy || !persistenceAvailable || persistenceGranted} onclick={() => void action(requestPersistence)}>Solicitar armazenamento persistente</Button>
+                <Text role="caption">F5 preserva os commits. Use o mesmo site, navegador e perfil. A permissão de persistência é decidida pelo navegador.</Text>
+              </Stack>
+            </section>
             <Divider />
             <section aria-labelledby="offline-heading">
               <Stack gap="layout-sm">
