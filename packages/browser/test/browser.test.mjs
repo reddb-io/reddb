@@ -443,14 +443,17 @@ for (const browser of browsers) {
           catch (error) { errors.push(error.code) }
           const reopened = await RedDBBrowser.openDatabase({ name: 'backup-restored' })
           let preserved
-          try { preserved = (await reopened.query('SELECT body FROM backups WHERE id = $1', [2])).rows[0][0] === 'after restore' }
+          try {
+            const rows = (await reopened.query('SELECT body, revision FROM backups WHERE id = $1', [2])).rows
+            preserved = rows[0][0] === 'after restore' && rows[0][1] === 7
+          }
           finally { await reopened.close() }
           return { nativeMatch, pendingExcluded, stillPending, restoredMatch, exact, revision, preserved, errors, length: backup.length }
         }, nativeQueryFixture)
         assert.deepEqual({ ...result, length: undefined }, {
           nativeMatch: true, pendingExcluded: true, stillPending: true, restoredMatch: true,
           exact: true, revision: 7, preserved: true,
-          errors: ['FILE_BUSY', 'DATABASE_EXISTS', 'ARTIFACT_ERROR', 'DATABASE_NOT_FOUND'], length: undefined,
+          errors: ['FILE_BUSY', 'DATABASE_EXISTS', 'DATABASE_ERROR', 'DATABASE_NOT_FOUND'], length: undefined,
         })
         assert.ok(result.length > 1024 * 1024, 'exercise multi-chunk backup I/O')
       } finally { await current.close() }
