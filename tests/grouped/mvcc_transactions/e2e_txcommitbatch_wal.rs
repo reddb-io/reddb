@@ -88,6 +88,104 @@ fn truncate_wal_tail(path: &Path, bytes: u64) {
 }
 
 #[test]
+fn sealed_delete_survives_abrupt_exit_with_and_without_a_later_checkpoint() {
+    const PATH_ENV: &str = "REDDB_TEST_SEALED_DELETE_CRASH_PATH";
+    if let Some(path) = std::env::var_os(PATH_ENV) {
+        let rt = RedDBRuntime::with_options(
+            RedDBOptions::persistent(PathBuf::from(path))
+                .with_durability_mode(DurabilityMode::WalDurableGrouped)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+                .expect("operational profile"),
+        )
+        .expect("child runtime");
+        set_current_connection_id(44008);
+        exec(&rt, "CREATE TABLE sealed_crash (id INT, body TEXT)");
+        let rows = (0..160)
+            .map(|id| format!("({id}, '{}')", "x".repeat(96)))
+            .collect::<Vec<_>>()
+            .join(",");
+        exec(
+            &rt,
+            &format!("INSERT INTO sealed_crash (id, body) VALUES {rows}"),
+        );
+        rt.db()
+            .store()
+            .get_collection("sealed_crash")
+            .expect("source")
+            .force_seal()
+            .expect("seal source");
+        rt.checkpoint().expect("durable pre-delete baseline");
+        exec(&rt, "DELETE FROM sealed_crash WHERE id < 159");
+        assert_eq!(
+            rt.db()
+                .store()
+                .get_collection("sealed_crash")
+                .expect("source")
+                .stats()
+                .growing_count,
+            0,
+            "DELETE must retain the sealed payload"
+        );
+        if std::env::var_os("REDDB_TEST_SEALED_DELETE_CHECKPOINT").is_some() {
+            rt.checkpoint().expect("publish changed sealed headers");
+        }
+        // Acknowledged DELETE has returned. Bypass all destructors/final
+        // checkpoints so recovery must trust the durable WAL/page publication.
+        std::process::exit(0);
+    }
+    for checkpoint_after_delete in [false, true] {
+        let db = support::temp_db_file("sealed-delete-abrupt-exit");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child.args(["--exact",
+            "e2e_txcommitbatch_wal::sealed_delete_survives_abrupt_exit_with_and_without_a_later_checkpoint",
+            "--nocapture", "--test-threads=1"])
+            .env(PATH_ENV, db.path())
+            .env_remove("REDDB_TEST_SEALED_DELETE_CHECKPOINT");
+        if checkpoint_after_delete {
+            child.env("REDDB_TEST_SEALED_DELETE_CHECKPOINT", "1");
+        }
+        let output = child.output().expect("launch child");
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rt = db_open(&db);
+        let rows = rt
+            .execute_query("SELECT id, body FROM sealed_crash ORDER BY id")
+            .expect("recover acknowledged delete")
+            .result
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&Value::Integer(159)));
+        assert_eq!(rows[0].get("body"), Some(&Value::text("x".repeat(96))));
+        assert!(rt
+            .execute_query("SELECT id FROM sealed_crash WHERE id = 7")
+            .expect("indexed deleted row")
+            .result
+            .records
+            .is_empty());
+        exec(
+            &rt,
+            "INSERT INTO sealed_crash (id, body) VALUES (1000, 'after recovery')",
+        );
+        rt.checkpoint()
+            .expect("checkpoint recovered source and new row");
+        drop(rt);
+        let rt = db_open(&db);
+        let rows = rt
+            .execute_query("SELECT id FROM sealed_crash ORDER BY id")
+            .expect("second recovery")
+            .result
+            .records;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("id"), Some(&Value::Integer(159)));
+        assert_eq!(rows[1].get("id"), Some(&Value::Integer(1000)));
+    }
+}
+
+#[test]
 fn autocommit_insert_update_delete_recover_from_commit_batches() {
     let db = support::temp_db_file("txcommitbatch-wal-recover");
 

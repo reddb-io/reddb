@@ -1021,6 +1021,42 @@ impl SegmentManager {
         }
     }
 
+    /// Stamp MVCC visibility without relocating or replacing a sealed payload.
+    /// Returns the authoritative stamped image for WAL, or `None` if another
+    /// stamp superseded the caller's pre-image. Lock order matches maintenance.
+    pub fn compare_exchange_xmax(
+        &self,
+        id: EntityId,
+        expected: u64,
+        xmax: u64,
+    ) -> Result<Option<UnifiedEntity>, SegmentError> {
+        let mut consolidation = self.consolidation.write();
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        for segment in growing.iter().chain(sealed.iter()) {
+            let mut segment = segment.write();
+            let Some(entity) = segment.get(id) else {
+                continue;
+            };
+            if entity.xmax != expected {
+                return Ok(None);
+            }
+            segment.set_xmax_in_place(id, xmax)?;
+            // A paced merge may already have copied this row. Publish the
+            // same header there so a later swap cannot resurrect old visibility.
+            if let Some(run) = consolidation.as_mut() {
+                if run.merged.contains(id) {
+                    run.merged.set_xmax_in_place(id, xmax)?;
+                }
+            }
+            // The visibility map is an abstract collection-wide hint; no
+            // physical page mapping proves a narrower invalidation safe here.
+            self.visibility_map.clear();
+            return Ok(segment.get(id).cloned());
+        }
+        Err(SegmentError::NotFound(id))
+    }
+
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
         let entity_id = entity.id;
@@ -2916,6 +2952,124 @@ mod tests {
         entity.set_xmin(xmin);
         entity.set_xmax(xmax);
         entity
+    }
+
+    #[test]
+    fn xmax_stamps_retain_payload_and_honor_competing_stamps_on_sealed_rows() {
+        let manager = SegmentManager::new("keys");
+        manager
+            .insert(lookup_version(1, "original", 1, 0))
+            .expect("seed");
+        manager.force_seal().expect("seal");
+        let mut latest = manager.get(EntityId::new(1)).expect("row");
+        latest.data = lookup_version(1, "latest", 1, 0).data;
+        // This manager API returns the current payload, even when its caller
+        // captured an earlier image. Only the header may be replaced.
+        manager.update(latest).expect("new payload");
+        manager.force_seal().expect("seal latest");
+        let baseline = manager.checkpoint_revisions();
+        let before = manager.resident_bytes();
+        let stamped = manager
+            .compare_exchange_xmax(EntityId::new(1), 0, 9)
+            .expect("stamp")
+            .expect("matched header");
+        assert_eq!(stamped.xmax, 9);
+        let EntityData::Row(row) = &stamped.data else {
+            panic!("row")
+        };
+        assert_eq!(row.get_field("key"), Some(&Value::text("latest")));
+        assert!(manager
+            .compare_exchange_xmax(EntityId::new(1), 0, 10)
+            .expect("competing stamp")
+            .is_none());
+        assert_eq!(manager.get(EntityId::new(1)).expect("stored row").xmax, 9);
+        assert!(manager
+            .compare_exchange_xmax(EntityId::new(1), 9, 0)
+            .expect("rollback")
+            .is_some());
+        assert_eq!(manager.get(EntityId::new(1)).expect("revived").xmax, 0);
+        assert_eq!(manager.stats().growing_count, 0);
+        assert!(
+            manager.checkpoint_mutations_since(&baseline).is_none()
+                || manager
+                    .checkpoint_mutations_since(&baseline)
+                    .expect("coverage")
+                    .contains(&EntityId::new(1))
+        );
+        assert_eq!(manager.resident_bytes(), before);
+    }
+
+    #[test]
+    fn xmax_stamps_update_already_copied_consolidation_images() {
+        let manager = SegmentManager::with_config(
+            "keys",
+            ManagerConfig {
+                consolidation_entities_per_tick: 1,
+                ..ManagerConfig::default()
+            },
+        );
+        manager
+            .bulk_insert((1..=8).map(|id| lookup_version(id, "body", 1, 0)).collect())
+            .expect("seed");
+        manager.force_seal().expect("seal");
+        manager.delete(EntityId::new(8)).expect("physical garbage");
+        assert!(manager.pressure_consolidation_tick());
+        let copied = manager
+            .consolidation
+            .read()
+            .as_ref()
+            .expect("merge in flight")
+            .sources[0]
+            .copied[0];
+        assert!(manager
+            .compare_exchange_xmax(copied, 0, 7)
+            .expect("stamp")
+            .is_some());
+        assert_eq!(
+            manager
+                .consolidation
+                .read()
+                .as_ref()
+                .expect("merge remains")
+                .merged
+                .get(copied)
+                .expect("copied image")
+                .xmax,
+            7
+        );
+        assert!(manager
+            .compare_exchange_xmax(copied, 7, 0)
+            .expect("rollback")
+            .is_some());
+        for _ in 0..16 {
+            manager.run_maintenance().expect("finish merge");
+        }
+        assert!(manager.consolidation.read().is_none());
+        assert_eq!(manager.get(copied).expect("published row").xmax, 0);
+        let before = manager.resident_bytes();
+        let baseline = manager.checkpoint_revisions();
+        for xmax in 8..=200 {
+            let expected = if xmax == 8 { 0 } else { xmax - 1 };
+            drop(
+                manager
+                    .compare_exchange_xmax(copied, expected, xmax)
+                    .expect("stamp"),
+            );
+            assert_eq!(
+                manager.resident_bytes(),
+                before,
+                "header ownership must stay bounded"
+            );
+        }
+        assert_eq!(manager.stats().growing_count, 0);
+        assert_eq!(manager.stats().total_entities, 7);
+        assert!(
+            manager.checkpoint_mutations_since(&baseline).is_none()
+                || manager
+                    .checkpoint_mutations_since(&baseline)
+                    .expect("coverage")
+                    .contains(&copied)
+        );
     }
 
     #[test]

@@ -158,6 +158,53 @@ fn restored_segment_accounting_covers_allocation_growth() {
     metadata_replacement_and_removal_stay_accounted();
     deleted_segment_capacity_stays_accounted();
     consolidation_allocation_reclamation();
+    header_stamps_keep_requested_allocations_bounded();
+}
+
+fn header_stamps_keep_requested_allocations_bounded() {
+    for flat in [false, true] {
+        let manager = SegmentManager::new("memory_probe");
+        let rows = (1..=160).map(|id| restored_entity(id, Fixture::NamedText));
+        if flat {
+            manager.bulk_insert(rows.collect()).expect("flat source");
+        } else {
+            for row in rows {
+                manager
+                    .restore_snapshot_entity(row)
+                    .expect("restored source");
+            }
+        }
+        manager.force_seal().expect("sealed source");
+        let reported = manager.resident_bytes();
+        let journal = manager.checkpoint_tracking_bytes();
+        let actual = LIVE.load(Ordering::Relaxed);
+        PEAK.store(actual, Ordering::Relaxed);
+        for generation in 1..=64 {
+            for raw in 1..=160 {
+                drop(
+                    manager
+                        .compare_exchange_xmax(EntityId::new(raw), generation - 1, generation)
+                        .expect("stamp authoritative image")
+                        .expect("matched previous header"),
+                );
+            }
+            assert_eq!(
+                LIVE.load(Ordering::Relaxed),
+                actual,
+                "equivalent header cycles must not retain new allocations"
+            );
+            assert_eq!(manager.resident_bytes(), reported);
+            assert_eq!(manager.checkpoint_tracking_bytes(), journal);
+        }
+        let peak_extra = PEAK.load(Ordering::Relaxed).saturating_sub(actual);
+        assert!(
+            peak_extra <= 64 * 1024,
+            "one returned WAL image must not clone the collection: {peak_extra}"
+        );
+        eprintln!("header stamps flat={flat} actual={actual} reported={reported} journal={journal} peak_extra={peak_extra}");
+        assert_eq!(manager.stats().growing_count, 0);
+        assert_eq!(manager.stats().total_entities, 160);
+    }
 }
 
 fn metadata_replacement_and_removal_stay_accounted() {

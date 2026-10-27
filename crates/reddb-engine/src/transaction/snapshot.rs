@@ -222,6 +222,13 @@ impl SnapshotManager {
     /// concurrent writer.
     pub fn begin(&self) -> Xid {
         let mut state = self.state.write();
+        // Do not issue a reserved autocommit slot below this new transaction
+        // later. Those unissued slots must be excluded from old snapshots, but
+        // retaining them after a DELETE needlessly pins its history in every
+        // new statement. Retire unused numbers, preserving all captured views.
+        // Lock order remains state -> pool, as in snapshot/replay publication.
+        let mut pool = self.autocommit_pool.lock();
+        pool.next = pool.end;
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
         state.active.insert(xid);
         self.visibility_revision.fetch_add(1, Ordering::Release);
@@ -903,14 +910,44 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_exclude_unissued_pool_slots_even_below_reader_xid() {
+    fn begin_retires_unused_pool_slots_so_new_snapshots_can_reclaim_committed_deletes() {
+        let manager = Arc::new(SnapshotManager::new());
+        let old = manager.allocate_committed_xid();
+        let (held, retention) = manager.fresh_retained_snapshot();
+        let deleting = manager.begin();
+        manager.commit(deleting);
+        assert!(
+            held.sees(old, deleting),
+            "older snapshot still needs the row"
+        );
+        assert!(manager.oldest_required_xid().expect("held horizon") <= deleting);
+        drop(retention);
+        let (fresh, _retention) = manager.fresh_retained_snapshot();
+        assert!(!fresh.sees(old, deleting), "new snapshot sees the delete");
+        assert!(
+            manager.oldest_required_xid().expect("fresh horizon") > deleting,
+            "unused lower pool slots must not pin an already visible delete"
+        );
+        assert!(manager.allocate_committed_xid() > deleting);
+    }
+
+    #[test]
+    fn snapshots_exclude_unissued_pool_slots_and_future_allocations_after_begin() {
         let manager = SnapshotManager::new();
         let old = manager.allocate_committed_xid();
+        let pooled_snapshot = manager.fresh_read_snapshot();
+        let pooled_future = manager.allocate_committed_xid();
+        assert!(
+            pooled_future < pooled_snapshot.xid,
+            "exercise the reserved range"
+        );
+        assert!(!pooled_snapshot.sees(pooled_future, XID_NONE));
+        assert!(pooled_snapshot.sees(old, pooled_future));
         let reader = manager.begin();
         let transaction_snapshot = manager.snapshot(reader);
         let statement_snapshot = manager.fresh_read_snapshot();
         let future = manager.allocate_committed_xid();
-        assert!(future < reader, "fixture must exercise the reserved range");
+        assert!(future > reader, "begin retires the unused lower range");
         for snapshot in [transaction_snapshot, statement_snapshot] {
             assert!(snapshot.sees(old, XID_NONE));
             assert!(!snapshot.sees(future, XID_NONE));

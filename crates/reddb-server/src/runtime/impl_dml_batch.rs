@@ -59,7 +59,7 @@ impl RedDBRuntime {
         let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
 
         for &id in ids {
-            let Some(mut entity) = manager.get(id) else {
+            let Some(entity) = manager.get(id) else {
                 continue;
             };
             let is_versioned_graph = versioned_collection
@@ -101,9 +101,11 @@ impl RedDBRuntime {
                         }
                     },
                 };
-                let pre_delete_fields = entity_row_fields_snapshot(&entity);
-                entity.set_xmax(xid);
-                if manager.update(entity.clone()).is_ok() {
+                if let Some(entity) = manager
+                    .compare_exchange_xmax(id, previous_xmax, xid)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
+                {
+                    let pre_delete_fields = entity_row_fields_snapshot(&entity);
                     #[cfg(test)]
                     self.index_store_ref().mutation_test_hook(
                         collection,

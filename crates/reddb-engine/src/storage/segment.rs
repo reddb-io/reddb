@@ -731,6 +731,76 @@ impl GrowingSegment {
         self.checkpoint_revision
     }
 
+    /// Change only MVCC visibility, retaining sealed payloads and their indexes.
+    /// The manager serializes this with consolidation and owns publication/WAL.
+    pub(super) fn set_xmax_in_place(
+        &mut self,
+        id: EntityId,
+        xmax: u64,
+    ) -> Result<(), SegmentError> {
+        let old = self.get(id).ok_or(SegmentError::NotFound(id))?;
+        if old.xmax == xmax {
+            return Ok(());
+        }
+        self.mark_checkpoint_header_dirty(id);
+        let flat_index = id
+            .raw()
+            .checked_sub(self.base_entity_id)
+            .and_then(|offset| {
+                usize::try_from(offset).ok().filter(|&index| {
+                    self.use_flat
+                        && self
+                            .flat_entities
+                            .get(index)
+                            .is_some_and(|row| row.id == id)
+                })
+            });
+        let entity = if let Some(index) = flat_index {
+            &mut self.flat_entities[index]
+        } else {
+            self.entities
+                .get_mut(&id)
+                .ok_or(SegmentError::NotFound(id))?
+        };
+        entity.set_xmax(xmax);
+        self.last_write_at = current_unix_secs();
+        Ok(())
+    }
+
+    /// Header changes must remain possible at the resident budget ceiling.
+    /// Reuse journal capacity; if coverage is evicted, older checkpoint proofs
+    /// fail closed and fall back to full validation. No payload/index changes.
+    fn mark_checkpoint_header_dirty(&mut self, id: EntityId) {
+        self.checkpoint_revision = self
+            .checkpoint_revision
+            .checked_add(1)
+            .expect("segment mutation counter must not overflow");
+        if self.checkpoint_mutations.capacity() == 0
+            || self.checkpoint_latest_mutations.capacity() == 0
+        {
+            self.checkpoint_mutation_floor = self.checkpoint_revision;
+            return;
+        }
+        while self.checkpoint_mutations.len() == self.checkpoint_mutations.capacity()
+            || (!self.checkpoint_latest_mutations.contains_key(&id)
+                && self.checkpoint_latest_mutations.len()
+                    == self.checkpoint_latest_mutations.capacity())
+        {
+            let Some((revision, previous)) = self.checkpoint_mutations.pop_front() else {
+                self.checkpoint_mutation_floor = self.checkpoint_revision;
+                return;
+            };
+            if self.checkpoint_latest_mutations.get(&previous) == Some(&revision) {
+                self.checkpoint_latest_mutations.remove(&previous);
+                self.checkpoint_mutation_floor = self.checkpoint_mutation_floor.max(revision);
+            }
+        }
+        self.checkpoint_latest_mutations
+            .insert(id, self.checkpoint_revision);
+        self.checkpoint_mutations
+            .push_back((self.checkpoint_revision, id));
+    }
+
     fn mark_checkpoint_entity_dirty(&mut self, id: EntityId) {
         self.checkpoint_revision = self
             .checkpoint_revision
@@ -2633,6 +2703,50 @@ mod tests {
         segment
             .find_key_entity(key, true, &mut |_| true)
             .map(|entity| entity.id)
+    }
+
+    #[test]
+    fn xmax_changes_reuse_journal_capacity_and_invalidate_evicted_proofs() {
+        for flat in [false, true] {
+            let mut segment = GrowingSegment::new(1, "keys");
+            let rows = (1..=32).map(|id| keyed_row(id, "unchanged", 1, 0));
+            if flat {
+                segment.bulk_insert(rows.collect()).expect("flat rows");
+            } else {
+                for row in rows {
+                    segment.insert(row).expect("hash row");
+                }
+            }
+            segment.seal().expect("seal");
+            let before = segment.resident_bytes();
+            let journal = segment.checkpoint_tracking_bytes();
+            let baseline = segment.checkpoint_revision();
+            for xmax in 2..=200 {
+                let previous = segment.checkpoint_revision();
+                for id in 1..=32 {
+                    segment
+                        .set_xmax_in_place(EntityId::new(id), xmax)
+                        .expect("header");
+                }
+                assert_eq!(segment.checkpoint_tracking_bytes(), journal);
+                assert_eq!(segment.resident_bytes(), before);
+                let changed = segment.checkpoint_mutations_since(previous);
+                // Complete coverage must name every changed row; otherwise the
+                // only permitted answer is a conservative full validation.
+                if let Some(changed) = changed {
+                    assert_eq!(changed.len(), 32);
+                    for id in 1..=32 {
+                        assert!(changed.contains(&EntityId::new(id)));
+                    }
+                }
+            }
+            assert!(segment.checkpoint_mutations_since(baseline).is_none());
+            assert!(keyed_probe(&segment, "unchanged").is_some());
+            assert_eq!(segment.get(EntityId::new(1)).expect("row").xmax, 200);
+            let revision = segment.checkpoint_revision();
+            assert!(segment.set_xmax_in_place(EntityId::new(999), 4).is_err());
+            assert_eq!(segment.checkpoint_revision(), revision);
+        }
     }
 
     #[test]

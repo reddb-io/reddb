@@ -1961,7 +1961,7 @@ fn red_stats_echoes_an_explicitly_configured_memory_budget() {
 fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
     cleanup_scope();
     // Include the boot catalog payloads while leaving room for live inserts.
-    let budget = 64 * 1024;
+    let budget = 128 * 1024;
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
         .expect("runtime with a tiny explicit budget");
 
@@ -2017,18 +2017,27 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
 
 #[test]
 fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
+    check_pressure_reclamation(false);
+}
+
+#[test]
+fn pressure_reclamation_preserves_a_held_snapshot_then_reuses_its_space() {
+    check_pressure_reclamation(true);
+}
+
+fn check_pressure_reclamation(hold_snapshot: bool) {
     cleanup_scope();
-    // Include boot catalog key lookups as well as row payloads and zone bounds.
-    // Keep the post-reclamation batch within budget while the dead seed still
-    // forces pressure consolidation before that batch can be admitted.
-    let budget = 168 * 1024;
+    // Fit the complete seed and catalog, then spend remaining headroom on live
+    // rows. This forces pressure independently of the directory estimate's
+    // padding, while retaining the same dead seed and post-reclamation batch.
+    let budget = 512 * 1024;
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
         .expect("runtime with a small explicit budget");
 
     exec(&rt, "CREATE TABLE reclaim_gate (id INT, body TEXT)");
-    // The live seed fits, but reserving all 160 rows plus their index in one
-    // operation exceeds this small budget. Release estimate slack between
-    // bounded seed batches while preserving the same consolidation workload.
+    exec(&rt, "CREATE TABLE live_pressure (id INT, body TEXT)");
+    // Release estimate slack between bounded seed batches, preserving the
+    // original 160-row consolidation workload before spending live headroom.
     for first_id in (0..160).step_by(40) {
         let rows = (first_id..first_id + 40)
             .map(|id| format!("({id}, '{}')", "x".repeat(96)))
@@ -2046,10 +2055,51 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         .expect("collection exists")
         .force_seal()
         .expect("force seal");
+    let mut filler_rows = 0;
+    let mut filled_headroom = false;
+    for id in 0..10_000 {
+        rt.refresh_memory_accounting();
+        let before_insert = rt.memory_accounting().total_used_bytes();
+        match rt.execute_query(&format!(
+            "INSERT INTO live_pressure (id, body) VALUES ({id}, 'live pressure owner')"
+        )) {
+            Ok(_) => {
+                filler_rows += 1;
+                rt.refresh_memory_accounting();
+                let after_insert = rt.memory_accounting().total_used_bytes();
+                assert!(after_insert <= budget,
+                    "a confirmed insert crossed its budget: id={id}, before={before_insert}, after={after_insert}, budget={budget}");
+            }
+            Err(error) => {
+                assert!(error.to_string().contains("over budget"), "{error}");
+                filled_headroom = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        filled_headroom && filler_rows > 0,
+        "live rows must exhaust admission headroom"
+    );
+    let held = hold_snapshot.then(|| {
+        let snapshots = rt.snapshot_manager();
+        let xid = snapshots.begin();
+        (xid, snapshots.snapshot(xid))
+    });
     exec(&rt, "DELETE FROM reclaim_gate WHERE id < 159");
     assert!(
-        rt.db().store().reclaimable_segment_bytes() > 0,
-        "bulk-seeded sealed deletes should be reclaimable"
+        budget_unsigned(&rt, "total_used_bytes") <= budget,
+        "a confirmed DELETE must stay within the shared resident budget"
+    );
+    let manager = rt
+        .db()
+        .store()
+        .get_collection("reclaim_gate")
+        .expect("seed source");
+    assert_eq!(
+        manager.stats().total_entities,
+        160,
+        "logical deletes must retain history until safe physical reclamation"
     );
 
     let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
@@ -2058,10 +2108,31 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         .map(|id| format!("({id}, 'pressure')"))
         .collect::<Vec<_>>()
         .join(", ");
-    rt.execute_query(&format!(
-        "INSERT INTO reclaim_gate (id, body) VALUES {pressure_rows}"
-    ))
-    .expect("pressure-triggered consolidation should admit the write");
+    let pressure_sql = format!("INSERT INTO reclaim_gate (id, body) VALUES {pressure_rows}");
+    if let Some((xid, snapshot)) = held {
+        let error = rt
+            .execute_query(&pressure_sql)
+            .expect_err("old snapshot prevents reuse");
+        assert!(error.to_string().contains("over budget"), "{error}");
+        let mut old_rows = 0;
+        manager.for_each_entity(|entity| {
+            if snapshot.sees(entity.xmin, entity.xmax) {
+                let row = entity.data.as_row().expect("retained table row");
+                assert_eq!(row.get_field("body"), Some(&Value::text("x".repeat(96))));
+                old_rows += 1;
+            }
+            true
+        });
+        assert_eq!(
+            old_rows, 160,
+            "the held snapshot retains every pre-delete row"
+        );
+        assert_eq!(manager.stats().total_entities, 160);
+        assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
+        rt.snapshot_manager().commit(xid);
+    }
+    let pressure_result = rt.execute_query(&pressure_sql);
+    pressure_result.expect("pressure-triggered consolidation should admit the write");
 
     assert!(
         budget_unsigned(&rt, "pressure_reclamations_triggered") > before_reclamations,
@@ -2073,6 +2144,24 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     );
 
     assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
+    let records = rt
+        .execute_query("SELECT id FROM reclaim_gate ORDER BY id")
+        .expect("confirmed rows survive pressure reclamation")
+        .result
+        .records;
+    assert_eq!(records.len(), 49);
+    assert_eq!(records[0].get("id"), Some(&Value::Integer(159)));
+    for (record, id) in records[1..].iter().zip(10_000..10_048) {
+        assert_eq!(record.get("id"), Some(&Value::Integer(id)));
+    }
+    assert_eq!(
+        rt.execute_query("SELECT id FROM live_pressure")
+            .expect("live pressure rows")
+            .result
+            .records
+            .len(),
+        filler_rows
+    );
 
     cleanup_scope();
 }
