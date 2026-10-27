@@ -13,7 +13,10 @@ FileSystemSyncAccessHandle.prototype.read = function (buffer, options) {
   if (failRead) { failRead = false; throw new Error('Injected backup read failure') }
   return read.call(this, buffer, options)
 }
-self.addEventListener('message', ({ data }) => {
+const handle = self.onmessage
+self.onmessage = event => {
+  const { data } = event
   if (data.method === 'query' && data.params.sql.startsWith('UPDATE')) fail = true
   if (data.method === 'exportBackup') failRead = true
-})
+  handle.call(self, event)
+}
