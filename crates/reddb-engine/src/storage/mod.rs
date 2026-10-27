@@ -28,6 +28,7 @@ pub mod segment_key_lookup;
 mod segment_unique_key;
 
 pub mod metadata_codec;
+pub mod paged_collection;
 pub mod snapshot;
 
 pub mod manager;

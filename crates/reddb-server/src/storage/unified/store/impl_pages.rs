@@ -1057,30 +1057,25 @@ impl UnifiedStore {
 
                     // Load B-tree with root page if it exists
                     if root_page > 0 {
-                        let btree = BTree::with_root(Arc::clone(pager), root_page);
+                        let btree = Arc::new(BTree::with_root(Arc::clone(pager), root_page));
 
                         // Load all entities from B-tree into the collection
-                        let mut cursor = btree.cursor_first().map_err(|err| {
-                            page_integrity(root_page, Some(name.clone()), err.to_string())
-                        })?;
+                        let reader =
+                            reddb_engine::storage::paged_collection::PagedCollectionReader::new(
+                                Arc::clone(&btree),
+                                name.as_str(),
+                                format_version,
+                            )?;
+                        let mut cursor = reader.cursor()?;
                         let manager = self.get_collection(&name);
                         loop {
-                            let next = cursor.next().map_err(|err| {
-                                page_integrity(root_page, Some(name.clone()), err.to_string())
-                            })?;
-                            let Some((key, value)) = next else {
+                            let Some(record) = cursor.next()? else {
                                 break;
                             };
-                            // Deserialize entity from value bytes
-                            let (entity, metadata) =
-                                Self::deserialize_entity_record(&value, self.format_version())
-                                    .map_err(|err| {
-                                        page_integrity(
-                                            root_page,
-                                            Some(name.clone()),
-                                            err.to_string(),
-                                        )
-                                    })?;
+                            let reddb_engine::storage::paged_collection::PagedEntityRecord {
+                                entity,
+                                metadata,
+                            } = record;
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -1099,9 +1094,7 @@ impl UnifiedStore {
                         }
 
                         // Store the B-tree for future lookups
-                        self.btree_indices
-                            .write()
-                            .insert(name.clone(), Arc::new(btree));
+                        self.btree_indices.write().insert(name.clone(), btree);
                         if format_version == STORE_VERSION_V11 {
                             if let Some(manager) = &manager {
                                 self.checkpoint_versions.write().insert(
