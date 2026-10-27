@@ -93,7 +93,7 @@ fn native_parameter_paths_keep_shared_types_and_execution() {
     let text = "O'Reilly'); DELETE FROM bindings; --\0🦊";
     for (sql, values) in [
         (
-            "INSERT INTO bindings VALUES ($1, $2), ($3, $4)",
+            "INSERT INTO bindings (id, body) VALUES ($1, $2), ($3, $4)",
             vec![
                 Value::Integer(1),
                 Value::text("before"),
