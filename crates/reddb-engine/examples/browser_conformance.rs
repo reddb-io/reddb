@@ -86,6 +86,10 @@ mod storage;
 mod pager;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../tests/support/collection_read.rs"]
+mod collection_read;
+
+#[cfg(target_arch = "wasm32")]
 #[path = "../tests/support/transaction.rs"]
 mod transaction;
 
@@ -149,6 +153,7 @@ pub fn run_conformance() -> String {
         .iter()
         .chain(storage::CASES.iter())
         .chain(pager::CASES.iter())
+        .chain(collection_read::CASES.iter())
         .chain(transaction::CASES.iter())
         .chain(entity::CASES.iter())
         .chain(entity_codec::CASES.iter())

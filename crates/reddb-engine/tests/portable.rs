@@ -82,6 +82,17 @@ mod storage;
 #[path = "support/pager.rs"]
 mod pager;
 
+#[path = "support/collection_read.rs"]
+mod collection_read;
+
+#[test]
+fn portable_collection_read_conformance() {
+    for (name, run) in collection_read::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_execution_conformance() {
     for (name, run) in portable::CASES {

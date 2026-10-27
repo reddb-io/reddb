@@ -118,3 +118,29 @@ Fleet rollout, observation and supported OCI downscale with rollback follow
 engine acceptance. Partitioned BigQuery resource/configuration/version/AI
 metering and the STG free database suspend/wake experiment remain separate,
 unfinished requirements of the original mission.
+
+## Development feedback loop
+
+Use the shared engine cases while changing read authority and composition:
+
+```sh
+cargo test --locked -p reddb-io-engine --test portable portable_collection_read_conformance -- --nocapture --test-threads=1
+```
+
+These cases reopen actual native-format bytes through the shared pager and a
+memory VFS. They cover overlay ordering/replacements/deletions, schema and
+metadata, preserved visibility stamps, I/O failure versus absence and early
+stop. They are also registered in the WASM conformance runner. They avoid
+building the server, but changing engine code still requires its recompilation;
+the initial isolated dependency graph also needs its own build cache.
+
+The runtime acceptance reproduction remains a separate, deliberately failing
+regression until native cold ownership is integrated. It is not ignored:
+
+```sh
+cargo test --locked -p reddb-io-server --test paged_open_memory_budget -- --nocapture --test-threads=1
+```
+
+Passing the fast cases does not qualify runtime memory, native host I/O, Auth,
+Platform or the historical source. Retain those later gates and the fixed data,
+limits, durability and recovery requirements.
