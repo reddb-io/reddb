@@ -1,38 +1,17 @@
-RedDB Browser 0.5.0 adds `createDatabaseSession` for JavaScript/TypeScript applications that repeatedly open and close local databases. The session retains the initialized Rust/WASM Worker between operations while every database handle still releases its exclusive OPFS file ownership on close.
+RedDB Browser 0.6.0 adds a JSON-safe local database session bridge for Dart/Flutter Web and other JS-interop consumers. The Dart browser entrypoint now supports OPFS database opening, parameterized table SQL and BEGIN/COMMIT/ROLLBACK through the same Rust/WASM Worker used by JavaScript/TypeScript.
 
 ```sh
-npm add @reddb-io/browser@0.5.0
+npm add @reddb-io/browser@0.6.0
 ```
 
-```ts
-import { createDatabaseSession } from '@reddb-io/browser'
-import RedDBWorker from '@reddb-io/browser/worker?worker'
+`createInteropDatabaseSession()` exposes structured envelopes for ready, openDatabase, info, query, closeDatabase and close. Database tokens fence old handles after session reuse. The underlying session retains initialization, releases file ownership on database close and discards pending transactions. Native formats, SQL semantics and the Worker protocol are unchanged.
 
-const session = await createDatabaseSession({ worker: new RedDBWorker() })
-try {
-  const db = await session.openDatabase({ name: 'my-app', create: true })
-  try {
-    await db.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
-    console.log(await db.query('SELECT id, body FROM notes'))
-  } finally { await db.close() }
-  // Later operations can open another handle in the same session.
-} finally { await session.close() }
-```
+Dart consumers use `package:reddb/reddb_browser.dart`, `BrowserDatabaseSession.open(module)`, `session.openDatabase(name: ..., create: true)` and `db.query(sql, params: [...])`. The driver is available as repository source, not a pub.dev release; pin the Git revision and `drivers/dart` path.
 
-- One session has at most one open database, including during opening and release. Overlapping opens fail explicitly.
-- Closing a database releases its file and discards an uncommitted transaction. Later opens recover current committed state, including changes by another tab or Worker.
-- Old handles stay closed and cannot query or release a later owner's file.
-- A failed release fences the session and terminates its Worker. Dispose failed sessions and create a new one before retrying after a Worker crash.
-- `session.close()` is idempotent and closes the current file before terminating the Worker. Keeping the session alive retains initialized WASM memory; applications must dispose it when finished.
-- Standalone `openDatabase`, artifact, scalar runtime, native backup and JSON-safe scalar interop APIs keep their existing behavior. No native file format, SQL semantics or Worker protocol changes are required.
+Compiled Dart browser tests cover parameter binding, quotation/Unicode, durable commits, rollback, rollback on close, file-lock contention, session reuse, stale handles and complete offline Chromium/Firefox restarts. Real Safari/iOS persistence and Flutter's separate `--wasm` compilation mode remain unqualified. Table SQL is the supported local subset; other collection models, AI/events and synchronization remain unsupported.
 
-Applications sharing a file across tabs must retain their writer/snapshot guards and queue open/operation/close with an application Web Lock. Sessions amortize Worker startup; file recovery and SQL costs remain. This release makes no universal latency, CPU or memory improvement claim. The optional browser benchmark compares equal 300 kB committed writes, alternating fresh Workers and a reused session with the same file history.
+Bundle/cache JS, Worker, WASM and the application locally. No RedDB server, account, API key or network service is required. Protect the entire open/read/change/commit/close operation with an application Web Lock across tabs. Retaining a session retains WASM memory; no CPU or memory reduction is claimed.
 
-Local operation needs no RedDB server, account, API key or network service. Bundle/cache HTML, JS, Worker and WASM together for offline startup. Real Chromium and Firefox tests cover ownership handoff, peer commit visibility, rollback on close, stale-handle isolation, I/O failures and offline browser restarts. The packaged TS/Vite consumer also reopens sessions offline.
-
-Table SQL/transactions and native `.rdb` backups remain supported with their existing limits. Other collection models, advanced SELECT clauses, AI/events, observation and synchronization remain unsupported. Real Safari/iOS persistence remains unqualified. See the full support contract and examples:
-
-- https://github.com/reddb-io/reddb/blob/main/docs/clients/browser.md
-- https://github.com/reddb-io/reddb/tree/main/packages/browser
+Usage and limits: https://github.com/reddb-io/reddb/blob/main/drivers/dart/BROWSER.md
 
 The installable `.tgz` and `SHA256SUMS` accompany this release. Browser versioning is independent of native RedDB and publishes to npm's `latest` channel.

@@ -103,3 +103,11 @@ export function restoreDatabase(options: {
   backup: Uint8Array
   worker?: Worker
 }): Promise<Database>
+
+/** JSON-safe, token-fenced session operations for JS-interop consumers. */
+export interface DatabaseSessionBridge {
+  /** ready, openDatabase, info, query, closeDatabase, close. Failures resolve as envelopes. */
+  invoke(method: string, params?: Record<string, unknown>): Promise<InteropResult>
+}
+
+export function createInteropDatabaseSession(options?: { worker?: Worker }): DatabaseSessionBridge

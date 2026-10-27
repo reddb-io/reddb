@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.5.0` adds reusable Worker sessions. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.6.0` adds local database sessions for Dart/Flutter Web and retains reusable Worker sessions. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
