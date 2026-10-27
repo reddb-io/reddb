@@ -129,6 +129,10 @@ the local database, discards uncommitted changes, activates the cached update
 and reloads. The update notice asks users to COMMIT first. The normal browser
 lifecycle also activates an update after existing tabs close. Version parameters
 on the page URL still support offline reload after the current worker is active.
+Installation reloads assets from the network instead of reusing fresh HTTP-cache
+entries, so a new worker cannot recache an old HTML document. The cache revision
+also includes the build producer's source, keeping cache-policy-only updates
+separate from the active application cache until activation.
 
 ## Vendored Design System
 
