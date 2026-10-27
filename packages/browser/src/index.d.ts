@@ -14,6 +14,7 @@ export interface RuntimeInfo {
     readonly storedQueryMode: 'read-write-tables'
     readonly sqlWrites: boolean
     readonly transactions: boolean
+    readonly queryParameters?: boolean
     readonly sync: boolean
   }
 }
@@ -64,9 +65,12 @@ export function openArtifact(options: {
   worker?: Worker
 }): Promise<Artifact>
 
+/** Scalars bind as AST literals; integer numbers must be safe and bigints fit i64/u64. */
+export type QueryParameter = null | boolean | number | string | bigint
+
 export interface Database extends Runtime {
   /** SELECT and table SQL mutations; mutations return an affectedRows column. */
-  query(sql: string): Promise<{ columns: string[]; rows: unknown[][] }>
+  query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Release exclusive ownership of the local file and terminate its worker. */
   close(): Promise<void>
 }

@@ -1,5 +1,5 @@
 /** Shared Rust/WASM runtime and artifact storage. */
-import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING } from './protocol.js'
+import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS } from './protocol.js'
 export { BrowserError } from './protocol.js'
 
 function createClient(suppliedWorker) {
@@ -138,8 +138,9 @@ async function openFile({ name, worker, create = false } = {}, method = 'open') 
   try {
     const info = await client.ready
     if (method === 'openDatabase' && (info.capabilities.storedQueries !== true
-      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions)) {
-      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL and transactions')
+      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
+      || info.capabilities.queryParameters !== true)) {
+      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
     }
     await client.call(method, method === 'openDatabase' ? { name, create } : { name })
   }
@@ -167,9 +168,14 @@ export async function openDatabase(options) {
   const client = await openFile(options, 'openDatabase')
   return {
     ...runtimeMethods(client),
-    query: sql => typeof sql === 'string'
-      ? client.call('query', { sql })
-      : Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string')),
+    query(sql, params) {
+      if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
+      if (params === undefined) return client.call('query', { sql })
+      if (!Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS) {
+        return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an array of at most 65536 positional parameters'))
+      }
+      return client.call('queryWithParams', { sql, params })
+    },
     close: client.closeFile,
   }
 }

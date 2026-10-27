@@ -10,6 +10,10 @@ pub(super) fn query(sql: &str) -> Result<TableQuery, LocalReadError> {
             "local database supports read-only table SELECT statements",
         ));
     };
+    table(query)
+}
+
+pub(crate) fn table(query: TableQuery) -> Result<TableQuery, LocalReadError> {
     if query.select_items.is_empty()
         || crate::query::runtime::is_universal_entity_source(&query.table)
         || query.table.starts_with('_')

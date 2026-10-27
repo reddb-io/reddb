@@ -274,7 +274,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])
@@ -358,6 +358,46 @@ for (const browser of browsers) {
           } finally { await reopened.close() }
         })
       } finally { await context.setOffline(false) }
+    })
+
+    storageTest('positional parameters retain types through the real Worker and WASM binder', async () => {
+      const current = await page()
+      try {
+        const result = await current.evaluate(async () => {
+          const database = await RedDBBrowser.openDatabase({ name: 'sql-params', create: true })
+          const text = "O'Reilly'); DELETE FROM bindings; -- $1\0🦊"
+          const errors = []
+          try {
+            await database.query('CREATE TABLE bindings (id INTEGER PRIMARY KEY, body TEXT, flag BOOLEAN, amount FLOAT)')
+            await database.query('INSERT INTO bindings VALUES ($1, $2, $3, $4)', [9007199254740993n, text, true, 0.125])
+            const first = await database.query('SELECT id, body, flag, amount FROM bindings WHERE id = ?1', [9007199254740993n])
+            const typed = await database.query('SELECT $1 AS nil, $2 AS flag, $3 AS minimum, $4 AS maximum, $5 AS fraction FROM bindings', [null, true, -9223372036854775808n, 18446744073709551615n, 0.125])
+            const page = await database.query('SELECT id FROM bindings LIMIT $1 OFFSET $2', [1, 0])
+            for (const value of [undefined, NaN, Infinity, 9007199254740992, 18446744073709551616n, -9223372036854775809n, {}, [1, 2]]) {
+              try { await database.query('SELECT $1 AS invalid FROM bindings', [value]) }
+              catch (error) { errors.push(error.code) }
+            }
+            for (const params of [[], [1, 2]]) {
+              try { await database.query('SELECT id FROM bindings WHERE id = $1', params) }
+              catch (error) { errors.push(error.code) }
+            }
+            await database.query('BEGIN')
+            await database.query('UPDATE bindings SET body = $1 WHERE id = $2', ['Discard', 9007199254740993n])
+            try { await database.query('DELETE FROM bindings WHERE id = $1', []) }
+            catch (error) { errors.push(error.code) }
+            try { await database.query('COMMIT') } catch (error) { errors.push(error.code) }
+            await database.query('ROLLBACK')
+            const unchanged = await database.query('SELECT body FROM bindings WHERE id = $1', [9007199254740993n])
+            return { first, typed, page, errors, unchanged, capability: (await database.info()).capabilities.queryParameters }
+          } finally { await database.close() }
+        })
+        assert.equal(result.capability, true)
+        assert.deepEqual(result.first.rows, [[{ $int: '9007199254740993' }, "O'Reilly'); DELETE FROM bindings; -- $1\0🦊", true, 0.125]])
+        assert.deepEqual(result.typed.rows, [[null, true, { $int: '-9223372036854775808' }, { $uint: '18446744073709551615' }, 0.125]])
+        assert.deepEqual(result.page.rows, [[{ $int: '9007199254740993' }]])
+        assert.deepEqual(result.errors, [...new Array(8).fill('INVALID_ARGUMENT'), 'INVALID_PARAMS', 'INVALID_PARAMS', 'INVALID_PARAMS', 'QUERY_EVALUATION_ERROR'])
+        assert.deepEqual(result.unchanged.rows, [["O'Reilly'); DELETE FROM bindings; -- $1\0🦊"]])
+      } finally { await current.close() }
     })
 
     storageTest('public SQL creates a database and worker termination rolls back uncommitted writes', async () => {

@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.2.0` exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.3.0` exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
@@ -88,7 +88,7 @@ COALESCE, ABS, JSON_PARSE, JSON_EXTRACT/JSON_EXTRACT_TEXT and CONTAINS. Unknown
 fields/functions are rejected even on empty tables. Functions and operators use
 the canonical Rust evaluators; exact values retain `reddb-json-v1` tags.
 
-Parameters, DISTINCT, grouping/aggregates, windows, joins/subqueries,
+DISTINCT, grouping/aggregates, windows, joins/subqueries,
 universal/system sources, other collection models, TTL and retention are rejected
 explicitly. Materialization is capped at 100,000 visible source rows, independently
 of LIMIT. Superseded and moderated rows use the shared committed-scan visibility;
@@ -99,6 +99,31 @@ compound assignment syntax are rejected. Transactions admit at most 100,000
 pending row actions. DML commits use the native WAL batch; catalog changes use
 one complete native snapshot publication. BEGIN copies the committed resident
 image, so transaction startup costs memory proportional to the local database.
+
+### Positional parameters
+
+Use `query(sql, params)` to bind values separately from the SQL text:
+
+```ts
+const body = "O'Reilly's offline note"
+await database.query('INSERT INTO notes (id, body) VALUES ($1, $2)', [1, body])
+const found = await database.query('SELECT id, body FROM notes WHERE id = $1', [1])
+```
+
+The canonical native Rust binder replaces AST parameter nodes with typed literals.
+Values never become SQL syntax. `$1`, `$2`, … and numbered `?1`, `?2`, … use
+one-based, contiguous indexes; repeated indexes reuse the same value. Missing,
+extra or skipped positions return `INVALID_PARAMS` and abort an active SQL
+transaction until ROLLBACK. Invalid JavaScript argument types are rejected before
+statement execution.
+
+Parameters accept `null`, boolean, string, finite fractional numbers, safe integer
+numbers and `bigint` in the signed i64 or unsigned u64 range. Unsafe integer
+numbers must use `bigint`; exact results retain the existing `$int`/`$uint` tags.
+Objects, arrays, dates and binary values are not parameter values in this release.
+At most 65,536 values are admitted. Bind parameters in supported SELECT/INSERT/
+UPDATE/DELETE expressions, including LIMIT (> 0) and OFFSET (>= 0); table/column
+names, operators and DDL are not parameterized.
 
 The embedding application owns this local file and its origin. This API does not
 establish a server user/tenant session or replay server RLS policies: export only
@@ -124,9 +149,9 @@ try {
 
 The versioned Worker/WASM contract reports `abiVersion: 1`,
 `valueEncoding: 'reddb-json-v1'` and capabilities. Currently `queryValidation`
-and `scalarQueries` are true. Version `0.2.0` also reports `storedQueries: true`
+and `scalarQueries` are true. Version `0.3.0` also reports `storedQueries: true`
 with `storedQueryMode: 'read-write-tables'`, `sqlWrites: true` and
-`transactions: true`; `sync` remains false.
+`transactions: true` and `queryParameters: true`; `sync` remains false.
 Capabilities describe the engine, not the operations exposed by a particular handle. Mismatched SDK/Worker/WASM versions fail with `VERSION_MISMATCH` before
 opening storage. Cache the JS, Worker and WASM as one versioned unit.
 

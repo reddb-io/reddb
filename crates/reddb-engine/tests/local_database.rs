@@ -300,3 +300,126 @@ fn unsupported_writes_fail_before_creating_catalog_or_rows() {
         [vec![Value::Integer(1)], vec![Value::Integer(2)]]
     );
 }
+
+#[test]
+fn positional_parameters_bind_crud_ast_and_recover_without_sql_interpolation() {
+    let mut database = seed();
+    let text = "O'Reilly'); DELETE FROM people; -- $1 \0 🦊";
+    database
+        .query_with_params(
+            "INSERT INTO people (id, name) VALUES ($1, $2)",
+            &[Value::Integer(3), Value::text(text)],
+            2000,
+        )
+        .expect("bind values as literals");
+    database
+        .query_with_params(
+            "UPDATE people SET total = total + $1 WHERE id = $2",
+            &[Value::Integer(5), Value::Integer(3)],
+            2000,
+        )
+        .expect("bound assignment and predicate");
+    database
+        .query_with_params(
+            "DELETE FROM people WHERE id = ?1",
+            &[Value::Integer(2)],
+            2000,
+        )
+        .expect("numbered question placeholder");
+    let mut database =
+        Database::open(database.into_inner(), "sql.rdb").expect("recover bound writes");
+    assert_eq!(
+        database
+            .query_with_params(
+                "SELECT name, total FROM people WHERE id = $1 OR id = $1",
+                &[Value::Integer(3)],
+                2000,
+            )
+            .expect("reused bound index")
+            .rows,
+        [vec![Value::text(text), Value::Integer(15)]]
+    );
+    assert_eq!(
+        rows(&mut database, "SELECT id FROM people ORDER BY id").len(),
+        2
+    );
+}
+
+#[test]
+fn positional_parameters_preserve_scalar_types_and_bind_limit_offset() {
+    let mut database = seed();
+    for value in [
+        Value::Null,
+        Value::Boolean(true),
+        Value::Integer(i64::MIN),
+        Value::UnsignedInteger(u64::MAX),
+        Value::Float(0.125),
+        Value::text("$1"),
+    ] {
+        assert_eq!(
+            database
+                .query_with_params(
+                    "SELECT $1 AS value FROM people WHERE id = 1",
+                    std::slice::from_ref(&value),
+                    2000,
+                )
+                .expect("bound literal projection")
+                .rows,
+            [vec![value]]
+        );
+    }
+    assert_eq!(
+        database
+            .query_with_params(
+                "SELECT '$1' AS quoted, id FROM people ORDER BY id LIMIT $1 OFFSET $2",
+                &[Value::Integer(1), Value::Integer(1)],
+                2000,
+            )
+            .expect("bind pagination, preserve quoted placeholder")
+            .rows,
+        [vec![Value::text("$1"), Value::Integer(2)]]
+    );
+}
+
+#[test]
+fn binding_failures_do_not_mutate_rows_and_abort_explicit_transactions() {
+    use reddb_engine::query::local_database::MAX_QUERY_PARAMETERS;
+    let mut database = seed();
+    for (sql, parameters) in [
+        (
+            "INSERT INTO people (id, name) VALUES ($1, $2)",
+            vec![Value::Integer(3)],
+        ),
+        (
+            "DELETE FROM people WHERE id = $1",
+            vec![Value::Integer(1), Value::Integer(2)],
+        ),
+        (
+            "UPDATE people SET total = $2",
+            vec![Value::Integer(1), Value::Integer(2)],
+        ),
+        ("SELECT id FROM people LIMIT $1", vec![Value::Integer(-1)]),
+    ] {
+        let error = database
+            .query_with_params(sql, &parameters, 2000)
+            .expect_err(sql);
+        assert_eq!(error.code(), "INVALID_PARAMS");
+    }
+    assert!(database
+        .query_with_params(
+            "SELECT id FROM people",
+            &vec![Value::Null; MAX_QUERY_PARAMETERS + 1],
+            2000
+        )
+        .is_err());
+    run(&mut database, "BEGIN");
+    assert!(database
+        .query_with_params("DELETE FROM people WHERE id = $1", &[], 2000)
+        .is_err());
+    assert!(database.query("COMMIT", 2000).is_err());
+    run(&mut database, "ROLLBACK");
+    assert_eq!(
+        rows(&mut database, "SELECT id FROM people ORDER BY id"),
+        [vec![Value::Integer(1)], vec![Value::Integer(2)]]
+    );
+}

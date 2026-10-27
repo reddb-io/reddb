@@ -1,5 +1,5 @@
 import init, * as wasm from './wasm/reddb_wasm.js'
-import { RUNTIME_ABI_VERSION, VALUE_ENCODING } from './protocol.js'
+import { RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS } from './protocol.js'
 
 let artifact
 let database
@@ -115,8 +115,15 @@ async function execute(method, params) {
     return
   }
   if (database) {
-    if (method !== 'query') throw error('QUERY_UNSUPPORTED', 'This database handle exposes local SQL')
+    if (method !== 'query' && method !== 'queryWithParams') throw error('QUERY_UNSUPPORTED', 'This database handle exposes local SQL')
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
+    if (method === 'queryWithParams') {
+      if (!Array.isArray(params.params) || params.params.length > MAX_QUERY_PARAMETERS) {
+        throw error('INVALID_ARGUMENT', 'Expected an array of at most 65536 positional parameters')
+      }
+      if (typeof database.queryWithParams !== 'function') throw error('VERSION_MISMATCH', 'WASM parameter binding is missing')
+      return database.queryWithParams(params.sql, params.params, Date.now())
+    }
     return database.query(params.sql, Date.now())
   }
   switch (method) {

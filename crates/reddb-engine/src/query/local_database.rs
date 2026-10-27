@@ -1,6 +1,6 @@
 //! Single-owner local SQL. Native formats and publication barriers remain canonical.
 use super::{
-    local_read::{query_resident, LocalReadError},
+    local_read::{query_resident_bound, LocalReadError},
     scalar::ScalarResult,
 };
 use crate::{
@@ -24,6 +24,9 @@ use std::{
 mod mutation;
 
 type Result<T> = std::result::Result<T, LocalReadError>;
+
+/// Same positional-parameter count bound as the native wire protocol.
+pub const MAX_QUERY_PARAMETERS: usize = 65_536;
 
 struct Transaction {
     resident: ResidentStore,
@@ -81,7 +84,16 @@ impl<F: VfsFile> LocalDatabase<F> {
     }
 
     pub fn query(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
-        let result = self.query_inner(sql, now_ms);
+        self.query_with_params(sql, &[], now_ms)
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        now_ms: u64,
+    ) -> Result<ScalarResult> {
+        let result = self.query_inner(sql, parameters, now_ms);
         if result.is_err() {
             if let Some(transaction) = &mut self.transaction {
                 transaction.aborted = true;
@@ -90,12 +102,22 @@ impl<F: VfsFile> LocalDatabase<F> {
         result
     }
 
-    fn query_inner(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
+    fn query_inner(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        now_ms: u64,
+    ) -> Result<ScalarResult> {
         // Also fence staged reads after an ambiguous durable commit.
         self.store.committed_resident()?;
+        if parameters.len() > MAX_QUERY_PARAMETERS {
+            return Err(query_error("local SQL accepts at most 65536 parameters"));
+        }
         let statement = reddb_rql::parse_frontend(sql)
             .map_err(LocalReadError::Parse)?
             .into_query_expr();
+        let statement =
+            super::parameters::bind(&statement, parameters).map_err(LocalReadError::Parameters)?;
         if matches!(
             statement,
             QueryExpr::TransactionControl(TxnControl::Rollback)
@@ -114,9 +136,9 @@ impl<F: VfsFile> LocalDatabase<F> {
         }
         match statement {
             QueryExpr::TransactionControl(control) => self.control(control),
-            QueryExpr::Table(_) => {
+            QueryExpr::Table(query) => {
                 let (resident, contracts) = self.visible()?;
-                query_resident(resident, contracts, sql)
+                query_resident_bound(resident, contracts, query)
             }
             QueryExpr::CreateTable(query) => self.create_table(&query, now_ms),
             QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => {

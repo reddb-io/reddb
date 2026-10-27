@@ -1,6 +1,7 @@
 //! Canonical query-plan construction. Hosts retain catalog/index/statistics decisions.
 pub mod aggregation;
 pub mod helpers;
+pub mod shape;
 use crate::query::logical_plan::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate};
 use crate::query::runtime::is_universal_entity_source;
 use helpers::*;

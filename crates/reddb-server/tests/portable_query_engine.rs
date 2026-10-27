@@ -58,6 +58,99 @@ fn native_storage_error_paths_keep_shared_type_authority() {
 }
 
 #[test]
+fn native_parameter_paths_keep_shared_types_and_execution() {
+    use reddb_engine::query::{local_database::LocalDatabase, parameters, planning::shape};
+    use reddb_file::{OpenMode, StdVfs, Vfs};
+    use reddb_server::storage::query::user_params as native;
+
+    let parsed = reddb_rql::parse_frontend("SELECT id FROM bindings WHERE id = $1")
+        .expect("parameter AST")
+        .into_query_expr();
+    let parameter: parameters::ParameterRef = native::scan_parameters(&parsed)[0];
+    assert_eq!(parameter.index, 0);
+    let error: parameters::BindError = native::bind(&parsed, &[]).expect_err("missing argument");
+    assert!(matches!(
+        error,
+        parameters::UserParamError::Arity {
+            expected: 1,
+            got: 0
+        }
+    ));
+    let _: shape::ParameterizedQuery =
+        reddb_server::storage::query::planner::shape::parameterize_query_expr(&parsed)
+            .expect("native shape helper returns the shared type");
+
+    let directory = tempfile::tempdir().expect("local parameter database");
+    let path = directory.path().join("parameters.rdb");
+    let file = StdVfs
+        .open(&path, OpenMode::create_keep())
+        .expect("open local file");
+    let mut local = LocalDatabase::create(file, &path, 1000).expect("create portable database");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
+    let create = "CREATE TABLE bindings (id INTEGER PRIMARY KEY, body TEXT)";
+    runtime.execute_query(create).expect("native schema");
+    local.query(create, 1000).expect("portable schema");
+    let text = "O'Reilly'); DELETE FROM bindings; --\0🦊";
+    for (sql, values) in [
+        (
+            "INSERT INTO bindings VALUES ($1, $2), ($3, $4)",
+            vec![
+                Value::Integer(1),
+                Value::text("before"),
+                Value::Integer(2),
+                Value::text("delete"),
+            ],
+        ),
+        (
+            "UPDATE bindings SET body = $1 WHERE id = $2",
+            vec![Value::text(text), Value::Integer(1)],
+        ),
+        (
+            "DELETE FROM bindings WHERE id = $1",
+            vec![Value::Integer(2)],
+        ),
+    ] {
+        runtime.execute_query_with_params(sql, &values).expect(sql);
+        local.query_with_params(sql, &values, 2000).expect(sql);
+    }
+    let sql = "SELECT $1 AS label, id, body FROM bindings WHERE id = $2 LIMIT $3 OFFSET $4";
+    let values = [
+        Value::text("bound"),
+        Value::Integer(1),
+        Value::Integer(10),
+        Value::Integer(0),
+    ];
+    let native = runtime
+        .execute_query_with_params(sql, &values)
+        .expect("native parameters")
+        .result;
+    let portable = local
+        .query_with_params(sql, &values, 2000)
+        .expect("portable parameters");
+    assert_eq!(native.columns, portable.columns);
+    let native_rows: Vec<Vec<Value>> = native
+        .records
+        .iter()
+        .map(|record| {
+            native
+                .columns
+                .iter()
+                .map(|column| record.get(column).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
+    assert_eq!(native_rows, portable.rows);
+    assert_eq!(
+        portable.rows,
+        [vec![
+            Value::text("bound"),
+            Value::Integer(1),
+            Value::text(text)
+        ]]
+    );
+}
+
+#[test]
 fn portable_scalar_corpus_matches_the_native_runtime() {
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
         .expect("native in-memory runtime opens");

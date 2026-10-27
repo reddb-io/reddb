@@ -1356,7 +1356,8 @@ SELECT restrictions from the initial table surface remain. Transaction pending
 row actions and visible source tables are capped at 100,000 independently of
 query pagination. Compiled capabilities report read-write-tables, sqlWrites and
 transactions true; storage-independent and foreign-language handles remain scalar
-only. Published npm 0.1.0 and the public playground predate this source API.
+only. Browser 0.2.0 and the public playground expose this table surface;
+Browser 0.3.0 adds positional parameter binding as described below.
 
 Cost sketch: autocommit scans O(N) candidates for uniqueness and emits O(changed
 row bytes) through the native WAL; BEGIN copies O(database snapshot bytes) once;
@@ -1369,3 +1370,36 @@ browser restarts with the HTTP listener stopped verify both offline writes and
 their subsequent recovery. Public SDK tests also terminate a worker with an open
 transaction and verify that only committed rows survive, and preserve corrupt
 existing artifacts even with create enabled.
+
+## Shared positional SQL parameter binding
+
+`reddb-engine::query::parameters` and `query::planning::shape` own the native
+positional binder and parameterized-query shape helpers. The native
+`storage::query::user_params` and `storage::query::planner::shape` paths re-export
+them. Their existing tests move with the implementations; metadata filter types
+already belong to `reddb-types`. Native prepared-query cache behavior stays with
+the native host while using the same helpers.
+
+`LocalDatabase::query_with_params` parses and binds per call, then dispatches the
+bound AST directly. SELECT admission and execution consume the bound TableQuery,
+so parameter values never need SQL quoting or reparsing. Arity and contiguous
+one-based index rules, reused positions, INSERT/UPDATE/DELETE expression binding
+and LIMIT/OFFSET validation reuse the native implementation. Binding failures
+follow the same aborted-transaction-until-ROLLBACK rule as statement failures.
+
+JS/TS `query(sql, params)` uses a dedicated queryWithParams worker operation and
+WASM method. Structured clone retains bigint values. The host maps scalar null,
+boolean, text and numeric inputs to canonical Values; integer numbers must be
+safe and bigints fit i64/u64. Argument conversion happens before SQL execution.
+Objects, arrays and binary parameters remain outside this JS surface. SDK,
+Worker and native entrypoints bound the parameter count at 65,536. The
+queryParameters capability prevents a new SQL SDK from opening storage with
+an older Worker/WASM that could ignore the new operation. File formats and ABI 1
+remain unchanged.
+
+Cost sketch: parameter binding walks O(AST nodes), retains the existing typed
+literal representation, and does not generate a second SQL text for SELECT.
+No prepared-statement cache or measured browser speedup is claimed here.
+Native tests and installed TS/Vite consumers cover SQL-looking text, embedded
+NUL/Unicode, exact integers, repeated indexes, invalid arity/gaps, transaction
+failure semantics and recovery of bound writes across full offline restarts.

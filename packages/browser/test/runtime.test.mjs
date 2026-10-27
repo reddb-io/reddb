@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { createRuntime, createInteropRuntime, BrowserError } from '../src/index.js'
+import { createRuntime, createInteropRuntime, openDatabase, BrowserError } from '../src/index.js'
 
 const info = {
   abiVersion: 1,
   valueEncoding: 'reddb-json-v1',
-  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, sync: false },
+  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, sync: false },
 }
 class ScriptedWorker {
   messages = []
@@ -41,6 +41,37 @@ test('a runtime initializes without OPFS and advertises only supported operation
   await runtime.close()
   assert.equal(worker.terminated, 1)
   await assert.rejects(runtime.info(), { code: 'CLOSED' })
+})
+
+test('database parameters retain bigint values and require a matching runtime before opening storage', async () => {
+  const originals = new Map(['isSecureContext', 'navigator'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  Object.defineProperty(globalThis, 'isSecureContext', { value: true, configurable: true })
+  Object.defineProperty(globalThis, 'navigator', { value: { storage: { getDirectory() {} }, locks: {} }, configurable: true })
+  try {
+    const worker = new ScriptedWorker()
+    const database = await openDatabase({ name: 'parameters', worker })
+    const params = [9007199254740993n, "O'Reilly", null, true, 0.125]
+    await database.query('INSERT INTO values VALUES ($1, $2, $3, $4, $5)', params)
+    assert.equal(worker.messages.at(-1).method, 'queryWithParams')
+    assert.deepEqual(worker.messages.at(-1).params.params, params)
+    await database.query('SELECT id FROM values')
+    assert.equal(worker.messages.at(-1).method, 'query')
+    const sent = worker.messages.length
+    for (const invalid of [{ value: 1 }, new Array(65537)]) {
+      await assert.rejects(database.query('SELECT $1 FROM values', invalid), { code: 'INVALID_ARGUMENT' })
+    }
+    assert.equal(worker.messages.length, sent)
+    await database.close()
+    const old = new ScriptedWorker()
+    old.info = { ...info, capabilities: { ...info.capabilities, queryParameters: undefined } }
+    await assert.rejects(openDatabase({ name: 'parameters', worker: old }), { code: 'VERSION_MISMATCH' })
+    assert.deepEqual(old.messages.map(message => message.method), ['initialize'])
+  } finally {
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  }
 })
 
 test('worker and WASM ABI mismatches fail before opening storage', async () => {

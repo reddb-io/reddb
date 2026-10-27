@@ -17,6 +17,7 @@ let server
 let origin
 let distribution
 let requests = 0
+const parameterText = "O'Reilly'); DELETE FROM todos; --\0🦊"
 
 async function files(directory, prefix = '') {
   const result = []
@@ -40,14 +41,15 @@ before(async () => {
   await writeFile(resolve(temporary, 'index.html'), '<!doctype html><meta charset="utf-8"><title>RedDB package consumer</title><script type="module" src="/main.ts"></script>')
   await writeFile(resolve(temporary, 'worker.d.ts'), "declare module '*?worker' { const Constructor: { new(): Worker }; export default Constructor }")
   await writeFile(resolve(temporary, 'main.ts'), `
-import { createRuntime, createInteropRuntime, openArtifact, openDatabase } from '@reddb-io/browser'
+import { createRuntime, createInteropRuntime, openArtifact, openDatabase, type QueryParameter } from '@reddb-io/browser'
 import RedDBWorker from '@reddb-io/browser/worker?worker'
+const parameterText = ${JSON.stringify(parameterText)}
 declare global { interface Window { result: Promise<unknown> } }
 window.result = (async () => {
   const runtime = await createRuntime({ worker: new RedDBWorker() })
   try {
     const info = await runtime.info()
-    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-write-tables') throw new Error('Incorrect runtime capabilities')
+    if (info.abiVersion !== 1 || !info.capabilities.storedQueries || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.queryParameters) throw new Error('Incorrect runtime capabilities')
     const result = await runtime.executeScalar('SELECT 6 * 7 AS answer')
     if (result.rows[0][0] !== 42) throw new Error('Incorrect scalar result')
   } finally { await runtime.close() }
@@ -78,25 +80,27 @@ window.result = (async () => {
   } finally { await database.close() }
   const local = await openDatabase({ name: 'packed-local', create: true, worker: new RedDBWorker() })
   let failure
-  const queryLocal = async (sql: string) => {
-    try { return await local.query(sql) }
+  const queryLocal = async (sql: string, params?: readonly QueryParameter[]) => {
+    try { return await local.query(sql, params) }
     catch (error) { throw new Error(sql + ': ' + String(error)) }
   }
   try {
     await queryLocal('CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT NOT NULL, revision INTEGER DEFAULT = 0)')
     const localBefore = await queryLocal('SELECT id, title, revision FROM todos ORDER BY id')
     await queryLocal('BEGIN')
-    if (!localBefore.rows.length) await queryLocal("INSERT INTO todos (id, title) VALUES (1, 'Keep offline'), (2, 'Delete me')")
-    const updated = await queryLocal('UPDATE todos SET revision = revision + 1 WHERE id = 1')
+    if (!localBefore.rows.length) await queryLocal('INSERT INTO todos (id, title) VALUES ($1, $2), ($3, $4)', [1, parameterText, 2, 'Delete me'])
+    const updated = await queryLocal('UPDATE todos SET revision = revision + $1 WHERE id = $2', [1, 1])
     if (updated.rows[0][0] !== 1) throw new Error('Incorrect SQL affected row count')
-    await queryLocal('DELETE FROM todos WHERE id = 2')
+    await queryLocal('DELETE FROM todos WHERE id = $1', [2])
     await queryLocal('COMMIT')
     await queryLocal('BEGIN')
-    await queryLocal("INSERT INTO todos (id, title) VALUES (99, 'Rollback')")
+    await queryLocal('INSERT INTO todos (id, title) VALUES ($1, $2)', [99, 'Rollback'])
     await queryLocal('ROLLBACK')
     const created = await queryLocal('SELECT id, title, revision FROM todos ORDER BY id')
+    const exact = await queryLocal('SELECT $1 AS exact FROM todos WHERE id = $2', [18446744073709551615n, 1])
+    if (JSON.stringify(exact.rows) !== JSON.stringify([[{ $uint: '18446744073709551615' }]])) throw new Error('Bigint parameter lost precision')
     await queryLocal('BEGIN')
-    await queryLocal("UPDATE todos SET title = 'must not survive close'")
+    await queryLocal('UPDATE todos SET title = $1', ['must not survive close'])
     return { before, scalar, stored, localBefore, created }
   } catch (error) { failure = error; throw error }
   finally { try { await local.close() } catch (error) { if (!failure) throw error } }
@@ -144,7 +148,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     try {
       let page = await context.newPage()
       await page.goto(origin)
-      const expected = (boot) => ({ before: Array.from({ length: boot - 1 }, (_, index) => [index + 1]), scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] }, localBefore: { columns: ['id', 'title', 'revision'], rows: boot === 1 ? [] : [[1, 'Keep offline', boot - 1]] }, created: { columns: ['id', 'title', 'revision'], rows: [[1, 'Keep offline', boot]] } })
+      const expected = (boot) => ({ before: Array.from({ length: boot - 1 }, (_, index) => [index + 1]), scalar: { columns: ['answer'], rows: [[42]] }, stored: { columns: ['rid', 'name', 'total'], rows: [[2, 'Bia', 22], [{ $uint: '9007199254740993' }, 'Ana', 10]] }, localBefore: { columns: ['id', 'title', 'revision'], rows: boot === 1 ? [] : [[1, parameterText, boot - 1]] }, created: { columns: ['id', 'title', 'revision'], rows: [[1, parameterText, boot]] } })
       assert.deepEqual(await page.evaluate(() => window.result), expected(1))
       await page.evaluate(() => navigator.serviceWorker.register('/offline.js'))
       await page.waitForFunction(() => navigator.serviceWorker.controller)
