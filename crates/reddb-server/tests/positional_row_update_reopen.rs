@@ -125,3 +125,31 @@ fn indexed_update_preserves_other_rows_after_checkpoint_and_reopen() {
         );
     }
 }
+
+#[test]
+fn ordered_claim_updates_only_the_first_reopened_row() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("data.rdb");
+    seed(&path);
+    {
+        let runtime = open(&path, false);
+        let result = runtime
+            .execute_query(
+                "UPDATE updated_rows SET n = 9 WHERE n = 1 CLAIM LIMIT 1 ORDER BY id ASC",
+            )
+            .expect("ordered claim update");
+        assert_eq!(result.affected_rows, 1);
+        runtime.checkpoint().expect("checkpoint claimed row");
+    }
+    let runtime = open(&path, false);
+    for (id, n) in [(0, 9), (1, 1), (2, 1)] {
+        let rows = runtime
+            .execute_query(&format!("SELECT n FROM updated_rows WHERE id = {id}"))
+            .expect("indexed read");
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("n").expect("n").to_string(),
+            n.to_string()
+        );
+    }
+}

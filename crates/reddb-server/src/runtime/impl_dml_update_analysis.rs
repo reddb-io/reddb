@@ -193,13 +193,18 @@ fn partial_top_k<T: Clone>(items: &mut Vec<T>, k: usize, cmp: impl Fn(&T, &T) ->
 }
 
 pub(super) fn ordered_update_target_ids(
-    manager: &Arc<crate::storage::SegmentManager>,
+    store: &crate::storage::unified::UnifiedStore,
+    collection: &str,
     entity_ids: &[EntityId],
     order_by: &[OrderByClause],
     limit: Option<usize>,
-) -> Vec<EntityId> {
-    let mut entities: Vec<UnifiedEntity> =
-        manager.get_many(entity_ids).into_iter().flatten().collect();
+) -> RedDBResult<Vec<EntityId>> {
+    let mut entities: Vec<UnifiedEntity> = store
+        .try_get_batch(collection, entity_ids)
+        .map_err(|err| RedDBError::Internal(err.to_string()))?
+        .into_iter()
+        .flatten()
+        .collect();
     match limit {
         // Top-k path only when a LIMIT bounds the output.
         Some(limit) => {
@@ -209,7 +214,7 @@ pub(super) fn ordered_update_target_ids(
         }
         None => entities.sort_by(|left, right| compare_update_order(left, right, order_by)),
     }
-    entities.into_iter().map(|entity| entity.id).collect()
+    Ok(entities.into_iter().map(|entity| entity.id).collect())
 }
 
 pub(super) fn compare_update_order(

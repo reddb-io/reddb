@@ -136,6 +136,30 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
+        // Derived indexes and resident segments do not yet prove complete
+        // coverage of a cold base. Scan the physical authority and apply the
+        // host's kind-specific visibility and policy before selecting targets.
+        if let Some(view) = store.collection_read_view(self.table) {
+            if view.is_paged() {
+                let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+                let mut ids = Vec::new();
+                view.scan_paged_physical_owned(|entity| {
+                    if self.candidate_visible(snapshot.as_ref(), entity)
+                        && self.matches_update_target(entity)
+                        && self.matches_filter(entity, compiled_filter.as_ref())
+                    {
+                        ids.push(entity.id);
+                        if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                return Ok(ids);
+            }
+        }
+
         if !matches!(self.target, Some(UpdateTarget::Documents))
             && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
         {
@@ -261,8 +285,8 @@ impl<'a> DmlTargetScan<'a> {
         let filter = self.filter?;
         let db = self.runtime.db();
         let store = db.store();
-        let manager = store.get_collection(self.table)?;
-        let compiled = match manager.column_schema() {
+        let view = store.collection_read_view(self.table)?;
+        let compiled = match view.column_schema() {
             Some(schema) => query_exec::CompiledEntityFilter::compile_with_schema(
                 filter, self.table, self.table, &schema,
             ),

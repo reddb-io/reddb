@@ -2200,7 +2200,13 @@ impl RedDBRuntime {
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
-            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
+            ordered_update_target_ids(
+                &store,
+                &query.table,
+                &ids_to_update,
+                &query.order_by,
+                order_limit,
+            )?
         };
         let mut ids_to_update = if query.claim_limit.is_some() {
             self.filter_claim_locked_target_ids(&query.table, ids_to_update)

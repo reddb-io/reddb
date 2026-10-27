@@ -46,6 +46,10 @@ pub const CASES: &[(&str, fn())] = &[
         "collection_batch_is_complete_or_fails",
         batch_is_complete_or_fails,
     ),
+    (
+        "collection_physical_scan_restores_schema_and_fails",
+        physical_scan_restores_schema_and_fails,
+    ),
 ];
 
 struct ReadPages {
@@ -290,6 +294,51 @@ fn batch_is_complete_or_fails() {
         "a read failure after a successful prefix must not publish a partial batch"
     );
     pages.fail_after.set(None);
+}
+
+fn physical_scan_restores_schema_and_fails() {
+    let (pages, base) = base();
+    let mut changes = CollectionReadChanges::new();
+    changes.insert(EntityId::new(30), None);
+    changes.insert(EntityId::new(80), Some(record(80, 2)));
+    let schema = Arc::new(vec!["id".to_string(), "revision".to_string()]);
+    let view = CollectionReadView::paged(base, Arc::new(changes), Some(schema.clone()));
+    assert!(view.is_paged());
+    let mut ids = Vec::new();
+    assert!(view
+        .scan_paged_physical_owned(|row| {
+            ids.push(row.id.raw());
+            assert_eq!(
+                row.data.as_row().expect("row").schema.as_ref(),
+                Some(&schema)
+            );
+            assert_eq!(
+                (row.xmin, row.xmax),
+                (17, 29),
+                "caller must decide physical visibility"
+            );
+            true
+        })
+        .expect("complete physical scan"));
+    assert_eq!(ids, [10, 50, 70, 80]);
+    let mut prefix = Vec::new();
+    assert!(!view
+        .scan_paged_physical_owned(|row| {
+            prefix.push(row.id.raw());
+            false
+        })
+        .expect("bounded prefix"));
+    assert_eq!(prefix, [10]);
+    let mut visited = 0;
+    assert!(view
+        .scan_paged_physical_owned(|_| {
+            visited += 1;
+            pages.fail.set(true);
+            true
+        })
+        .is_err());
+    assert_eq!(visited, 1, "an I/O error after a prefix must be returned");
+    pages.fail.set(false);
 }
 
 fn bootstrap_is_complete_or_fails() {

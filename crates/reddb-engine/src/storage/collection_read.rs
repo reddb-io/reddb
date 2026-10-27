@@ -68,6 +68,26 @@ impl MvccVacuumStats {
 }
 
 impl<P: PageStore> CollectionReadView<P> {
+    pub fn is_paged(&self) -> bool {
+        matches!(self.authority, ReadAuthority::Paged { .. })
+    }
+
+    pub fn scan_paged_physical_owned(
+        &self,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<bool, StoreError> {
+        if !self.is_paged() {
+            return Err(StoreError::Internal(
+                "paged scan requires paged authority".into(),
+            ));
+        }
+        self.visit_entities(|entity| {
+            let mut owned = entity.clone();
+            self.restore_owned_schema(&mut owned);
+            visit(&owned)
+        })
+    }
+
     pub fn resolve_table_row(
         &self,
         logical_id: EntityId,
