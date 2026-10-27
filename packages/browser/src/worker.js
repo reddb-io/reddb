@@ -154,12 +154,14 @@ async function execute(method, params) {
     if (typeof params.sql !== 'string') throw error('INVALID_ARGUMENT', 'Expected an RQL string')
     return method === 'validateQuery' ? wasm.validateQuery(params.sql) : wasm.executeScalar(params.sql)
   }
-  if (!artifact && !database) throw error('CLOSED', 'The file is not open')
   if (method === 'close') {
-    release()
-    await ownership
+    if (artifact || database) {
+      release()
+      await ownership
+    }
     return
   }
+  if (!artifact && !database) throw error('CLOSED', 'The file is not open')
   if (database) {
     if (method === 'exportBackup') {
       try { return exportBackup() }

@@ -488,7 +488,7 @@ for (const browser of browsers) {
             for (const operation of [() => failing.exportBackup(), () => failing.query('SELECT body FROM notes')]) {
               try { await operation() } catch (error) { errors.push(error.code) }
             }
-          } finally { await failing.close().catch(error => { if (error.code !== 'CLOSED') throw error }) }
+          } finally { await failing.close(); await failing.close() }
           return { errors, rows }
         })
         assert.deepEqual(result, { errors: ['DATABASE_ERROR', 'DATABASE_ERROR', 'DATABASE_ERROR', 'ARTIFACT_ERROR', 'CLOSED'], rows: [['before']] })
