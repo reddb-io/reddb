@@ -151,6 +151,11 @@ reload and query your committed notes again. Reopening or updating the page
 discards changes without COMMIT. The older binary-marker artifact is preserved
 under its separate filename.
 
+Use **Baixar backup .rdb** to save committed data outside the origin, or select a
+file and choose **Restaurar em novo banco**. Restore preserves the original file
+and records the new name in the URL so F5/offline reload opens the restored copy.
+Commit before switching databases; the closed handle's pending changes are discarded.
+
 [Example source and local commands](https://github.com/reddb-io/reddb/tree/main/packages/browser-example).
 
 ## Install

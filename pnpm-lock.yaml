@@ -36,8 +36,8 @@ importers:
   packages/browser-example:
     dependencies:
       '@reddb-io/browser':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.4.0
+        version: 0.4.0
       '@reddb-io/design-system':
         specifier: workspace:*
         version: link:../../vendor/ds
@@ -288,8 +288,8 @@ packages:
   '@oxc-project/types@0.155.0':
     resolution: {integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==}
 
-  '@reddb-io/browser@0.3.0':
-    resolution: {integrity: sha512-Vlw7FhX4QLmiHyG//SDac0APHuuv1V6rgRuSKbuvlU6KXdqpd660+7b/pXDtPVFdJJzd63eGu0EfCFU1KVF3Rg==}
+  '@reddb-io/browser@0.4.0':
+    resolution: {integrity: sha512-y8KMhsP4OrmqZc6y6O+p/BOWT4MvN5gkWYmTgPHxpEr2xHw1pzaj/T5mt+jsZ1fARTCWHFI9+eYSKbmRa/quMw==}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -1859,7 +1859,7 @@ snapshots:
 
   '@oxc-project/types@0.155.0': {}
 
-  '@reddb-io/browser@0.3.0': {}
+  '@reddb-io/browser@0.4.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     optional: true
