@@ -969,7 +969,18 @@ impl UnifiedStore {
         collection: &str,
     ) -> Option<reddb_engine::storage::collection_read::CollectionReadView<Pager>> {
         self.get_collection(collection)
-            .map(reddb_engine::storage::collection_read::CollectionReadView::resident)
+            .map(|manager| self.collection_read_authority(manager))
+    }
+
+    /// Shared by queries, full checkpoints and raw WAL reconciliation. Callers
+    /// holding the collection registry guard pass their already pinned manager
+    /// instead of recursively acquiring that guard. Native boot is still fully
+    /// resident; cold selection also needs generation-aware reuse proofs.
+    pub(super) fn collection_read_authority(
+        &self,
+        manager: Arc<SegmentManager>,
+    ) -> reddb_engine::storage::collection_read::CollectionReadView<Pager> {
+        reddb_engine::storage::collection_read::CollectionReadView::resident(manager)
     }
 
     pub fn try_get(

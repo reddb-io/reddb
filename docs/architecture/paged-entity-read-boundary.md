@@ -220,3 +220,41 @@ ID directories and aggregate result/group state require their own accounting;
 pushdown still collects its projected ScanRows before planning. These changes
 do not constitute cold ownership, a global query-workspace bound, or approval
 of the full-runtime memory gate.
+
+
+## Checkpoint input is a complete physical authority
+
+The existing bounded checkpoint-tree builder now lives in the shared engine
+and consumes `CollectionReadView::visit_records`. Both native full checkpoint
+construction and raw WAL reconciliation use it. The comparison, verified-prefix
+copy, encoded batch limits and identical-tree reuse algorithm are unchanged.
+Native callers retain WAL synchronization, exclusion/normalization of pending
+transaction rows, DWB, root publication and retirement. The helper returns an
+unpublished tree; successful construction alone is not durability.
+
+Four shared VFS cases verify that an identical paged source reuses the same
+root without page allocation; an unchanged prefix plus replacement, deletion
+and append survives reopening durable bytes; an injected source failure after
+a visited prefix cannot become a successful partial tree; and explicit host
+projection preserves/normalizes physical MVCC records rather than applying
+query visibility. The previous tree remains readable while a replacement is
+unpublished. They exercise the same builder used by native persistence and
+are registered in the WASM runner, which has not been executed here.
+
+Queries, full checkpoints and raw WAL reconciliation now share one native
+authority factory. Callers already holding the collection-registry guard pass
+their pinned manager instead of acquiring that guard recursively. The factory
+still selects resident views because boot restores every row. This enables
+complete-source checkpoint composition but does not activate cold ownership. Existing identical/sparse checkpoint proofs are still
+based on resident manager revisions; they must include cold-generation and
+mutation-overlay identity before a partial manager can participate. Counts,
+allocator bootstrap, remaining mutation/maintenance/index ports and shared
+workspace admission remain necessary. No native format or publication-order
+change is introduced by moving the builder.
+
+
+The final local check for this stage passed 35 engine and 39 native tests,
+plus Clippy with warnings denied. The unchanged runtime-opening memory
+acceptance still failed at 10,543,588 bytes against 2,097,152 bytes. No final
+release image, historical Auth/Platform qualification, fleet rollout or OCI
+volume reduction is admitted by these component/native results.

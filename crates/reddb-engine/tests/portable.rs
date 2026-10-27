@@ -85,6 +85,17 @@ mod pager;
 #[path = "support/collection_read.rs"]
 mod collection_read;
 
+#[path = "support/collection_checkpoint.rs"]
+mod collection_checkpoint;
+
+#[test]
+fn portable_collection_checkpoint_conformance() {
+    for (name, run) in collection_checkpoint::CASES {
+        eprintln!("{name}");
+        run();
+    }
+}
+
 #[test]
 fn portable_collection_read_conformance() {
     for (name, run) in collection_read::CASES {

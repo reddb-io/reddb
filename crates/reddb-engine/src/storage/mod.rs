@@ -27,6 +27,7 @@ mod segment_graph_index;
 pub mod segment_key_lookup;
 mod segment_unique_key;
 
+pub mod checkpoint_tree;
 pub mod collection_read;
 pub mod metadata_codec;
 pub mod paged_collection;
