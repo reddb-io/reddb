@@ -30,6 +30,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::entity::EntityId;
 use reddb_types::Value;
 
+mod memory;
+
 /// Reference target for metadata cross-links
 #[derive(Debug, Clone, PartialEq)]
 pub enum RefTarget {
@@ -422,6 +424,7 @@ pub enum TypedColumn {
 /// - Type-specific indexing
 #[derive(Debug, Default)]
 pub struct MetadataStorage {
+    memory: memory::MetadataMemory,
     /// Boolean values
     bool_values: BTreeMap<(EntityId, String), bool>,
     /// Integer values
@@ -446,6 +449,36 @@ impl MetadataStorage {
         Self::default()
     }
 
+    /// O(1) in entities and fields: owned payloads update at mutation time.
+    pub fn memory_bytes(&self) -> usize {
+        use super::memory_size::{btree_map_bytes, hash_table_bytes};
+        let mut bytes = self
+            .memory
+            .payload_bytes()
+            .saturating_add(self.memory.key_set_bytes)
+            .saturating_add(hash_table_bytes::<EntityId, HashSet<String>>(
+                self.memory.entity_capacity,
+            ))
+            .saturating_add(hash_table_bytes::<(EntityId, String), MetadataValue>(
+                self.memory.complex_capacity,
+            ));
+        macro_rules! tree {
+            ($field:ident, $value:ty, $bit:expr) => {
+                bytes = bytes.saturating_add(btree_map_bytes::<(EntityId, String), $value>(
+                    self.$field.len(),
+                    self.memory.tree_roots & (1 << $bit) != 0,
+                ));
+            };
+        }
+        tree!(bool_values, bool, 0);
+        tree!(int_values, i64, 1);
+        tree!(float_values, f64, 2);
+        tree!(string_values, String, 3);
+        tree!(bytes_values, Vec<u8>, 4);
+        tree!(timestamp_values, u64, 5);
+        bytes
+    }
+
     /// Set a metadata value for an entity
     pub fn set(&mut self, entity_id: EntityId, key: impl Into<String>, value: MetadataValue) {
         let key = key.into();
@@ -454,10 +487,25 @@ impl MetadataStorage {
         self.remove_value(&entity_id, &key);
 
         // Track key for entity
-        self.entity_keys
-            .entry(entity_id)
-            .or_default()
-            .insert(key.clone());
+        let keys = self.entity_keys.entry(entity_id).or_default();
+        let before = super::memory_size::hash_table_bytes::<String, ()>(keys.capacity());
+        let owned_key = key.clone();
+        let key_bytes = owned_key.capacity();
+        if keys.insert(owned_key) {
+            self.memory.add_owned(key_bytes);
+        }
+        let after = super::memory_size::hash_table_bytes::<String, ()>(keys.capacity());
+        self.memory.key_set_bytes = self
+            .memory
+            .key_set_bytes
+            .saturating_add(after.saturating_sub(before));
+        self.memory.entity_capacity = self.memory.entity_capacity.max(self.entity_keys.capacity());
+        if !matches!(value, MetadataValue::Null) {
+            self.memory.add_owned(
+                key.capacity()
+                    .saturating_add(memory::value_heap_bytes(&value)),
+            );
+        }
 
         // Store in appropriate type-specific map
         match value {
@@ -465,21 +513,27 @@ impl MetadataStorage {
                 // Don't store nulls, just track the key
             }
             MetadataValue::Bool(b) => {
+                self.memory.tree_roots |= 1;
                 self.bool_values.insert((entity_id, key), b);
             }
             MetadataValue::Int(i) => {
+                self.memory.tree_roots |= 1 << 1;
                 self.int_values.insert((entity_id, key), i);
             }
             MetadataValue::Float(f) => {
+                self.memory.tree_roots |= 1 << 2;
                 self.float_values.insert((entity_id, key), f);
             }
             MetadataValue::String(s) => {
+                self.memory.tree_roots |= 1 << 3;
                 self.string_values.insert((entity_id, key), s);
             }
             MetadataValue::Bytes(b) => {
+                self.memory.tree_roots |= 1 << 4;
                 self.bytes_values.insert((entity_id, key), b);
             }
             MetadataValue::Timestamp(t) => {
+                self.memory.tree_roots |= 1 << 5;
                 self.timestamp_values.insert((entity_id, key), t);
             }
             complex @ (MetadataValue::Array(_)
@@ -488,6 +542,10 @@ impl MetadataStorage {
             | MetadataValue::Reference(_)
             | MetadataValue::References(_)) => {
                 self.complex_values.insert((entity_id, key), complex);
+                self.memory.complex_capacity = self
+                    .memory
+                    .complex_capacity
+                    .max(self.complex_values.capacity());
             }
         }
     }
@@ -560,7 +618,15 @@ impl MetadataStorage {
     /// Remove all metadata for an entity
     pub fn remove_all(&mut self, entity_id: EntityId) {
         if let Some(keys) = self.entity_keys.remove(&entity_id) {
+            self.memory.key_set_bytes = self
+                .memory
+                .key_set_bytes
+                .checked_sub(super::memory_size::hash_table_bytes::<String, ()>(
+                    keys.capacity(),
+                ))
+                .expect("removed metadata key set was charged");
             for key in keys {
+                self.memory.release_owned(key.capacity());
                 self.remove_value(&entity_id, &key);
             }
         }
@@ -569,13 +635,21 @@ impl MetadataStorage {
     /// Remove a specific value
     fn remove_value(&mut self, entity_id: &EntityId, key: &str) {
         let key_tuple = (*entity_id, key.to_string());
-        self.bool_values.remove(&key_tuple);
-        self.int_values.remove(&key_tuple);
-        self.float_values.remove(&key_tuple);
-        self.string_values.remove(&key_tuple);
-        self.bytes_values.remove(&key_tuple);
-        self.timestamp_values.remove(&key_tuple);
-        self.complex_values.remove(&key_tuple);
+        macro_rules! remove {
+            ($field:ident, $heap:expr) => {
+                if let Some(((_, key), value)) = self.$field.remove_entry(&key_tuple) {
+                    self.memory
+                        .release_owned(key.capacity().saturating_add(($heap)(&value)));
+                }
+            };
+        }
+        remove!(bool_values, |_: &bool| 0usize);
+        remove!(int_values, |_: &i64| 0usize);
+        remove!(float_values, |_: &f64| 0usize);
+        remove!(string_values, |v: &String| v.capacity());
+        remove!(bytes_values, |v: &Vec<u8>| v.capacity());
+        remove!(timestamp_values, |_: &u64| 0usize);
+        remove!(complex_values, memory::value_heap_bytes);
     }
 
     /// Find entities matching int range

@@ -1,43 +1,23 @@
-# Bloom Filter
+# Segment membership pruning
 
-Internal probabilistic structure used to avoid unnecessary disk reads. When a query checks for a key, the bloom filter can definitively say "not in this segment" -- skipping a full B-tree scan.
+The internal bloom-compatible probe checks physical entity membership without
+materializing matching rows. The SQL query path extracts only equality probes
+on `rid`; ordinary fields, including a field named `id`, are not implicit primary
+keys. Declared user indexes have their own lookup paths.
 
-## How It Works
+A supported physical RID is checked against the growing and sealed segment
+storage. A negative result can skip the query only when every consulted segment
+proves absence. Missing state and unsupported probes remain conservative. MVCC
+visibility and the complete query predicate still apply to positive candidates.
 
-Each segment maintains a bloom filter that tracks all entity IDs and primary keys inserted into it. On read:
+The old first-column map of debug-formatted values is removed. It did not serve
+this RID path and could add a second resident index during restoration and
+consolidation. Physical membership uses the existing entity directories, so no
+additional per-row bloom map is allocated by this probe.
 
-1. Query arrives for key X
-2. Bloom filter says "definitely not here" → skip segment entirely
-3. Bloom filter says "maybe here" → proceed to B-tree lookup
+Segment publication, deletion and consolidation maintain the same physical
+entity lookup. There is no configurable false-positive rate for this exact
+membership path. The method name `bloom_may_contain_key` remains compatible.
 
-False positive rate: ~1% with optimal sizing. False negative rate: 0% (never misses a key that exists).
-
-## Automatic Integration
-
-Bloom filters are **automatically maintained** -- no configuration required. They are populated on every entity insert via `index_entity()` in the segment system.
-
-## Segment Lifecycle
-
-- **Growing segment**: Bloom filter accepts inserts, populated on every entity write
-- **Sealed segment**: Bloom filter is frozen alongside the segment
-- **Compaction**: Bloom filters from merged segments are combined via bitwise OR
-
-## Visibility in EXPLAIN
-
-Bloom filter pruning appears in query explain output:
-
-```
-Bloom filter pruned 3 of 5 segments
-```
-
-## Segment Ownership
-
-Segment bloom filters are embedded in segment metadata rather than managed by a
-separate registry. Segment creation, entity indexing, sealing, and compaction
-own their bloom state alongside the other per-segment metadata.
-
-## See Also
-
-- [Architecture](/engine/architecture.md) -- Storage engine overview
-- [B-Tree Index](/engine/btree.md) -- Primary index structure
-- [Write & Read Paths](/engine/memtable.md) -- Growing and sealed segment paths
+See [B-tree index](/engine/btree.md) and
+[resident row accounting](/architecture/resident-row-memory-accounting.md).

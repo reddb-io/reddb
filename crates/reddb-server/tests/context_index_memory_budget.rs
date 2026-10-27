@@ -37,9 +37,14 @@ fn context_growth_is_rejected_before_publishing_an_over_budget_row() {
     runtime
         .execute_query("CREATE TABLE context_rows (id INTEGER PRIMARY KEY,body TEXT) WITH context_index = true")
         .expect("opt-in collection");
-    let mut accepted = 0;
+    // Establish a positive control before the larger indexed rows exhaust the
+    // tiny budget. Resident directories now participate in the same ceiling.
+    runtime
+        .execute_query("INSERT INTO context_rows (id,body) VALUES (0,'seed')")
+        .expect("small positive control fits the unchanged 128 KiB budget");
+    let mut accepted = 1;
     let mut rejection = None;
-    for id in 0..100 {
+    for id in 1..100 {
         match runtime.execute_query(&format!(
             "INSERT INTO context_rows (id,body) VALUES ({id},'customer{id} reference{id} alpha beta gamma delta')"
         )) {

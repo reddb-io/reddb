@@ -28,7 +28,7 @@
 //! Archived (compressed, infrequently accessed)
 //! ```
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
@@ -172,41 +172,14 @@ fn entity_id_from_probe_key(key: &[u8]) -> Option<EntityId> {
 
 const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
 
-/// Approximate cost of one entry in the `deleted` tombstone map: the entity
-/// id and deletion ordinal plus hashbrown's control byte and load-factor slack.
-///
-/// Tombstones outlive the entity they bury — a sealed segment holds its
-/// `deleted` map for as long as the segment lives. That map is the memory
-/// consolidation reclaims even in HashMap mode, where the entity body itself
-/// was already freed by `force_delete`.
-const TOMBSTONE_ENTRY_BYTES: u64 = 24;
-
 #[derive(Debug, Clone)]
 struct UpdateIndexSnapshot {
-    pk_column_name: Option<String>,
-    pk_value: Option<Value>,
-    pk_index_key: Option<(String, String)>,
     cross_refs: Vec<CrossRef>,
 }
 
 impl UpdateIndexSnapshot {
     fn from_entity(entity: &UnifiedEntity) -> Self {
-        let (pk_column_name, pk_value) = match &entity.data {
-            EntityData::Row(row) => (
-                row.schema
-                    .as_deref()
-                    .and_then(|schema| schema.first().cloned()),
-                row.columns.first().cloned(),
-            ),
-            _ => (None, None),
-        };
-        let pk_index_key = pk_value
-            .as_ref()
-            .map(|value| (entity.kind.collection().to_string(), format!("{:?}", value)));
         Self {
-            pk_column_name,
-            pk_value,
-            pk_index_key,
             cross_refs: entity.cross_refs().to_vec(),
         }
     }
@@ -513,6 +486,9 @@ pub struct GrowingSegment {
 
     /// Entity storage (HashMap for random access)
     entities: HashMap<EntityId, UnifiedEntity>,
+    // Removal can reduce HashMap::capacity via tombstones without freeing its
+    // bucket allocation. No segment path shrinks this table explicitly.
+    entity_capacity_high_water: usize,
     /// Append-only positions for HashMap-resident IDs. Deleted entries stay
     /// until the segment is reclaimed; flat storage already has stable positions.
     hash_scan_ids: Vec<EntityId>,
@@ -530,8 +506,6 @@ pub struct GrowingSegment {
     /// Metadata storage (type-aware)
     metadata: MetadataStorage,
 
-    /// Primary key index: (collection, pk_value) → EntityId
-    pk_index: BTreeMap<(String, String), EntityId>,
     /// Lazy schema-aware unique-key lookups, independent of the legacy
     /// first-column index. Protected by the owning segment's entity lock.
     unique_key_lookup: parking_lot::RwLock<Vec<SegmentUniqueKey>>,
@@ -539,6 +513,7 @@ pub struct GrowingSegment {
     key_lookup: Option<SegmentKeyLookup>,
     /// Type index: kind → EntityIds
     kind_index: HashMap<String, HashSet<EntityId>>,
+    kind_capacity_high_water: [usize; 6],
     /// Conservative physical presence, independent of kind_index and MVCC.
     /// Bits only accumulate; unrestricted mutable access sets both bits.
     graph_kind_mask: u8,
@@ -715,17 +690,18 @@ impl GrowingSegment {
             created_at: now,
             last_write_at: now,
             entities: HashMap::new(),
+            entity_capacity_high_water: 0,
             hash_scan_ids: Vec::new(),
             flat_entities: Vec::new(),
             base_entity_id: 0,
             use_flat: false,
             deleted: HashMap::new(),
             metadata: MetadataStorage::new(),
-            pk_index: BTreeMap::new(),
             unique_key_lookup: parking_lot::RwLock::new(Vec::new()),
             unique_key_lookup_bytes: AtomicU64::new(0),
             key_lookup: Some(SegmentKeyLookup::default()),
             kind_index: HashMap::new(),
+            kind_capacity_high_water: [0; 6],
             graph_read_index: parking_lot::RwLock::new(Some(SegmentGraphIndex::default())),
             graph_read_index_bytes: AtomicU64::new(0),
             graph_kind_mask: 0,
@@ -905,11 +881,11 @@ impl GrowingSegment {
     fn apply_hot_update_with_metadata(
         &mut self,
         entity: &UnifiedEntity,
-        modified_columns: &[String],
+        _modified_columns: &[String],
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
         let old = self.update_existing_entity_in_place(entity)?;
-        self.reindex_for_update(&old, entity, Some(modified_columns));
+        self.reindex_for_update(&old, entity);
         self.update_col_zones_from_entity(entity);
         if let Some(metadata) = metadata {
             self.metadata.set_all(entity.id, metadata);
@@ -923,7 +899,7 @@ impl GrowingSegment {
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
         let old = self.update_existing_entity_in_place(entity)?;
-        self.reindex_for_update(&old, entity, None);
+        self.reindex_for_update(&old, entity);
         self.update_col_zones_from_entity(entity);
         if let Some(metadata) = metadata {
             self.metadata.set_all(entity.id, metadata);
@@ -1069,20 +1045,58 @@ impl GrowingSegment {
         }
     }
 
-    /// This segment's approximate resident bytes. One relaxed load — the
-    /// arena's contribution to the shared accounting pool (ADR 0073 §2).
+    /// This segment's approximate resident bytes: cached payload counters and
+    /// retained directory capacities feed the shared accounting pool (ADR 0073 §2).
     /// Unlike `stats()` this never walks the entity map, so a stats reader
     /// does not pay `O(entities)` to observe memory.
     pub fn memory_bytes(&self) -> u64 {
-        self.memory_bytes.load(Ordering::Relaxed)
-            + self.zone_payload_bytes as u64
-            + self.unique_key_lookup_bytes.load(Ordering::Relaxed)
-            + self
-                .key_lookup
-                .as_ref()
-                .map_or(0, SegmentKeyLookup::memory_bytes)
-            + self.graph_read_index_bytes.load(Ordering::Relaxed)
-            + (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64
+        // Each resident entity's inline body is already in memory_bytes.
+        // Charge only spare slots and directory overhead here, retaining the
+        // allocation after deletions instead of treating holes as reclamation.
+        let directories = super::memory_size::hash_table_bytes::<EntityId, UnifiedEntity>(
+            self.entity_capacity_high_water,
+        )
+        .saturating_sub(
+            self.entities
+                .len()
+                .saturating_mul(std::mem::size_of::<UnifiedEntity>()),
+        )
+        .saturating_add(
+            self.flat_entities
+                .capacity()
+                .saturating_sub(self.flat_entities.len())
+                .saturating_mul(std::mem::size_of::<UnifiedEntity>()),
+        );
+        let kinds = self
+            .kind_capacity_high_water
+            .iter()
+            .fold(
+                super::memory_size::hash_table_bytes::<String, HashSet<EntityId>>(
+                    self.kind_index.capacity(),
+                ),
+                |bytes, capacity| {
+                    bytes.saturating_add(super::memory_size::hash_table_bytes::<EntityId, ()>(
+                        *capacity,
+                    ))
+                },
+            )
+            .saturating_add(self.kind_index.keys().map(String::capacity).sum::<usize>());
+        self.memory_bytes
+            .load(Ordering::Relaxed)
+            .saturating_add(directories as u64)
+            .saturating_add(kinds as u64)
+            .saturating_add(self.metadata.memory_bytes() as u64)
+            .saturating_add(self.zone_payload_bytes as u64)
+            .saturating_add(self.unique_key_lookup_bytes.load(Ordering::Relaxed))
+            .saturating_add(
+                self.key_lookup
+                    .as_ref()
+                    .map_or(0, SegmentKeyLookup::memory_bytes),
+            )
+            .saturating_add(self.graph_read_index_bytes.load(Ordering::Relaxed))
+            .saturating_add(
+                (self.hash_scan_ids.capacity() * std::mem::size_of::<EntityId>()) as u64,
+            )
     }
 
     /// Release a resident entity's payload from the memory estimate. Only for
@@ -1127,13 +1141,18 @@ impl GrowingSegment {
     /// Approximate bytes this segment holds: resident entity payloads plus the
     /// tombstone set.
     pub fn resident_bytes(&self) -> u64 {
-        self.memory_bytes() + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+        self.memory_bytes()
+            .saturating_add(super::memory_size::hash_table_bytes::<EntityId, usize>(
+                self.deleted.capacity(),
+            ) as u64)
     }
 
     /// Bytes a consolidation of this segment would return to the budget: the
     /// payloads of resident tombstones plus the tombstone set that buries them.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.dead_entity_bytes + self.deleted.len() as u64 * TOMBSTONE_ENTRY_BYTES
+        self.dead_entity_bytes.saturating_add(
+            super::memory_size::hash_table_bytes::<EntityId, usize>(self.deleted.capacity()) as u64,
+        )
     }
 
     /// Snapshot the ids of every live entity, in iteration order.
@@ -1174,7 +1193,7 @@ impl GrowingSegment {
     /// Unlike `insert`, this keeps `sequence_id` — the merged segment is the
     /// same rows, not new ones, and callers (`physical_collection_roots`, MVCC
     /// ordering) read that field. All derived structures are rebuilt: kind
-    /// index, primary-key index, cross-reference forward/reverse indexes, and
+    /// index, cross-reference forward/reverse indexes, and
     /// per-column zone maps.
     pub fn adopt_entity(&mut self, entity: UnifiedEntity, metadata: Option<Metadata>) {
         let id = entity.id;
@@ -1190,6 +1209,9 @@ impl GrowingSegment {
         self.index_entity(&entity);
         self.update_col_zones_from_entity(&entity);
         self.entities.insert(id, entity);
+        self.entity_capacity_high_water = self
+            .entity_capacity_high_water
+            .max(self.entities.capacity());
 
         if let Some(metadata) = metadata {
             if !metadata.is_empty() {
@@ -1377,6 +1399,23 @@ impl GrowingSegment {
         false
     }
 
+    fn observe_kind_capacity(&mut self, kind: &EntityKind) {
+        let position = match kind {
+            EntityKind::TableRow { .. } => 0,
+            EntityKind::GraphNode(_) => 1,
+            EntityKind::GraphEdge(_) => 2,
+            EntityKind::Vector { .. } => 3,
+            EntityKind::TimeSeriesPoint(_) => 4,
+            EntityKind::QueueMessage { .. } => 5,
+        };
+        let capacity = self
+            .kind_index
+            .get(kind.storage_type())
+            .map_or(0, HashSet::capacity);
+        self.kind_capacity_high_water[position] =
+            self.kind_capacity_high_water[position].max(capacity);
+    }
+
     /// Index an entity
     fn index_entity(&mut self, entity: &UnifiedEntity) {
         self.mark_checkpoint_entity_dirty(entity.id);
@@ -1407,15 +1446,7 @@ impl GrowingSegment {
             .entry(kind_key)
             .or_default()
             .insert(entity.id);
-
-        // Primary key index (if applicable)
-        if let EntityData::Row(row) = &entity.data {
-            if let Some(first_col) = row.columns.first() {
-                let pk_str = format!("{:?}", first_col);
-                self.pk_index
-                    .insert((entity.kind.collection().to_string(), pk_str), entity.id);
-            }
-        }
+        self.observe_kind_capacity(&entity.kind);
 
         // Cross-reference indices
         for cross_ref in entity.cross_refs() {
@@ -1730,13 +1761,9 @@ impl GrowingSegment {
             return self.has_live_entity(id);
         }
 
-        let Ok(pk_str) = std::str::from_utf8(key) else {
-            return false;
-        };
-        let pk_key = (self.collection.clone(), pk_str.to_string());
-        self.pk_index
-            .get(&pk_key)
-            .is_some_and(|id| self.has_live_entity(*id))
+        // Only physical RID probes have an absence proof. A user field is
+        // not a registered primary key merely because it is the first column.
+        true
     }
 
     /// Remove entity from indices
@@ -1755,15 +1782,6 @@ impl GrowingSegment {
             set.remove(&entity.id);
         }
 
-        // Primary key index
-        if let EntityData::Row(row) = &entity.data {
-            if let Some(first_col) = row.columns.first() {
-                let pk_str = format!("{:?}", first_col);
-                self.pk_index
-                    .remove(&(entity.kind.collection().to_string(), pk_str));
-            }
-        }
-
         // Cross-reference indices
         self.cross_ref_forward.remove(&entity.id);
         // Note: reverse refs from this entity still need cleanup
@@ -1774,58 +1792,10 @@ impl GrowingSegment {
     /// Skips index work that is not needed:
     /// - `kind_index`: entity kind is immutable, so remove+reinsert is always
     ///   a no-op; we skip it entirely and keep the existing entry.
-    /// - `pk_index`: only updated when the primary-key column (first column of
-    ///   a Row entity) actually changed. When `modified_columns` is provided,
-    ///   we check membership; otherwise we compare old vs new pk value.
     /// - `cross_ref`: only rebuilt when the refs actually differ.
-    fn reindex_for_update(
-        &mut self,
-        old: &UpdateIndexSnapshot,
-        new: &UnifiedEntity,
-        modified_columns: Option<&[String]>,
-    ) {
+    fn reindex_for_update(&mut self, old: &UpdateIndexSnapshot, new: &UnifiedEntity) {
         // kind_index: kind is immutable — the existing entry is already correct.
         // No remove + reinsert needed.
-
-        // pk_index: only update when pk column is touched
-        let pk_changed = match &new.data {
-            EntityData::Row(new_row) => {
-                if let Some(cols) = modified_columns {
-                    // Caller told us exactly what changed — check if first schema column modified
-                    // pk is the first column; check by name against the schema or by position 0
-                    let pk_col_name = old.pk_column_name.as_deref().or_else(|| {
-                        new_row
-                            .schema
-                            .as_deref()
-                            .and_then(|schema| schema.first().map(|name| name.as_str()))
-                    });
-                    match pk_col_name {
-                        Some(pk_name) => cols.iter().any(|c| c.eq_ignore_ascii_case(pk_name)),
-                        // No schema — fall back to value comparison
-                        None => old.pk_value.as_ref() != new_row.columns.first(),
-                    }
-                } else {
-                    old.pk_value.as_ref() != new_row.columns.first()
-                }
-            }
-            // Non-row types don't use pk_index
-            _ => false,
-        };
-
-        if pk_changed {
-            // Remove old pk entry
-            if let Some((collection, pk_str)) = &old.pk_index_key {
-                self.pk_index.remove(&(collection.clone(), pk_str.clone()));
-            }
-            // Insert new pk entry
-            if let EntityData::Row(row) = &new.data {
-                if let Some(first_col) = row.columns.first() {
-                    let pk_str = format!("{:?}", first_col);
-                    self.pk_index
-                        .insert((new.kind.collection().to_string(), pk_str), new.id);
-                }
-            }
-        }
 
         // cross_ref: only rebuild when refs actually changed
         let new_refs = new.cross_refs();
@@ -1945,6 +1915,7 @@ impl GrowingSegment {
             };
             kind_set.reserve(run.len());
             kind_set.extend(run.iter().map(|entity| entity.id));
+            self.observe_kind_capacity(&run[0].kind);
         }
 
         let now = current_unix_secs();
@@ -2031,6 +2002,9 @@ impl GrowingSegment {
                 } else {
                     self.hash_scan_ids.push(id);
                     self.entities.insert(id, entity);
+                    self.entity_capacity_high_water = self
+                        .entity_capacity_high_water
+                        .max(self.entities.capacity());
                 }
             }
         } else {
@@ -2054,6 +2028,9 @@ impl GrowingSegment {
                 pairs.push((id, entity));
             }
             self.entities.extend(pairs);
+            self.entity_capacity_high_water = self
+                .entity_capacity_high_water
+                .max(self.entities.capacity());
         }
 
         // Apply the accumulated zone updates.
@@ -2269,6 +2246,9 @@ impl UnifiedSegment for GrowingSegment {
         // Store
         let id = entity.id;
         self.entities.insert(id, entity);
+        self.entity_capacity_high_water = self
+            .entity_capacity_high_water
+            .max(self.entities.capacity());
 
         // Update write timestamp
         self.last_write_at = current_unix_secs();
