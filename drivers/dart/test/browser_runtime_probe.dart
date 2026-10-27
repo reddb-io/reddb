@@ -91,7 +91,7 @@ Future<Object> databaseProbe() async {
     await db.query('BEGIN');
     await db.query("UPDATE visits SET body = 'discard on close' WHERE id = 2");
     final old = db;
-    await db.close();
+    await Future.wait([db.close(), db.close()]);
     db = await peer.openDatabase(name: 'dart-interop');
     final recovered = (await db
         .query('SELECT body FROM visits WHERE id = 2'))['rows'] as List;
@@ -117,6 +117,7 @@ Future<Object> databaseProbe() async {
     }
     await session.close();
     await session.close();
+    await db.close();
     String? closed;
     try {
       await db.query('SELECT 1');

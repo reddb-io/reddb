@@ -239,11 +239,12 @@ export function createInteropDatabaseSession(options = {}) {
   ready.catch(() => {})
   let database
   let handle = 0
+  let fileClosing
   let closed = false
   return {
     async invoke(method, params = {}) {
       try {
-        if (method === 'close') {
+        if (method === 'close' || (method === 'closeDatabase' && closed)) {
           closed = true
           await (await ready).close()
           return { ok: true, result: null }
@@ -259,14 +260,18 @@ export function createInteropDatabaseSession(options = {}) {
           case 'ready': break
           case 'openDatabase':
             database = await session.openDatabase({ name: params.name, create: params.create ?? false })
+            fileClosing = undefined
             result = ++handle
             break
           case 'closeDatabase':
             // A repeated close of an old handle cannot release the current owner.
-            if (params.handle === handle && database) {
-              const releasing = database
-              database = undefined
-              await releasing.close()
+            if (params.handle === handle) {
+              if (database) {
+                const releasing = database
+                database = undefined
+                fileClosing = releasing.close()
+              }
+              await fileClosing
             }
             break
           case 'info':
