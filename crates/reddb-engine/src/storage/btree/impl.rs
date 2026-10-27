@@ -21,6 +21,16 @@ impl<P: PageStore> BTree<P> {
         }
         Ok(())
     }
+
+    fn write_leaf_and_retire(&self, id: u32, page: Page, heads: Vec<u32>) -> BTreeResult<()> {
+        self.pager.write_page(id, page)?;
+        for head in heads {
+            OverflowChain::new(self.pager.as_ref())
+                .free(head)
+                .map_err(value_layout::ValueLayoutError::from)?;
+        }
+        Ok(())
+    }
     /// Create a new B+ tree using the given pager
     pub fn new(pager: Arc<P>) -> Self {
         Self {
@@ -281,14 +291,12 @@ impl<P: PageStore> BTree<P> {
         if let SearchResult::Found(pos) = search_leaf(&page, key)? {
             let (_, old_value) = read_leaf_cell(&page, pos)?;
             if new_stored.len() <= old_value.len() {
-                // Shrinking (or same-size) overwrite. If the old cell
-                // owned an overflow chain, free it before the new bytes
-                // overwrite the pointer header — otherwise the chain
-                // is unreachable but still allocated (slice F).
-                self.free_chain_if_pointer(&old_value)?;
+                // Do not retire the old chain until the leaf no longer
+                // references it; a failed leaf write must leave it owned.
                 overwrite_leaf_value(&mut page, pos, &new_stored)?;
                 let page_id = page.page_id();
                 self.pager.write_page(page_id, page)?;
+                self.free_chain_if_pointer(&old_value)?;
                 return Ok(());
             }
             // Grow case: fall through to delete+insert for a proper
@@ -325,19 +333,19 @@ impl<P: PageStore> BTree<P> {
             return Ok(());
         }
 
-        let mut current_leaf: Option<(u32, Page, bool)> = None; // (leaf_id, page, dirty)
+        let mut current_leaf: Option<(u32, Page, bool, Vec<u32>)> = None;
         for (key, value) in items {
             // Locate the leaf for this key. If it matches the leaf we
             // already have in hand, reuse the in-memory page.
             let (leaf_id, _path) = self.find_leaf(root_id, key)?;
-            if current_leaf.as_ref().map(|(id, _, _)| *id) != Some(leaf_id) {
-                if let Some((id, page, dirty)) = current_leaf.take() {
+            if current_leaf.as_ref().map(|(id, _, _, _)| *id) != Some(leaf_id) {
+                if let Some((id, page, dirty, retired)) = current_leaf.take() {
                     if dirty {
-                        self.pager.write_page(id, page)?;
+                        self.write_leaf_and_retire(id, page, retired)?;
                     }
                 }
                 let page = self.pager.read_page(leaf_id)?;
-                current_leaf = Some((leaf_id, page, false));
+                current_leaf = Some((leaf_id, page, false, Vec::new()));
             }
 
             // Encode the new value through the spill ladder so the
@@ -346,16 +354,15 @@ impl<P: PageStore> BTree<P> {
             // branch needs it, and an oversize value gets caught by the
             // single-key `upsert` fallback below.
             let applied_in_place = {
-                let (_, page, dirty) = current_leaf.as_mut().expect("set above");
+                let (_, page, dirty, retired) = current_leaf.as_mut().expect("set above");
                 if let SearchResult::Found(pos) = search_leaf(page, key)? {
                     let (_, old_value) = read_leaf_cell(page, pos)?;
                     match value_layout::encode(self.pager.as_ref(), value) {
                         Ok(new_stored) if new_stored.len() <= old_value.len() => {
-                            // Shrinking overwrite: free the old chain
-                            // before the pointer header is scribbled over
-                            // (slice F).
-                            self.free_chain_if_pointer(&old_value)?;
                             overwrite_leaf_value(page, pos, &new_stored)?;
+                            if let Some(head) = value_layout::pointer_head(&old_value) {
+                                retired.push(head);
+                            }
                             *dirty = true;
                             true
                         }
@@ -366,18 +373,18 @@ impl<P: PageStore> BTree<P> {
                 }
             };
             if !applied_in_place {
-                if let Some((id, page, dirty)) = current_leaf.take() {
+                if let Some((id, page, dirty, retired)) = current_leaf.take() {
                     if dirty {
-                        self.pager.write_page(id, page)?;
+                        self.write_leaf_and_retire(id, page, retired)?;
                     }
                 }
                 self.upsert(key, value)?;
             }
         }
 
-        if let Some((id, page, dirty)) = current_leaf.take() {
+        if let Some((id, page, dirty, retired)) = current_leaf.take() {
             if dirty {
-                self.pager.write_page(id, page)?;
+                self.write_leaf_and_retire(id, page, retired)?;
             }
         }
         Ok(())
@@ -611,15 +618,13 @@ impl<P: PageStore> BTree<P> {
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
                     // Found — delete from this page (may differ from leaf_id).
-                    // If the cell carries a spill pointer, return every
-                    // overflow page to the free list before the leaf cell
-                    // goes away; otherwise the chain leaks (slice F).
+                    // Preserve the old chain until the leaf write succeeds.
                     let (_, stored) = read_leaf_cell(&page, pos)?;
-                    self.free_chain_if_pointer(&stored)?;
                     delete_from_leaf(&mut page, pos)?;
                     page.update_checksum();
                     let page_id = page.page_id();
                     self.pager.write_page(page_id, page.clone())?;
+                    self.free_chain_if_pointer(&stored)?;
 
                     *self
                         .rightmost_leaf

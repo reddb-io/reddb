@@ -786,7 +786,7 @@ pub fn pager_orchestration_allocation_fence() {
 #[path = "pager_eviction.rs"]
 mod eviction;
 
-pub const CASES: [(&str, fn()); 19] = [
+pub const CASES: [(&str, fn()); 20] = [
     (
         "pager_eviction_batch_stays_within_one_frame",
         eviction::pager_eviction_batch_stays_within_one_frame,
@@ -810,6 +810,10 @@ pub const CASES: [(&str, fn()); 19] = [
     (
         "btree_reclamation_and_cursor_lifetime",
         btree::btree_reclamation_and_cursor_lifetime,
+    ),
+    (
+        "btree_failed_delete_keeps_referenced_overflow_owned",
+        btree::btree_failed_delete_keeps_referenced_overflow_owned,
     ),
     (
         "btree_bounds_and_corruption",
