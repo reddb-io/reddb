@@ -253,8 +253,8 @@
     </Navbar>
   {/snippet}
 
-  <div class="@container/browser h-full min-h-0">
-    <div class="browser-regions h-full min-h-0 grid-cols-1 @3xl/browser:grid-cols-[minmax(14rem,1fr)_minmax(0,4fr)] @3xl/browser:grid-rows-[minmax(0,1fr)]">
+  <div class="@container/browser h-full min-h-0 overflow-auto">
+    <div class="browser-regions min-h-full min-h-0 auto-rows-max grid-cols-1 @3xl/browser:h-full @3xl/browser:auto-rows-auto @3xl/browser:grid-cols-[minmax(14rem,1fr)_minmax(0,4fr)] @3xl/browser:grid-rows-[minmax(0,1fr)]">
       <section id="consulta" class="min-h-0 min-w-0 @3xl/browser:col-start-2 @3xl/browser:row-start-1" aria-label="Consulta RQL e resultado">
         <Stack gap="none" class="h-full min-h-0" onkeydown={(event) => {
           if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void action(query) }

@@ -188,7 +188,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     try {
       const page = await context.newPage()
       await ready(page)
-      assert.equal(await page.getByText('0.3.0', { exact: true }).isVisible(), true)
+      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: /^0\.3\.0$/ }).isVisible(), true)
       const text = "O'Reilly'); DELETE FROM notes; --\0🦊"
       await execute(page, 'INSERT INTO notes (id, body) VALUES ($1, $2)', false, [1, text])
       assert.deepEqual((await execute(page, 'SELECT body FROM notes WHERE id = ?1', false, [1])).rows, [[text]])
