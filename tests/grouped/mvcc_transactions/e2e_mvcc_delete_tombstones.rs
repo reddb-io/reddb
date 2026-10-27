@@ -53,6 +53,55 @@ fn scanned_ids(rt: &RedDBRuntime, table: &str) -> Vec<i64> {
 }
 
 #[test]
+fn cached_cross_collection_reads_follow_sealed_delete_rollback_and_vacuum() {
+    let rt = rt();
+    set_current_connection_id(43871);
+    exec(&rt, "CREATE TABLE mvcc_cached_delete (id INT, label TEXT)");
+    exec(
+        &rt,
+        "INSERT INTO mvcc_cached_delete (id, label) VALUES (1, 'base')",
+    );
+    let id = reddb::storage::EntityId::new(rid(&rt, "mvcc_cached_delete"));
+    let store = rt.db().store();
+    let manager = store.get_collection("mvcc_cached_delete").expect("source");
+    manager.force_seal().expect("sealed source");
+    assert_eq!(store.get_any(id).expect("warm cache").1.xmax, 0);
+
+    exec(&rt, "BEGIN");
+    exec(&rt, "DELETE FROM mvcc_cached_delete WHERE id = 1");
+    let deleted = manager.get(id).expect("retained old version");
+    assert_ne!(deleted.xmax, 0);
+    assert_eq!(
+        store.get_any(id).expect("cached current header").1.xmax,
+        deleted.xmax
+    );
+    exec(&rt, "ROLLBACK");
+    let revived = store.get_any(id).expect("cached revived version").1;
+    assert_eq!(revived.xmax, 0);
+    assert_eq!(
+        revived.data.as_row().expect("row").get_field("label"),
+        Some(&Value::text("base"))
+    );
+    assert_eq!(scanned_ids(&rt, "mvcc_cached_delete"), [1]);
+
+    exec(&rt, "DELETE FROM mvcc_cached_delete WHERE id = 1");
+    let deleted = manager.get(id).expect("committed retained version");
+    assert_ne!(deleted.xmax, 0);
+    assert_eq!(
+        store.get_any(id).expect("cached committed header").1.xmax,
+        deleted.xmax
+    );
+    assert!(scanned_ids(&rt, "mvcc_cached_delete").is_empty());
+    exec(&rt, "VACUUM mvcc_cached_delete");
+    assert!(manager.get(id).is_none());
+    assert!(
+        store.get_any(id).is_none(),
+        "a cached copy must not revive reclaimed history"
+    );
+    clear_current_connection_id();
+}
+
+#[test]
 fn delete_tombstone_preserves_old_snapshot_and_hides_new_snapshot() {
     let rt = rt();
     set_current_connection_id(43801);

@@ -460,11 +460,9 @@ impl UnifiedStore {
             self.retire_btree(tree);
         }
 
-        self.resident
-            .entity_cache
-            .retain(|entity_id, (collection, _)| {
-                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-            });
+        self.resident.entity_cache.retain(|entity_id, collection| {
+            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+        });
 
         self.resident.cross_refs.write().retain(|source_id, refs| {
             refs.retain(|(target_id, _, target_collection)| {

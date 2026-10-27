@@ -11,7 +11,7 @@
 
 use super::context_index::ContextIndex;
 use super::entity::{CrossRef, EntityId, EntityKind, RefType, UnifiedEntity};
-use super::entity_cache::EntityCache;
+use super::entity_cache::EntityLocationCache;
 use super::error::StoreError;
 use super::manager::ManagerConfig;
 use super::manager::SegmentManager;
@@ -49,11 +49,12 @@ pub struct ResidentStore {
     /// Cross-structure context index for unified search
     #[doc(hidden)]
     pub context_index: ContextIndex,
-    /// Hot entity cache — sharded bounded LRU for `get_any` lookups.
+    /// Entity locations — sharded bounded LRU for `get_any` lookups.
+    /// Never owns an extra payload or a stale copy of MVCC visibility.
     /// See `entity_cache.rs` for the rationale; this replaced a single
     /// `RwLock<HashMap>` that serialised every `delete_batch` invalidation.
     #[doc(hidden)]
-    pub entity_cache: EntityCache,
+    pub entity_cache: EntityLocationCache,
     /// Graph node label index: (collection, label) → Vec<EntityId>.
     /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
     #[doc(hidden)]
@@ -77,7 +78,7 @@ impl ResidentStore {
             cross_refs: RwLock::new(HashMap::new()),
             reverse_refs: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
-            entity_cache: EntityCache::new(),
+            entity_cache: EntityLocationCache::new(),
             graph_label_index: RwLock::new(HashMap::new()),
             aux_metadata: RwLock::new(Vec::new()),
         }
@@ -190,11 +191,19 @@ impl ResidentStore {
     }
 
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
-        // Sharded LRU probe: hits / misses are counted by `EntityCache::get`,
-        // so external observers can read `entity_cache_hit_rate()` without
-        // any extra wiring on the call site.
-        if let Some(cached) = self.entity_cache.get(id.raw()) {
-            return Some(cached);
+        // Locations are hints, never payload/visibility authorities. Fetch under
+        // the current catalog/segment locks even on a hit, so a stale refill
+        // racing DELETE, rollback or collection replacement remains harmless.
+        if let Some(collection) = self.entity_cache.get(id.raw()) {
+            let collections = self.collections.read();
+            if let Some(entity) = collections
+                .get(&collection)
+                .and_then(|manager| manager.get(id))
+            {
+                return Some((collection, entity));
+            }
+            drop(collections);
+            self.entity_cache.remove(id.raw());
         }
 
         // Cache miss — fall back to the full collection scan, then memoise.
@@ -206,7 +215,7 @@ impl ResidentStore {
                 // lock — the cache shards are independent, but releasing
                 // here keeps `collections` contention low.
                 drop(collections);
-                self.entity_cache.insert(id.raw(), result.clone());
+                self.entity_cache.insert(id.raw(), result.0.clone());
                 return Some(result);
             }
         }
@@ -575,7 +584,7 @@ impl ResidentStore {
             let _ = self.unindex_cross_refs(*entity_id);
         }
         retire_index();
-        self.entity_cache.retain(|entity_id, (collection, _)| {
+        self.entity_cache.retain(|entity_id, collection| {
             collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
         });
         self.remove_from_graph_label_index_batch(name, &entity_ids);
@@ -618,8 +627,7 @@ impl ResidentStore {
             collections.insert(name.to_string(), new_manager);
         }
 
-        self.entity_cache
-            .retain(|_, (collection, _)| collection != name);
+        self.entity_cache.retain(|_, collection| collection != name);
         self.remove_from_graph_label_index_batch(
             name,
             &prepared.iter().map(|e| e.id).collect::<Vec<_>>(),

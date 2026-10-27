@@ -2,6 +2,7 @@
 use reddb_engine::storage::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb_engine::storage::manager::{ManagerConfig, SegmentManager};
 use reddb_engine::storage::metadata::{Metadata, MetadataStorage, MetadataValue, RefTarget};
+use reddb_engine::storage::resident_store::ResidentStore;
 use reddb_engine::storage::segment::GrowingSegment;
 use reddb_types::Value;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -159,6 +160,49 @@ fn restored_segment_accounting_covers_allocation_growth() {
     deleted_segment_capacity_stays_accounted();
     consolidation_allocation_reclamation();
     header_stamps_keep_requested_allocations_bounded();
+    cached_locations_do_not_retain_payload_copies();
+}
+
+fn cached_locations_do_not_retain_payload_copies() {
+    for dimensions in [16, 65_536] {
+        let store = ResidentStore::new();
+        let manager = std::sync::Arc::new(SegmentManager::new("memory_probe"));
+        for raw in 1..=8 {
+            manager
+                .insert(UnifiedEntity::vector(
+                    EntityId::new(raw),
+                    "memory_probe",
+                    vec![1.0; dimensions],
+                ))
+                .expect("source vector");
+        }
+        manager.force_seal().expect("sealed source");
+        store
+            .collections
+            .write()
+            .insert("memory_probe".into(), manager);
+        let before = LIVE.load(Ordering::Relaxed);
+        for raw in 1..=8 {
+            drop(store.get_any(EntityId::new(raw)).expect("warm location"));
+        }
+        let retained = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+        assert!(retained < 64 * 1024,
+            "cached location ownership must not scale with payload: dimensions={dimensions}, retained={retained}");
+        assert_eq!(store.entity_cache_stats().entries, 8);
+        for raw in 1..=8 {
+            drop(
+                store
+                    .get_any(EntityId::new(raw))
+                    .expect("current source image"),
+            );
+        }
+        assert_eq!(
+            LIVE.load(Ordering::Relaxed),
+            before + retained,
+            "hits must not retain additional payload copies"
+        );
+        eprintln!("location cache dimensions={dimensions} retained={retained}");
+    }
 }
 
 fn header_stamps_keep_requested_allocations_bounded() {
