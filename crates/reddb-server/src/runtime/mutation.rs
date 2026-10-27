@@ -201,7 +201,17 @@ impl<'rt> MutationEngine<'rt> {
         let _reservation = self.runtime.admit_non_evictable_growth(
             crate::storage::memory_pools::MemoryPool::SegmentArena,
             &format!("insert into {collection}"),
-            growth_bytes.saturating_add(index_growth_bytes),
+            growth_bytes
+                .saturating_add(index_growth_bytes)
+                .saturating_add(
+                    rows.iter()
+                        .map(|row| {
+                            self.store
+                                .context_index()
+                                .estimate_fields_growth(&collection, &row.fields)
+                        })
+                        .fold(0, u64::saturating_add),
+                ),
         )?;
 
         #[cfg(test)]

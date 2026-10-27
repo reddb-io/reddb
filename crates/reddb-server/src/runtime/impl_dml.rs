@@ -1821,6 +1821,13 @@ impl RedDBRuntime {
             &format!("insert into {collection}"),
             crate::runtime::memory_admission::estimate_timeseries_point_growth(
                 &metric, &tags, &fields,
+            )
+            .saturating_add(
+                self.inner
+                    .db
+                    .store()
+                    .context_index()
+                    .estimate_fields_growth(collection, &[]),
             ),
         )?;
         let indexed_columns = self

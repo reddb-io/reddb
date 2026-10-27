@@ -124,6 +124,12 @@ impl crate::RedDBRuntime {
         (entity_bytes as u64)
             .saturating_add(key_growth as u64)
             .saturating_add(index_growth)
+            .saturating_add(
+                self.db()
+                    .store()
+                    .context_index()
+                    .estimate_entity_growth(&applied.collection, &applied.entity),
+            )
     }
 
     pub(crate) fn admit_non_evictable_growth(
