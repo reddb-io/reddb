@@ -111,7 +111,7 @@ fn runtime_query_object(
     object.insert("result".to_string(), rendered);
     object.insert(
         "descriptor".to_string(),
-        descriptor_json(&result.result, &records),
+        descriptor_json(&result.result, records),
     );
     object.insert(
         "selection".to_string(),
