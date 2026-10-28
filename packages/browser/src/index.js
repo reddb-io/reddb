@@ -304,6 +304,11 @@ export async function restoreDatabase(options) {
 function databaseMethods(client) {
   return {
     ...runtimeMethods(client),
+    catalog: () => client.call('catalog'),
+    readQuery(sql, params, scopes) {
+      if (typeof sql !== 'string' || !Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS || !Array.isArray(scopes) || scopes.length > 64) return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes'))
+      return client.call('readQuery', { sql, params, scopes })
+    },
     query(sql, params) {
       if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
       if (params === undefined) return client.call('query', { sql })

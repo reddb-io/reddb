@@ -5,7 +5,7 @@ import { createRuntime, createInteropRuntime, createDatabaseSession, openDatabas
 const info = {
   abiVersion: 1,
   valueEncoding: 'reddb-json-v1',
-  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
+  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, databaseInspection: true, sync: false },
 }
 class ScriptedWorker {
   messages = []
