@@ -462,7 +462,8 @@ impl<P: PageStore> BTree<P> {
                 if sibling != 0 {
                     let sib_page = self.pager.read_page(sibling)?;
                     match leaf_high_key(&sib_page)? {
-                        None => Some(sibling), // empty sibling — free real estate
+                        None if leaf_right_sibling(&sib_page) == 0 => Some(sibling),
+                        None => None,
                         Some(hk)
                             if leaf_right_sibling(&sib_page) == 0 && items[i].0 > hk.as_slice() =>
                         {
@@ -477,11 +478,30 @@ impl<P: PageStore> BTree<P> {
                 None
             };
 
-            let (leaf_id, _path) = match hint_leaf_id {
+            let (leaf_id, path) = match hint_leaf_id {
                 Some(id) => (id, Vec::new()),
                 None => self.find_leaf(root_id, items[i].0)?,
             };
             let mut page = self.pager.read_page(leaf_id)?;
+            // The next leaf's first key is a hard ceiling; an ancestor
+            // separator can define an earlier routing boundary.
+            let next_min = match leaf_right_sibling(&page) {
+                0 => None,
+                next_id => {
+                    let next = self.pager.read_page(next_id)?;
+                    if next.page_type()? != PageType::BTreeLeaf || next.cell_count() == 0 {
+                        return Err(BTreeError::Corrupted(
+                            "invalid next leaf during bulk insert".into(),
+                        ));
+                    }
+                    Some(read_leaf_cell(&next, 0)?.0)
+                }
+            };
+            let parent_upper = if next_min.is_some() {
+                self.leaf_upper_bound(leaf_id, &path)?
+            } else {
+                None
+            };
 
             // Snapshot the leaf's last key (via the O(1) slot lookup)
             // and current free bytes. Both drive the append fast path
@@ -504,6 +524,15 @@ impl<P: PageStore> BTree<P> {
             let mut inserted = 0usize;
             while i + inserted < items.len() {
                 let (key, value) = items[i + inserted];
+                if next_min
+                    .as_ref()
+                    .is_some_and(|bound| key >= bound.as_slice())
+                    || parent_upper
+                        .as_ref()
+                        .is_some_and(|bound| key >= bound.as_slice())
+                {
+                    break;
+                }
 
                 // Strictly-ascending check, doubles as duplicate
                 // detection without a leaf binary search.
@@ -756,6 +785,28 @@ impl<P: PageStore> BTree<P> {
             BTreeError::LockPoisoned(format!("rightmost_leaf write: {error}"))
         })? = cached;
         Ok(())
+    }
+
+    /// Find the first upper separator on the path from a leaf to the root.
+    /// A separator may be lower than the next leaf's current minimum after
+    /// deletion, so the neighboring leaf alone is not a routing boundary.
+    fn leaf_upper_bound(&self, leaf_id: u32, path: &[u32]) -> BTreeResult<Option<Vec<u8>>> {
+        let mut child_id = leaf_id;
+        for &parent_id in path.iter().rev() {
+            let parent = self.pager.read_page(parent_id)?;
+            let (keys, children) = read_interior_keys_children(&parent)?;
+            let position = children
+                .iter()
+                .position(|id| *id == child_id)
+                .ok_or_else(|| {
+                    BTreeError::Corrupted("bulk insert path is missing its child".into())
+                })?;
+            if let Some(upper) = keys.get(position) {
+                return Ok(Some(upper.clone()));
+            }
+            child_id = parent_id;
+        }
+        Ok(None)
     }
 
     /// Find the leaf page containing the key
