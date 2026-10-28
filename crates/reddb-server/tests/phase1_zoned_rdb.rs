@@ -191,6 +191,35 @@ fn sidecars_present(path: &Path) -> bool {
 }
 
 #[test]
+fn migration_never_overwrites_an_existing_rollback_file() {
+    let dir = temp_dir("existing_backup");
+    let path = dir.path().join("data.rdb");
+    populate(&path, 2);
+    revert_to_sidecars(&path).expect("create phase-1 sidecars");
+    let backup = backup_path_for(&path);
+    fs::write(&backup, b"previous rollback point").expect("write existing backup");
+    let hdr = retired::pager_header_shadow_path_v0(&path);
+    let meta = retired::pager_meta_shadow_path_v0(&path);
+    let before: Vec<_> = [&path, &hdr, &meta, &backup]
+        .iter()
+        .map(|p| fs::read(p).expect("read original file"))
+        .collect();
+
+    let err = migrate_to_zoned(&path).expect_err("existing backup must block migration");
+    assert!(
+        matches!(err, ZoneMigrationError::Io(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists)
+    );
+    let after: Vec<_> = [&path, &hdr, &meta, &backup]
+        .iter()
+        .map(|p| fs::read(p).expect("read file after refusal"))
+        .collect();
+    assert_eq!(
+        before, after,
+        "source and existing backup must be preserved"
+    );
+}
+
+#[test]
 fn migrate_and_revert_round_trip_preserves_a_populated_store_byte_for_byte() {
     let dir = temp_dir("round_trip");
     let path = dir.path().join("data.rdb");
@@ -244,6 +273,55 @@ fn migrate_and_revert_round_trip_preserves_a_populated_store_byte_for_byte() {
         !backup_path_for(&path).exists(),
         "a completed revert consumes the rollback point"
     );
+}
+
+#[test]
+fn phase1_migration_refuses_unrecovered_dwb_without_modifying_files() {
+    for contents in [&[][..], &b"unrecovered DWB bytes"[..]] {
+        let dir = temp_dir("legacy_dwb");
+        let path = dir.path().join("data.rdb");
+        populate(&path, 2);
+        revert_to_sidecars(&path).expect("create phase-1 sidecars");
+        let dwb = retired::pager_dwb_shadow_path_v0(&path);
+        fs::write(&dwb, contents).expect("write legacy DWB");
+        let hdr = retired::pager_header_shadow_path_v0(&path);
+        let meta = retired::pager_meta_shadow_path_v0(&path);
+        let before: Vec<_> = [&path, &hdr, &meta, &dwb]
+            .iter()
+            .map(|p| fs::read(p).expect("read original"))
+            .collect();
+
+        let err = migrate_to_zoned(&path).expect_err("DWB recovery is not implemented");
+        assert!(matches!(err, ZoneMigrationError::LegacyDwbUnsupported(_)));
+        assert!(!backup_path_for(&path).exists());
+        let after: Vec<_> = [&path, &hdr, &meta, &dwb]
+            .iter()
+            .map(|p| fs::read(p).expect("read original after refusal"))
+            .collect();
+        assert_eq!(before, after, "refusal must preserve every source file");
+    }
+}
+
+#[test]
+fn phase1_migration_refuses_dwb_after_an_earlier_partial_conversion() {
+    let dir = temp_dir("partial_with_dwb");
+    let path = dir.path().join("data.rdb");
+    populate(&path, 2);
+    revert_to_sidecars(&path).expect("create phase-1 sidecars");
+    migrate_to_zoned(&path).expect("convert phase 1");
+    let dwb = retired::pager_dwb_shadow_path_v0(&path);
+    fs::write(&dwb, b"unrecovered DWB bytes").expect("write legacy DWB");
+    let before_data = fs::read(&path).expect("read data file");
+    let before_backup = fs::read(backup_path_for(&path)).expect("read retained backup");
+
+    let err = migrate_to_zoned(&path).expect_err("DWB recovery is not implemented");
+    assert!(matches!(err, ZoneMigrationError::LegacyDwbUnsupported(_)));
+    assert_eq!(fs::read(&path).expect("read data file"), before_data);
+    assert_eq!(
+        fs::read(backup_path_for(&path)).expect("read backup"),
+        before_backup
+    );
+    assert_eq!(fs::read(&dwb).expect("read DWB"), b"unrecovered DWB bytes");
 }
 
 #[test]
