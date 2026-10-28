@@ -182,7 +182,7 @@ fn execute_resident_query(
     manager.scan_for_each(None, |entity| {
         if let Some(scope) = scope {
             let Some(record) = super::records::runtime_table_record_from_entity_ref_with_schema(
-                &entity,
+                entity,
                 Some(&schema),
             ) else {
                 return true;
