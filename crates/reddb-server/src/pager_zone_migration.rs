@@ -64,6 +64,13 @@ pub enum ZoneMigrationError {
     AlreadyZoned(PathBuf),
     /// No usable database header survives in page 0 or the `rdb-hdr` shadow.
     HeaderUnrecoverable(PathBuf),
+    /// This tool cannot relocate pages from the pre-phase-3 layout.
+    PrePhase3Unsupported {
+        path: PathBuf,
+        version: u32,
+    },
+    /// A legacy DWB sidecar needs recovery before the layout can be changed.
+    LegacyDwbUnsupported(PathBuf),
     Io(std::io::Error),
 }
 
@@ -73,8 +80,7 @@ impl std::fmt::Display for ZoneMigrationError {
             Self::MissingStore(path) => write!(f, "no store at {}", path.display()),
             Self::NotALegacyStore(path) => write!(
                 f,
-                "{} carries no retired rdb-hdr/rdb-meta sidecar, so there is nothing to \
-                 migrate; a zoned store opens directly",
+                "{} carries no retired rdb-hdr/rdb-meta sidecar for this migration",
                 path.display()
             ),
             Self::AlreadyZoned(path) => write!(
@@ -87,6 +93,21 @@ impl std::fmt::Display for ZoneMigrationError {
                 "neither page 0 of {} nor its rdb-hdr shadow holds a readable database \
                  header, so no superblock can be seeded from this store. This is a damaged \
                  store, not a legacy one: reach for red salvage (ADR 0074 §4)",
+                path.display()
+            ),
+            Self::PrePhase3Unsupported { path, version } => write!(
+                f,
+                "{} uses pre-phase-3 pager version {version:#010x}; this migration tool \
+                 cannot relocate its pages or recovery state. The source was not changed; \
+                 retain its complete backup and use the original engine until a qualified \
+                 conversion is available",
+                path.display()
+            ),
+            Self::LegacyDwbUnsupported(path) => write!(
+                f,
+                "{} is a legacy double-write sidecar; this migration tool cannot verify or \
+                 recover its contents. The source was not changed; retain the complete \
+                 store until a qualified conversion is available",
                 path.display()
             ),
             Self::Io(err) => write!(f, "io error: {err}"),
@@ -122,16 +143,19 @@ pub fn migrate_to_zoned(data_path: &Path) -> Result<ZoneMigrationReport> {
     if !data_path.exists() {
         return Err(ZoneMigrationError::MissingStore(data_path.to_path_buf()));
     }
+    let dwb = retired::first_present_phase3_dwb_sidecar(data_path);
     let sidecars = present_sidecars(data_path);
     if sidecars.is_empty() {
+        // A partial earlier migration may have removed the phase-1
+        // sidecars while leaving the DWB behind.
+        if let Some(sidecar) = dwb {
+            return Err(ZoneMigrationError::LegacyDwbUnsupported(sidecar));
+        }
         return Err(ZoneMigrationError::NotALegacyStore(data_path.to_path_buf()));
     }
     if has_valid_superblock_zone(data_path)? {
         return Err(ZoneMigrationError::AlreadyZoned(data_path.to_path_buf()));
     }
-
-    let backup_path = backup_path_for(data_path);
-    fs::copy(data_path, &backup_path)?;
 
     let page_zero = read_page(data_path, 0)?;
     // Page 0 is authoritative unless it is the torn one — which is exactly the
@@ -145,6 +169,24 @@ pub fn migrate_to_zoned(data_path: &Path) -> Result<ZoneMigrationReport> {
                 .ok_or_else(|| ZoneMigrationError::HeaderUnrecoverable(data_path.to_path_buf()))?;
             (shadow, true)
         };
+
+    // Phase 1 only moves header/manifest shadows. A pre-phase-3 file can
+    // contain live pages in the future DWB zone, and a sidecar may contain
+    // recovery state. Neither can safely be retired by this conversion.
+    // Check before creating a backup or mutating any source file.
+    let header = reddb_file::decode_database_header(&header_image)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    if header.version < reddb_file::PAGE_FILE_VERSION {
+        return Err(ZoneMigrationError::PrePhase3Unsupported {
+            path: data_path.to_path_buf(),
+            version: header.version,
+        });
+    }
+    if let Some(sidecar) = dwb {
+        return Err(ZoneMigrationError::LegacyDwbUnsupported(sidecar));
+    }
+    let backup_path = backup_path_for(data_path);
+    create_rollback_copy(data_path, &backup_path)?;
 
     let manifest_recovered_from_shadow = restore_manifest_page_if_torn(data_path)?;
 
@@ -174,6 +216,31 @@ pub fn migrate_to_zoned(data_path: &Path) -> Result<ZoneMigrationReport> {
         header_recovered_from_shadow,
         manifest_recovered_from_shadow,
     })
+}
+
+/// Create a durable rollback point without replacing an earlier attempt.
+/// A failed copy is retained so a retry cannot silently overwrite it.
+fn create_rollback_copy(data_path: &Path, backup_path: &Path) -> std::io::Result<()> {
+    let mut source = File::open(data_path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut backup = options.open(backup_path)?;
+    std::io::copy(&mut source, &mut backup)?;
+    backup.sync_all()?;
+    #[cfg(unix)]
+    {
+        let parent = backup_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Walk a migration back: rebuild page 0 as a plain checksummed header page and

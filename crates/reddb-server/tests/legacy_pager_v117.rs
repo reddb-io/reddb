@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use reddb_file::layout::retired;
-use reddb_server::pager_zone_migration::migrate_to_zoned;
+use reddb_server::pager_zone_migration::{backup_path_for, migrate_to_zoned, ZoneMigrationError};
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
@@ -32,10 +32,10 @@ fn fixture_rows(runtime: &RedDBRuntime) -> Vec<(i64, String)> {
         .records
         .iter()
         .map(|record| {
-            let Some(Value::Integer(id)) = record.get("c0") else {
+            let Some(Value::Integer(id)) = record.get("c0").or_else(|| record.get("id")) else {
                 panic!("expected integer value");
             };
-            let Some(Value::Text(name)) = record.get("c1") else {
+            let Some(Value::Text(name)) = record.get("c1").or_else(|| record.get("name")) else {
                 panic!("expected string value");
             };
             (*id, name.to_string())
@@ -43,6 +43,51 @@ fn fixture_rows(runtime: &RedDBRuntime) -> Vec<(i64, String)> {
         .collect();
     rows.sort();
     rows
+}
+
+fn snapshot_tree(root: &Path, current: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+    for entry in fs::read_dir(current).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let kind = entry.file_type().expect("fixture file type");
+        if kind.is_dir() {
+            snapshot_tree(root, &entry.path(), files);
+        } else {
+            assert!(kind.is_file(), "fixture must not contain symlinks");
+            files.push((
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("relative path")
+                    .to_string_lossy()
+                    .into_owned(),
+                fs::read(entry.path()).expect("read fixture file"),
+            ));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+}
+
+#[test]
+fn v117_store_is_refused_without_changing_any_file_until_conversion_exists() {
+    let dir = tempfile::tempdir().expect("temporary database");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-v117");
+    copy_tree(&fixture, dir.path());
+    let path = dir.path().join("data.rdb");
+    let mut before = Vec::new();
+    snapshot_tree(dir.path(), dir.path(), &mut before);
+
+    let err = migrate_to_zoned(&path).expect_err("legacy phase-3 conversion is unavailable");
+    assert!(matches!(
+        err,
+        ZoneMigrationError::PrePhase3Unsupported { .. }
+    ));
+    assert!(!backup_path_for(&path).exists());
+    let mut after = Vec::new();
+    snapshot_tree(dir.path(), dir.path(), &mut after);
+    assert_eq!(
+        before, after,
+        "refusal must preserve every file byte-for-byte"
+    );
 }
 
 #[test]
