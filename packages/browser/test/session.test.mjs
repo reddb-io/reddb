@@ -52,6 +52,58 @@ after(async () => {
   if (temporary) await rm(temporary, { recursive: true, force: true })
 })
 
+for (const name of selected) test(`${name}: scoped inspection is read-only and survives an offline browser restart`, { timeout: 120_000 }, async () => {
+  const profile = await mkdtemp(resolve(temporary, 'inspection-'))
+  let context
+  const port = server.address().port
+  async function inspect(page) {
+    return page.evaluate(async prefix => {
+      const { openDatabase } = await import(prefix + 'index.js')
+      const db = await openDatabase({ name: 'inspection' })
+      const scopes = [{ table: 'files', field: 'tenant_id', value: 'first' }]
+      try {
+        const catalog = await db.catalog()
+        const result = await db.readQuery("SELECT body FROM files WHERE tenant_id = 'second' OR 1 = 1 ORDER BY id LIMIT 1", [], scopes)
+        const denied = []
+        for (const sql of ['DELETE FROM files', 'BEGIN', 'SELECT * FROM files; DELETE FROM files']) {
+          try { await db.readQuery(sql, [], scopes); denied.push(false) } catch { denied.push(true) }
+        }
+        try { await db.readQuery('SELECT * FROM files', [], []); denied.push(false) } catch { denied.push(true) }
+        return { catalog, result, denied, all: await db.query('SELECT body FROM files ORDER BY id') }
+      } finally { await db.close() }
+    }, prefix)
+  }
+  try {
+    context = await browsers[name].launchPersistentContext(profile, { headless: true })
+    let page = await context.newPage(); await page.goto(origin)
+    await page.evaluate(async prefix => {
+      const { openDatabase } = await import(prefix + 'index.js')
+      const db = await openDatabase({ name: 'inspection', create: true })
+      try {
+        await db.query('CREATE TABLE files (id INTEGER PRIMARY KEY, tenant_id TEXT NOT NULL, body TEXT)')
+        await db.query('INSERT INTO files VALUES (1, $1, $2), (2, $3, $4)', ['second', 'other campaign', 'first', 'my clue'])
+      } finally { await db.close() }
+    }, prefix)
+    const expected = await inspect(page)
+    assert.deepEqual(expected.result.rows, [['my clue']])
+    assert.deepEqual(expected.denied, [true, true, true, true])
+    assert.deepEqual(expected.all.rows, [['other campaign'], ['my clue']])
+    assert.equal(expected.catalog.rows.length, 3)
+    await page.evaluate(async () => { await navigator.serviceWorker.register('/offline.js'); await navigator.serviceWorker.ready })
+    await page.waitForFunction(() => navigator.serviceWorker.controller)
+    await context.close()
+    await new Promise(resolve => server.close(resolve))
+    const before = requests
+    context = await browsers[name].launchPersistentContext(profile, { headless: true, offline: true })
+    page = await context.newPage(); await page.goto(origin)
+    assert.deepEqual(await inspect(page), expected)
+    assert.equal(requests, before)
+  } finally {
+    await context?.close()
+    if (!server.listening) { server.listen(port, '127.0.0.1'); await once(server, 'listening') }
+  }
+})
+
 for (const name of selected) {
   test(`${name}: sessions release real file locks, recover peer commits and fence stale handles`, async () => {
     const browser = await browsers[name].launch({ headless: true })

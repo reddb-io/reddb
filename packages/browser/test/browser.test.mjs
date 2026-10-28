@@ -274,7 +274,7 @@ for (const browser of browsers) {
         })
         assert.deepEqual(result.info, {
           abiVersion: 1, valueEncoding: 'reddb-json-v1',
-          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
+          capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, databaseInspection: true, sync: false },
         })
         assert.deepEqual(result.actual, result.expected)
         assert.deepEqual(result.errors, ['QUERY_UNSUPPORTED', 'QUERY_EVALUATION_ERROR', 'QUERY_PARSE_ERROR', 'INVALID_ARGUMENT'])

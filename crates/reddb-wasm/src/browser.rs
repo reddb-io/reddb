@@ -21,6 +21,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "transactions": true,
             "queryParameters": true,
             "databaseBackups": true,
+            "databaseInspection": true,
             "sync": false,
         })
     });
@@ -241,6 +242,56 @@ fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
 
 #[wasm_bindgen]
 impl BrowserDatabase {
+    pub fn catalog(&self) -> Result<JsValue, JsValue> {
+        let result = self.database.catalog().map_err(local_query_error)?;
+        js_sys::JSON::parse(&result.to_json().to_string_compact())
+    }
+
+    #[wasm_bindgen(js_name = readQuery)]
+    pub fn read_query(&self, sql: &str, params: Array, scopes: Array) -> Result<JsValue, JsValue> {
+        if params.length() as usize > reddb_engine::query::local_database::MAX_QUERY_PARAMETERS
+            || scopes.length() > 64
+        {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "Inspection argument limit exceeded",
+            ));
+        }
+        let values = params
+            .iter()
+            .map(query_parameter)
+            .collect::<Result<Vec<_>, _>>()?;
+        let scopes = scopes
+            .iter()
+            .map(|scope| {
+                let text = |key: &str| -> Result<String, JsValue> {
+                    js_sys::Reflect::get(&scope, &JsValue::from_str(key))?
+                        .as_string()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            coded_error(
+                                "INVALID_ARGUMENT",
+                                "Expected an inspection table and field",
+                            )
+                        })
+                };
+                Ok(reddb_engine::query::local_read::ReadScope {
+                    table: text("table")?,
+                    field: text("field")?,
+                    value: query_parameter(js_sys::Reflect::get(
+                        &scope,
+                        &JsValue::from_str("value"),
+                    )?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?;
+        let result = self
+            .database
+            .read_query(sql, &values, &scopes)
+            .map_err(local_query_error)?;
+        js_sys::JSON::parse(&result.to_json().to_string_compact())
+    }
+
     #[wasm_bindgen(js_name = checkHealthy)]
     pub fn check_healthy(&self) -> Result<(), JsValue> {
         self.database.check_healthy().map_err(local_query_error)

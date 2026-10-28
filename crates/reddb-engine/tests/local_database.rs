@@ -29,6 +29,125 @@ fn seed() -> Database {
 }
 
 #[test]
+fn inspection_filters_sources_before_caller_predicates_and_limits() {
+    use reddb_engine::query::local_read::ReadScope;
+    let mut database = create();
+    run(
+        &mut database,
+        "CREATE TABLE files (id INTEGER PRIMARY KEY, tenant_id TEXT NOT NULL, body TEXT)",
+    );
+    run(&mut database, "INSERT INTO files VALUES (1, 'other', 'hidden'), (2, 'mine', 'clue'), (3, 'other', 'hidden too')");
+    let scopes = [ReadScope {
+        table: "files".into(),
+        field: "tenant_id".into(),
+        value: Value::text("mine"),
+    }];
+    for sql in [
+        "SELECT body FROM files WHERE tenant_id = 'other' OR 1 = 1 ORDER BY id LIMIT 1",
+        "SELECT f.body FROM files f ORDER BY f.id",
+        "SELECT body FROM files WHERE body = $1",
+    ] {
+        let parameters = if sql.contains("$1") {
+            vec![Value::text("clue")]
+        } else {
+            vec![]
+        };
+        assert_eq!(
+            database
+                .read_query(sql, &parameters, &scopes)
+                .expect("scoped read")
+                .rows,
+            [vec![Value::text("clue")]]
+        );
+    }
+    assert!(database
+        .read_query("SELECT * FROM files", &[], &[])
+        .is_err());
+    let wrong = [ReadScope {
+        table: "files".into(),
+        field: "missing".into(),
+        value: Value::text("mine"),
+    }];
+    assert!(database
+        .read_query("SELECT * FROM files", &[], &wrong)
+        .is_err());
+    let duplicate = [
+        ReadScope {
+            table: "files".into(),
+            field: "tenant_id".into(),
+            value: Value::text("mine"),
+        },
+        ReadScope {
+            table: "files".into(),
+            field: "tenant_id".into(),
+            value: Value::text("other"),
+        },
+    ];
+    assert!(database
+        .read_query("SELECT * FROM files", &[], &duplicate)
+        .is_err());
+}
+
+#[test]
+fn inspection_cannot_mutate_the_database_or_control_transactions() {
+    use reddb_engine::query::local_read::ReadScope;
+    let mut database = seed();
+    let scopes = [ReadScope {
+        table: "people".into(),
+        field: "id".into(),
+        value: Value::Integer(1),
+    }];
+    for sql in [
+        "DELETE FROM people",
+        "UPDATE people SET name = 'lost'",
+        "INSERT INTO people VALUES (3, 'C', 1)",
+        "CREATE TABLE stolen (id INTEGER)",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "SELECT * FROM people; DELETE FROM people",
+    ] {
+        assert!(
+            database.read_query(sql, &[], &scopes).is_err(),
+            "must reject {sql}"
+        );
+    }
+    assert_eq!(
+        rows(&mut database, "SELECT name FROM people ORDER BY id"),
+        [vec![Value::text("Ana")], vec![Value::text("Bia")]]
+    );
+    assert_eq!(database.catalog().expect("catalog").rows.len(), 3);
+}
+
+#[test]
+fn catalog_tracks_real_contracts_and_transaction_rollback() {
+    let mut database = seed();
+    let expected = database.catalog().expect("catalog");
+    assert_eq!(
+        expected.columns,
+        ["table_name", "column_name", "data_type", "nullable"]
+    );
+    assert!(expected
+        .rows
+        .iter()
+        .all(|row| row[0] == Value::text("people")));
+    run(&mut database, "BEGIN");
+    run(
+        &mut database,
+        "CREATE TABLE provisional (id INTEGER PRIMARY KEY)",
+    );
+    assert_eq!(database.catalog().expect("staged catalog").rows.len(), 4);
+    assert!(database.query("SELECT missing FROM people", 2000).is_err());
+    assert!(database.catalog().is_err());
+    run(&mut database, "ROLLBACK");
+    let database = Database::open(database.into_inner(), "sql.rdb").expect("reopen");
+    assert_eq!(
+        database.catalog().expect("reopened catalog").rows,
+        expected.rows
+    );
+}
+
+#[test]
 fn sql_crud_recovers_canonical_artifact() {
     let mut database = seed();
     assert_eq!(

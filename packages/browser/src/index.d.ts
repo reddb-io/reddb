@@ -16,6 +16,7 @@ export interface RuntimeInfo {
     readonly transactions: boolean
     readonly queryParameters?: boolean
     readonly databaseBackups?: boolean
+    readonly databaseInspection?: boolean
     readonly sync: boolean
   }
 }
@@ -70,6 +71,10 @@ export function openArtifact(options: {
 export type QueryParameter = null | boolean | number | string | bigint
 
 export interface Database extends Runtime {
+  /** Persisted catalog columns: table_name, column_name, data_type, nullable. */
+  catalog(): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** SELECT only, over the host's allowed tables and equality-filtered source rows. */
+  readQuery(sql: string, params: readonly QueryParameter[], scopes: readonly {table: string; field: string; value: QueryParameter}[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** SELECT and table SQL mutations; mutations return an affectedRows column. */
   query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Complete native .rdb image of committed state, at most 256 MiB. Pending SQL changes are excluded. */

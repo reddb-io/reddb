@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.6.0` adds local database sessions for Dart/Flutter Web and retains reusable Worker sessions. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.7.0` adds persisted catalog inspection and read-only, host-scoped SELECT, retaining local Dart/Flutter Web database sessions and reusable Workers. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
@@ -504,3 +504,22 @@ internal fixtures remain separate from application entrypoints.
    pending intent, identity separation, offline assets and the storage-status UI.
 5. Validate two-device sync and engine conformance, Safari/iOS on real devices,
    quota/failure cases, bundle size, startup, memory and query performance.
+
+## Embedded explorers and scoped reads
+
+`database.catalog()` returns the persisted columns `table_name`, `column_name`,
+`data_type` and `nullable`. It reads real contracts, including empty tables.
+
+```ts
+const scopes = [{ table: 'files', field: 'tenant_id', value: 'campaign-1' }]
+const result = await database.readQuery('SELECT name, body FROM files', [], scopes)
+```
+
+The host supplies the allowed table and equality predicate. The canonical engine
+filters source records before the caller's WHERE, ordering and limit. Only SELECT
+is admitted; SQL cannot remove this filter or address an unlisted table. Empty
+scopes deny all tables. This is a local inspection boundary, not a server user
+session or RLS. The browser's file owner can still use the ordinary full SQL API.
+Catalogs and scoped reads honor the same I/O health fence; an aborted explicit
+transaction must roll back first. Source filtering uses canonical record
+materialization and may temporarily allocate one record for each candidate.
