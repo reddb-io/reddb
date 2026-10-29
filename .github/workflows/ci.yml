@@ -555,6 +555,9 @@ jobs:
       - name: red_client size budget
         if: matrix.shard == 4
         run: ./scripts/check-red-client-size.sh
+      - name: Reproduce duplicate retired page allocation
+        if: matrix.shard == 1
+        run: cargo test --locked -p reddb-io-engine --test portable retired_batch_rejects_duplicate_pages_without_modifying_allocator -- --exact
       - name: Run non-integration test layer
         if: matrix.shard == 1
         env:
