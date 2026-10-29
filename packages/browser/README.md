@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.4.0` adds native `.rdb` backup export and restore. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.7.0` adds persisted catalog inspection and read-only, host-scoped SELECT, retaining local Dart/Flutter Web database sessions and reusable Workers. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
@@ -42,6 +42,47 @@ try {
 
 Consumers receive built JS/Worker/WASM assets and TypeScript declarations; they
 need no Rust toolchain. The commands below are for engine/package contributors.
+
+## Reuse the Worker between file owners
+
+Use a session when an application opens and closes a database frequently. The
+session retains the initialized Worker and WASM; each database handle still
+owns an exclusive file lock until it closes. Only one database can be open in
+one session at a time.
+
+```ts
+import { createDatabaseSession } from '@reddb-io/browser'
+import RedDBWorker from '@reddb-io/browser/worker?worker'
+
+const session = await createDatabaseSession({ worker: new RedDBWorker() })
+try {
+  // Repeat this block for later operations using the same session.
+  await navigator.locks.request('my-app-operation', async () => {
+    const db = await session.openDatabase({ name: 'my-app', create: true })
+    try {
+      await db.query('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+      console.log(await db.query('SELECT id, body FROM notes'))
+    } finally { await db.close() }
+  })
+} finally { await session.close() }
+```
+
+Use the same outer application lock in every tab to queue operations. The SDK's
+file lock still returns `FILE_BUSY` to simultaneous owners; sessions do not add
+cross-tab forwarding or shared transactions. Protect stale application snapshots
+with the application's existing writer/slot locks as well.
+
+`db.close()` releases the file and discards an uncommitted transaction. Later
+opens recover the current committed file, including writes by other owners.
+An old handle remains closed even after the session opens another database.
+A failed release fences the session and terminates its Worker. Close/discard a
+session after a Worker failure and create a new one for retry.
+
+`session.close()` closes its current file and terminates the Worker. It is
+idempotent; callers must dispose sessions when finished. Keeping WASM initialized
+retains its memory between operations. This amortizes startup, not native file
+recovery or SQL execution. Standalone `openDatabase()` retains its existing
+behavior: its handle closes both file and Worker.
 
 ## Local table SQL from JS/TS
 
@@ -463,3 +504,22 @@ internal fixtures remain separate from application entrypoints.
    pending intent, identity separation, offline assets and the storage-status UI.
 5. Validate two-device sync and engine conformance, Safari/iOS on real devices,
    quota/failure cases, bundle size, startup, memory and query performance.
+
+## Embedded explorers and scoped reads
+
+`database.catalog()` returns the persisted columns `table_name`, `column_name`,
+`data_type` and `nullable`. It reads real contracts, including empty tables.
+
+```ts
+const scopes = [{ table: 'files', field: 'tenant_id', value: 'campaign-1' }]
+const result = await database.readQuery('SELECT name, body FROM files', [], scopes)
+```
+
+The host supplies the allowed table and equality predicate. The canonical engine
+filters source records before the caller's WHERE, ordering and limit. Only SELECT
+is admitted; SQL cannot remove this filter or address an unlisted table. Empty
+scopes deny all tables. This is a local inspection boundary, not a server user
+session or RLS. The browser's file owner can still use the ordinary full SQL API.
+Catalogs and scoped reads honor the same I/O health fence; an aborted explicit
+transaction must roll back first. Source filtering uses canonical record
+materialization and may temporarily allocate one record for each candidate.

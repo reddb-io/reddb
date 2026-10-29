@@ -126,28 +126,38 @@ export function createInteropRuntime({ worker } = {}) {
   }
 }
 
-async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+function requireStorage() {
+  if (!globalThis.isSecureContext || !globalThis.Worker || !globalThis.navigator?.storage?.getDirectory || !globalThis.navigator?.locks) {
+    throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
+  }
+}
+
+function validateFileOptions(name, create) {
   if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
   if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
     throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
   }
-  if (!globalThis.isSecureContext || !globalThis.Worker || !globalThis.navigator?.storage?.getDirectory || !globalThis.navigator?.locks) {
-    throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
+  requireStorage()
+}
+
+async function openClientFile(client, name, create, backup, method) {
+  const info = await client.ready
+  const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
+  if (sqlDatabase && (info.capabilities.storedQueries !== true
+    || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
+    || info.capabilities.queryParameters !== true)) {
+    throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
   }
+  if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
+    throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
+  }
+  await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
+}
+
+async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+  validateFileOptions(name, create)
   const client = createClient(worker)
-  try {
-    const info = await client.ready
-    const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
-    if (sqlDatabase && (info.capabilities.storedQueries !== true
-      || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
-      || info.capabilities.queryParameters !== true)) {
-      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
-    }
-    if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
-      throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
-    }
-    await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
-  }
+  try { await openClientFile(client, name, create, backup, method) }
   catch (error) { client.shutdown(error); throw error }
   return client
 }
@@ -172,6 +182,116 @@ export async function openDatabase(options) {
   return databaseMethods(await openFile(options, 'openDatabase'))
 }
 
+/** Reuse one initialized Worker across sequential, independently owned database handles. */
+export async function createDatabaseSession({ worker } = {}) {
+  requireStorage()
+  const client = createClient(worker)
+  await client.ready
+  let active = false
+  let closed = false
+  let closing
+  return {
+    async openDatabase({ name, create = false } = {}) {
+      if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      validateFileOptions(name, create)
+      if (active) throw new BrowserError('INVALID_ARGUMENT', 'Close the current database before opening another in this session')
+      active = true
+      try {
+        await openClientFile(client, name, create, undefined, 'openDatabase')
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      } catch (error) { active = false; throw error }
+      let released = false
+      let fileClosing
+      return databaseMethods({
+        call(method, params) {
+          if (released || closed) return Promise.reject(new BrowserError('CLOSED', 'This database handle is closed'))
+          return client.call(method, params)
+        },
+        closeFile() {
+          if (!fileClosing) {
+            released = true
+            fileClosing = closed ? closing : client.call('close').then(() => { active = false }).catch(error => {
+              // A failed release cannot lend this Worker to another file owner.
+              closed = true
+              client.shutdown(error)
+              throw error
+            })
+          }
+          return fileClosing
+        },
+      })
+    },
+    close() {
+      if (!closing) {
+        closed = true
+        closing = client.closeFile()
+      }
+      return closing
+    },
+  }
+}
+
+/** JSON-safe session boundary for Dart and other JS-interop hosts. */
+export function createInteropDatabaseSession(options = {}) {
+  let ready
+  try { ready = createDatabaseSession(options) }
+  catch (error) { ready = Promise.reject(error) }
+  ready.catch(() => {})
+  let database
+  let handle = 0
+  let fileClosing
+  let closed = false
+  return {
+    async invoke(method, params = {}) {
+      try {
+        if (method === 'close' || (method === 'closeDatabase' && closed)) {
+          closed = true
+          await (await ready).close()
+          return { ok: true, result: null }
+        }
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        const session = await ready
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        if (!params || typeof params !== 'object' || Array.isArray(params)) {
+          throw new BrowserError('INVALID_ARGUMENT', 'Expected an argument object')
+        }
+        let result
+        switch (method) {
+          case 'ready': break
+          case 'openDatabase':
+            database = await session.openDatabase({ name: params.name, create: params.create ?? false })
+            fileClosing = undefined
+            result = ++handle
+            break
+          case 'closeDatabase':
+            // A repeated close of an old handle cannot release the current owner.
+            if (params.handle === handle) {
+              if (database) {
+                const releasing = database
+                database = undefined
+                fileClosing = releasing.close()
+              }
+              await fileClosing
+            }
+            break
+          case 'info':
+          case 'query':
+            if (!database || params.handle !== handle) throw new BrowserError('CLOSED', 'This database handle is closed')
+            result = method === 'info' ? await database.info() : await database.query(params.sql, params.params)
+            break
+          default: throw new BrowserError('INVALID_ARGUMENT', 'Unknown database operation')
+        }
+        return { ok: true, result: result ?? null }
+      } catch (error) {
+        return { ok: false, error: {
+          code: typeof error.code === 'string' ? error.code : 'RUNTIME_ERROR',
+          message: error.message || String(error),
+        } }
+      }
+    },
+  }
+}
+
 /** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */
 export async function restoreDatabase(options) {
   const backup = options?.backup
@@ -184,6 +304,11 @@ export async function restoreDatabase(options) {
 function databaseMethods(client) {
   return {
     ...runtimeMethods(client),
+    catalog: () => client.call('catalog'),
+    readQuery(sql, params, scopes) {
+      if (typeof sql !== 'string' || !Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS || !Array.isArray(scopes) || scopes.length > 64) return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes'))
+      return client.call('readQuery', { sql, params, scopes })
+    },
     query(sql, params) {
       if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
       if (params === undefined) return client.call('query', { sql })

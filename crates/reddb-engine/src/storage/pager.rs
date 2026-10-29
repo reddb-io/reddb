@@ -230,7 +230,9 @@ struct DeferredPageReclamation {
 /// The superblock zone occupies the head of page 0 (ADR 0038 §2 phase 1).
 const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
+// The phase-3 layout was introduced in 1.0.1. Later file format versions
+// must not make existing phase-3 stores look like legacy sidecar stores.
+const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 
 /// The newest valid superblock copy together with its slot image.
 pub type NewestSuperblock = (
@@ -848,6 +850,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::InvalidDatabase(
                 "invalid retired page range".into(),
             ));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(pages.len());
+        if pages.iter().any(|id| !seen.insert(*id)) {
+            return Err(PagerError::InvalidDatabase("duplicate retired page".into()));
         }
         let mut freelist = self.freelist_write()?;
         for id in pages {
