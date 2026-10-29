@@ -132,6 +132,93 @@ fn paged_layout_version_is_independent_of_current_writer_version() {
 }
 
 #[test]
+fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    use reddb_file::{PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE, PAGE_FILE_VERSION};
+
+    let create = || {
+        let pager = Pager::open_owned(
+            pager::MemoryFile::default(),
+            "format-fence.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            true,
+        )
+        .expect("create pager");
+        pager
+            .commit_superblock(|slot| {
+                reddb_file::set_database_header_version(slot, PAGE_FILE_VERSION - 1).map_err(
+                    |error| {
+                        reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
+                    },
+                )
+            })
+            .expect("create one older-version slot");
+        pager
+    };
+    let pager = create();
+    let persisted_page_count = pager.header().expect("header").page_count;
+    pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("dirty allocation");
+    pager
+        .fence_file_format_version(PAGE_FILE_VERSION)
+        .expect("fence format");
+    let bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable bytes");
+    for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+        let start = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+        let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+        assert!(reddb_file::paged_superblock_slot_generation(slot, copy).is_some());
+        let header = reddb_file::decode_database_header(slot).expect("header");
+        assert_eq!(header.version, PAGE_FILE_VERSION);
+        assert_eq!(
+            header.page_count, persisted_page_count,
+            "format fence must not publish dirty allocator state"
+        );
+        let mut damaged = bytes.clone();
+        damaged[start + 64] ^= 1;
+        let reopened = Pager::open_owned(
+            pager::MemoryFile::from_bytes(damaged),
+            "format-fallback.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            false,
+        )
+        .expect("either fenced copy can recover");
+        assert_eq!(
+            reopened.header().expect("fallback header").version,
+            PAGE_FILE_VERSION
+        );
+    }
+
+    for fail_at in 1..=4 {
+        let pager = create();
+        pager
+            .with_file(|file| {
+                file.operations.borrow_mut().clear();
+                file.fail_at = Some(fail_at);
+            })
+            .expect("inject failure");
+        assert!(
+            pager.fence_file_format_version(PAGE_FILE_VERSION).is_err(),
+            "boundary {fail_at}"
+        );
+        pager
+            .with_file(|file| file.fail_at = None)
+            .expect("restore I/O");
+        assert!(
+            pager.allocate_page(PageType::BTreeLeaf).is_err(),
+            "failure must fence writes"
+        );
+    }
+}
+
+#[test]
 fn retired_batch_rejects_duplicate_pages_without_modifying_allocator() {
     use reddb_engine::storage::{
         page::PageType,
