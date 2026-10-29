@@ -560,6 +560,14 @@ jobs:
         run: |
           cargo build --locked --bin red
           python3 scripts/verify-concurrent-http.py target/debug/red
+      - name: Verify upgrade from stable 1.26.8
+        if: matrix.shard == 1
+        run: |
+          curl --fail --silent --show-error --location --retry 3 -o "$RUNNER_TEMP/red-linux-x86_64-static" https://github.com/reddb-io/reddb/releases/download/v1.26.8/red-linux-x86_64-static
+          curl --fail --silent --show-error --location --retry 3 -o "$RUNNER_TEMP/red-linux-x86_64-static.sha256" https://github.com/reddb-io/reddb/releases/download/v1.26.8/red-linux-x86_64-static.sha256
+          (cd "$RUNNER_TEMP" && sha256sum -c red-linux-x86_64-static.sha256)
+          chmod +x "$RUNNER_TEMP/red-linux-x86_64-static"
+          python3 scripts/verify-http-upgrade.py "$RUNNER_TEMP/red-linux-x86_64-static" target/debug/red
       - name: Run non-integration test layer
         if: matrix.shard == 1
         env:
