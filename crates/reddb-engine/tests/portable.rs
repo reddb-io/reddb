@@ -127,6 +127,36 @@ fn paged_layout_version_is_independent_of_current_writer_version() {
 }
 
 #[test]
+fn retired_batch_rejects_duplicate_pages_without_modifying_allocator() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+
+    let pager = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "duplicate-retirement.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true,
+    )
+    .unwrap();
+    let retired = pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id();
+    let before = pager.free_page_count().unwrap();
+    assert!(pager.free_retired_pages(&[retired, retired]).is_err());
+    assert_eq!(pager.free_page_count().unwrap(), before);
+    assert_ne!(
+        pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id(),
+        retired
+    );
+    pager.free_retired_pages(&[retired]).unwrap();
+    assert_eq!(
+        pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id(),
+        retired
+    );
+}
+
+#[test]
 fn portable_execution_conformance() {
     for (name, run) in portable::CASES {
         eprintln!("{name}");
