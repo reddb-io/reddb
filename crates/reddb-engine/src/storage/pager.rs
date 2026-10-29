@@ -196,6 +196,9 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     file: Mutex<F>,
     /// Whether mutable pages are protected by the in-file DWB zone.
     dwb_enabled: bool,
+    /// A failed writeback may leave the only complete image in the DWB.
+    /// Refuse further writes until reopen has recovered that image.
+    writeback_failed: std::sync::atomic::AtomicBool,
     /// Page cache
     cache: PageCache,
     /// Free page list
@@ -265,6 +268,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             path,
             file: Mutex::new(file),
             dwb_enabled: config.double_write && !config.read_only,
+            writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
@@ -407,10 +411,12 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         copy_index: usize,
         generation: u64,
     ) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
         let mut file = self.file_lock()?;
+        self.ensure_writeback_available()?;
         Ok(pager_io::write_superblock_slot(
             &mut *file, slot, copy_index, generation,
         )?)
@@ -498,12 +504,39 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         )?)
     }
 
+    fn ensure_writeback_available(&self) -> Result<(), PagerError> {
+        if self
+            .writeback_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(PagerError::Io(std::io::Error::other(
+                "page writeback failed; reopen the database to recover before writing",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Amortize protected eviction over one bounded DWB frame. Keeping the
+    /// remaining cache dirty would otherwise pay three fsyncs per victim.
+    fn write_evicted_dirty_page(&self, page: Page) -> Result<(), PagerError> {
+        let mut ids = self
+            .cache
+            .dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME.saturating_sub(1));
+        ids.sort_unstable();
+        let mut pages = self.cache.flush_dirty_pages(&ids);
+        pages.push((page.page_id(), page));
+        pages.sort_unstable_by_key(|(id, _)| *id);
+        self.write_dirty_page_batch(&pages)
+    }
+
     /// Write a page to disk (bypassing cache)
     fn write_page_raw(&self, page_id: u32, page: &Page) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
         let mut file = self.file_lock()?;
+        self.ensure_writeback_available()?;
         Ok(pager_io::write_page(&mut *file, page_id, page)?)
     }
 
@@ -520,8 +553,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
 
         Ok(page)
@@ -545,8 +577,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache (no checksum verification)
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
 
         Ok(page)
@@ -554,6 +585,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Write a page (cache-aware)
     pub fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -566,8 +598,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // page will never be flushed otherwise (same bug fixed in
         // `allocate_page`).
         if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -579,6 +610,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn write_page_no_checksum(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -586,8 +618,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
         if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -596,6 +627,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Allocate a new page
     pub fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -664,8 +696,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // handling: write the evicted page through immediately so
         // the on-disk image stays consistent.
         if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page)?;
         }
         self.cache.mark_dirty(page_id);
 
@@ -674,6 +705,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Reserve a contiguous extent of vector pages.
     pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<ExtentId, PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -697,8 +729,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             let mut page = Page::new(PageType::Vector, page_id);
             page.update_checksum();
             if let Some(dirty_page) = self.cache.insert(page_id, page) {
-                let evicted_id = dirty_page.page_id();
-                self.write_page_raw(evicted_id, &dirty_page)?;
+                self.write_evicted_dirty_page(dirty_page)?;
             }
             self.cache.mark_dirty(page_id);
         }
@@ -711,6 +742,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -806,6 +838,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Return a fully validated, unpublished tree generation in one allocator
     /// mutation. Call only after its removal from the manifest is durable.
     pub fn free_retired_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -846,6 +879,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn update_physical_header(&self, physical: PhysicalFileHeader) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -863,6 +897,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Flush all dirty pages to disk
     pub fn flush(&self) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Ok(());
         }
@@ -897,22 +932,22 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             self.cache.mark_dirty(page_id);
         }
 
-        // Flush dirty pages from cache (through DWB if enabled)
-        dirty_pages.extend(self.cache.flush_dirty());
-        if !dirty_pages.is_empty() {
-            // WAL-FIRST: ensure every WAL record describing a dirty
-            // page is durable BEFORE the page itself reaches disk.
-            // Pages with `lsn == 0` are exempt (freelist trunks, header
-            // shadow pages, anything not produced by a WAL append).
-            let max_lsn = dirty_pages
-                .iter()
-                .filter_map(|(_, page)| page.header().ok().map(|h| h.lsn))
-                .max()
-                .unwrap_or(0);
-            if max_lsn > 0 {
-                self.wal.flush_until(max_lsn)?;
-            }
-            self.write_pages_through_dwb(&dirty_pages)?;
+        // IDs are compact; page images are not. At 16 KiB per page, staging
+        // 256 images plus one DWB frame uses about 5 MiB, independently of
+        // the dirty cache size. Publish the header only after every batch.
+        const FLUSH_BATCH_PAGES: usize = 256;
+        for batch in dirty_pages.chunks(FLUSH_BATCH_PAGES) {
+            self.write_dirty_page_batch(batch)?;
+        }
+        drop(dirty_pages);
+        // Batch dirty IDs, not every resident ID: otherwise a few edits in
+        // a mostly clean cache pay a protected write per cache-sized slice.
+        // Physical order also avoids arbitrary seeks among each batch's homes.
+        let mut page_ids = self.cache.dirty_page_ids(usize::MAX);
+        page_ids.sort_unstable();
+        for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
+            let pages = self.cache.flush_dirty_pages(ids);
+            self.write_dirty_page_batch(&pages)?;
         }
 
         // Write header if dirty
@@ -921,6 +956,34 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
 
         Ok(())
+    }
+
+    fn write_dirty_page_batch(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        // Every image's WAL must be durable before its home write, including
+        // dirty data evicted while publishing freelist trunks. LSN zero is
+        // reserved for pages not produced by a WAL append.
+        let result = (|| {
+            let max_lsn = pages
+                .iter()
+                .filter_map(|(_, page)| page.header().ok().map(|header| header.lsn))
+                .max()
+                .unwrap_or(0);
+            if max_lsn > 0 {
+                self.wal.flush_until(max_lsn)?;
+            }
+            self.write_pages_through_dwb(pages)
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            for (page_id, _) in pages {
+                self.cache.mark_dirty(*page_id);
+            }
+        }
+        result
     }
 
     /// Sync file to disk (fsync)
@@ -981,6 +1044,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// number actually written. Background-writer entry point —
     /// reuses the same persistence path as `flush()` but bounded.
     pub fn flush_some_dirty(&self, max: usize) -> Result<usize, PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only || max == 0 {
             return Ok(0);
         }
@@ -1045,7 +1109,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Keep the file locked through staging, home writes and clearing so
         // another page writer cannot interleave with a protected batch.
         let mut file = self.file_lock()?;
-        Ok(pager_io::write_pages(&mut *file, pages, self.dwb_enabled)?)
+        self.ensure_writeback_available()?;
+        let result = pager_io::write_pages(&mut *file, pages, self.dwb_enabled);
+        if result.is_err() {
+            // Set this while holding the file lock: a waiting writer must not
+            // replace the recovery frame after an interrupted home write.
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(result?)
     }
 
     /// Recover from double-write buffer after a crash.
