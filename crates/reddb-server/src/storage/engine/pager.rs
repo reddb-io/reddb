@@ -918,6 +918,24 @@ mod tests {
     }
 
     #[test]
+    fn flush_refuses_nonzero_lsn_without_a_wal_writer() {
+        let path = temp_db_path();
+        let pager = Pager::open(&path, PagerConfig::default()).expect("open pager");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.set_lsn(42);
+        pager.write_page(page.page_id(), page).expect("write page");
+
+        assert!(
+            pager.flush().is_err(),
+            "a page with an LSN needs a WAL barrier"
+        );
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
     fn set_wal_writer_attaches_handle() {
         use crate::storage::wal::writer::WalWriter;
         use std::sync::{Arc, Mutex};
