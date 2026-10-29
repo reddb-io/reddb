@@ -2012,6 +2012,12 @@ mod tests {
                 "experimental exit before retired free",
             ),
             (
+                "enqueued",
+                "REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE",
+                186,
+                "experimental exit after retired enqueue",
+            ),
+            (
                 "after",
                 "REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE",
                 185,
@@ -2108,10 +2114,11 @@ mod tests {
             reuse.push(reused);
         }
         assert!(
-            reuse[0] >= reuse[1],
-            "recovery must not lose retired pages before allocator publication: before={} after={}",
+            reuse[0] >= reuse[2] && reuse[1] >= reuse[2],
+            "recovery must not lose retired pages before allocator publication: before={} enqueued={} after={}",
             reuse[0],
-            reuse[1]
+            reuse[1],
+            reuse[2]
         );
     }
 
