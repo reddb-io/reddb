@@ -487,6 +487,27 @@ impl Pager {
             .unwrap_or(false)
     }
 
+    /// Install an ownership recorder while all other mutators are fenced.
+    #[allow(dead_code)] // Used when ownership recovery is activated.
+    pub(crate) fn install_ownership_recorder(
+        &self,
+        recorder: Arc<dyn super::PageOwnershipRecorder>,
+    ) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.is_some() {
+            return Err(std::io::Error::other(
+                "ownership recorder already installed",
+            ));
+        }
+        *slot = Some(recorder);
+        Ok(())
+    }
+
     /// Issue a best-effort OS read-ahead hint under the page-I/O lock.
     pub fn prefetch_hint(&self, page_id: u32) {
         let _ = self.core.with_file(|file| {

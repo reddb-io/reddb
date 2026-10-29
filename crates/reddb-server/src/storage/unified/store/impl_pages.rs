@@ -490,6 +490,15 @@ impl UnifiedStore {
             .collect();
         reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        // Record the exact pages before the catalog can forget their owners.
+        // Recovery resolves this intent against the durable catalog epoch.
+        let mut retirement_intent = reclaim.clone();
+        retirement_intent.extend_from_slice(&released_pages);
+        if !retirement_intent.is_empty() {
+            pager
+                .record_retirement_intent(&retirement_intent)
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        }
         // Do not mutate retirement state or the free list before both the new
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)

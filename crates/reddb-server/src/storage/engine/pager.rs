@@ -128,9 +128,29 @@ impl reddb_file::VfsFile for NativePagerFile {
     }
 }
 
+/// Durable ownership callbacks installed only while a fenced epoch is active.
+pub(crate) trait PageOwnershipRecorder: Send + Sync {
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+}
+
 #[doc(hidden)]
 #[derive(Default)]
-pub struct NativeWalBarrier(RwLock<Option<Arc<Mutex<WalWriter>>>>);
+pub struct NativeWalBarrier(
+    RwLock<Option<Arc<Mutex<WalWriter>>>>,
+    RwLock<Option<Arc<dyn PageOwnershipRecorder>>>,
+);
+
+impl NativeWalBarrier {
+    fn ownership_recorder(&self) -> std::io::Result<Option<Arc<dyn PageOwnershipRecorder>>> {
+        Ok(self
+            .1
+            .read()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?
+            .clone())
+    }
+}
 
 impl WalBarrier for NativeWalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
@@ -146,6 +166,27 @@ impl WalBarrier for NativeWalBarrier {
             return Err(std::io::Error::other(
                 "nonzero page LSN requires a WAL durability barrier",
             ));
+        }
+        Ok(())
+    }
+
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.reserve_pages(start, count)?;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.detach_free_pages(pages)?;
+        }
+        Ok(())
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.retire_pages(pages)?;
         }
         Ok(())
     }

@@ -178,6 +178,21 @@ impl Default for PagerConfig {
 /// Implementations must make all records through `lsn` durable or return an error.
 pub trait WalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()>;
+
+    /// Called before pages are removed from allocator ownership.
+    fn reserve_pages(&self, _start: u32, _count: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Called before a persisted free-list trunk is detached from its head.
+    fn detach_free_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Called before retired pages enter the free list.
+    fn retire_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A pager without a WAL may only publish pages whose LSN is zero.
@@ -571,6 +586,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    fn record_ownership(
+        &self,
+        operation: impl FnOnce(&W) -> std::io::Result<()>,
+    ) -> Result<(), PagerError> {
+        if let Err(error) = operation(&self.wal) {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(PagerError::Io(error));
+        }
+        Ok(())
+    }
+
     /// Amortize protected eviction over one bounded DWB frame. Keeping the
     /// remaining cache dirty would otherwise pay three fsyncs per victim.
     fn write_evicted_dirty_page(&self, page: Page) -> Result<(), PagerError> {
@@ -693,7 +720,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             // A previous fence can fail after loading the trunk into memory.
             // Retry it before the fast path can consume any of those pages.
             self.complete_allocation_fence()?;
-            if let Some(id) = freelist.allocate() {
+            if let Some(id) = freelist.next_in_memory_page() {
+                self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+                let id = freelist
+                    .allocate()
+                    .expect("free page checked while allocator is locked");
                 self.allocation_reused
                     .store(true, std::sync::atomic::Ordering::Release);
                 id
@@ -712,6 +743,25 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     ));
                 }
 
+                // Persist ownership of every page detached from the trunk
+                // before either superblock stops naming that trunk.
+                let mut detached = FreeList::new();
+                detached
+                    .load_from_trunk(&trunk)
+                    .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {e}")))?;
+                let mut pages = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let page_count = self.page_count()?;
+                while let Some(id) = detached.allocate() {
+                    if id < FIRST_ALLOCATABLE_PAGE || id >= page_count || !seen.insert(id) {
+                        return Err(PagerError::InvalidDatabase(
+                            "invalid freelist trunk page".into(),
+                        ));
+                    }
+                    pages.push(id);
+                }
+                self.record_ownership(|wal| wal.detach_free_pages(&pages))?;
+
                 freelist
                     .load_from_trunk(&trunk)
                     .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
@@ -726,6 +776,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 self.allocation_fence_pending
                     .store(true, std::sync::atomic::Ordering::Release);
                 self.complete_allocation_fence()?;
+                let next = freelist.next_in_memory_page().ok_or_else(|| {
+                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                })?;
+                self.record_ownership(|wal| wal.reserve_pages(next, 1))?;
                 let id = freelist.allocate().ok_or_else(|| {
                     PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
                 })?;
@@ -736,7 +790,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 // No free pages, extend file
                 let mut header = self.header_write()?;
                 let id = header.page_count;
-                header.page_count += 1;
+                let next = id
+                    .checked_add(1)
+                    .ok_or_else(|| PagerError::InvalidDatabase("page count overflow".into()))?;
+                self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+                header.page_count = next;
                 *self.header_dirty_lock()? = true;
                 id
             }
@@ -778,9 +836,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let start_page = {
             let mut header = self.header_write()?;
             let start = header.page_count;
-            header.page_count = header.page_count.checked_add(n_pages).ok_or_else(|| {
+            let end = header.page_count.checked_add(n_pages).ok_or_else(|| {
                 PagerError::InvalidDatabase("contiguous extent page count overflow".to_string())
             })?;
+            self.record_ownership(|wal| wal.reserve_pages(start, n_pages))?;
+            header.page_count = end;
             *self.header_dirty_lock()? = true;
             start
         };
@@ -817,12 +877,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     "invalid deferred free page".into(),
                 ));
             }
+            self.record_ownership(|wal| wal.retire_pages(&[page_id]))?;
             // Keep dirty forwarding/empty nodes until publication. An
             // incidental flush must leave the previous root traversable.
             deferred.pending.insert(page_id);
             return Ok(());
         }
         drop(deferred);
+
+        self.record_ownership(|wal| wal.retire_pages(&[page_id]))?;
 
         // Remove from cache
         self.cache.remove(page_id);
@@ -895,6 +958,25 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    /// Record the pages whose catalog ownership is about to be retired.
+    pub fn record_retirement_intent(&self, pages: &[u32]) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let page_count = self.page_count()?;
+        let mut seen = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= page_count || !seen.insert(*id))
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid retirement intent".into(),
+            ));
+        }
+        self.record_ownership(|wal| wal.retire_pages(pages))
+    }
+
     /// Return a fully validated, unpublished tree generation in one allocator
     /// mutation. Call only after its removal from the manifest is durable.
     pub fn free_retired_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
@@ -959,6 +1041,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             }
             trunk_id = next.unwrap_or(0);
         }
+        self.record_ownership(|wal| wal.retire_pages(pages))?;
         for id in pages {
             self.cache.remove(*id);
         }
