@@ -695,6 +695,10 @@ struct ResidentReplayTarget<'a> {
 }
 
 impl super::store_wal::StoreReplayTarget for ResidentReplayTarget<'_> {
+    fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        self.store.set_aux_metadata(bytes.to_vec());
+        Ok(())
+    }
     fn has_collection(&self, name: &str) -> bool {
         self.store.get_collection(name).is_some()
     }

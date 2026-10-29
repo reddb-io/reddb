@@ -38,6 +38,11 @@ pub enum StoreWalAction {
         collection: String,
         records: Vec<Vec<u8>>,
     },
+    /// Single-file collection contracts must survive acknowledged DDL even
+    /// when no snapshot checkpoint has run before process loss.
+    SetAuxMetadata {
+        bytes: Vec<u8>,
+    },
 }
 
 impl StoreWalAction {
@@ -97,6 +102,9 @@ impl StoreWalAction {
                 collection: collection.clone(),
                 records: records.clone(),
             },
+            Self::SetAuxMetadata { bytes } => reddb_file::StoreWalActionFrame::SetAuxMetadata {
+                bytes: bytes.clone(),
+            },
         }
     }
 
@@ -132,6 +140,9 @@ impl StoreWalAction {
                 collection,
                 records,
             }),
+            reddb_file::StoreWalActionFrame::SetAuxMetadata { bytes } => {
+                Ok(Self::SetAuxMetadata { bytes })
+            }
         }
     }
 }
@@ -140,6 +151,11 @@ impl StoreWalAction {
 /// pager effects at its existing mutation boundaries; replay targets are private
 /// until recovery completes successfully.
 pub trait StoreReplayTarget {
+    fn set_aux_metadata(&self, _bytes: &[u8]) -> Result<(), super::error::StoreError> {
+        Err(super::error::StoreError::Serialization(
+            "auxiliary metadata WAL actions are unsupported by this replay target".to_string(),
+        ))
+    }
     fn has_collection(&self, name: &str) -> bool;
     fn create_collection(&self, name: &str) -> Result<(), super::error::StoreError>;
     fn drop_collection(&self, name: &str) -> Result<(), super::error::StoreError>;
@@ -163,6 +179,7 @@ pub fn apply_replayed_action(
     action: &StoreWalAction,
 ) -> Result<(), super::error::StoreError> {
     match action {
+        StoreWalAction::SetAuxMetadata { bytes } => target.set_aux_metadata(bytes),
         StoreWalAction::CreateCollection { name } => {
             if !target.has_collection(name) {
                 let _ = target.create_collection(name);

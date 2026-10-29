@@ -208,10 +208,11 @@ impl RedDB {
     /// it from the stored entities and a KV collection would come back as a
     /// table. No-op for other profiles, which persist contracts via the
     /// metadata sidecar.
-    pub(crate) fn sync_single_file_contract_blob(&self) {
+    pub(crate) fn sync_single_file_contract_blob(&self) -> Result<(), Box<dyn std::error::Error>> {
         let contracts = self.collection_contracts();
         let bytes = crate::physical::serialize_collection_contracts(&contracts);
-        self.store().set_aux_metadata(bytes);
+        self.store().persist_aux_metadata(bytes)?;
+        Ok(())
     }
 
     /// Seed the in-memory contract cache from the store's auxiliary-metadata
@@ -282,6 +283,7 @@ impl RedDB {
         &self,
         contract: crate::physical::CollectionContract,
     ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
+        let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             if let Some(ttl_ms) = contract.default_ttl_ms {
                 defaults.insert(contract.name.clone(), ttl_ms);
@@ -310,7 +312,7 @@ impl RedDB {
             && !self.paged_mode
         {
             self.collection_contract_cache.insert(contract.clone());
-            self.sync_single_file_contract_blob();
+            self.sync_single_file_contract_blob()?;
             return Ok(contract);
         }
 
@@ -348,6 +350,7 @@ impl RedDB {
         &self,
         collection: &str,
     ) -> Result<Option<crate::physical::CollectionContract>, Box<dyn std::error::Error>> {
+        let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             defaults.remove(collection);
         }
@@ -362,7 +365,7 @@ impl RedDB {
             && !self.paged_mode
         {
             let removed = self.collection_contract_cache.remove(collection);
-            self.sync_single_file_contract_blob();
+            self.sync_single_file_contract_blob()?;
             return Ok(removed);
         }
 

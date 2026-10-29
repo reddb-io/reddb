@@ -131,6 +131,15 @@ deferral, correct canonical reads, and publication after VACUUM makes the
 collection fit again. Native artifact shrink/reopen tests still verify the
 published path for collections that fit.
 
+Embedded single-file contract changes append auxiliary metadata to the logical
+WAL before acknowledging DDL. Publication holds the same store fence across
+cache edits, contract-map serialization and WAL append. Recovery applies the
+latest auxiliary blob before hydrating the contract cache; an empty blob clears
+it. This adds store-action tag 7. Older readers reject that tag, so upgrade
+readers before opening a WAL containing these contract edits. Existing native
+record and snapshot encodings are unchanged. The process-kill KV regression
+covers fresh embedded, fresh paged and embedded options reopening a paged file.
+
 Run the focused gates with:
 
 ```sh

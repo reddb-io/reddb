@@ -14,6 +14,10 @@ struct NativeReplayTarget<'a> {
 }
 
 impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<'_> {
+    fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        self.store.resident.set_aux_metadata(bytes.to_vec());
+        Ok(())
+    }
     fn has_collection(&self, name: &str) -> bool {
         self.store.get_collection(name).is_some()
     }
