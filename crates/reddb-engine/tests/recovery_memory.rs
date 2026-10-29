@@ -307,3 +307,38 @@ fn recovery_preserves_named_system_metadata_for_bootstrap_readers() {
         assert_eq!(encoded(&recovered), image);
     }
 }
+
+#[test]
+fn recovered_documents_keep_promoted_fields_in_lean_reads() {
+    use reddb_engine::query::records::{runtime_table_record_lean, runtime_table_record_lean_ref};
+    let manager = SegmentManager::new("documents");
+    let mut body = Vec::new();
+    reddb_types::document_body_codec::encode(
+        &[
+            ("name", &Value::text("alice")),
+            ("score", &Value::Integer(42)),
+        ],
+        &mut body,
+    )
+    .expect("body");
+    let mut original = UnifiedEntity::table_row(EntityId::new(1), "documents", 1, vec![]);
+    original.data = EntityData::Row(RowData::with_names(
+        vec![Value::Json(body)],
+        vec!["body".into()],
+    ));
+    manager
+        .restore_snapshot_entity(original.clone())
+        .expect("recover document");
+    let recovered = manager.get(original.id).expect("recovered document");
+    assert!(recovered.data.as_row().expect("row").named.is_none());
+    for entity in [original, recovered] {
+        for record in [
+            runtime_table_record_lean(entity.clone()),
+            runtime_table_record_lean_ref(&entity),
+        ] {
+            let record = record.expect("document record");
+            assert_eq!(record.get("name"), Some(&Value::text("alice")));
+            assert_eq!(record.get("score"), Some(&Value::Integer(42)));
+        }
+    }
+}

@@ -39,6 +39,88 @@ fn seeded_runtime(budget: u64, document: bool) -> RedDBRuntime {
 }
 
 #[test]
+fn recovered_row_patch_preserves_fields_outside_the_patch() {
+    use crate::storage::{EntityData, EntityId, UnifiedEntity};
+    use reddb_types::Value;
+
+    for document in [false, true] {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(if document {
+                "CREATE DOCUMENT patch_recovery"
+            } else {
+                "CREATE TABLE patch_recovery (name TEXT, score INT)"
+            })
+            .expect("collection");
+        let fields = if document {
+            let mut body = Vec::new();
+            reddb_types::document_body_codec::encode(
+                &[
+                    ("name", &Value::text("alice")),
+                    ("score", &Value::Integer(1)),
+                ],
+                &mut body,
+            )
+            .expect("body");
+            vec![("body".to_string(), Value::Json(body))]
+        } else {
+            vec![
+                ("name".to_string(), Value::text("alice")),
+                ("score".to_string(), Value::Integer(1)),
+            ]
+        };
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(90001), "patch_recovery", 1, vec![]);
+        entity.data = EntityData::Row(crate::storage::unified::entity::RowData {
+            columns: vec![],
+            named: Some(fields.into_iter().collect()),
+            schema: None,
+        });
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("patch_recovery")
+            .expect("manager");
+        manager
+            .restore_snapshot_entity(entity)
+            .expect("recover row");
+        assert!(manager
+            .get(EntityId::new(90001))
+            .expect("row")
+            .data
+            .as_row()
+            .expect("row data")
+            .named
+            .is_none());
+        runtime
+            .patch_entity(PatchEntityInput {
+                collection: "patch_recovery".to_string(),
+                id: EntityId::new(90001),
+                payload: crate::json::Value::Null,
+                operations: vec![PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["fields".to_string(), "score".to_string()],
+                    value: Some(crate::json::Value::Integer(2)),
+                }],
+            })
+            .expect("patch recovered row");
+        let result = runtime
+            .execute_query("SELECT name, score FROM patch_recovery")
+            .expect("read patched row");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("alice")),
+            "document={document}"
+        );
+        assert_eq!(
+            result.result.records[0].get("score"),
+            Some(&Value::Integer(2))
+        );
+    }
+}
+
+#[test]
 fn mutation_memory_oversized_update_preserves_table_and_document() {
     for document in [false, true] {
         let runtime = seeded_runtime(128 * 1024, document);

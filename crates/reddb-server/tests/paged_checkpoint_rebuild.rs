@@ -800,7 +800,8 @@ fn metadata_only_health_detects_artifact_descriptor_drift() {
     let rt = RedDBRuntime::with_options(
         RedDBOptions::persistent(directory.path().join("health.rdb"))
             .with_storage_profile(StorageDeployPreset::Serverless.selection())
-            .expect("paged profile"),
+            .expect("paged profile")
+            .with_capability(reddb_server::api::Capability::FullText),
     )
     .expect("runtime");
     rt.execute_query("CREATE TABLE artifact_rows (body TEXT)")

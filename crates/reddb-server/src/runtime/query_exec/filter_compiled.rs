@@ -383,12 +383,10 @@ pub(crate) fn resolve_kind<'a>(
 }
 
 fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool {
-    row.named.as_ref().is_some_and(|named| {
-        matches!(
-            named.get("body"),
-            Some(Value::Json(_)) | Some(Value::Blob(_))
-        )
-    })
+    matches!(
+        row.get_field("body"),
+        Some(Value::Json(_)) | Some(Value::Blob(_))
+    )
 }
 
 /// Offset-read a single-source document's top-level field from its body.

@@ -251,8 +251,10 @@ fn apply_document_body_patch_operations(
     apply_patch_operations_to_json(body, operations).map_err(crate::RedDBError::Query)
 }
 
-fn document_body_from_named(fields: &HashMap<String, Value>) -> RedDBResult<JsonValue> {
-    match fields.get("body") {
+fn document_body_from_row(
+    row: &crate::storage::unified::entity::RowData,
+) -> RedDBResult<JsonValue> {
+    match row.get_field("body") {
         Some(Value::Json(bytes)) => {
             // The stored body may be the native binary container (PRD-1398) or
             // plain JSON; decode either form back to JSON.
@@ -511,6 +513,23 @@ impl RedDBRuntime {
 
         match &mut entity.data {
             crate::storage::EntityData::Row(row) => {
+                // PATCH mutates a named map. A recovered row may instead own
+                // its values under a shared schema; move those values into
+                // the map before applying only the requested field changes.
+                if row.named.is_none() {
+                    if let Some(schema) = row.schema.as_ref() {
+                        let fields = if schema.len() == row.columns.len() {
+                            schema
+                                .iter()
+                                .cloned()
+                                .zip(std::mem::take(&mut row.columns))
+                                .collect()
+                        } else {
+                            collect_row_fields(row).into_iter().collect()
+                        };
+                        row.named = Some(fields);
+                    }
+                }
                 let is_document_collection = db
                     .collection_contract(&collection)
                     .map(|contract| {
@@ -604,9 +623,7 @@ impl RedDBRuntime {
                     context_index_dirty = true;
                     let mut body = match document_body_replace {
                         Some(body) => body,
-                        None => document_body_from_named(
-                            row.named.get_or_insert_with(Default::default),
-                        )?,
+                        None => document_body_from_row(row)?,
                     };
                     apply_document_body_patch_operations(&mut body, &document_body_ops)?;
                     replace_document_row_body(
@@ -619,8 +636,7 @@ impl RedDBRuntime {
                 }
 
                 if is_document_collection && !has_patch_operations {
-                    let mut body =
-                        document_body_from_named(row.named.get_or_insert_with(Default::default))?;
+                    let mut body = document_body_from_row(row)?;
                     let previous_body = body.clone();
                     apply_document_json_merge_patch(
                         &mut body,
@@ -640,12 +656,11 @@ impl RedDBRuntime {
 
                 if !field_ops.is_empty() {
                     context_index_dirty = true;
-                    let named = row.named.get_or_insert_with(Default::default);
                     if is_document_collection {
                         // Document fields are projections of the canonical
                         // `body` JSON. Apply the assignment to the body so the
                         // stored document remains single-source.
-                        let mut body = document_body_from_named(named)?;
+                        let mut body = document_body_from_row(row)?;
                         apply_patch_operations_to_json(&mut body, &field_ops)
                             .map_err(crate::RedDBError::Query)?;
                         replace_document_row_body(
@@ -656,6 +671,7 @@ impl RedDBRuntime {
                             &mut modified_columns,
                         )?;
                     } else {
+                        let named = row.named.get_or_insert_with(Default::default);
                         for op in &field_ops {
                             if let Some(col) = op.path.first() {
                                 modified_columns.push(col.clone());
@@ -680,11 +696,10 @@ impl RedDBRuntime {
                         }
                     }
                     context_index_dirty = true;
-                    let named = row.named.get_or_insert_with(Default::default);
                     if is_document_collection {
                         // Mirror the `field_ops` path above: keep the canonical
                         // `body` JSON as the single stored representation.
-                        let mut body = document_body_from_named(named)?;
+                        let mut body = document_body_from_row(row)?;
                         if let JsonValue::Object(map) = &mut body {
                             for (key, value) in fields {
                                 map.insert(key.clone(), value.clone());
@@ -698,6 +713,7 @@ impl RedDBRuntime {
                             &mut modified_columns,
                         )?;
                     } else {
+                        let named = row.named.get_or_insert_with(Default::default);
                         for (key, value) in fields {
                             modified_columns.push(key.clone());
                             named.insert(key.clone(), json_to_storage_value(value)?);
@@ -1257,9 +1273,7 @@ impl RedDBRuntime {
                     apply_row_field_assignments_raw(row, static_row_assignments);
                     apply_row_field_assignments_raw(row, dynamic_row_assignments);
                     if !document_body_ops.is_empty() {
-                        let mut body = document_body_from_named(
-                            row.named.get_or_insert_with(Default::default),
-                        )?;
+                        let mut body = document_body_from_row(row)?;
                         apply_document_body_patch_operations(&mut body, &document_body_ops)?;
                         replace_document_row_body(
                             row,
