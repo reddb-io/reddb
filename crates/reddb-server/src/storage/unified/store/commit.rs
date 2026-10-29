@@ -860,13 +860,82 @@ impl StoreCommitCoordinator {
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY").is_some() {
+                std::process::exit(187);
+            }
             pager
                 .sync_recovered_allocator()
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC").is_some() {
+                std::process::exit(188);
+            }
             self.append_durable_page_ownership(PageOwnershipRecord::Finish {
                 epoch: pending.epoch,
             })?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH").is_some() {
+                std::process::exit(189);
+            }
         }
+        self.release_completed_ownership_wal()
+    }
+
+    /// Begin an epoch only when the caller has excluded all other pager mutators.
+    pub(super) fn begin_page_ownership_epoch(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+    ) -> io::Result<()> {
+        if store.ownership_active_epoch.load(Ordering::Acquire) != 0
+            || epoch <= store.ownership_catalog_epoch.load(Ordering::Acquire)
+        {
+            return Err(io::Error::other("invalid page ownership epoch"));
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        pager
+            .fence_file_format_version(reddb_file::file_format::PAGE_OWNERSHIP_FILE_VERSION)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let coordinator = Arc::clone(
+            store
+                .commit
+                .as_ref()
+                .ok_or_else(|| io::Error::other("ownership epoch requires a WAL coordinator"))?,
+        );
+        let recorder = Arc::new(StoreOwnershipRecorder::begin(coordinator, epoch)?);
+        pager.install_ownership_recorder(recorder)?;
+        store.ownership_active_epoch.store(epoch, Ordering::Release);
+        Ok(())
+    }
+
+    /// Complete the epoch only while the same exclusion remains in force.
+    pub(super) fn finish_page_ownership_epoch(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+    ) -> io::Result<()> {
+        if epoch == 0 || store.ownership_active_epoch.load(Ordering::Acquire) != epoch {
+            return Err(io::Error::other("page ownership epoch is not active"));
+        }
+        if store.ownership_catalog_epoch.load(Ordering::Acquire) != epoch {
+            return Err(io::Error::other("page ownership epoch is not published"));
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        pager
+            .sync_recovered_allocator()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.append_durable_page_ownership(
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Finish { epoch },
+        )?;
+        pager.clear_ownership_recorder()?;
+        store.ownership_active_epoch.store(0, Ordering::Release);
         self.release_completed_ownership_wal()
     }
 
@@ -884,6 +953,7 @@ impl StoreCommitCoordinator {
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
         let mut pending = Vec::<(u64, Vec<u8>)>::new();
         let mut ownership_journal = Vec::new();
+        let mut latest_ownership_epoch = 0;
         let mut incomplete_wal_tail = false;
         let mut applied = false;
 
@@ -898,6 +968,7 @@ impl StoreCommitCoordinator {
             };
             match record {
                 WalRecord::PageOwnership { record } => {
+                    latest_ownership_epoch = latest_ownership_epoch.max(record.epoch());
                     ownership_journal
                         .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
@@ -973,9 +1044,20 @@ impl StoreCommitCoordinator {
         }
 
         if applied {
+            // Opening is exclusive: no client can mutate published trees
+            // while replay constructs replacement generations.
+            let epoch = latest_ownership_epoch
+                .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))?;
+            self.begin_page_ownership_epoch(store, epoch)?;
+            // Even when the replayed actions leave all B-trees unchanged, the
+            // epoch must be in the catalog before its journal can finish.
+            store.mark_paged_registry_dirty();
             store
                 .reconcile_replayed_btrees()
                 .map_err(|err| io::Error::other(err.to_string()))?;
+            self.finish_page_ownership_epoch(store, epoch)?;
         }
         Ok(())
     }
@@ -1674,6 +1756,28 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
+    fn ownership_epoch_rejects_nested_begin_and_wrong_finish() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(directory.path().join("data.rdb")).expect("store");
+        store.create_collection("rows").expect("collection");
+        store.persist().expect("baseline");
+        let coordinator = store.commit.as_ref().expect("WAL coordinator");
+        assert!(coordinator.begin_page_ownership_epoch(&store, 0).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 1).is_err());
+        coordinator
+            .begin_page_ownership_epoch(&store, 1)
+            .expect("begin epoch");
+        assert!(coordinator.begin_page_ownership_epoch(&store, 2).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 2).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 1).is_err());
+        store.flush_paged_registry().expect("publish epoch");
+        coordinator
+            .finish_page_ownership_epoch(&store, 1)
+            .expect("finish epoch");
+        assert_eq!(store.ownership_active_epoch.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn native_pager_records_page_ownership_in_durable_wal() {
         use reddb_file::page_ownership_journal::PageOwnershipRecord;
 
@@ -1826,6 +1930,111 @@ mod tests {
             .expect("coordinator")
             .truncate()
             .expect("completed ownership can be truncated");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ownership_recovery_survives_interruption_and_retry() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        const CHILD: &str = "REDDB_EXPERIMENTAL_OWNERSHIP_RECOVERY_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let _store = UnifiedStore::open(path).expect("recover store");
+            panic!("recovery interruption hook was not reached");
+        }
+        for (published, hook, exit_code) in [
+            (
+                false,
+                "REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY",
+                187,
+            ),
+            (false, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC", 188),
+            (false, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH", 189),
+            (
+                true,
+                "REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY",
+                187,
+            ),
+            (true, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC", 188),
+            (true, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH", 189),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open(&path).expect("create store");
+                store.create_collection("rows").expect("collection");
+                if published {
+                    store.ownership_active_epoch.store(1, Ordering::Release);
+                }
+                store.persist().expect("baseline");
+            }
+            let wal_path = reddb_file::layout::unified_wal_path(&path);
+            let ids;
+            {
+                let pager =
+                    crate::storage::engine::Pager::open(&path, Default::default()).expect("pager");
+                let first = pager.page_count().expect("page count");
+                let coordinator = StoreCommitCoordinator::open(
+                    &wal_path,
+                    DurabilityMode::Strict,
+                    GroupCommitOptions::default(),
+                )
+                .expect("WAL");
+                let intent = |page_id| {
+                    if published {
+                        PageOwnershipRecord::Retire { epoch: 1, page_id }
+                    } else {
+                        PageOwnershipRecord::Reserve { epoch: 1, page_id }
+                    }
+                };
+                coordinator
+                    .append_durable_page_ownership_batch(&[
+                        PageOwnershipRecord::Begin { epoch: 1 },
+                        intent(first),
+                        intent(first + 1),
+                    ])
+                    .expect("reserve");
+                ids = [
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                        .page_id(),
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                        .page_id(),
+                ];
+                pager.sync().expect("persist abandoned pages");
+            }
+            for _ in 0..if exit_code == 189 { 1 } else { 2 } {
+                let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", "storage::unified::store::commit::tests::ownership_recovery_survives_interruption_and_retry", "--nocapture"])
+                    .env(CHILD, &path)
+                    .env(hook, "1")
+                    .output().expect("run interrupted recovery");
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit_code),
+                    "published={published} {hook}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let reopened = UnifiedStore::open(&path).expect("recover after interruptions");
+            let pager = reopened.pager.as_ref().expect("pager");
+            let a = pager
+                .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                .expect("reuse")
+                .page_id();
+            let b = pager
+                .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                .expect("reuse")
+                .page_id();
+            assert_ne!(a, b, "published={published} {hook}: duplicate page");
+            assert!(
+                ids.contains(&a) && ids.contains(&b),
+                "published={published} {hook}: lost recovered page"
+            );
+        }
     }
 
     #[test]

@@ -29,6 +29,10 @@ pub enum PageOwnershipRecord {
 }
 
 impl PageOwnershipRecord {
+    pub fn epoch(self) -> u64 {
+        self.fields().1
+    }
+
     fn fields(self) -> (u8, u64, u32) {
         match self {
             Self::Begin { epoch } => (1, epoch, 0),

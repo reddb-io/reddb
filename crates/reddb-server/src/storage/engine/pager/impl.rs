@@ -508,6 +508,21 @@ impl Pager {
         Ok(())
     }
 
+    /// Remove the recorder after allocator copies and journal completion are
+    /// durable, while other mutators remain fenced.
+    pub(crate) fn clear_ownership_recorder(&self) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.take().is_none() {
+            return Err(std::io::Error::other("ownership recorder is not installed"));
+        }
+        Ok(())
+    }
+
     /// Issue a best-effort OS read-ahead hint under the page-I/O lock.
     pub fn prefetch_hint(&self, page_id: u32) {
         let _ = self.core.with_file(|file| {
