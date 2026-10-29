@@ -993,6 +993,51 @@ fn native_artifact_budget_deferral_is_visible_recoverable_and_reversible() {
 }
 
 #[test]
+fn native_kv_reads_recovered_shapes_without_copying_unrelated_payloads() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    runtime
+        .execute_query("CREATE KV recovered_keys")
+        .expect("KV collection");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("recovered_keys")
+        .expect("manager");
+    for id in 0..33 {
+        let mut row =
+            UnifiedEntity::table_row(EntityId::new(1000 + id), "recovered_keys", id, vec![]);
+        row.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(if id == 0 {
+                    "wanted".to_string()
+                } else {
+                    format!("other-{id}")
+                }),
+                if id == 0 {
+                    Value::text("kept")
+                } else {
+                    Value::Blob(vec![255; 64 * 1024])
+                },
+            ],
+            vec!["key".into(), "value".into()],
+        ));
+        manager
+            .restore_snapshot_entity(row)
+            .expect("recover named record");
+    }
+    let (value, allocations) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+        runtime.db().get_kv("recovered_keys", "wanted")
+    });
+    assert_eq!(value, Some((Value::text("kept"), EntityId::new(1000))));
+    assert!(
+        allocations.allocated_bytes < 65536,
+        "native KV get copied unrelated values: {allocations:?}"
+    );
+}
+
+#[test]
 fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
     use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
     use reddb_types::Value;

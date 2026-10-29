@@ -204,18 +204,14 @@ impl Pager {
             }
         }
 
-        // Acquire file lock (exclusive for writes, shared for read-only)
-        let lock_file = if !config.read_only {
-            let lf = OpenOptions::new().read(true).write(true).open(&path)?;
-            lf.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
-            Some(lf)
+        // Lock the same handle that performs page I/O. Windows byte-range
+        // locks deny reads/writes through a separately opened handle even in
+        // this process. The owned VFS handle holds the fence until it closes.
+        if !config.read_only {
+            file.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
         } else {
-            let lf = OpenOptions::new().read(true).open(&path)?;
-            match lf.try_lock_shared() {
-                Ok(_) => Some(lf),
-                Err(_) => None,
-            }
-        };
+            let _ = FileExt::try_lock_shared(&file);
+        }
 
         // ADR 0038 phase 3: the DWB sidecar is retired. When DWB is active,
         // the recovery frame is written to a reserved zone inside the data
@@ -262,7 +258,6 @@ impl Pager {
         )?;
         let mut pager = Self {
             core,
-            _lock_file: lock_file,
             config,
             encryption: None,
         };

@@ -94,6 +94,7 @@ async function sharedConformance(browserPage) {
     'resident_store_models_and_cache', 'resident_store_graph_metadata_and_references',
     'store_wal_canonical_action_frames', 'store_wal_impossible_counts_and_truncation',
     'store_wal_entity_record_replay', 'store_wal_host_index_boundaries', 'store_wal_atomic_resident_refresh',
+    'store_wal_aux_metadata_replay',
     'store_wal_recovery_fixture',
     'record_filter_durable_restart', 'contract_write_durable_publication',
     'resident_file_models_and_checkpoint', 'resident_file_owned_restart_fixture',

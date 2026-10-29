@@ -93,7 +93,6 @@ impl Default for PagerConfig {
 /// Native host adapter for the shared pager.
 pub struct Pager {
     core: SharedPager<NativePagerFile, NativeWalBarrier>,
-    _lock_file: Option<File>,
     config: PagerConfig,
     pub(crate) encryption: Option<(
         crate::storage::encryption::PageEncryptor,
@@ -358,6 +357,42 @@ mod tests {
         }
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn native_pager_lock_guards_own_io_and_releases_on_drop() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("locked-io.rdb");
+        let pager = Pager::open_default(&path).expect("locked pager opens");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate under lock");
+        let id = page.page_id();
+        page.insert_cell(b"key", b"kept").expect("cell");
+        pager.write_page(id, page).expect("write under lock");
+        pager.sync().expect("sync under lock");
+        assert_eq!(
+            pager
+                .read_page(id)
+                .expect("read under lock")
+                .read_cell(0)
+                .expect("cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+        assert!(
+            matches!(Pager::open_default(&path), Err(PagerError::Locked)),
+            "the writer fence remains exclusive"
+        );
+        drop(pager);
+        let reopened = Pager::open_default(&path).expect("last I/O handle releases writer fence");
+        assert_eq!(
+            reopened
+                .read_page(id)
+                .expect("durable page")
+                .read_cell(0)
+                .expect("durable cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
     }
 
     #[test]

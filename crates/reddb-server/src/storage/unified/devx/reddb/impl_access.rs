@@ -5,86 +5,6 @@ pub(crate) struct NativeArtifactBuild {
     pub deferred_collections: std::collections::HashSet<String>,
 }
 
-#[cfg(test)]
-mod artifact_memory_tests {
-    use super::*;
-
-    #[test]
-    fn disabled_fulltext_does_not_copy_rows_or_publish_search_artifacts() {
-        let runtime =
-            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
-        runtime
-            .execute_query("CREATE TABLE source (payload BLOB)")
-            .expect("table");
-        let db = runtime.db();
-        let manager = db.store().get_collection("source").expect("manager");
-        let (_, baseline) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
-            db.native_vector_artifact_records().expect("empty build")
-        });
-        for id in 1..=32 {
-            manager
-                .insert(UnifiedEntity::table_row(
-                    EntityId::new(1000 + id),
-                    "source",
-                    id,
-                    vec![Value::Blob(vec![255; 64 * 1024])],
-                ))
-                .expect("source row");
-        }
-        let (build, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
-            db.native_vector_artifact_records().expect("disabled build")
-        });
-        assert!(build.records.is_empty());
-        assert!(
-            build.deferred_collections.is_empty(),
-            "disabled capabilities do not consume artifact allowance"
-        );
-        assert!(
-            measured.allocated_bytes <= baseline.allocated_bytes + 4096,
-            "disabled fulltext copied source payloads: {baseline:?} -> {measured:?}"
-        );
-    }
-
-    #[test]
-    fn document_artifact_traversal_is_ordered_and_bounded() {
-        let json = crate::json::from_slice::<JsonValue>(br#"{"a":{"b":1},"z":[2,3]}"#)
-            .expect("JSON fixture");
-        let mut entries = Vec::new();
-        let mut bytes = 0;
-        RedDB::collect_native_document_entries_from_json(
-            "body",
-            &json,
-            &mut entries,
-            &mut bytes,
-            4096,
-        )
-        .expect("small document fits");
-        assert_eq!(
-            entries,
-            vec![
-                ("body.a.b".into(), "1".into()),
-                ("body.z[0]".into(), "2".into()),
-                ("body.z[1]".into(), "3".into())
-            ]
-        );
-        let mut deep = JsonValue::Integer(1);
-        for _ in 0..64 {
-            deep = JsonValue::Object([("child".to_string(), deep)].into());
-        }
-        let mut entries = Vec::new();
-        let mut bytes = 0;
-        assert!(RedDB::collect_native_document_entries_from_json(
-            "body",
-            &deep,
-            &mut entries,
-            &mut bytes,
-            128
-        )
-        .is_err());
-        assert!(bytes <= 128);
-    }
-}
-
 impl RedDB {
     /// Access the quorum coordinator (Phase 2.6 PG parity).
     ///
@@ -255,6 +175,7 @@ impl RedDB {
             let mut entities = Vec::new();
             let mut source_bytes = 0usize;
             let mut exceeded = false;
+            let column_schema = manager.column_schema();
             manager.for_each_entity(|entity| {
                 let eligible = match &entity.data {
                     EntityData::Vector(vector) => {
@@ -274,7 +195,13 @@ impl RedDB {
                     return false;
                 }
                 source_bytes += bytes;
-                entities.push(entity.clone());
+                let mut owned = entity.clone();
+                if let EntityData::Row(row) = &mut owned.data {
+                    if row.named.is_none() && row.schema.is_none() {
+                        row.schema = column_schema.clone();
+                    }
+                }
+                entities.push(owned);
                 true
             });
             if exceeded {
@@ -622,8 +549,8 @@ impl RedDB {
         let mut bytes = 0;
         match data {
             EntityData::Row(row) => {
-                if let Some(named) = &row.named {
-                    for (key, value) in named {
+                if row.named.is_some() || row.schema.is_some() {
+                    for (key, value) in row.iter_fields() {
                         Self::collect_native_document_entries_from_value(
                             key,
                             value,
@@ -632,16 +559,17 @@ impl RedDB {
                             limit,
                         )?;
                     }
-                }
-                for (idx, value) in row.columns.iter().enumerate() {
-                    let path = format!("columns[{idx}]");
-                    Self::collect_native_document_entries_from_value(
-                        &path,
-                        value,
-                        &mut entries,
-                        &mut bytes,
-                        limit,
-                    )?;
+                } else {
+                    for (idx, value) in row.columns.iter().enumerate() {
+                        let path = format!("columns[{idx}]");
+                        Self::collect_native_document_entries_from_value(
+                            &path,
+                            value,
+                            &mut entries,
+                            &mut bytes,
+                            limit,
+                        )?;
+                    }
                 }
             }
             EntityData::Node(node) => {
@@ -1683,5 +1611,110 @@ impl RedDB {
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
+    }
+}
+
+#[cfg(test)]
+mod artifact_memory_tests {
+    use super::*;
+
+    #[test]
+    fn document_artifact_paths_survive_shared_recovery_shapes() {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(1), "documents", 1, vec![]);
+        entity.data = EntityData::Row(crate::storage::unified::entity::RowData::with_names(
+            vec![Value::Json(br#"{"thing":"kept"}"#.to_vec())],
+            vec!["body".into()],
+        ));
+        let before = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
+            .expect("named document");
+        let EntityData::Row(row) = &mut entity.data else {
+            unreachable!("fixture is a row");
+        };
+        *row = crate::storage::unified::entity::RowData {
+            columns: vec![row.get_field("body").expect("body field").clone()],
+            named: None,
+            schema: Some(Arc::new(vec!["body".into()])),
+        };
+        let after = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
+            .expect("shared document");
+        assert_eq!(
+            before, after,
+            "compaction must preserve named document paths"
+        );
+    }
+
+    #[test]
+    fn disabled_fulltext_does_not_copy_rows_or_publish_search_artifacts() {
+        let runtime =
+            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE source (payload BLOB)")
+            .expect("table");
+        let db = runtime.db();
+        let manager = db.store().get_collection("source").expect("manager");
+        let (_, baseline) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("empty build")
+        });
+        for id in 1..=32 {
+            manager
+                .insert(UnifiedEntity::table_row(
+                    EntityId::new(1000 + id),
+                    "source",
+                    id,
+                    vec![Value::Blob(vec![255; 64 * 1024])],
+                ))
+                .expect("source row");
+        }
+        let (build, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("disabled build")
+        });
+        assert!(build.records.is_empty());
+        assert!(
+            build.deferred_collections.is_empty(),
+            "disabled capabilities do not consume artifact allowance"
+        );
+        assert!(
+            measured.allocated_bytes <= baseline.allocated_bytes + 4096,
+            "disabled fulltext copied source payloads: {baseline:?} -> {measured:?}"
+        );
+    }
+
+    #[test]
+    fn document_artifact_traversal_is_ordered_and_bounded() {
+        let json = crate::json::from_slice::<JsonValue>(br#"{"a":{"b":1},"z":[2,3]}"#)
+            .expect("JSON fixture");
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        RedDB::collect_native_document_entries_from_json(
+            "body",
+            &json,
+            &mut entries,
+            &mut bytes,
+            4096,
+        )
+        .expect("small document fits");
+        assert_eq!(
+            entries,
+            vec![
+                ("body.a.b".into(), "1".into()),
+                ("body.z[0]".into(), "2".into()),
+                ("body.z[1]".into(), "3".into())
+            ]
+        );
+        let mut deep = JsonValue::Integer(1);
+        for _ in 0..64 {
+            deep = JsonValue::Object([("child".to_string(), deep)].into());
+        }
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        assert!(RedDB::collect_native_document_entries_from_json(
+            "body",
+            &deep,
+            &mut entries,
+            &mut bytes,
+            128
+        )
+        .is_err());
+        assert!(bytes <= 128);
     }
 }

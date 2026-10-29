@@ -346,23 +346,57 @@ impl RedDB {
 
     /// Get a key-value pair by key, returning the value and entity id
     ///
-    /// Scans the collection for an entity whose named field `key` matches.
+    /// Clone only the selected value. Legacy positional rows without an
+    /// indexed key use their collection schema in the borrowed fallback scan.
     pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
         let manager = self.store.get_collection(collection)?;
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if let EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            let value = named.get("value").cloned().unwrap_or(Value::Null);
-                            return Some((value, entity.id));
-                        }
-                    }
-                }
-            }
+        if let Some(value) = manager.project_key_entity(key, None, false, |entity| {
+            (
+                entity
+                    .data
+                    .as_row()
+                    .and_then(|row| row.get_field("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                entity.id,
+            )
+        }) {
+            return Some(value);
         }
-        None
+        let columns = manager.column_schema();
+        let key_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "key"));
+        let value_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "value"));
+        let mut found = None;
+        manager.for_each_entity(|entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            let legacy = row.named.is_none() && row.schema.is_none();
+            let stored_key = row.get_field("key").or_else(|| {
+                if legacy {
+                    key_index.and_then(|index| row.columns.get(index))
+                } else {
+                    None
+                }
+            });
+            if matches!(stored_key, Some(Value::Text(stored)) if stored.as_ref() == key) {
+                let value = row.get_field("value").or_else(|| {
+                    if legacy {
+                        value_index.and_then(|index| row.columns.get(index))
+                    } else {
+                        None
+                    }
+                });
+                found = Some((value.cloned().unwrap_or(Value::Null), entity.id));
+                return false;
+            }
+            true
+        });
+        found
     }
 
     /// Delete a key-value pair by key, returning whether it was found and removed
