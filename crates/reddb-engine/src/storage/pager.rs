@@ -851,6 +851,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "invalid retired page range".into(),
             ));
         }
+        let mut seen = std::collections::HashSet::with_capacity(pages.len());
+        if pages.iter().any(|id| !seen.insert(*id)) {
+            return Err(PagerError::InvalidDatabase("duplicate retired page".into()));
+        }
         let mut freelist = self.freelist_write()?;
         for id in pages {
             self.cache.remove(*id);
