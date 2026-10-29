@@ -51,3 +51,120 @@ fn kv_collection_model_survives_single_file_restart() {
         );
     }
 }
+
+/// #2536 contract regression. Parent kills the writer only after acknowledged DDL
+/// and KV writes; no Drop or bootstrap checkpoint can rescue the missing catalog.
+/// This is a minimal contract fixture, not the private Hunter/RedWire reproducer.
+#[test]
+fn kv_model_and_value_survive_kill_without_bootstrap_checkpoint() {
+    qualify_kv_kill(
+        "embedded",
+        "kv_model_and_value_survive_kill_without_bootstrap_checkpoint",
+    );
+}
+
+#[test]
+fn paged_kv_model_and_value_survive_kill_without_bootstrap_checkpoint() {
+    qualify_kv_kill(
+        "paged",
+        "paged_kv_model_and_value_survive_kill_without_bootstrap_checkpoint",
+    );
+}
+
+#[test]
+fn legacy_paged_kv_model_and_value_survive_kill_without_bootstrap_checkpoint() {
+    qualify_kv_kill(
+        "embedded_on_paged",
+        "legacy_paged_kv_model_and_value_survive_kill_without_bootstrap_checkpoint",
+    );
+}
+
+fn qualify_kv_kill(mode: &str, test_name: &str) {
+    use reddb_server::StorageDeployPreset;
+    use std::time::{Duration, Instant};
+    const CHILD: &str = "REDDB_KV_KILL_PATH";
+    const MODE: &str = "REDDB_KV_KILL_MODE";
+    let options = |path: &std::path::Path, mode: &str| {
+        let options = RedDBOptions::persistent(path);
+        if mode == "paged" {
+            options
+                .with_storage_profile(StorageDeployPreset::Serverless.selection())
+                .unwrap()
+        } else {
+            options
+        }
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = std::path::PathBuf::from(path);
+        let mode = std::env::var(MODE).unwrap();
+        let runtime = RedDBRuntime::with_options(options(&path, &mode)).unwrap();
+        runtime.execute_query("CREATE KV sessions").unwrap();
+        runtime
+            .execute_query("KV PUT sessions.token = 'acknowledged'")
+            .unwrap();
+        assert_eq!(
+            declared_model(&runtime, "sessions"),
+            Some(CollectionModel::Kv)
+        );
+        std::fs::write(path.with_extension("ready"), b"acknowledged").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        if mode == "embedded_on_paged" {
+            let runtime = RedDBRuntime::with_options(options(&path, "paged")).unwrap();
+            runtime.checkpoint().unwrap();
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, &path)
+            .env(MODE, mode)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !path.with_extension("ready").exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{mode}: writer exited before ACK"
+            );
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{mode}: writer did not acknowledge fixture within 30 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        assert!(
+            !child.wait().unwrap().success(),
+            "writer must die uncleanly"
+        );
+        for reopen in 0..3 {
+            let runtime = RedDBRuntime::with_options(options(&path, mode)).unwrap();
+            assert_eq!(
+                declared_model(&runtime, "sessions"),
+                Some(CollectionModel::Kv),
+                "{mode}: reopen {reopen} lost native model"
+            );
+            let result = runtime.execute_query("KV GET sessions.token").unwrap();
+            assert!(
+                !result.result.records.is_empty(),
+                "{mode}: lost acknowledged KV value"
+            );
+            assert!(
+                result
+                    .result
+                    .records
+                    .iter()
+                    .any(|record| record.get("value")
+                        == Some(&reddb_types::Value::text("acknowledged"))),
+                "{mode}: wrong KV payload: {:?}",
+                result.result.records
+            );
+            runtime.checkpoint().unwrap();
+        }
+    }
+}

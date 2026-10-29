@@ -1009,3 +1009,127 @@ fn portable_aggregation_conformance() {
         run();
     }
 }
+
+/// Recovery must not lose free-list trunks or hand a live page out as free.
+/// Exercise more than two trunks, two superblock fallback choices and repeated reuse.
+#[test]
+fn multi_trunk_recovery_reuses_every_page_without_growing() {
+    use reddb_engine::storage::{
+        freelist::FREE_IDS_PER_TRUNK,
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    use reddb_file::{PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE};
+    use std::collections::BTreeSet;
+
+    let open = |bytes: Option<Vec<u8>>| {
+        let create = bytes.is_none();
+        Pager::open_owned(
+            bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes),
+            "multi-trunk-reuse.rdb".into(),
+            PagerConfig {
+                // This fixture targets allocator trunks. Tiny-cache eviction is
+                // covered by the native crash matrix and portable pager tests.
+                cache_size: 2 * FREE_IDS_PER_TRUNK + 16,
+                ..Default::default()
+            },
+            NoWal,
+            create,
+        )
+        .unwrap()
+    };
+    let initial = open(None);
+    let mut sentinel = initial.allocate_page(PageType::BTreeLeaf).unwrap();
+    let live = sentinel.page_id();
+    sentinel
+        .insert_cell(b"sentinel", b"must survive all reuse")
+        .unwrap();
+    initial.write_page(live, sentinel).unwrap();
+    let types = [
+        PageType::BTreeLeaf,
+        PageType::BTreeInterior,
+        PageType::Overflow,
+    ];
+    let ids: BTreeSet<_> = (0..2 * FREE_IDS_PER_TRUNK + 7)
+        .map(|index| {
+            initial
+                .allocate_page(types[index % types.len()])
+                .unwrap()
+                .page_id()
+        })
+        .collect();
+    initial.sync().unwrap();
+    let page_count = initial.page_count().unwrap();
+    let baseline = initial
+        .with_file(|file| file.durable.borrow().clone())
+        .unwrap();
+    drop(initial);
+    for damaged_copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+        let mut image = baseline.clone();
+        for cycle in 0..3 {
+            let store = open(Some(image));
+            let recovered: Vec<_> = ids.iter().copied().collect();
+            store.recover_unowned_pages(&recovered).unwrap();
+            store.recover_unowned_pages(&recovered).unwrap();
+            store.sync_recovered_allocator().unwrap();
+            // The free-page counter excludes the trunk pages themselves.
+            // The allocation-ID oracle below must recover those pages too.
+            image = store
+                .with_file(|file| file.durable.borrow().clone())
+                .unwrap();
+            drop(store);
+            image[damaged_copy * PAGED_SUPERBLOCK_SLOT_SIZE + 64] ^= 1;
+            let store = open(Some(image));
+            // Journal replay after losing either superblock must be idempotent.
+            store.recover_unowned_pages(&recovered).unwrap();
+            store.sync_recovered_allocator().unwrap();
+            let mut allocated = BTreeSet::new();
+            let mut written = BTreeSet::new();
+            for index in 0..ids.len() {
+                let mut page = store.allocate_page(types[index % types.len()]).unwrap();
+                let id = page.page_id();
+                assert_ne!(id, live, "live sentinel was recycled");
+                assert!(ids.contains(&id), "lost reusable page, appended {id}");
+                assert!(allocated.insert(id), "page allocated twice: {id}");
+                // Touch both sides of trunk boundaries without fsyncing thousands
+                // of full in-memory file images in this portable fixture.
+                if index % FREE_IDS_PER_TRUNK <= 1 {
+                    page.insert_cell(b"generation", &(cycle as u64).to_le_bytes())
+                        .unwrap();
+                    store.write_page(id, page).unwrap();
+                    written.insert(id);
+                }
+            }
+            assert_eq!(allocated, ids);
+            assert_eq!(store.page_count().unwrap(), page_count);
+            assert_eq!(store.free_page_count().unwrap(), 0);
+            store.sync().unwrap();
+            image = store
+                .with_file(|file| file.durable.borrow().clone())
+                .unwrap();
+            assert_eq!(
+                image.len(),
+                baseline.len(),
+                "file grew in reuse cycle {cycle}"
+            );
+            drop(store);
+            let store = open(Some(image));
+            assert_eq!(
+                store.read_page(live).unwrap().read_cell(0).unwrap(),
+                (b"sentinel".to_vec(), b"must survive all reuse".to_vec())
+            );
+            for id in &written {
+                assert_eq!(
+                    store.read_page(*id).unwrap().read_cell(0).unwrap(),
+                    (
+                        b"generation".to_vec(),
+                        (cycle as u64).to_le_bytes().to_vec()
+                    )
+                );
+            }
+            image = store
+                .with_file(|file| file.durable.borrow().clone())
+                .unwrap();
+        }
+    }
+}

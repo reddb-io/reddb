@@ -1766,6 +1766,10 @@ impl UnifiedStore {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "storage_apocalypse.rs"]
+mod storage_apocalypse;
+
 #[cfg(test)]
 mod tests {
     use super::*;

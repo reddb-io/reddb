@@ -74,3 +74,12 @@ python3 scripts/jepsen_black_box_cluster.py --seed 0x5eed --red-bin target/debug
 
 The harness records `history.jsonl`, `schedule.json`, per-node logs, and
 `repro.json` under `target/jepsen-blackbox/` when artifacts are kept.
+
+## Page ownership and bounded storage growth
+
+`make test-storage-apocalypse` runs the non-ignored native checkpoint/replay
+crash matrix, repeated allocator reuse and storage plateau regressions, and
+transaction/snapshot regressions. The dedicated `Storage recovery and growth`
+workflow runs it on storage PRs and daily, together with `make test-dst-storage`.
+See [the failure-to-test map](storage-growth-regressions.md) for exact scenarios,
+space allowances and qualification limits.
