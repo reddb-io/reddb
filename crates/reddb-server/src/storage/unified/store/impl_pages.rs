@@ -299,10 +299,31 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
     payload.extend_from_slice(
         &bytes[cs + META_V3_PAGE1_HEADER..cs + META_V3_PAGE1_HEADER + first_take],
     );
+    let mut seen = std::collections::HashSet::new();
     while next != 0 && payload.len() < total {
+        if !seen.insert(next)
+            || seen.len()
+                >= pager
+                    .page_count()
+                    .map_err(|err| page_integrity(next, None, err.to_string()))?
+                    as usize
+        {
+            return Err(page_integrity(next, None, "cyclic metadata overflow chain"));
+        }
         let ov = pager
             .read_page(next)
             .map_err(|err| page_integrity(next, None, err.to_string()))?;
+        if ov
+            .page_type()
+            .map_err(|err| page_integrity(next, None, err.to_string()))?
+            != crate::storage::engine::PageType::Overflow
+        {
+            return Err(page_integrity(
+                next,
+                None,
+                "invalid metadata overflow page type",
+            ));
+        }
         let ob = ov.as_bytes();
         if ob.len() < cs + META_V3_OVERFLOW_HEADER {
             return Err(page_integrity(
@@ -1521,6 +1542,37 @@ mod checkpoint_work_tests {
         assert!(
             existing_overflow_chain(pager).is_err(),
             "a live page must not be mistaken for metadata overflow"
+        );
+        assert!(
+            read_meta_payload(pager).is_err(),
+            "a live page must not be read as metadata overflow"
+        );
+
+        let mut cycle = pager.allocate_page(PageType::Overflow).unwrap();
+        let cycle_id = cycle.page_id();
+        reddb_file::encode_native_metadata_overflow_continuation_header(
+            &mut cycle.as_bytes_mut()[HEADER_SIZE..],
+            reddb_file::NativeMetadataOverflowContinuationHeader {
+                next_overflow_page_id: cycle_id,
+                chunk_bytes: 1,
+            },
+        )
+        .unwrap();
+        pager.write_page(cycle_id, cycle).unwrap();
+        let mut manifest = Page::new(PageType::Header, 1);
+        reddb_file::encode_native_metadata_overflow_header(
+            &mut manifest.as_bytes_mut()[HEADER_SIZE..],
+            reddb_file::NativeMetadataOverflowHeader {
+                format_version: STORE_VERSION_V11,
+                total_payload_bytes: META_V3_FIRST_PAYLOAD_CAP as u32 + 3,
+                next_overflow_page_id: cycle_id,
+            },
+        )
+        .unwrap();
+        pager.write_page(1, manifest).unwrap();
+        assert!(
+            read_meta_payload(pager).is_err(),
+            "cyclic overflow must not be accepted"
         );
 
         let mut manifest = Page::new(PageType::Header, 1);
