@@ -935,6 +935,14 @@ mod tests {
             pager.flush().is_err(),
             "a page with an LSN needs a WAL barrier"
         );
+        assert!(
+            pager.dirty_page_count() > 0,
+            "failed flush must retain dirty pages"
+        );
+        assert!(
+            pager.flush().is_err(),
+            "failed writeback must remain fenced"
+        );
         drop(pager);
         cleanup(&path);
     }
