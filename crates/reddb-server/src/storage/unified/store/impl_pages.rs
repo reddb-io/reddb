@@ -490,6 +490,16 @@ impl UnifiedStore {
             .collect();
         reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let active_epoch = self.ownership_active_epoch.load(Ordering::Acquire);
+        let catalog_epoch = if active_epoch == 0 {
+            self.ownership_catalog_epoch.load(Ordering::Acquire)
+        } else {
+            active_epoch
+        };
+        if catalog_epoch != 0 {
+            reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        }
         // Record the exact pages before the catalog can forget their owners.
         // Recovery resolves this intent against the durable catalog epoch.
         let mut retirement_intent = reclaim.clone();
@@ -503,6 +513,8 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        self.ownership_catalog_epoch
+            .store(catalog_epoch, Ordering::Release);
         #[cfg(test)]
         if !reclaim.is_empty()
             && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE").is_some()
@@ -846,6 +858,8 @@ impl UnifiedStore {
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
+            ownership_catalog_epoch: AtomicU64::new(0),
+            ownership_active_epoch: AtomicU64::new(0),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
             commit: None,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
@@ -927,6 +941,8 @@ impl UnifiedStore {
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
+            ownership_catalog_epoch: AtomicU64::new(0),
+            ownership_active_epoch: AtomicU64::new(0),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
             commit,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
@@ -1280,6 +1296,13 @@ impl UnifiedStore {
                 pager
                     .restore_deferred_reclamation(&deferred)
                     .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                let ownership_epoch =
+                    reddb_file::native_store::decode_native_paged_ownership_epoch(
+                        content, &mut pos,
+                    )
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                self.ownership_catalog_epoch
+                    .store(ownership_epoch.unwrap_or(0), Ordering::Release);
             }
         }
 
@@ -1560,6 +1583,25 @@ impl UnifiedStore {
 #[cfg(test)]
 mod checkpoint_work_tests {
     use super::*;
+
+    #[test]
+    fn catalog_ownership_epoch_survives_reopen_and_later_publication() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).expect("open store");
+            store.create_collection("rows").expect("create collection");
+            store.ownership_active_epoch.store(37, Ordering::Release);
+            store.persist().expect("publish ownership epoch");
+            assert_eq!(store.ownership_catalog_epoch.load(Ordering::Acquire), 37);
+            store.ownership_active_epoch.store(0, Ordering::Release);
+            store
+                .persist()
+                .expect("publish without changing ownership epoch");
+        }
+        let reopened = UnifiedStore::open(&path).expect("reopen store");
+        assert_eq!(reopened.ownership_catalog_epoch.load(Ordering::Acquire), 37);
+    }
 
     #[test]
     fn metadata_overflow_with_missing_continuation_fails_closed() {
