@@ -162,6 +162,7 @@ fn scan_wal_prefix(bytes: &[u8]) -> Result<(u64, u64, u64), RecoveryError> {
     let mut last_valid_end = WAL_FILE_HEADER_BYTES as u64;
 
     loop {
+        let record_start = cursor.position() as usize;
         match decode_main_wal_record_frame(&mut cursor, version, 1) {
             Ok(Some((_term, frame))) => {
                 validate_frame(&frame, &mut prev_begin, &mut open_tx, &mut last_committed)?;
@@ -171,7 +172,14 @@ fn scan_wal_prefix(bytes: &[u8]) -> Result<(u64, u64, u64), RecoveryError> {
             // Clean EOF exactly at a record boundary: nothing torn.
             Ok(None) => break,
             // Torn/corrupt record: the prefix ends here.
-            Err(_) => break,
+            Err(error) => {
+                if bytes.get(record_start)
+                    == Some(&(reddb_file::MainWalRecordType::PageOwnership as u8))
+                {
+                    return Err(RecoveryError::WalUnreadable(error.to_string()));
+                }
+                break;
+            }
         }
     }
 
@@ -190,6 +198,11 @@ fn validate_frame(
     last_committed: &mut u64,
 ) -> Result<(), RecoveryError> {
     match frame {
+        MainWalRecordFrame::PageOwnership { .. } => {
+            return Err(RecoveryError::WalUnreadable(
+                "page ownership journal requires recovery".into(),
+            ));
+        }
         MainWalRecordFrame::Begin { tx_id } => {
             if let Some(open) = *open_tx {
                 return Err(RecoveryError::NestedTransaction {
@@ -272,6 +285,27 @@ fn read_optional(path: &Path) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::wal_workload::run_wal_workload;
+
+    #[test]
+    fn ownership_records_are_not_accepted_as_a_recovered_wal_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(WAL_FILE_NAME);
+        let frame = reddb_file::MainWalRecordFrame::PageOwnership {
+            record: reddb_file::page_ownership_journal::PageOwnershipRecord::Reserve {
+                epoch: 1,
+                page_id: 67,
+            },
+        };
+        let record = reddb_file::encode_main_wal_record_frame(&frame, 1).unwrap();
+        for length in [record.len(), record.len() - 1] {
+            let mut wal = reddb_file::encode_wal_file_header().to_vec();
+            wal.extend_from_slice(&record[..length]);
+            std::fs::write(&path, wal).unwrap();
+            assert!(recover_and_check(directory.path()).is_err());
+            assert!(crate::tm_commit_path::recover_tm_commit_path(directory.path()).is_err());
+            assert!(crate::value_equivalence::recover_committed_values(directory.path()).is_err());
+        }
+    }
 
     #[test]
     fn fault_free_run_recovers_everything() {

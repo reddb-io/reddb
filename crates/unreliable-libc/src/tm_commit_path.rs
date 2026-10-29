@@ -320,10 +320,24 @@ pub fn recover_tm_commit_path(dir: &Path) -> io::Result<Vec<TmRecoveredTx>> {
     let mut open: BTreeMap<u64, TxBuilder> = BTreeMap::new();
     let mut committed = Vec::new();
 
-    while let Ok(Some((_term, frame))) =
-        decode_main_wal_record_frame(&mut cursor, version, WORKLOAD_TERM)
-    {
+    loop {
+        let record_start = cursor.position() as usize;
+        let frame = match decode_main_wal_record_frame(&mut cursor, version, WORKLOAD_TERM) {
+            Ok(Some((_term, frame))) => frame,
+            Ok(None) => break,
+            Err(error) => {
+                if cursor.get_ref().get(record_start)
+                    == Some(&(reddb_file::MainWalRecordType::PageOwnership as u8))
+                {
+                    return Err(error);
+                }
+                break;
+            }
+        };
         match frame {
+            MainWalRecordFrame::PageOwnership { .. } => {
+                return Err(io::Error::other("page ownership journal requires recovery"));
+            }
             MainWalRecordFrame::Begin { tx_id } => {
                 open.insert(tx_id, TxBuilder::default());
             }

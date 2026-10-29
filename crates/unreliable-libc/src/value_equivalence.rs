@@ -303,10 +303,26 @@ pub fn recover_committed_values(dir: &Path) -> Result<Vec<RecoveredTx>, Equivale
     let mut open: Option<(u64, Vec<Value>)> = None;
 
     // Replay until a clean EOF or a torn trailing record ends the prefix.
-    while let Ok(Some((_term, frame))) =
-        decode_main_wal_record_frame(&mut reader, version, WORKLOAD_TERM)
-    {
+    loop {
+        let record_start = reader.position() as usize;
+        let frame = match decode_main_wal_record_frame(&mut reader, version, WORKLOAD_TERM) {
+            Ok(Some((_term, frame))) => frame,
+            Ok(None) => break,
+            Err(error) => {
+                if wal_bytes.get(record_start)
+                    == Some(&(reddb_file::MainWalRecordType::PageOwnership as u8))
+                {
+                    return Err(EquivalenceError::WalUnreadable(error.to_string()));
+                }
+                break;
+            }
+        };
         match frame {
+            MainWalRecordFrame::PageOwnership { .. } => {
+                return Err(EquivalenceError::WalUnreadable(
+                    "page ownership journal requires recovery".into(),
+                ));
+            }
             MainWalRecordFrame::Begin { tx_id } => open = Some((tx_id, Vec::new())),
             MainWalRecordFrame::PageWrite { tx_id, data, .. } => {
                 if let Some((open_id, values)) = open.as_mut() {
