@@ -13,6 +13,10 @@ pub use reddb_file::MainWalRecordType as RecordType;
 /// A single entry in the write-ahead log
 #[derive(Debug, Clone, PartialEq)]
 pub enum WalRecord {
+    /// Durable page-ownership intent. It must be resolved before page reuse.
+    PageOwnership {
+        record: reddb_file::page_ownership_journal::PageOwnershipRecord,
+    },
     /// Start of a transaction
     Begin { tx_id: u64 },
     /// Commit of a transaction
@@ -161,6 +165,9 @@ impl WalRecord {
     /// costs no copy of the payload.
     fn to_file_frame_ref(&self) -> MainWalRecordFrameRef<'_> {
         match self {
+            WalRecord::PageOwnership { record } => {
+                MainWalRecordFrameRef::PageOwnership { record: *record }
+            }
             WalRecord::Begin { tx_id } => MainWalRecordFrameRef::Begin { tx_id: *tx_id },
             WalRecord::Commit { tx_id } => MainWalRecordFrameRef::Commit { tx_id: *tx_id },
             WalRecord::Rollback { tx_id } => MainWalRecordFrameRef::Rollback { tx_id: *tx_id },
@@ -217,6 +224,9 @@ impl WalRecord {
     #[cfg(test)]
     fn to_file_frame(&self) -> MainWalRecordFrame {
         match self {
+            WalRecord::PageOwnership { record } => {
+                MainWalRecordFrame::PageOwnership { record: *record }
+            }
             WalRecord::Begin { tx_id } => MainWalRecordFrame::Begin { tx_id: *tx_id },
             WalRecord::Commit { tx_id } => MainWalRecordFrame::Commit { tx_id: *tx_id },
             WalRecord::Rollback { tx_id } => MainWalRecordFrame::Rollback { tx_id: *tx_id },
@@ -270,6 +280,7 @@ impl WalRecord {
 
     fn from_file_frame(frame: MainWalRecordFrame) -> Self {
         match frame {
+            MainWalRecordFrame::PageOwnership { record } => WalRecord::PageOwnership { record },
             MainWalRecordFrame::Begin { tx_id } => WalRecord::Begin { tx_id },
             MainWalRecordFrame::Commit { tx_id } => WalRecord::Commit { tx_id },
             MainWalRecordFrame::Rollback { tx_id } => WalRecord::Rollback { tx_id },
@@ -325,6 +336,21 @@ impl WalRecord {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn page_ownership_intent_round_trips_through_native_wal() {
+        let record = WalRecord::PageOwnership {
+            record: reddb_file::page_ownership_journal::PageOwnershipRecord::Reserve {
+                epoch: 7,
+                page_id: 67,
+            },
+        };
+        let bytes = record.encode();
+        let (_, decoded) = WalRecord::read(&mut Cursor::new(bytes))
+            .expect("decode WAL record")
+            .expect("record is present");
+        assert_eq!(decoded, record);
+    }
 
     // ==================== WalRecord::encode Tests ====================
 
