@@ -713,6 +713,24 @@ impl PageCacheShard {
         dirty_pages
     }
 
+    /// Snapshot and clear one dirty image under the same entry lock. A later
+    /// writer must leave its replacement dirty, even while this image flushes.
+    fn take_dirty_page(&self, page_id: u32) -> Option<Page> {
+        let index = cache_read(&self.index);
+        let slot = *index.get(&page_id)?;
+        let mut entries = cache_write(&self.entries);
+        let entry = entries.get_mut(slot)?.as_mut()?;
+        if !entry.dirty {
+            return None;
+        }
+        let page = entry.page.clone();
+        entry.dirty = false;
+        drop(entries);
+        drop(index);
+        cache_lock(&self.stats).writebacks += 1;
+        Some(page)
+    }
+
     /// Bounded counterpart of `flush_dirty` used by the background
     /// writer. Snapshots up to `max` dirty pages, marks them clean,
     /// and returns the (page_id, page) pairs for the caller to
@@ -790,6 +808,20 @@ impl PageCacheShard {
     /// Get all cached page IDs
     pub fn page_ids(&self) -> Vec<u32> {
         cache_read(&self.index).keys().copied().collect()
+    }
+
+    /// Snapshot IDs without cloning images or clearing their dirty flags.
+    fn dirty_page_ids(&self, max: usize) -> Vec<u32> {
+        let index = cache_read(&self.index);
+        let entries = cache_read(&self.entries);
+        index
+            .iter()
+            .filter_map(|(&page_id, &slot)| {
+                let entry = entries.get(slot)?.as_ref()?;
+                entry.dirty.then_some(page_id)
+            })
+            .take(max)
+            .collect()
     }
 }
 
@@ -915,6 +947,18 @@ impl PageCache {
         out
     }
 
+    /// Snapshot only the requested dirty images, bounding payload copies by
+    /// the caller's batch size rather than the full cache capacity.
+    pub fn flush_dirty_pages(&self, page_ids: &[u32]) -> Vec<(u32, Page)> {
+        let mut pages = Vec::with_capacity(page_ids.len());
+        for &page_id in page_ids {
+            if let Some(page) = self.shard_for(page_id).take_dirty_page(page_id) {
+                pages.push((page_id, page));
+            }
+        }
+        pages
+    }
+
     pub fn flush_some_dirty(&self, max: usize) -> Vec<(u32, Page)> {
         if max == 0 {
             return Vec::new();
@@ -946,6 +990,18 @@ impl PageCache {
             out.extend(s.page_ids());
         }
         out
+    }
+
+    /// Clean entries must not split a small dirty set into many I/O batches.
+    pub fn dirty_page_ids(&self, max: usize) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for shard in self.shards.iter() {
+            if ids.len() == max {
+                break;
+            }
+            ids.extend(shard.dirty_page_ids(max - ids.len()));
+        }
+        ids
     }
 }
 

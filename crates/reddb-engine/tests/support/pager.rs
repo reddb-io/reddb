@@ -28,6 +28,8 @@ pub(crate) struct MemoryFile {
     pub(crate) operations: Rc<RefCell<Vec<Operation>>>,
     pub(crate) fail_at: Option<usize>,
     pub(crate) fail_prefix: Option<usize>,
+    pub(crate) fail_write_range: Option<std::ops::Range<u64>>,
+    pub(crate) failed_write_offset: Option<u64>,
     pub(crate) fail_len: Cell<bool>,
 }
 
@@ -82,6 +84,16 @@ impl VfsFile for MemoryFile {
         if let Err(error) = self.operation(Operation::Write(self.position, buffer.len())) {
             self.write_prefix(&buffer[..self.fail_prefix.unwrap_or(buffer.len() / 2)]);
             return Err(error);
+        }
+        if self
+            .fail_write_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&self.position))
+        {
+            self.fail_write_range = None;
+            self.failed_write_offset = Some(self.position);
+            self.write_prefix(&buffer[..buffer.len() / 2]);
+            return Err(io::Error::other("injected torn home-page write"));
         }
         self.write_prefix(buffer);
         self.position += buffer.len() as u64;
@@ -721,7 +733,26 @@ pub fn pager_orchestration_allocation_fence() {
     }
 }
 
-pub const CASES: [(&str, fn()); 14] = [
+#[path = "pager_eviction.rs"]
+mod eviction;
+
+pub const CASES: [(&str, fn()); 18] = [
+    (
+        "pager_eviction_batch_stays_within_one_frame",
+        eviction::pager_eviction_batch_stays_within_one_frame,
+    ),
+    (
+        "pager_sparse_dirty_pages_share_a_protected_batch",
+        eviction::pager_sparse_dirty_pages_share_a_protected_batch,
+    ),
+    (
+        "pager_dirty_eviction_recovers_a_torn_home_write",
+        eviction::pager_dirty_eviction_recovers_a_torn_home_write,
+    ),
+    (
+        "pager_dirty_eviction_obeys_wal_barrier",
+        eviction::pager_dirty_eviction_obeys_wal_barrier,
+    ),
     (
         "btree_persisted_round_trip",
         btree::btree_persisted_round_trip,
