@@ -876,6 +876,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 ));
             }
             let trunk = self.read_page(trunk_id)?;
+            if trunk.page_id() != trunk_id {
+                return Err(PagerError::InvalidDatabase(
+                    "misdirected freelist trunk".into(),
+                ));
+            }
             let mut loaded = FreeList::new();
             let next = loaded
                 .load_from_trunk(&trunk)

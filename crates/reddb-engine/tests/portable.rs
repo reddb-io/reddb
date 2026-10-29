@@ -238,7 +238,7 @@ fn retired_batch_rejects_pages_already_free_before_and_after_reopen() {
 }
 
 #[test]
-fn retired_batch_rejects_cyclic_freelist_without_modifying_allocator() {
+fn retired_batch_rejects_corrupt_freelist_without_modifying_allocator() {
     use reddb_engine::storage::{
         page::{Page, PageType, HEADER_SIZE, PAGE_SIZE},
         pager::{NoWal, Pager, PagerConfig},
@@ -266,20 +266,32 @@ fn retired_batch_rejects_cyclic_freelist_without_modifying_allocator() {
     pager.free_retired_pages(&[free]).expect("retire page");
     pager.sync().expect("persist freelist");
     let head = pager.header().expect("header").freelist_head;
-    let mut bytes = pager
+    let bytes = pager
         .with_file(|file| file.durable.borrow().clone())
         .expect("file");
     drop(pager);
 
     let offset = head as usize * PAGE_SIZE;
-    let mut trunk = Page::from_bytes(bytes[offset..offset + PAGE_SIZE].try_into().expect("page"));
-    trunk.as_bytes_mut()[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&head.to_le_bytes());
-    trunk.update_checksum();
-    bytes[offset..offset + PAGE_SIZE].copy_from_slice(trunk.as_bytes());
-    let reopened = open(pager::MemoryFile::from_bytes(bytes), false);
-    let before = reopened.free_page_count().expect("free count");
-    assert!(reopened.free_retired_pages(&[live]).is_err());
-    assert_eq!(reopened.free_page_count().expect("free count"), before);
+    for cyclic in [true, false] {
+        let mut bytes = bytes.clone();
+        let mut trunk =
+            Page::from_bytes(bytes[offset..offset + PAGE_SIZE].try_into().expect("page"));
+        let retired = if cyclic {
+            trunk.as_bytes_mut()[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&head.to_le_bytes());
+            live
+        } else {
+            let mut header = trunk.header().expect("trunk header");
+            header.page_id = live;
+            trunk.set_header(&header);
+            head
+        };
+        trunk.update_checksum();
+        bytes[offset..offset + PAGE_SIZE].copy_from_slice(trunk.as_bytes());
+        let reopened = open(pager::MemoryFile::from_bytes(bytes), false);
+        let before = reopened.free_page_count().expect("free count");
+        assert!(reopened.free_retired_pages(&[retired]).is_err());
+        assert_eq!(reopened.free_page_count().expect("free count"), before);
+    }
 }
 
 #[test]
