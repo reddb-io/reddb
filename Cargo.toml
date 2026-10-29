@@ -195,6 +195,8 @@ embedded = ["reddb-client/embedded"]
 redwire = ["reddb-client/redwire"]
 
 [dev-dependencies]
+# Torn-page fixtures use the shared pager's in-file recovery offsets.
+reddb-engine = { workspace = true }
 # Tests at the umbrella level reach into the published-driver
 # layer of `reddb-client` (RedWire codec + frame, embedded
 # integration smoke). The crate-root dep keeps `default-features

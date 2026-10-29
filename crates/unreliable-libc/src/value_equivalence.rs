@@ -304,7 +304,8 @@ pub fn recover_committed_values(dir: &Path) -> Result<Vec<RecoveredTx>, Equivale
 
     // Replay until a clean EOF or a torn trailing record ends the prefix.
     loop {
-        let record_start = reader.position() as usize;
+        let record_start = usize::try_from(reader.position())
+            .map_err(|error| EquivalenceError::WalUnreadable(error.to_string()))?;
         let frame = match decode_main_wal_record_frame(&mut reader, version, WORKLOAD_TERM) {
             Ok(Some((_term, frame))) => frame,
             Ok(None) => break,

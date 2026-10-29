@@ -2689,6 +2689,7 @@ dependencies = [
  "prost",
  "rcgen",
  "reddb-io-client",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
