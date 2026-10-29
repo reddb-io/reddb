@@ -1738,6 +1738,669 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_reclaims_unpublished_pages() {
+        interrupted_replay_reclaims_pages(false, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_reclaims_durable_unpublished_pages() {
+        interrupted_replay_reclaims_pages(false, true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_preserves_published_pages() {
+        interrupted_replay_reclaims_pages(true, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_checkpoint_reclaims_unpublished_pages() {
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_REBUILD_PATH";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            // Inject resident changes without a WAL record: after the aborted
+            // checkpoint the old durable rows must remain authoritative.
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, 8))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+            store.persist().expect("must exit during checkpoint");
+            panic!("checkpoint rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let mut first = 0;
+        let mut last = 0;
+        for cycle in 1..=12 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_checkpoint_reclaims_unpublished_pages",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD", "1")
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(183),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("experimental checkpoint exit before manifest"));
+            last = std::fs::metadata(&path).unwrap().len();
+            if cycle == 1 {
+                first = last;
+            }
+            eprintln!("checkpoint_exit_cycle={cycle} data_logical={last}");
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(format!("initial-{id}"))]
+            );
+        }
+        assert!(last <= first + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted checkpoint must bound page growth: first={first}, after_12={last}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_checkpoint_with_wal_reclaims_unpublished_pages() {
+        use std::os::unix::fs::MetadataExt;
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_WAL_PATH";
+        const ROUND: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_WAL_ROUND";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let round: u64 = std::env::var(ROUND).unwrap().parse().unwrap();
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            if round > 1 {
+                for id in 1..=200 {
+                    assert_eq!(
+                        store
+                            .get("rows", EntityId::new(id))
+                            .unwrap()
+                            .data
+                            .as_row()
+                            .unwrap()
+                            .columns,
+                        vec![Value::text(replay_crash_payload(id, round - 1))]
+                    );
+                }
+            }
+            let actions: Vec<_> = (1..=200)
+                .map(|id| {
+                    let entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text(replay_crash_payload(id, round))],
+                    );
+                    StoreWalAction::upsert_entity("rows", &entity, None, STORE_VERSION_V11)
+                })
+                .collect();
+            for action in &actions {
+                store.apply_replayed_action(action, false).unwrap();
+            }
+            // Use the actual strict WAL coordinator. No checkpoint proof is
+            // installed, so the replacement-tree path must still be taken.
+            store
+                .commit
+                .as_ref()
+                .unwrap()
+                .append_actions(&actions)
+                .unwrap();
+            store.persist().expect("must exit during checkpoint");
+            panic!("checkpoint rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let mut fourth = 0;
+        let mut last = 0;
+        for round in 1..=12 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_checkpoint_with_wal_reclaims_unpublished_pages",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env(ROUND, round.to_string())
+                .env("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD", "1")
+                .output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(183),
+                "round {round}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("experimental checkpoint exit before manifest"));
+            let meta = std::fs::metadata(&path).unwrap();
+            last = meta.len();
+            if round == 4 {
+                fourth = last;
+            }
+            eprintln!(
+                "checkpoint_wal_exit_round={round} data_logical={last} data_allocated={}",
+                meta.blocks() * 512
+            );
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 12))]
+            );
+        }
+        recovered.persist().unwrap();
+        drop(recovered);
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 12))]
+            );
+        }
+        assert!(last <= fourth + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted WAL-backed checkpoints must bound page growth: round4={fourth}, round12={last}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_retired_reclamation_preserves_reuse() {
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_RETIRED_PATH";
+        fn mutate(store: &UnifiedStore, round: u64) {
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, round))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+        }
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            mutate(&store, 2);
+            store.persist().expect("must exit at retired free boundary");
+            panic!("retired free hook was not reached");
+        }
+        let mut reuse = Vec::new();
+        for (label, env_name, exit_code, message) in [
+            (
+                "before",
+                "REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE",
+                184,
+                "experimental exit before retired free",
+            ),
+            (
+                "after",
+                "REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE",
+                185,
+                "experimental exit after retired free",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+                store.create_collection("rows").unwrap();
+                for id in 1..=200 {
+                    store
+                        .insert(
+                            "rows",
+                            UnifiedEntity::table_row(
+                                EntityId::new(id),
+                                "rows",
+                                id,
+                                vec![Value::text(format!("initial-{id}"))],
+                            ),
+                        )
+                        .unwrap();
+                }
+                store.persist().unwrap();
+                mutate(&store, 1);
+                store.persist().unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_retired_reclamation_preserves_reuse",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env(env_name, "1")
+                .output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(exit_code),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            eprintln!(
+                "retired_reclaim_{label} child={}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            for id in 1..=200 {
+                assert_eq!(
+                    store
+                        .get("rows", EntityId::new(id))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text(replay_crash_payload(id, 2))]
+                );
+            }
+            let pager = store.pager.as_ref().unwrap();
+            let before_pages = pager.page_count().unwrap();
+            let mut ids = std::collections::HashSet::new();
+            let mut reused = 0;
+            for _ in 0..256 {
+                let page = pager
+                    .allocate_page(crate::storage::engine::page::PageType::BTreeLeaf)
+                    .unwrap();
+                let id = page.page_id();
+                assert!(ids.insert(id), "duplicate allocation");
+                reused += u32::from(id < before_pages);
+                pager.write_page(id, page).unwrap();
+            }
+            pager.sync().unwrap();
+            eprintln!(
+                "retired_reclaim_{label} before_pages={before_pages} reused={reused} appended={}",
+                256 - reused
+            );
+            drop(store);
+            let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+            for id in 1..=200 {
+                assert_eq!(
+                    reopened
+                        .get("rows", EntityId::new(id))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text(replay_crash_payload(id, 2))]
+                );
+            }
+            reuse.push(reused);
+        }
+        assert!(
+            reuse[0] >= reuse[1],
+            "recovery must not lose retired pages before allocator publication: before={} after={}",
+            reuse[0],
+            reuse[1]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn experimental_retaining_released_root_is_not_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, 1))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::unified::store::commit::tests::interrupted_retired_reclamation_preserves_reuse", "--nocapture"])
+            .env("REDDB_EXPERIMENTAL_RETIRED_PATH", &path)
+            .env("REDDB_EXPERIMENTAL_RETAIN_RELEASED_ROOT", "1")
+            .env("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE", "1")
+            .output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(185),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("experimental exit after retired free"));
+
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 2))]
+            );
+        }
+        let retired_roots: Vec<_> = reopened
+            .retired_btrees
+            .lock()
+            .iter()
+            .map(|entry| entry.tree.root_page_id())
+            .collect();
+        let pager = reopened.pager.as_ref().unwrap();
+        let root_types: Vec<_> = retired_roots
+            .iter()
+            .map(|id| pager.read_page(*id).unwrap().page_type().unwrap())
+            .collect();
+        assert!(
+            root_types.contains(&crate::storage::engine::page::PageType::FreelistTrunk),
+            "expected a retained root to have become a freelist trunk: {root_types:?}"
+        );
+        let error = reopened
+            .persist()
+            .expect_err("retained root was reused as allocator metadata");
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected retired tree page type"),
+            "{error}"
+        );
+        eprintln!("retained_root_types={root_types:?} persist_error={error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn interrupted_replay_reclaims_pages(after_publication: bool, force_sync: bool) {
+        use std::os::unix::fs::MetadataExt;
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_REPLAY_REBUILD_PATH";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let _store = UnifiedStore::open_with_config(path, config())
+                .expect("must exit while replay rebuilds");
+            panic!("replay rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        {
+            let coordinator = StoreCommitCoordinator::open(
+                reddb_file::layout::unified_wal_path(&path),
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .unwrap();
+            let actions = (1..=200)
+                .map(|id| {
+                    let entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text(replay_crash_payload(id, 8))],
+                    );
+                    StoreWalAction::upsert_entity("rows", &entity, None, STORE_VERSION_V11)
+                })
+                .collect::<Vec<_>>();
+            coordinator.append_actions(&actions).unwrap();
+        }
+        let snapshot = || {
+            let data = std::fs::metadata(&path).unwrap();
+            let wal = std::fs::metadata(reddb_file::layout::unified_wal_path(&path)).unwrap();
+            (
+                data.len(),
+                data.blocks() * 512,
+                wal.len(),
+                wal.blocks() * 512,
+            )
+        };
+        let baseline = snapshot();
+        let mut previous = baseline;
+        let mut first_failure = baseline;
+        for cycle in 1..=12 {
+            let test_name = if after_publication {
+                "storage::unified::store::commit::tests::interrupted_replay_preserves_published_pages"
+            } else if force_sync {
+                "storage::unified::store::commit::tests::interrupted_replay_reclaims_durable_unpublished_pages"
+            } else {
+                "storage::unified::store::commit::tests::interrupted_replay_reclaims_unpublished_pages"
+            };
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD_PATH, &path);
+            if !force_sync {
+                command.env("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC", "1");
+            } else {
+                command.env_remove("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC");
+            }
+            let message = if after_publication {
+                command.env("REDDB_EXPERIMENTAL_EXIT_AFTER_REPLAY_PUBLICATION", "1");
+                "experimental replay exit after manifest"
+            } else {
+                command.env("REDDB_EXPERIMENTAL_EXIT_DURING_REPLAY_REBUILD", "1");
+                "experimental replay rebuild exit before manifest"
+            };
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(182),
+                "cycle {cycle}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            let now = snapshot();
+            eprintln!("replay_exit_cycle={cycle} data_logical={} data_allocated={} wal_logical={} wal_allocated={}",now.0,now.1,now.2,now.3);
+            if cycle == 1 {
+                first_failure = now;
+            }
+            previous = now;
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        let pages = recovered.pager.as_ref().unwrap().page_count().unwrap();
+        let free = recovered.pager.as_ref().unwrap().free_page_count().unwrap();
+        recovered.persist().unwrap();
+        drop(recovered);
+        let final_sizes = snapshot();
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(reopened.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        eprintln!("replay_rebuild baseline={baseline:?} after_12={previous:?} after_recovery_checkpoint={final_sizes:?} pages={pages} free={free}");
+        // Probe actual allocation rather than the cached free-page counter:
+        // newly allocated IDs reveal whether interrupted generations returned
+        // to the allocator after recovery and a completed checkpoint.
+        let pager = reopened.pager.as_ref().unwrap();
+        let before_probe = pager.page_count().unwrap();
+        let mut ids = std::collections::HashSet::new();
+        let mut reused = 0;
+        for _ in 0..256 {
+            let page = pager
+                .allocate_page(crate::storage::engine::page::PageType::BTreeLeaf)
+                .unwrap();
+            let id = page.page_id();
+            assert!(ids.insert(id), "allocator returned the same page twice");
+            reused += u32::from(id < before_probe);
+            pager.write_page(id, page).unwrap();
+        }
+        pager.sync().unwrap();
+        let after_probe = pager.page_count().unwrap();
+        eprintln!("replay_reuse_probe count=256 before_pages={before_probe} after_pages={after_probe} reused={reused} appended={}", 256 - reused);
+        drop(reopened);
+        let verified = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                verified
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        assert!(
+            previous.0 <= first_failure.0 + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted replay must bound page growth: first={}, after_12={}",
+            first_failure.0,
+            previous.0
+        );
+    }
+
     #[test]
     fn paged_wal_replay_survives_immediate_process_exit() {
         const CHILD_PATH: &str = "REDDB_TEST_REPLAY_CRASH_PATH";
