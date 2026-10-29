@@ -2233,7 +2233,7 @@ impl RedDBRuntime {
         } else {
             ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
         };
-        let mut ids_to_update = if query.claim_limit.is_some() {
+        let mut ids_to_update = if query.claim_limit.is_some() || autocommit_table_update {
             self.filter_claim_locked_target_ids(&query.table, ids_to_update)
         } else {
             ids_to_update
@@ -2361,6 +2361,9 @@ impl RedDBRuntime {
     fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
         let conn_id = current_connection_id();
         let locks = self.inner.pending_claim_locks.read();
+        if locks.is_empty() {
+            return ids;
+        }
         ids.into_iter()
             .filter(|id| {
                 let Some(entity) = self.inner.db.store().get(table, *id) else {
@@ -2455,29 +2458,39 @@ impl RedDBRuntime {
         }
 
         let affected = applied_chunk.len() as u64;
-        if !applied_chunk.is_empty() {
+        let mut published = 0;
+        let persistence = (|| -> RedDBResult<()> {
             self.enforce_unique_update_post_images(&query.table, compiled_plan, &applied_chunk)?;
-            if compiled_plan.row_touches_unique_columns
-                || compiled_plan
-                    .row_contract_plan
-                    .as_ref()
-                    .is_some_and(|plan| plan.has_expressions)
-            {
-                let db = self.db();
-                let contract = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(self, &db, &query.table);
-                for item in &applied_chunk {
-                    let fields =
-                        crate::application::ports::entity_row_fields_snapshot(&item.entity);
-                    let previous_id = item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
-                    contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+            for chunk in applied_chunk.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                if compiled_plan.row_touches_unique_columns
+                    || compiled_plan
+                        .row_contract_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.has_expressions)
+                {
+                    let db = self.db();
+                    let contract = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(self, &db, &query.table);
+                    for item in chunk {
+                        let fields =
+                            crate::application::ports::entity_row_fields_snapshot(&item.entity);
+                        let previous_id =
+                            item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
+                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                    }
                 }
+                self.persist_update_chunk(chunk)?;
+                published += chunk.len();
             }
-            self.persist_update_chunk(&applied_chunk)?;
-            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
-            if !query.suppress_events {
-                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
-            }
+            Ok(())
+        })();
+        // Earlier chunks may have been published when a later constraint
+        // check fails. Finish their indexes and events before returning it.
+        let published_mutations = &applied_chunk[..published];
+        let lsns = self.flush_update_chunk(published_mutations, topology_guard)?;
+        if !query.suppress_events {
+            self.emit_update_events_for_collection(&query.table, published_mutations, &lsns)?;
         }
+        persistence?;
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -3177,6 +3190,45 @@ mod tests {
                 Some(&Value::text("new"))
             );
         }
+    }
+
+    #[test]
+    fn autocommit_update_skips_row_claimed_by_another_transaction() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id INT, rank INT, status TEXT, note TEXT)")
+            .unwrap();
+        rt.execute_query("CREATE INDEX capabilities_rank ON capabilities (rank)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, rank, status, note) VALUES (1, 10, 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        let claim = rt.execute_query("UPDATE capabilities SET status = 'claimed' WHERE status = 'ready' CLAIM LIMIT 1 ORDER BY rank ASC").unwrap();
+        assert_eq!(claim.affected_rows, 1);
+        set_current_connection_id(42);
+        let other = rt
+            .execute_query("UPDATE capabilities SET note = 'new' WHERE id = 1")
+            .unwrap();
+        assert_eq!(other.affected_rows, 0);
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let rows = rt
+            .execute_query("SELECT status, note FROM capabilities WHERE id = 1")
+            .unwrap();
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        assert_eq!(
+            rows.result.records[0].get("note"),
+            Some(&Value::text("old"))
+        );
     }
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {
