@@ -219,6 +219,144 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
 }
 
 #[test]
+fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{Pager, PagerConfig, WalBarrier},
+    };
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Event {
+        Reserve(u32, u32),
+        Detach(Vec<u32>),
+        Retire(Vec<u32>),
+    }
+    struct Barrier {
+        events: Rc<RefCell<Vec<Event>>>,
+        fail: Rc<Cell<bool>>,
+    }
+    impl WalBarrier for Barrier {
+        fn flush_until(&self, _: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
+            if self.fail.get() {
+                return Err(std::io::Error::other("injected ownership failure"));
+            }
+            self.events.borrow_mut().push(Event::Reserve(start, count));
+            Ok(())
+        }
+        fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+            if self.fail.get() {
+                return Err(std::io::Error::other("injected ownership failure"));
+            }
+            self.events.borrow_mut().push(Event::Detach(pages.to_vec()));
+            Ok(())
+        }
+        fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+            if self.fail.get() {
+                return Err(std::io::Error::other("injected ownership failure"));
+            }
+            self.events.borrow_mut().push(Event::Retire(pages.to_vec()));
+            Ok(())
+        }
+    }
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let fail = Rc::new(Cell::new(false));
+    let barrier = || Barrier {
+        events: Rc::clone(&events),
+        fail: Rc::clone(&fail),
+    };
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "ownership-hooks.rdb".into(),
+            PagerConfig::default(),
+            barrier(),
+            create,
+        )
+        .expect("open pager")
+    };
+
+    let pager = open(pager::MemoryFile::default(), true);
+    let a = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    let b = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    assert_eq!(
+        &*events.borrow(),
+        &[Event::Reserve(a, 1), Event::Reserve(b, 1)]
+    );
+    pager
+        .record_retirement_intent(&[a, b])
+        .expect("record retirement");
+    pager.free_retired_pages(&[a, b]).expect("retire pages");
+    assert_eq!(
+        &events.borrow()[2..],
+        &[Event::Retire(vec![a, b]), Event::Retire(vec![a, b])]
+    );
+    pager.sync().expect("persist freelist");
+    let bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable file");
+    drop(pager);
+
+    events.borrow_mut().clear();
+    let detached_failure = open(pager::MemoryFile::from_bytes(bytes.clone()), false);
+    fail.set(true);
+    assert!(detached_failure.allocate_page(PageType::BTreeLeaf).is_err());
+    fail.set(false);
+    assert!(detached_failure.allocate_page(PageType::BTreeLeaf).is_err());
+    assert_eq!(
+        detached_failure
+            .with_file(|file| file.durable.borrow().clone())
+            .expect("durable file"),
+        bytes
+    );
+    drop(detached_failure);
+    let reopened = open(pager::MemoryFile::from_bytes(bytes), false);
+    let reused = reopened
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("reuse")
+        .page_id();
+    let observed = events.borrow();
+    assert!(
+        matches!(&observed[..], [Event::Detach(pages), Event::Reserve(id, 1)] if pages.len() == 2 && pages.contains(&a) && pages.contains(&b) && *id == reused)
+    );
+    drop(observed);
+
+    let other_events = Rc::new(RefCell::new(Vec::new()));
+    let other_fail = Rc::new(Cell::new(true));
+    let failing = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "ownership-fail.rdb".into(),
+        PagerConfig::default(),
+        Barrier {
+            events: other_events,
+            fail: Rc::clone(&other_fail),
+        },
+        true,
+    )
+    .expect("open pager");
+    let count = failing.page_count().expect("page count");
+    assert!(failing.allocate_page(PageType::BTreeLeaf).is_err());
+    assert_eq!(failing.page_count().expect("page count"), count);
+    other_fail.set(false);
+    assert!(
+        failing.allocate_page(PageType::BTreeLeaf).is_err(),
+        "failed journal must fence writes"
+    );
+}
+
+#[test]
 fn retired_batch_rejects_duplicate_pages_without_modifying_allocator() {
     use reddb_engine::storage::{
         page::PageType,

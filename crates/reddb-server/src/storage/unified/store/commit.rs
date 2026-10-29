@@ -328,6 +328,74 @@ pub(crate) struct StoreCommitCoordinator {
     ownership_wal_state: AtomicU8,
 }
 
+/// Connects a fenced pager ownership epoch to the store's durable WAL.
+#[allow(dead_code)] // Installed once recovery and format fencing are active.
+struct StoreOwnershipRecorder {
+    coordinator: Arc<StoreCommitCoordinator>,
+    epoch: u64,
+}
+
+impl StoreOwnershipRecorder {
+    #[allow(dead_code)]
+    fn begin(coordinator: Arc<StoreCommitCoordinator>, epoch: u64) -> io::Result<Self> {
+        coordinator.append_durable_page_ownership(
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Begin { epoch },
+        )?;
+        Ok(Self { coordinator, epoch })
+    }
+
+    fn append_pages(
+        &self,
+        pages: &[u32],
+        make_record: impl Fn(u64, u32) -> reddb_file::page_ownership_journal::PageOwnershipRecord,
+    ) -> io::Result<()> {
+        for chunk in pages.chunks(256) {
+            let records: Vec<_> = chunk
+                .iter()
+                .map(|&id| make_record(self.epoch, id))
+                .collect();
+            self.coordinator
+                .append_durable_page_ownership_batch(&records)?;
+        }
+        Ok(())
+    }
+}
+
+impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipRecorder {
+    fn reserve_pages(&self, start: u32, count: u32) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+        let end = start.checked_add(count).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "ownership range overflow")
+        })?;
+        let mut next = start;
+        while next < end {
+            let chunk_end = next.saturating_add(256).min(end);
+            let records: Vec<_> = (next..chunk_end)
+                .map(|page_id| PageOwnershipRecord::Reserve {
+                    epoch: self.epoch,
+                    page_id,
+                })
+                .collect();
+            self.coordinator
+                .append_durable_page_ownership_batch(&records)?;
+            next = chunk_end;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> io::Result<()> {
+        self.append_pages(pages, |epoch, page_id| {
+            reddb_file::page_ownership_journal::PageOwnershipRecord::DetachFree { epoch, page_id }
+        })
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> io::Result<()> {
+        self.append_pages(pages, |epoch, page_id| {
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Retire { epoch, page_id }
+        })
+    }
+}
+
 impl StoreCommitCoordinator {
     pub(crate) fn open(
         wal_path: impl Into<PathBuf>,
@@ -606,19 +674,33 @@ impl StoreCommitCoordinator {
         &self,
         record: reddb_file::page_ownership_journal::PageOwnershipRecord,
     ) -> io::Result<()> {
-        // Validate before WalRecord::encode, which expects a valid file frame.
-        reddb_file::page_ownership_journal::encode(record)?;
-        let record = WalRecord::PageOwnership { record };
+        self.append_durable_page_ownership_batch(&[record])
+    }
+
+    /// Append a bounded set of ownership intents behind one durability fence.
+    #[allow(dead_code)] // Activated with the pager recovery and format fence.
+    pub(super) fn append_durable_page_ownership_batch(
+        &self,
+        records: &[reddb_file::page_ownership_journal::PageOwnershipRecord],
+    ) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        for &record in records {
+            // Validate before WalRecord::encode, which expects a valid frame.
+            reddb_file::page_ownership_journal::encode(record)?;
+            WalRecord::PageOwnership { record }.encode_into(&mut bytes);
+        }
         let _epoch = self.queue.epoch.read();
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
         self.ownership_wal_state.store(2, Ordering::Release);
         if matches!(self.mode, DurabilityMode::Strict) {
-            self.wal.lock().append(&record)?;
+            self.wal.lock().append_bytes(&bytes)?;
             return self.force_sync();
         }
 
-        let bytes = record.encode();
         let length = bytes.len() as u64;
         let target = self.queue.enqueue(bytes);
         let (state_lock, cond) = &*self.state;
@@ -1505,6 +1587,78 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
+    fn native_pager_records_page_ownership_in_durable_wal() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let wal_path = reddb_file::layout::unified_wal_path(&path);
+        let pager = crate::storage::engine::Pager::open(&path, Default::default())
+            .expect("open native pager");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                &wal_path,
+                DurabilityMode::Async,
+                GroupCommitOptions::default(),
+            )
+            .expect("open WAL"),
+        );
+        let recorder = Arc::new(
+            StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch"),
+        );
+        pager
+            .install_ownership_recorder(recorder)
+            .expect("install recorder");
+        let page = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id();
+        pager
+            .record_retirement_intent(&[page])
+            .expect("record retirement");
+        pager.free_retired_pages(&[page]).expect("retire");
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .expect("read WAL")
+            .iter()
+            .map(|item| item.expect("WAL record").1)
+            .collect();
+        assert_eq!(
+            records,
+            vec![
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Begin { epoch: 7 }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Reserve {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Retire {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Retire {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+            ]
+        );
+        assert!(
+            coordinator.fsync_count() >= 3,
+            "async ownership writes must sync"
+        );
+        assert!(
+            coordinator.truncate().is_err(),
+            "ownership WAL remains protected"
+        );
+    }
+
+    #[test]
     fn ownership_intents_are_durable_in_every_mode() {
         use reddb_file::page_ownership_journal::PageOwnershipRecord;
 
@@ -1522,8 +1676,12 @@ mod tests {
                 epoch: 1,
                 page_id: 67,
             };
+            let detach = PageOwnershipRecord::DetachFree {
+                epoch: 1,
+                page_id: 68,
+            };
             coordinator
-                .append_durable_page_ownership(intent)
+                .append_durable_page_ownership_batch(&[intent, detach])
                 .expect("durable intent");
             assert!(
                 coordinator.fsync_count() > 0,
@@ -1535,8 +1693,11 @@ mod tests {
                 .collect::<io::Result<Vec<_>>>()
                 .expect("read records");
             assert!(
-                matches!(records.as_slice(), [(_, WalRecord::PageOwnership { record })] if *record == intent)
+                matches!(records.as_slice(), [(_, WalRecord::PageOwnership { record: first }), (_, WalRecord::PageOwnership { record: second })] if *first == intent && *second == detach)
             );
+            assert!(coordinator
+                .append_single_record(WalRecord::PageOwnership { record: intent })
+                .is_err());
             assert!(coordinator
                 .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 0 })
                 .is_err());

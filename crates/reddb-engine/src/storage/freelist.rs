@@ -160,6 +160,10 @@ impl FreeList {
         self.free_pages.len()
     }
 
+    pub(crate) fn next_in_memory_page(&self) -> Option<u32> {
+        self.free_pages.last().copied()
+    }
+
     /// Test whether a batch overlaps free pages already loaded into memory.
     pub(crate) fn contains_any(&self, pages: &std::collections::HashSet<u32>) -> bool {
         self.free_pages.iter().any(|id| pages.contains(id))
