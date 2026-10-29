@@ -560,6 +560,7 @@ jobs:
         run: |
           result=0
           cargo test --locked -p reddb-io-server --lib page_ownership_intent_round_trips_through_native_wal -- --nocapture || result=1
+          cargo test --locked -p reddb-io-server --lib unresolved_ownership_intent_blocks_store_replay -- --nocapture || result=1
           for name in interrupted_replay_reclaims_unpublished_pages interrupted_replay_reclaims_durable_unpublished_pages interrupted_checkpoint_reclaims_unpublished_pages interrupted_checkpoint_with_wal_reclaims_unpublished_pages interrupted_retired_reclamation_preserves_reuse; do
             cargo test --locked -p reddb-io-server --lib -- --exact "storage::unified::store::commit::tests::$name" --nocapture || result=1
           done
