@@ -558,7 +558,7 @@ jobs:
       - name: Verify metadata recovery regressions
         if: matrix.shard == 1
         run: |
-          cargo test --locked -p reddb-io-server --lib metadata_overflow_with_missing_continuation_fails_closed -- --exact storage::unified::store::impl_pages::checkpoint_work_tests::metadata_overflow_with_missing_continuation_fails_closed
+          cargo test --locked -p reddb-io-server --lib -- --exact storage::unified::store::impl_pages::checkpoint_work_tests::metadata_overflow_with_missing_continuation_fails_closed
           cargo test --locked -p reddb-io-engine --test portable paged_layout_version_is_independent_of_current_writer_version -- --exact
       - name: Run non-integration test layer
         if: matrix.shard == 1
