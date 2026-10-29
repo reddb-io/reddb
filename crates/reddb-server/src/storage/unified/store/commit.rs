@@ -324,6 +324,8 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
+    /// Includes recovered epochs that were never published in the catalog.
+    ownership_last_epoch: AtomicU64,
     // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
     ownership_wal_state: AtomicU8,
 }
@@ -461,6 +463,7 @@ impl StoreCommitCoordinator {
             state,
             fsync_count,
             wal_generation: AtomicU64::new(0),
+            ownership_last_epoch: AtomicU64::new(0),
             ownership_wal_state: AtomicU8::new(0),
         })
     }
@@ -692,6 +695,10 @@ impl StoreCommitCoordinator {
             reddb_file::page_ownership_journal::encode(record)?;
             WalRecord::PageOwnership { record }.encode_into(&mut bytes);
         }
+        for record in records {
+            self.ownership_last_epoch
+                .fetch_max(record.epoch(), Ordering::AcqRel);
+        }
         let _epoch = self.queue.epoch.read();
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
@@ -882,6 +889,14 @@ impl StoreCommitCoordinator {
         self.release_completed_ownership_wal()
     }
 
+    pub(super) fn next_page_ownership_epoch(&self, store: &UnifiedStore) -> io::Result<u64> {
+        self.ownership_last_epoch
+            .load(Ordering::Acquire)
+            .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))
+    }
+
     /// Begin an epoch only when the caller has excluded all other pager mutators.
     pub(super) fn begin_page_ownership_epoch(
         &self,
@@ -890,6 +905,7 @@ impl StoreCommitCoordinator {
     ) -> io::Result<()> {
         if store.ownership_active_epoch.load(Ordering::Acquire) != 0
             || epoch <= store.ownership_catalog_epoch.load(Ordering::Acquire)
+            || epoch <= self.ownership_last_epoch.load(Ordering::Acquire)
         {
             return Err(io::Error::other("invalid page ownership epoch"));
         }
@@ -969,6 +985,8 @@ impl StoreCommitCoordinator {
             match record {
                 WalRecord::PageOwnership { record } => {
                     latest_ownership_epoch = latest_ownership_epoch.max(record.epoch());
+                    self.ownership_last_epoch
+                        .fetch_max(record.epoch(), Ordering::AcqRel);
                     ownership_journal
                         .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
@@ -1765,14 +1783,14 @@ mod tests {
         assert!(coordinator.begin_page_ownership_epoch(&store, 0).is_err());
         assert!(coordinator.finish_page_ownership_epoch(&store, 1).is_err());
         coordinator
-            .begin_page_ownership_epoch(&store, 1)
+            .begin_page_ownership_epoch(&store, 2)
             .expect("begin epoch");
-        assert!(coordinator.begin_page_ownership_epoch(&store, 2).is_err());
+        assert!(coordinator.begin_page_ownership_epoch(&store, 3).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 3).is_err());
         assert!(coordinator.finish_page_ownership_epoch(&store, 2).is_err());
-        assert!(coordinator.finish_page_ownership_epoch(&store, 1).is_err());
         store.flush_paged_registry().expect("publish epoch");
         coordinator
-            .finish_page_ownership_epoch(&store, 1)
+            .finish_page_ownership_epoch(&store, 2)
             .expect("finish epoch");
         assert_eq!(store.ownership_active_epoch.load(Ordering::Acquire), 0);
     }
@@ -1874,13 +1892,13 @@ mod tests {
             .expect("WAL");
             coordinator
                 .append_durable_page_ownership_batch(&[
-                    PageOwnershipRecord::Begin { epoch: 1 },
+                    PageOwnershipRecord::Begin { epoch: 2 },
                     PageOwnershipRecord::Reserve {
-                        epoch: 1,
+                        epoch: 2,
                         page_id: first,
                     },
                     PageOwnershipRecord::Reserve {
-                        epoch: 1,
+                        epoch: 2,
                         page_id: first + 1,
                     },
                 ])
@@ -1920,7 +1938,7 @@ mod tests {
             Some((
                 _,
                 WalRecord::PageOwnership {
-                    record: PageOwnershipRecord::Finish { epoch: 1 }
+                    record: PageOwnershipRecord::Finish { epoch: 2 }
                 }
             ))
         ));
@@ -1963,10 +1981,12 @@ mod tests {
             {
                 let store = UnifiedStore::open(&path).expect("create store");
                 store.create_collection("rows").expect("collection");
-                if published {
-                    store.ownership_active_epoch.store(1, Ordering::Release);
-                }
                 store.persist().expect("baseline");
+                if published {
+                    store.ownership_active_epoch.store(2, Ordering::Release);
+                    store.flush_paged_registry().expect("publish epoch");
+                    store.ownership_active_epoch.store(0, Ordering::Release);
+                }
             }
             let wal_path = reddb_file::layout::unified_wal_path(&path);
             let ids;
@@ -1982,14 +2002,14 @@ mod tests {
                 .expect("WAL");
                 let intent = |page_id| {
                     if published {
-                        PageOwnershipRecord::Retire { epoch: 1, page_id }
+                        PageOwnershipRecord::Retire { epoch: 2, page_id }
                     } else {
-                        PageOwnershipRecord::Reserve { epoch: 1, page_id }
+                        PageOwnershipRecord::Reserve { epoch: 2, page_id }
                     }
                 };
                 coordinator
                     .append_durable_page_ownership_batch(&[
-                        PageOwnershipRecord::Begin { epoch: 1 },
+                        PageOwnershipRecord::Begin { epoch: 2 },
                         intent(first),
                         intent(first + 1),
                     ])

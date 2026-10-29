@@ -358,6 +358,25 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    /// Copy a published tree in bounded batches before applying sparse updates.
+    pub(super) fn copy_checkpoint_tree(&self, previous: &BTree) -> Result<Arc<BTree>, StoreError> {
+        let pager = self.pager.as_ref().ok_or_else(|| {
+            StoreError::Io(std::io::Error::other("checkpoint tree requires a pager"))
+        })?;
+        let mut builder = CheckpointTreeBuilder::new(pager);
+        let mut cursor = previous
+            .cursor_first()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        while let Some(record) = cursor
+            .next()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+        {
+            builder.push(record)?;
+        }
+        builder.flush()?;
+        Ok(builder.tree)
+    }
+
     /// Compare and encode one borrowed row at a time. Begin a new tree only at
     /// the first difference, copying its already-verified prefix in bounded
     /// batches. Unchanged trees require no replacement allocation.
@@ -1378,6 +1397,9 @@ impl UnifiedStore {
                 )));
             }
         };
+        // Prevent unrelated allocations or frees from being attributed to
+        // this checkpoint's ownership epoch.
+        let _ownership_guard = pager.lock_ownership_mutations();
 
         match pager.read_page(1) {
             Ok(_) => {}
@@ -1397,6 +1419,33 @@ impl UnifiedStore {
         if let Some(commit) = &self.commit {
             commit.force_sync().map_err(StoreError::Io)?;
         }
+
+        struct InterruptedOwnership<'a> {
+            pager: &'a Pager,
+            active: bool,
+        }
+        impl Drop for InterruptedOwnership<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    self.pager.fence_interrupted_ownership();
+                }
+            }
+        }
+        let mut ownership = InterruptedOwnership {
+            pager,
+            active: self.commit.is_some(),
+        };
+        let epoch = if let Some(commit) = &self.commit {
+            let epoch = commit
+                .next_page_ownership_epoch(self)
+                .map_err(StoreError::Io)?;
+            commit
+                .begin_page_ownership_epoch(self, epoch)
+                .map_err(StoreError::Io)?;
+            Some(epoch)
+        } else {
+            None
+        };
 
         let collections = self.resident.collections.read();
         let mut btree_indices = self.btree_indices.write();
@@ -1555,6 +1604,10 @@ impl UnifiedStore {
         *self.checkpoint_versions.write() = checkpoint_versions;
 
         if let Some(commit) = &self.commit {
+            commit
+                .finish_page_ownership_epoch(self, epoch.expect("WAL ownership epoch"))
+                .map_err(StoreError::Io)?;
+            ownership.active = false;
             commit.truncate().map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
@@ -1594,16 +1647,12 @@ mod checkpoint_work_tests {
         {
             let store = UnifiedStore::open(&path).expect("open store");
             store.create_collection("rows").expect("create collection");
-            store.ownership_active_epoch.store(37, Ordering::Release);
             store.persist().expect("publish ownership epoch");
-            assert_eq!(store.ownership_catalog_epoch.load(Ordering::Acquire), 37);
-            store.ownership_active_epoch.store(0, Ordering::Release);
-            store
-                .persist()
-                .expect("publish without changing ownership epoch");
+            assert_eq!(store.ownership_catalog_epoch.load(Ordering::Acquire), 1);
+            store.persist().expect("publish next ownership epoch");
         }
         let reopened = UnifiedStore::open(&path).expect("reopen store");
-        assert_eq!(reopened.ownership_catalog_epoch.load(Ordering::Acquire), 37);
+        assert_eq!(reopened.ownership_catalog_epoch.load(Ordering::Acquire), 2);
     }
 
     #[test]

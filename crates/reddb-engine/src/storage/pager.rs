@@ -221,6 +221,9 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     /// Store-managed frees stay unavailable until their removal from the
     /// durable catalog has crossed a publication boundary.
     deferred_reclamation: Mutex<DeferredPageReclamation>,
+    /// Excludes page ownership changes while a host publishes an epoch.
+    /// Reentrant so the publishing thread can use ordinary pager methods.
+    ownership_mutations: parking_lot::ReentrantMutex<()>,
     /// Reused page ownership must reach both superblock copies before a
     /// manifest can refer to those pages, including single-slot recovery.
     allocation_reused: std::sync::atomic::AtomicBool,
@@ -289,6 +292,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
+            ownership_mutations: parking_lot::ReentrantMutex::new(()),
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
             allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
@@ -309,6 +313,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     pub fn wal_barrier(&self) -> &W {
         &self.wal
+    }
+
+    /// Hold across an entire ownership publication, not just individual
+    /// allocation calls. Readers may continue accessing already-published pages.
+    pub fn lock_ownership_mutations(&self) -> parking_lot::ReentrantMutexGuard<'_, ()> {
+        self.ownership_mutations.lock()
+    }
+
+    /// An interrupted publication must be recovered before any more writes.
+    pub fn fence_interrupted_ownership(&self) {
+        self.writeback_failed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Run a host operation while holding the same lock as protected page I/O.
@@ -450,6 +466,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         &self,
         mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let _publication = self
             .superblock_publication
             .lock()
@@ -476,6 +493,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// and may publish a new mandatory format only after this succeeds. A
     /// failed write fences subsequent mutation until reopen and recovery.
     pub fn fence_file_format_version(&self, version: u32) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -667,6 +685,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Write a page (cache-aware)
     pub fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -692,6 +711,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn write_page_no_checksum(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -709,6 +729,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Allocate a new page
     pub fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -823,6 +844,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Reserve a contiguous extent of vector pages.
     pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<ExtentId, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -862,6 +884,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -900,6 +923,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.deferred_reclamation
             .lock()
             .map_err(|_| PagerError::LockPoisoned)?
@@ -919,6 +943,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn restore_deferred_reclamation(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let count = self.page_count()?;
         if pages
             .iter()
@@ -944,6 +969,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         retained: &[u32],
         released: &[u32],
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut deferred = self
             .deferred_reclamation
             .lock()
@@ -960,6 +986,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Record the pages whose catalog ownership is about to be retired.
     pub fn record_retirement_intent(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -980,6 +1007,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Return a fully validated, unpublished tree generation in one allocator
     /// mutation. Call only after its removal from the manifest is durable.
     pub fn free_retired_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -1111,6 +1139,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// The caller must exclude all allocation and publication until this state
     /// has been synced to both superblocks and the journal is completed.
     pub fn recover_unowned_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -1147,6 +1176,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Persist the current allocator in both fallback copies during recovery.
     /// The caller must exclude allocation until journal completion is durable.
     pub fn sync_recovered_allocator(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let result = (|| {
             self.sync()?;
             let _publication = self
@@ -1184,6 +1214,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn update_physical_header(&self, physical: PhysicalFileHeader) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
@@ -1202,6 +1233,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Flush all dirty pages to disk
     pub fn flush(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Ok(());
@@ -1293,6 +1325,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Sync file to disk (fsync)
     pub fn sync(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.flush()?;
 
         if self
@@ -1349,6 +1382,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// number actually written. Background-writer entry point —
     /// reuses the same persistence path as `flush()` but bounded.
     pub fn flush_some_dirty(&self, max: usize) -> Result<usize, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only || max == 0 {
             return Ok(0);
@@ -1452,6 +1486,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Write header and sync to disk (public for checkpointer).
     pub fn write_header_and_sync(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.write_header()?;
         let file = self.file_lock()?;
         file.sync_all()?;
@@ -1464,6 +1499,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         in_progress: bool,
         target_lsn: u64,
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut header = self.header_write()?;
         header.checkpoint_in_progress = in_progress;
         header.checkpoint_target_lsn = target_lsn;
@@ -1474,6 +1510,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Update the checkpoint LSN and clear the in-progress flag.
     pub fn complete_checkpoint(&self, lsn: u64) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut header = self.header_write()?;
         header.checkpoint_lsn = lsn;
         header.checkpoint_in_progress = false;

@@ -540,6 +540,41 @@ impl Pager {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ownership_scope_serializes_other_allocators_and_fences_errors() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pager = Arc::new(
+            Pager::open(directory.path().join("data.rdb"), Default::default()).expect("pager"),
+        );
+        let scope = pager.lock_ownership_mutations();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other_pager = Arc::clone(&pager);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal worker started");
+            let page = other_pager.allocate_page(PageType::BTreeLeaf);
+            done_tx
+                .send(page.map(|page| page.page_id()))
+                .expect("signal allocation");
+        });
+        started_rx.recv().expect("worker started");
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        let own = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("reentrant allocation");
+        drop(scope);
+        let other = done_rx
+            .recv()
+            .expect("worker result")
+            .expect("other allocation");
+        worker.join().expect("worker");
+        assert_ne!(own.page_id(), other);
+        pager.fence_interrupted_ownership();
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+    }
+
     fn temp_db_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "reddb-pager-{}-{}-{}.rdb",

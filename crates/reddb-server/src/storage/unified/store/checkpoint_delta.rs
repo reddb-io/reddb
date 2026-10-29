@@ -273,6 +273,15 @@ impl UnifiedStore {
         // do not reread potentially changed manager payloads in a second pass.
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
+        // A crash before catalog publication must leave the old generation
+        // intact. The ownership journal can reclaim an unpublished copy, but
+        // cannot undo mutations to pages reachable from the old catalog.
+        let tree =
+            if !upserts.is_empty() && self.ownership_active_epoch.load(Ordering::Acquire) != 0 {
+                self.copy_checkpoint_tree(tree)?
+            } else {
+                Arc::clone(tree)
+            };
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;
         for (id, source) in upserts {
@@ -317,7 +326,7 @@ impl UnifiedStore {
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             std::process::exit(176);
         }
-        Ok(Some(Arc::clone(tree)))
+        Ok(Some(tree))
     }
 }
 
