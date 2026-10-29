@@ -142,6 +142,10 @@ impl WalBarrier for NativeWalBarrier {
         if let Some(wal) = wal {
             let mut writer = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             writer.flush_until(lsn)?;
+        } else if lsn != 0 {
+            return Err(std::io::Error::other(
+                "nonzero page LSN requires a WAL durability barrier",
+            ));
         }
         Ok(())
     }
