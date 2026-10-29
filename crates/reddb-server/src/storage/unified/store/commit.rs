@@ -1432,6 +1432,53 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
+    fn unresolved_ownership_intent_blocks_store_replay() {
+        for truncated in [false, true] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open(&path).expect("create store");
+                store.create_collection("rows").expect("create collection");
+                store.persist().expect("persist baseline");
+            }
+            let wal_path = reddb_file::layout::unified_wal_path(&path);
+            {
+                let mut writer = WalWriter::open(&wal_path).expect("open WAL");
+                writer
+                    .append(&WalRecord::PageOwnership {
+                        record: reddb_file::page_ownership_journal::PageOwnershipRecord::Reserve {
+                            epoch: 1,
+                            page_id: 67,
+                        },
+                    })
+                    .expect("append ownership intent");
+                writer.sync().expect("sync ownership intent");
+            }
+            if truncated {
+                let wal = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wal_path)
+                    .expect("WAL");
+                let length = wal.metadata().expect("length").len();
+                wal.set_len(length - 1).expect("truncate last byte");
+                wal.sync_all().expect("sync truncation");
+            }
+            let before = std::fs::read(&path).expect("baseline data");
+            let error = match UnifiedStore::open(&path) {
+                Ok(_) => panic!("unresolved ownership must prevent opening"),
+                Err(error) => error,
+            };
+            let expected = if truncated {
+                "incomplete page ownership WAL record"
+            } else {
+                "page ownership journal requires recovery"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(std::fs::read(&path).expect("preserved data"), before);
+        }
+    }
+
+    #[test]
     fn logical_wal_replay_restores_a_deleted_physical_identity() {
         for flat in [false, true] {
             let store = UnifiedStore::new();
