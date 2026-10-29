@@ -185,6 +185,9 @@ impl FreeList {
             data[NEXT_TRUNK_OFFSET + 2],
             data[NEXT_TRUNK_OFFSET + 3],
         ]);
+        if next_trunk == trunk.page_id() {
+            return Err(FreeListError::Corrupted("trunk points to itself".into()));
+        }
 
         // Read count
         let count = u32::from_le_bytes([

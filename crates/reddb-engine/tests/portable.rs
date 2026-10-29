@@ -291,6 +291,10 @@ fn retired_batch_rejects_corrupt_freelist_without_modifying_allocator() {
         let before = reopened.free_page_count().expect("free count");
         assert!(reopened.free_retired_pages(&[retired]).is_err());
         assert_eq!(reopened.free_page_count().expect("free count"), before);
+        assert!(
+            reopened.allocate_page(PageType::BTreeLeaf).is_err(),
+            "allocation must reject a self-linked or misdirected trunk"
+        );
     }
 }
 
