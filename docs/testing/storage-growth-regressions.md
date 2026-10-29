@@ -100,6 +100,13 @@ observes all six model profilers while an unrelated collection grows. It measure
 allocated bytes as well as allocation count, since worker-thread cloning can
 leave only a few large allocations on the calling thread.
 
+System collections in the `red_` and `red.` namespaces retain their named-row
+representation: bootstrap and catalog readers still access those maps directly.
+Both early and late recovery compaction must preserve it. A storage-only cold
+open checks the durable bootstrap marker before runtime initialization, then
+repeated runtime opens check the selected preset and declared column schema.
+Compacting user data must never cause an existing vault to bootstrap again.
+
 Run the focused gates with:
 
 ```sh

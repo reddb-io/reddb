@@ -1036,15 +1036,19 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
             NoWal,
             create,
         )
-        .unwrap()
+        .expect("valid multi-trunk recovery fixture")
     };
     let initial = open(None);
-    let mut sentinel = initial.allocate_page(PageType::BTreeLeaf).unwrap();
+    let mut sentinel = initial
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("valid multi-trunk recovery fixture");
     let live = sentinel.page_id();
     sentinel
         .insert_cell(b"sentinel", b"must survive all reuse")
-        .unwrap();
-    initial.write_page(live, sentinel).unwrap();
+        .expect("valid multi-trunk recovery fixture");
+    initial
+        .write_page(live, sentinel)
+        .expect("valid multi-trunk recovery fixture");
     let types = [
         PageType::BTreeLeaf,
         PageType::BTreeInterior,
@@ -1054,39 +1058,53 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
         .map(|index| {
             initial
                 .allocate_page(types[index % types.len()])
-                .unwrap()
+                .expect("valid multi-trunk recovery fixture")
                 .page_id()
         })
         .collect();
-    initial.sync().unwrap();
-    let page_count = initial.page_count().unwrap();
+    initial.sync().expect("valid multi-trunk recovery fixture");
+    let page_count = initial
+        .page_count()
+        .expect("valid multi-trunk recovery fixture");
     let baseline = initial
         .with_file(|file| file.durable.borrow().clone())
-        .unwrap();
+        .expect("valid multi-trunk recovery fixture");
     drop(initial);
     for damaged_copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
         let mut image = baseline.clone();
         for cycle in 0..3 {
             let store = open(Some(image));
             let recovered: Vec<_> = ids.iter().copied().collect();
-            store.recover_unowned_pages(&recovered).unwrap();
-            store.recover_unowned_pages(&recovered).unwrap();
-            store.sync_recovered_allocator().unwrap();
+            store
+                .recover_unowned_pages(&recovered)
+                .expect("valid multi-trunk recovery fixture");
+            store
+                .recover_unowned_pages(&recovered)
+                .expect("valid multi-trunk recovery fixture");
+            store
+                .sync_recovered_allocator()
+                .expect("valid multi-trunk recovery fixture");
             // The free-page counter excludes the trunk pages themselves.
             // The allocation-ID oracle below must recover those pages too.
             image = store
                 .with_file(|file| file.durable.borrow().clone())
-                .unwrap();
+                .expect("valid multi-trunk recovery fixture");
             drop(store);
             image[damaged_copy * PAGED_SUPERBLOCK_SLOT_SIZE + 64] ^= 1;
             let store = open(Some(image));
             // Journal replay after losing either superblock must be idempotent.
-            store.recover_unowned_pages(&recovered).unwrap();
-            store.sync_recovered_allocator().unwrap();
+            store
+                .recover_unowned_pages(&recovered)
+                .expect("valid multi-trunk recovery fixture");
+            store
+                .sync_recovered_allocator()
+                .expect("valid multi-trunk recovery fixture");
             let mut allocated = BTreeSet::new();
             let mut written = BTreeSet::new();
             for index in 0..ids.len() {
-                let mut page = store.allocate_page(types[index % types.len()]).unwrap();
+                let mut page = store
+                    .allocate_page(types[index % types.len()])
+                    .expect("valid multi-trunk recovery fixture");
                 let id = page.page_id();
                 assert_ne!(id, live, "live sentinel was recycled");
                 assert!(ids.contains(&id), "lost reusable page, appended {id}");
@@ -1095,18 +1113,30 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
                 // of full in-memory file images in this portable fixture.
                 if index % FREE_IDS_PER_TRUNK <= 1 {
                     page.insert_cell(b"generation", &(cycle as u64).to_le_bytes())
-                        .unwrap();
-                    store.write_page(id, page).unwrap();
+                        .expect("valid multi-trunk recovery fixture");
+                    store
+                        .write_page(id, page)
+                        .expect("valid multi-trunk recovery fixture");
                     written.insert(id);
                 }
             }
             assert_eq!(allocated, ids);
-            assert_eq!(store.page_count().unwrap(), page_count);
-            assert_eq!(store.free_page_count().unwrap(), 0);
-            store.sync().unwrap();
+            assert_eq!(
+                store
+                    .page_count()
+                    .expect("valid multi-trunk recovery fixture"),
+                page_count
+            );
+            assert_eq!(
+                store
+                    .free_page_count()
+                    .expect("valid multi-trunk recovery fixture"),
+                0
+            );
+            store.sync().expect("valid multi-trunk recovery fixture");
             image = store
                 .with_file(|file| file.durable.borrow().clone())
-                .unwrap();
+                .expect("valid multi-trunk recovery fixture");
             assert_eq!(
                 image.len(),
                 baseline.len(),
@@ -1115,12 +1145,20 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
             drop(store);
             let store = open(Some(image));
             assert_eq!(
-                store.read_page(live).unwrap().read_cell(0).unwrap(),
+                store
+                    .read_page(live)
+                    .expect("valid multi-trunk recovery fixture")
+                    .read_cell(0)
+                    .expect("valid multi-trunk recovery fixture"),
                 (b"sentinel".to_vec(), b"must survive all reuse".to_vec())
             );
             for id in &written {
                 assert_eq!(
-                    store.read_page(*id).unwrap().read_cell(0).unwrap(),
+                    store
+                        .read_page(*id)
+                        .expect("valid multi-trunk recovery fixture")
+                        .read_cell(0)
+                        .expect("valid multi-trunk recovery fixture"),
                     (
                         b"generation".to_vec(),
                         (cycle as u64).to_le_bytes().to_vec()
@@ -1129,7 +1167,7 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
             }
             image = store
                 .with_file(|file| file.durable.borrow().clone())
-                .unwrap();
+                .expect("valid multi-trunk recovery fixture");
         }
     }
 }

@@ -31,13 +31,21 @@ fn named_snapshot_recovery_does_not_expand_the_resident_working_set() {
     let live = SegmentManager::new("telemetry");
     let recovered = SegmentManager::new("telemetry");
     live.bulk_insert((1..=4096).map(|id| named_row(id, false)).collect())
-        .unwrap();
+        .expect("valid recovery fixture");
     for id in 1..=4096 {
         let image = encoded(&named_row(id, false));
-        let row = read_entity_binary(&image, &mut 0, STORE_VERSION_V11).unwrap();
-        recovered.restore_snapshot_entity(row).unwrap();
+        let row =
+            read_entity_binary(&image, &mut 0, STORE_VERSION_V11).expect("valid recovery fixture");
+        recovered
+            .restore_snapshot_entity(row)
+            .expect("valid recovery fixture");
     }
-    recovered.set_column_schema_if_empty(live.column_schema().unwrap().as_ref().clone());
+    recovered.set_column_schema_if_empty(
+        live.column_schema()
+            .expect("valid recovery fixture")
+            .as_ref()
+            .clone(),
+    );
     assert_eq!(recovered.compact_recovered_rows(), 0);
     eprintln!(
         "live={} recovered={}",
@@ -50,7 +58,11 @@ fn named_snapshot_recovery_does_not_expand_the_resident_working_set() {
     );
     for id in [1, 2048, 4096] {
         assert_eq!(
-            encoded(&recovered.get(EntityId::new(id)).unwrap()),
+            encoded(
+                &recovered
+                    .get(EntityId::new(id))
+                    .expect("valid recovery fixture")
+            ),
             encoded(&named_row(id, false)),
             "compaction must preserve named native records for another reopen"
         );
@@ -58,9 +70,11 @@ fn named_snapshot_recovery_does_not_expand_the_resident_working_set() {
     // Dynamic schemas must keep every field, including fields absent in the
     // first restored row. Compaction must never silently drop one.
     let changed = named_row(4097, true);
-    recovered.restore_snapshot_entity(changed.clone()).unwrap();
+    recovered
+        .restore_snapshot_entity(changed.clone())
+        .expect("valid recovery fixture");
     assert_eq!(
-        encoded(&recovered.get(changed.id).unwrap()),
+        encoded(&recovered.get(changed.id).expect("valid recovery fixture")),
         encoded(&changed)
     );
 }
@@ -71,8 +85,11 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
     for id in 1..=8 {
         let bytes = encoded(&named_row(id, false));
         manager
-            .insert(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
-            .unwrap();
+            .insert(
+                read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11)
+                    .expect("valid recovery fixture"),
+            )
+            .expect("valid recovery fixture");
     }
     assert_eq!(
         manager.compact_recovered_rows(),
@@ -80,14 +97,20 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
         "never guess a missing schema"
     );
     let original: Vec<_> = (1..=8)
-        .map(|id| encoded(&manager.get(EntityId::new(id)).unwrap()))
+        .map(|id| {
+            encoded(
+                &manager
+                    .get(EntityId::new(id))
+                    .expect("valid recovery fixture"),
+            )
+        })
         .collect();
     let schema = (0..16)
         .rev()
         .map(|i| format!("telemetry_dimension_{i:02}"))
         .collect();
     manager.set_column_schema_if_empty(schema);
-    manager.force_seal().unwrap();
+    manager.force_seal().expect("valid recovery fixture");
     let cursor = manager.physical_scan_cursor();
     let before = manager.resident_bytes();
     assert_eq!(
@@ -99,21 +122,31 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
     drop(cursor);
     assert_eq!(manager.compact_recovered_rows(), 8);
     for id in 1..=8 {
-        let row = manager.get(EntityId::new(id)).unwrap();
+        let row = manager
+            .get(EntityId::new(id))
+            .expect("valid recovery fixture");
         assert_eq!(
-            row.data.as_row().unwrap().columns[0],
+            row.data.as_row().expect("valid recovery fixture").columns[0],
             Value::Integer(id as i64 + 15)
         );
-        assert_eq!(encoded(&row), original[(id - 1) as usize]);
+        assert_eq!(
+            encoded(&row),
+            original[usize::try_from(id - 1).expect("small recovery fixture")]
+        );
     }
     let extra = named_row(9, true);
-    manager.restore_snapshot_entity(extra.clone()).unwrap();
+    manager
+        .restore_snapshot_entity(extra.clone())
+        .expect("valid recovery fixture");
     assert_eq!(
         manager.compact_recovered_rows(),
         0,
         "dynamic fields are retained"
     );
-    assert_eq!(encoded(&manager.get(extra.id).unwrap()), encoded(&extra));
+    assert_eq!(
+        encoded(&manager.get(extra.id).expect("valid recovery fixture")),
+        encoded(&extra)
+    );
 }
 
 #[test]
@@ -129,16 +162,23 @@ fn repeated_named_recovery_keeps_memory_and_every_native_record_stable() {
         for image in &images {
             recovered
                 .restore_snapshot_entity(
-                    read_entity_binary(image, &mut 0, STORE_VERSION_V11).unwrap(),
+                    read_entity_binary(image, &mut 0, STORE_VERSION_V11)
+                        .expect("valid recovery fixture"),
                 )
-                .unwrap();
+                .expect("valid recovery fixture");
         }
         recovered.set_column_schema_if_empty(schema.clone());
         assert_eq!(recovered.compact_recovered_rows(), 0);
         let bytes = recovered.resident_bytes();
         assert_eq!(*warm_bytes.get_or_insert(bytes), bytes);
         images = (1..=256)
-            .map(|id| encoded(&recovered.get(EntityId::new(id)).unwrap()))
+            .map(|id| {
+                encoded(
+                    &recovered
+                        .get(EntityId::new(id))
+                        .expect("valid recovery fixture"),
+                )
+            })
             .collect();
         assert_eq!(
             images, original,
@@ -158,11 +198,20 @@ fn recovery_compacts_each_row_when_its_schema_is_already_known() {
     for id in 1..=256 {
         let bytes = encoded(&named_row(id, false));
         manager
-            .restore_snapshot_entity(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
-            .unwrap();
-        let row = manager.get(EntityId::new(id)).unwrap();
+            .restore_snapshot_entity(
+                read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11)
+                    .expect("valid recovery fixture"),
+            )
+            .expect("valid recovery fixture");
+        let row = manager
+            .get(EntityId::new(id))
+            .expect("valid recovery fixture");
         assert!(
-            row.data.as_row().unwrap().named.is_none(),
+            row.data
+                .as_row()
+                .expect("valid recovery fixture")
+                .named
+                .is_none(),
             "compaction after the full snapshot loads is too late for its memory peak"
         );
         assert_eq!(encoded(&row), bytes);
@@ -180,12 +229,20 @@ fn recovery_shares_dynamic_row_shapes_without_declaring_columns_or_unbounded_cac
         ));
         let bytes = encoded(&row);
         manager
-            .restore_snapshot_entity(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
-            .unwrap();
-        let recovered = manager.get(row.id).unwrap();
+            .restore_snapshot_entity(
+                read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11)
+                    .expect("valid recovery fixture"),
+            )
+            .expect("valid recovery fixture");
+        let recovered = manager.get(row.id).expect("valid recovery fixture");
         assert_eq!(encoded(&recovered), bytes);
         assert_eq!(
-            recovered.data.as_row().unwrap().named.is_none(),
+            recovered
+                .data
+                .as_row()
+                .expect("valid recovery fixture")
+                .named
+                .is_none(),
             id <= 16,
             "shape cache is capped"
         );
@@ -216,6 +273,37 @@ fn compiled_projection_rejects_a_different_explicit_row_shape() {
     let row = reddb_engine::query::records::runtime_table_record_from_entity_ref_projected(
         &entity, &columns,
     )
-    .unwrap();
+    .expect("valid recovery fixture");
     assert_eq!(row.get("id"), Some(&Value::Integer(7)));
+}
+
+#[test]
+fn recovery_preserves_named_system_metadata_for_bootstrap_readers() {
+    for collection in ["red_config", "red_materialized_view_defs", "red.config"] {
+        let manager = SegmentManager::new(collection);
+        let mut entity = UnifiedEntity::table_row(EntityId::new(1), collection, 1, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text("system.bootstrap.completed"),
+                Value::Boolean(true),
+            ],
+            vec!["key".into(), "value".into()],
+        ));
+        let image = encoded(&entity);
+        manager
+            .restore_snapshot_entity(entity)
+            .expect("restore bootstrap marker");
+        manager.set_column_schema_if_empty(vec!["key".into(), "value".into()]);
+        manager.compact_recovered_rows();
+        let recovered = manager.get(EntityId::new(1)).expect("marker survives");
+        let fields = recovered
+            .data
+            .as_row()
+            .expect("metadata row")
+            .named
+            .as_ref()
+            .expect("system readers retain their named representation");
+        assert_eq!(fields.get("value"), Some(&Value::Boolean(true)));
+        assert_eq!(encoded(&recovered), image);
+    }
 }

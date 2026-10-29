@@ -785,6 +785,63 @@ fn paged_recovery_compacts_named_rows_before_runtime_initialization() {
 }
 
 #[test]
+fn paged_recovery_keeps_bootstrap_and_declared_schema_metadata_readable() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("bootstrap-recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        assert_eq!(
+            runtime.inner.db.store().set_config_tree(
+                "system.bootstrap",
+                &crate::serde_json::json!({"completed": true, "preset": "production"}),
+            ),
+            2
+        );
+        runtime
+            .execute_query("CREATE TABLE bootstrap_recovery (id INTEGER, payload TEXT)")
+            .expect("declared schema");
+    }
+    for _ in 0..3 {
+        // Bootstrap reads this before a runtime or any late hydration exists.
+        {
+            let db = crate::storage::RedDB::open_with_options(&options).expect("cold storage open");
+            assert_eq!(
+                db.store()
+                    .get_config(crate::service_cli::BOOTSTRAP_COMPLETED_KEY),
+                Some(reddb_types::Value::Boolean(true)),
+                "an existing vault must not be bootstrapped again after recovery"
+            );
+        }
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime reopen");
+        assert_eq!(
+            runtime
+                .inner
+                .db
+                .store()
+                .get_config(crate::service_cli::BOOTSTRAP_PRESET_KEY),
+            Some(reddb_types::Value::text("production"))
+        );
+        let manager = runtime
+            .inner
+            .db
+            .store()
+            .get_collection("bootstrap_recovery")
+            .expect("table");
+        assert_eq!(
+            manager
+                .column_schema()
+                .expect("rehydrated declared columns")
+                .len(),
+            2
+        );
+    }
+}
+
+#[test]
 fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
     use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
     use reddb_types::Value;

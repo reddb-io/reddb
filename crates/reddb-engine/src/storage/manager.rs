@@ -348,6 +348,9 @@ impl SegmentManager {
     /// a cursor's immutable view must never change under it.
     #[doc(hidden)]
     pub fn compact_recovered_rows(&self) -> usize {
+        if self.recovery_preserves_named_rows() {
+            return 0;
+        }
         let Some(schema) = self.column_schema() else {
             return 0;
         };
@@ -590,7 +593,17 @@ impl SegmentManager {
         }
     }
 
+    fn recovery_preserves_named_rows(&self) -> bool {
+        // Internal catalog/configuration readers still consume named maps
+        // directly, including bootstrap before runtime initialization. Keep
+        // their established representation on both recovery compaction paths.
+        self.collection.starts_with("red_") || self.collection.starts_with("red.")
+    }
+
     fn recovery_schema(&self, row: &super::entity::RowData) -> Option<Arc<Vec<String>>> {
+        if self.recovery_preserves_named_rows() {
+            return None;
+        }
         let named = row.named.as_ref()?;
         let matches = |schema: &Vec<String>| {
             schema.len() == named.len() && schema.iter().all(|name| named.contains_key(name))
