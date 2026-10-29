@@ -555,6 +555,11 @@ jobs:
       - name: red_client size budget
         if: matrix.shard == 4
         run: ./scripts/check-red-client-size.sh
+      - name: Verify concurrent HTTP updates and restart recovery
+        if: matrix.shard == 1
+        run: |
+          cargo build --locked --bin red
+          python3 scripts/verify-concurrent-http.py target/debug/red
       - name: Run non-integration test layer
         if: matrix.shard == 1
         env:
