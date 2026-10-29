@@ -22,6 +22,8 @@ pub enum PageOwnershipRecord {
     Reserve { epoch: u64, page_id: u32 },
     /// Retire a page after its previous owner has been identified.
     Retire { epoch: u64, page_id: u32 },
+    /// A free page detached from a persisted trunk, before changing its head.
+    DetachFree { epoch: u64, page_id: u32 },
     /// Mark a journal epoch complete after all allocator and catalog fences.
     Finish { epoch: u64 },
 }
@@ -33,6 +35,7 @@ impl PageOwnershipRecord {
             Self::Reserve { epoch, page_id } => (2, epoch, page_id),
             Self::Retire { epoch, page_id } => (3, epoch, page_id),
             Self::Finish { epoch } => (4, epoch, 0),
+            Self::DetachFree { epoch, page_id } => (5, epoch, page_id),
         }
     }
 }
@@ -40,7 +43,7 @@ impl PageOwnershipRecord {
 /// Encode one complete record. Does not write or synchronize any file.
 pub fn encode(record: PageOwnershipRecord) -> io::Result<[u8; RECORD_SIZE]> {
     let (kind, epoch, page_id) = record.fields();
-    if epoch == 0 || ((kind == 2 || kind == 3) && page_id == 0) {
+    if epoch == 0 || ((kind == 2 || kind == 3 || kind == 5) && page_id == 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid ownership record",
@@ -88,6 +91,7 @@ pub fn decode(bytes: &[u8]) -> io::Result<PageOwnershipRecord> {
         (2, 1..) => Ok(PageOwnershipRecord::Reserve { epoch, page_id }),
         (3, 1..) => Ok(PageOwnershipRecord::Retire { epoch, page_id }),
         (4, 0) => Ok(PageOwnershipRecord::Finish { epoch }),
+        (5, 1..) => Ok(PageOwnershipRecord::DetachFree { epoch, page_id }),
         _ => Err(invalid()),
     }
 }
@@ -98,6 +102,7 @@ pub struct PendingOwnershipEpoch {
     pub epoch: u64,
     pub reserved_pages: std::collections::BTreeSet<u32>,
     pub retired_pages: std::collections::BTreeSet<u32>,
+    pub detached_free_pages: std::collections::BTreeSet<u32>,
 }
 
 /// Validate a complete journal and return the unfinished epoch, if any.
@@ -129,6 +134,7 @@ pub fn pending_epoch(bytes: &[u8]) -> io::Result<Option<PendingOwnershipEpoch>> 
                     epoch,
                     reserved_pages: Default::default(),
                     retired_pages: Default::default(),
+                    detached_free_pages: Default::default(),
                 });
             }
             PageOwnershipRecord::Reserve { epoch, page_id } => {
@@ -144,6 +150,13 @@ pub fn pending_epoch(bytes: &[u8]) -> io::Result<Option<PendingOwnershipEpoch>> 
                     .filter(|value| value.epoch == epoch)
                     .ok_or_else(invalid)?;
                 current.retired_pages.insert(page_id);
+            }
+            PageOwnershipRecord::DetachFree { epoch, page_id } => {
+                let current = pending
+                    .as_mut()
+                    .filter(|value| value.epoch == epoch)
+                    .ok_or_else(invalid)?;
+                current.detached_free_pages.insert(page_id);
             }
             PageOwnershipRecord::Finish { epoch } => {
                 if pending.as_ref().is_none_or(|value| value.epoch != epoch) {
@@ -173,6 +186,10 @@ mod tests {
                 epoch: 7,
                 page_id: u32::MAX,
             },
+            PageOwnershipRecord::DetachFree {
+                epoch: 7,
+                page_id: 68,
+            },
             PageOwnershipRecord::Finish { epoch: 7 },
         ] {
             let bytes = encode(record).expect("encode");
@@ -201,6 +218,11 @@ mod tests {
             page_id: 0
         })
         .is_err());
+        assert!(encode(PageOwnershipRecord::DetachFree {
+            epoch: 1,
+            page_id: 0
+        })
+        .is_err());
     }
 
     #[test]
@@ -221,12 +243,20 @@ mod tests {
             page_id: 68,
         };
         let finish = PageOwnershipRecord::Finish { epoch: 7 };
-        let pending = pending_epoch(&bytes(&[begin, reserve, reserve, retire]))
+        let detach = PageOwnershipRecord::DetachFree {
+            epoch: 7,
+            page_id: 69,
+        };
+        let pending = pending_epoch(&bytes(&[begin, reserve, reserve, retire, detach]))
             .expect("pending")
             .expect("active epoch");
         assert_eq!(pending.epoch, 7);
         assert_eq!(pending.reserved_pages.into_iter().collect::<Vec<_>>(), [67]);
         assert_eq!(pending.retired_pages.into_iter().collect::<Vec<_>>(), [68]);
+        assert_eq!(
+            pending.detached_free_pages.into_iter().collect::<Vec<_>>(),
+            [69]
+        );
         assert_eq!(
             pending_epoch(&bytes(&[begin, reserve, finish])).expect("finished"),
             None
