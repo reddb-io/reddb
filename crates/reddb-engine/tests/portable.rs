@@ -238,6 +238,51 @@ fn retired_batch_rejects_pages_already_free_before_and_after_reopen() {
 }
 
 #[test]
+fn retired_batch_rejects_cyclic_freelist_without_modifying_allocator() {
+    use reddb_engine::storage::{
+        page::{Page, PageType, HEADER_SIZE, PAGE_SIZE},
+        pager::{NoWal, Pager, PagerConfig},
+    };
+
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "cyclic-freelist.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open pager")
+    };
+    let pager = open(pager::MemoryFile::default(), true);
+    let free = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate free page")
+        .page_id();
+    let live = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate live page")
+        .page_id();
+    pager.free_retired_pages(&[free]).expect("retire page");
+    pager.sync().expect("persist freelist");
+    let head = pager.header().expect("header").freelist_head;
+    let mut bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("file");
+    drop(pager);
+
+    let offset = head as usize * PAGE_SIZE;
+    let mut trunk = Page::from_bytes(bytes[offset..offset + PAGE_SIZE].try_into().expect("page"));
+    trunk.as_bytes_mut()[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&head.to_le_bytes());
+    trunk.update_checksum();
+    bytes[offset..offset + PAGE_SIZE].copy_from_slice(trunk.as_bytes());
+    let reopened = open(pager::MemoryFile::from_bytes(bytes), false);
+    let before = reopened.free_page_count().expect("free count");
+    assert!(reopened.free_retired_pages(&[live]).is_err());
+    assert_eq!(reopened.free_page_count().expect("free count"), before);
+}
+
+#[test]
 fn portable_execution_conformance() {
     for (name, run) in portable::CASES {
         eprintln!("{name}");
