@@ -346,7 +346,7 @@ mod tests {
             },
         };
         let bytes = record.encode();
-        let (_, decoded) = WalRecord::read(&mut Cursor::new(bytes))
+        let decoded = WalRecord::read(&mut Cursor::new(bytes))
             .expect("decode WAL record")
             .expect("record is present");
         assert_eq!(decoded, record);
