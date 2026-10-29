@@ -102,10 +102,7 @@ const META_V3_OVERFLOW_PAYLOAD_CAP: usize = META_PAGE_CONTENT_CAP - META_V3_OVER
 
 fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
     let cs = crate::storage::engine::HEADER_SIZE;
-    let page = match pager.read_page(1) {
-        Ok(p) => p,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let page = pager.read_page(1)?;
     let bytes = page.as_bytes();
     if bytes.len() < cs + META_V3_PAGE1_HEADER {
         return Ok(Vec::new());
@@ -126,15 +123,16 @@ fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
                 "cyclic metadata overflow chain".into(),
             ));
         }
-        let ov = match pager.read_page(next) {
-            Ok(p) => p,
-            Err(_) => break,
-        };
+        let ov = pager.read_page(next)?;
+        if ov.page_type()? != crate::storage::engine::PageType::Overflow {
+            return Err(PagerError::InvalidDatabase(
+                "invalid metadata overflow page type".into(),
+            ));
+        }
         let ob = ov.as_bytes();
-        let nn = match reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..]) {
-            Ok(header) => header.next_overflow_page_id,
-            Err(_) => 0,
-        };
+        let nn = reddb_file::decode_native_metadata_overflow_continuation_header(&ob[cs..])
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?
+            .next_overflow_page_id;
         pages.push(next);
         next = nn;
     }
@@ -324,6 +322,13 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
             &ob[cs + META_V3_OVERFLOW_HEADER..cs + META_V3_OVERFLOW_HEADER + take],
         );
         next = nn;
+    }
+    if payload.len() != total {
+        return Err(page_integrity(
+            1,
+            None,
+            "metadata overflow chain is incomplete",
+        ));
     }
     Ok(Some(payload))
 }
@@ -1514,6 +1519,71 @@ impl UnifiedStore {
 #[cfg(test)]
 mod checkpoint_work_tests {
     use super::*;
+
+    #[test]
+    fn metadata_overflow_with_missing_continuation_fails_closed() {
+        use crate::storage::engine::{Page, PageType, HEADER_SIZE};
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(directory.path().join("data.rdb")).expect("paged store");
+        let pager = store.pager.as_ref().unwrap();
+        let valid_payload = vec![42; META_PAGE_CONTENT_CAP * 3];
+        let valid_manifest = build_meta_page1_with_overflow(pager, &valid_payload).unwrap();
+        pager.write_page(1, valid_manifest).unwrap();
+        assert!(!existing_overflow_chain(pager).unwrap().is_empty());
+        assert_eq!(read_meta_payload(pager).unwrap().unwrap(), valid_payload);
+
+        let missing = pager.page_count().unwrap() + 100;
+        let mut manifest = Page::new(PageType::Header, 1);
+        reddb_file::encode_native_metadata_overflow_header(
+            &mut manifest.as_bytes_mut()[HEADER_SIZE..],
+            reddb_file::NativeMetadataOverflowHeader {
+                format_version: STORE_VERSION_V11,
+                total_payload_bytes: META_PAGE_CONTENT_CAP as u32 + 1,
+                next_overflow_page_id: missing,
+            },
+        )
+        .unwrap();
+        pager.write_page(1, manifest).unwrap();
+
+        assert!(
+            existing_overflow_chain(pager).is_err(),
+            "a missing continuation must not be treated as an empty chain"
+        );
+
+        let wrong_type = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let mut manifest = Page::new(PageType::Header, 1);
+        reddb_file::encode_native_metadata_overflow_header(
+            &mut manifest.as_bytes_mut()[HEADER_SIZE..],
+            reddb_file::NativeMetadataOverflowHeader {
+                format_version: STORE_VERSION_V11,
+                total_payload_bytes: META_PAGE_CONTENT_CAP as u32 + 1,
+                next_overflow_page_id: wrong_type.page_id(),
+            },
+        )
+        .unwrap();
+        pager.write_page(1, manifest).unwrap();
+        assert!(
+            existing_overflow_chain(pager).is_err(),
+            "a live page must not be mistaken for metadata overflow"
+        );
+
+        let mut manifest = Page::new(PageType::Header, 1);
+        reddb_file::encode_native_metadata_overflow_header(
+            &mut manifest.as_bytes_mut()[HEADER_SIZE..],
+            reddb_file::NativeMetadataOverflowHeader {
+                format_version: STORE_VERSION_V11,
+                total_payload_bytes: META_PAGE_CONTENT_CAP as u32 + 1,
+                next_overflow_page_id: 0,
+            },
+        )
+        .unwrap();
+        pager.write_page(1, manifest).unwrap();
+        assert!(
+            read_meta_payload(pager).is_err(),
+            "a truncated metadata payload must not be accepted"
+        );
+    }
 
     #[test]
     fn retired_tree_pages_remain_pinned_by_a_cursor() {
