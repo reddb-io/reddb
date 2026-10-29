@@ -83,6 +83,96 @@ mod storage;
 mod pager;
 
 #[test]
+fn paged_layout_version_is_independent_of_current_writer_version() {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig, PagerError};
+    use reddb_file::{PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE};
+
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "version-test.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+    };
+    let initial = open(pager::MemoryFile::default(), true).expect("create fixture");
+    let bytes = initial
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("copy durable fixture");
+    drop(initial);
+
+    let with_version = |version| {
+        let mut image = bytes.clone();
+        for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+            let offset = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = &mut image[offset..offset + PAGED_SUPERBLOCK_SLOT_SIZE];
+            let generation = reddb_file::paged_superblock_slot_generation(slot, copy)
+                .expect("fixture slot is valid");
+            reddb_file::set_database_header_version(slot, version).expect("set fixture version");
+            reddb_file::seal_paged_superblock_slot(slot, copy, generation)
+                .expect("seal fixture slot");
+        }
+        pager::MemoryFile::from_bytes(image)
+    };
+    let supported = open(with_version(0x0001_0001), false)
+        .expect("the original phase-3 DWB layout must stay readable");
+    assert_eq!(
+        supported.header().expect("read header").version,
+        0x0001_0001
+    );
+    assert!(matches!(
+        open(with_version(0x0001_0000), false),
+        Err(PagerError::LegacyPagedStore { .. })
+    ));
+    assert!(matches!(
+        open(with_version(reddb_file::PAGE_FILE_VERSION + 1), false),
+        Err(PagerError::InvalidDatabase(_))
+    ));
+}
+
+#[test]
+fn retired_batch_rejects_duplicate_pages_without_modifying_allocator() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+
+    let pager = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "duplicate-retirement.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true,
+    )
+    .expect("create pager");
+    let retired = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate retired page")
+        .page_id();
+    let before = pager.free_page_count().expect("read free count");
+    assert!(pager.free_retired_pages(&[retired, retired]).is_err());
+    assert_eq!(pager.free_page_count().expect("read free count"), before);
+    assert_ne!(
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate live page")
+            .page_id(),
+        retired
+    );
+    pager
+        .free_retired_pages(&[retired])
+        .expect("release one page");
+    assert_eq!(
+        pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("reuse retired page")
+            .page_id(),
+        retired
+    );
+}
+
+#[test]
 fn portable_execution_conformance() {
     for (name, run) in portable::CASES {
         eprintln!("{name}");
