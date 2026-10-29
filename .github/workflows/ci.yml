@@ -555,6 +555,9 @@ jobs:
       - name: red_client size budget
         if: matrix.shard == 4
         run: ./scripts/check-red-client-size.sh
+      - name: Verify native WAL barrier regression
+        if: matrix.shard == 1
+        run: cargo test --locked -p reddb-io-server --lib -- --exact storage::engine::pager::tests::flush_refuses_nonzero_lsn_without_a_wal_writer
       - name: Run non-integration test layer
         if: matrix.shard == 1
         env:
