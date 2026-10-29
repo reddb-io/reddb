@@ -2113,9 +2113,9 @@ impl RedDBRuntime {
         // assignments are constants. Resolve the current pre-image under the
         // RMW lock. Explicit transactions keep their statement snapshot and
         // first-committer-wins conflict detection.
-        let needs_rmw_lock = (matches!(query.target, UpdateTarget::Rows)
-            && self.current_xid().is_none())
-            || update_needs_rmw_lock(query);
+        let autocommit_table_update =
+            matches!(query.target, UpdateTarget::Rows) && self.current_xid().is_none();
+        let needs_rmw_lock = autocommit_table_update || update_needs_rmw_lock(query);
         let claim_model = update_model_name(update_target_model(query.target));
         if query.claim_limit.is_some() {
             self.inner
@@ -2184,11 +2184,36 @@ impl RedDBRuntime {
             scan_limit,
             query.target,
         );
-        if needs_rmw_lock {
+        if needs_rmw_lock && !autocommit_table_update {
             target_scan = target_scan.with_live_table_rows();
         }
         let ids_to_update = {
             let _topology_guard = topology_lock.read();
+            // The statement snapshot predates the table lock. Refresh it
+            // after acquiring that lock so earlier autocommits are visible,
+            // but never select an uncommitted physical tip. Historical
+            // versions can be absent from current indexes while a writer is
+            // active, so retain the snapshot-aware index fallback then.
+            let _fresh_snapshot = if autocommit_table_update {
+                let mut ctx =
+                    crate::runtime::impl_core::capture_current_snapshot().unwrap_or_else(|| {
+                        let manager = self.snapshot_manager();
+                        crate::runtime::impl_core::SnapshotContext {
+                            snapshot: manager.fresh_read_snapshot(),
+                            manager,
+                            own_xids: std::collections::HashSet::new(),
+                            requires_index_fallback: false,
+                            serializable_reader: None,
+                        }
+                    });
+                ctx.snapshot = ctx.manager.fresh_read_snapshot();
+                ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
+                Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
+                    ctx,
+                ))
+            } else {
+                None
+            };
             target_scan.find_target_ids()?
         };
         let order_limit = if query.claim_limit.is_some() {
@@ -3102,6 +3127,49 @@ mod tests {
             selected.result.records[0].get("observed_at"),
             Some(&Value::text("after"))
         );
+    }
+
+    #[test]
+    fn autocommit_update_does_not_filter_on_uncommitted_row_image() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, status TEXT, payload TEXT)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, status, payload) VALUES ('A', 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("UPDATE capabilities SET status = 'busy' WHERE id = 'A'")
+            .unwrap();
+        clear_current_connection_id();
+        let autocommit =
+            rt.execute_query("UPDATE capabilities SET payload = 'new' WHERE status = 'ready'");
+        if let Ok(result) = &autocommit {
+            assert_eq!(
+                result.affected_rows, 1,
+                "uncommitted status hid the committed target"
+            );
+        }
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT status, payload FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        if autocommit.is_ok() {
+            assert_eq!(
+                selected.result.records[0].get("payload"),
+                Some(&Value::text("new"))
+            );
+        }
     }
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {
