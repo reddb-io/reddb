@@ -104,6 +104,23 @@ impl From<OverflowError> for ValueLayoutError {
     }
 }
 
+/// Encode only when the result fits in a leaf, without allocating pages.
+pub(crate) fn encode_inline_without_pages(
+    value: &[u8],
+) -> Result<Option<Vec<u8>>, ValueLayoutError> {
+    if value.len() > MAX_VALUE_SIZE {
+        return Err(ValueLayoutError::ValueTooLarge(value.len()));
+    }
+    if value.len() <= OVERFLOW_THRESHOLD {
+        return Ok(Some(reddb_file::encode_btree_inline_raw(value)));
+    }
+    let (flag, bytes) = value_codec::encode(value);
+    if flag == value_codec::ValueFlag::Lz4 && bytes.len() <= OVERFLOW_THRESHOLD {
+        return Ok(Some(reddb_file::encode_btree_inline_compressed(&bytes)));
+    }
+    Ok(None)
+}
+
 /// Apply the decision ladder and return the bytes the B-tree should
 /// persist in the leaf cell value slot. May allocate overflow pages
 /// through `pager`.

@@ -1640,6 +1640,103 @@ impl UnifiedStore {
 mod checkpoint_work_tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_inline_sparse_checkpoint_replays_durable_rows() {
+        const CHILD: &str = "REDDB_TEST_INLINE_SPARSE_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let insert = std::env::var_os("REDDB_TEST_INLINE_SPARSE_INSERT").is_some();
+            let multi = std::env::var_os("REDDB_TEST_INLINE_SPARSE_MULTI").is_some();
+            let store = UnifiedStore::open(path).expect("open store");
+            let initial_count = if multi { 600 } else { 1 };
+            for id in 1..=initial_count {
+                store.insert_auto("rows", row(id, 1)).expect("seed");
+            }
+            store.persist().expect("baseline");
+            let manager = store.get_collection("rows").expect("collection");
+            let ids: Vec<u64> = if multi {
+                (1..=initial_count).collect()
+            } else {
+                vec![if insert { 2 } else { 1 }]
+            };
+            let mut actions = Vec::new();
+            for id in ids {
+                if insert {
+                    manager.insert(row(id, 9)).expect("insert version");
+                } else {
+                    manager.update(row(id, 9)).expect("update version");
+                }
+                let entity = manager.get(EntityId::new(id)).expect("changed entity");
+                actions.push(StoreWalAction::upsert_entity(
+                    "rows",
+                    &entity,
+                    None,
+                    store.format_version(),
+                ));
+            }
+            let references = store
+                .commit
+                .as_ref()
+                .expect("coordinator")
+                .append_checkpoint_actions(&actions)
+                .expect("durable WAL");
+            store.remember_checkpoint_rows(actions, references);
+            store.persist().expect("exit after sparse write");
+            panic!("inline sparse crash hook was not reached");
+        }
+        for (insert, multi) in [(false, false), (true, false), (false, true)] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args(["--exact", "storage::unified::store::impl_pages::checkpoint_work_tests::interrupted_inline_sparse_checkpoint_replays_durable_rows", "--nocapture"])
+                .env(CHILD, &path)
+                .env("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE", "1");
+            if insert {
+                command.env("REDDB_TEST_INLINE_SPARSE_INSERT", "1");
+            }
+            if multi {
+                command.env("REDDB_TEST_INLINE_SPARSE_MULTI", "1");
+            }
+            let output = command.output().expect("crash child");
+            assert_eq!(
+                output.status.code(),
+                Some(190),
+                "insert={insert} multi={multi}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let recovered = UnifiedStore::open(&path).expect("recover");
+            let ids: Vec<u64> = if multi {
+                (1..=600).collect()
+            } else {
+                vec![if insert { 2 } else { 1 }]
+            };
+            for id in ids {
+                assert_eq!(
+                    recovered
+                        .get("rows", EntityId::new(id))
+                        .expect("recovered row")
+                        .data
+                        .as_row()
+                        .expect("row")
+                        .columns,
+                    vec![Value::Integer(9)]
+                );
+            }
+            assert_eq!(
+                recovered.get_collection("rows").expect("rows").count(),
+                if multi {
+                    600
+                } else if insert {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+    }
+
     #[test]
     fn catalog_ownership_epoch_survives_reopen_and_later_publication() {
         let directory = tempfile::tempdir().expect("temporary store");

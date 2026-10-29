@@ -273,15 +273,40 @@ impl UnifiedStore {
         // do not reread potentially changed manager payloads in a second pass.
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
-        // A crash before catalog publication must leave the old generation
-        // intact. The ownership journal can reclaim an unpublished copy, but
-        // cannot undo mutations to pages reachable from the old catalog.
-        let tree =
-            if !upserts.is_empty() && self.ownership_active_epoch.load(Ordering::Acquire) != 0 {
-                self.copy_checkpoint_tree(tree)?
-            } else {
-                Arc::clone(tree)
-            };
+        let protected = self.ownership_active_epoch.load(Ordering::Acquire) != 0;
+        let mut tree = Arc::clone(tree);
+        let mut copied = false;
+        let mut apply = |items: &[(Vec<u8>, Vec<u8>)]| -> Result<(), StoreError> {
+            if protected && !copied {
+                // Inline values can be upserted without changing page
+                // ownership or tree links when the leaves have room. Every
+                // image was checked against the durable WAL above, so replay
+                // can finish a partially applied batch after a crash.
+                if tree
+                    .try_upsert_inline_without_splits(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                {
+                    #[cfg(test)]
+                    if std::env::var_os("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE").is_some() {
+                        self.pager
+                            .as_ref()
+                            .expect("paged checkpoint")
+                            .sync()
+                            .map_err(|error| {
+                                StoreError::Io(std::io::Error::other(error.to_string()))
+                            })?;
+                        std::process::exit(190);
+                    }
+                    return Ok(());
+                }
+                // Structural changes must leave the published generation
+                // untouched until the catalog points at their replacement.
+                tree = self.copy_checkpoint_tree(&tree)?;
+                copied = true;
+            }
+            tree.upsert_batch_sorted(items)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+        };
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;
         for (id, source) in upserts {
@@ -301,9 +326,10 @@ impl UnifiedStore {
             };
             let key = id.raw().to_be_bytes().to_vec();
             let bytes = key.len() + value.len();
-            if !batch.is_empty() && batch_bytes.saturating_add(bytes) > 1024 * 1024 {
-                tree.upsert_batch_sorted(&batch)
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            if !batch.is_empty()
+                && (batch_bytes.saturating_add(bytes) > 1024 * 1024 || batch.len() >= 512)
+            {
+                apply(&batch)?;
                 batch.clear();
                 batch_bytes = 0;
             }
@@ -311,8 +337,7 @@ impl UnifiedStore {
             batch.push((key, value));
         }
         if !batch.is_empty() {
-            tree.upsert_batch_sorted(&batch)
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            apply(&batch)?;
         }
         drop(retained);
         #[cfg(debug_assertions)]

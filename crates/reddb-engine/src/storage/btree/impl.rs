@@ -302,6 +302,58 @@ impl<P: PageStore> BTree<P> {
         self.insert_encoded(key, &new_stored)
     }
 
+    /// Upsert inline values without allocating, freeing or changing tree links.
+    /// The caller must make every value durable in its WAL before
+    /// calling this method. Returns false without writing if any item needs a
+    /// structural update or an overflow chain.
+    pub fn try_upsert_inline_without_splits(
+        &self,
+        items: &[(Vec<u8>, Vec<u8>)],
+    ) -> BTreeResult<bool> {
+        let _writer = self.writer.lock();
+        let root_id = self.root_page_id();
+        if root_id == 0 && !items.is_empty() {
+            return Ok(false);
+        }
+        let mut pages = std::collections::BTreeMap::<u32, (Page, Vec<(Vec<u8>, Vec<u8>)>)>::new();
+        for (key, value) in items {
+            if key.len() > MAX_KEY_SIZE {
+                return Err(BTreeError::KeyTooLarge(key.len()));
+            }
+            let Some(new_value) = value_layout::encode_inline_without_pages(value)? else {
+                return Ok(false);
+            };
+            let (leaf_id, _) = self.find_leaf(root_id, key)?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(leaf_id) {
+                let page = self.pager.read_page(leaf_id)?;
+                let entries = read_leaf_entries(&page)?;
+                entry.insert((page, entries));
+            }
+            let (_, entries) = pages.get_mut(&leaf_id).expect("leaf was loaded");
+            match entries.binary_search_by(|(existing, _)| existing.as_slice().cmp(key)) {
+                Ok(position) => {
+                    if value_layout::pointer_head(&entries[position].1).is_some() {
+                        return Ok(false);
+                    }
+                    entries[position].1 = new_value;
+                }
+                Err(position) => entries.insert(position, (key.clone(), new_value)),
+            }
+        }
+        // Check every leaf before writing any of them. Repacking can use dead
+        // cell space, but must never split or alter routing links.
+        for (page, entries) in pages.values_mut() {
+            if leaf_entries_size(entries) > PAGE_SIZE - LEAF_SLOT_ARRAY_OFFSET {
+                return Ok(false);
+            }
+            write_leaf_entries(page, entries)?;
+        }
+        for (page_id, (page, _)) in pages {
+            self.pager.write_page(page_id, page)?;
+        }
+        Ok(true)
+    }
+
     /// Batch upsert for sorted keys landing in a small set of leaves.
     ///
     /// Walks to each leaf once, applies every same-or-shrink in-place
