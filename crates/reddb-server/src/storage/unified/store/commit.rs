@@ -662,6 +662,11 @@ impl StoreCommitCoordinator {
                 Err(err) => return Err(err),
             };
             match record {
+                WalRecord::PageOwnership { .. } => {
+                    return Err(io::Error::other(
+                        "page ownership journal requires recovery before WAL replay",
+                    ));
+                }
                 WalRecord::TxCommitBatch { actions, .. } => {
                     for payload in actions {
                         let action = StoreWalAction::decode(&payload)?;
