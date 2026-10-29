@@ -1069,6 +1069,31 @@ impl GrowingSegment {
         }
     }
 
+    /// Boot-time representation compaction. The manager proves exclusive
+    /// ownership before calling this; published segments are never rewritten.
+    pub(crate) fn compact_recovered_rows(&mut self, schema: &std::sync::Arc<Vec<String>>) -> usize {
+        let mut removed = 0usize;
+        let mut added = 0usize;
+        let mut compacted = 0;
+        for entity in self
+            .entities
+            .values_mut()
+            .chain(self.flat_entities.iter_mut())
+        {
+            let before = super::memory_size::entity_bytes(entity);
+            if let EntityData::Row(row) = &mut entity.data {
+                if row.compact_with_schema(schema) {
+                    removed = removed.saturating_add(before);
+                    added = added.saturating_add(super::memory_size::entity_bytes(entity));
+                    compacted += 1;
+                }
+            }
+        }
+        self.release_memory(removed);
+        self.add_memory(added);
+        compacted
+    }
+
     /// This segment's approximate resident bytes. One relaxed load — the
     /// arena's contribution to the shared accounting pool (ADR 0073 §2).
     /// Unlike `stats()` this never walks the entity map, so a stats reader

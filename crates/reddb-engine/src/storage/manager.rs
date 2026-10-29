@@ -333,6 +333,33 @@ impl SegmentManager {
         }
     }
 
+    /// Compact named records after recovery has restored the authoritative
+    /// column schema, before serving requests. Captured segments are skipped:
+    /// a cursor's immutable view must never change under it.
+    #[doc(hidden)]
+    pub fn compact_recovered_rows(&self) -> usize {
+        let Some(schema) = self.column_schema() else {
+            return 0;
+        };
+        if schema
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != schema.len()
+        {
+            return 0;
+        }
+        let mut growing = self.growing.write();
+        let mut sealed = self.sealed.write();
+        let mut compacted = 0;
+        for segment in growing.iter_mut().chain(sealed.iter_mut()) {
+            if let Some(segment) = Arc::get_mut(segment) {
+                compacted += segment.get_mut().compact_recovered_rows(&schema);
+            }
+        }
+        compacted
+    }
+
     /// Get collection name
     pub fn collection(&self) -> &str {
         &self.collection

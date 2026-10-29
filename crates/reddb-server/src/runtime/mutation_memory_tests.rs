@@ -681,3 +681,58 @@ fn bulk_update_wal_batches_and_recovers_every_key_after_process_exit() {
         );
     }
 }
+
+#[test]
+fn recovered_named_rows_share_declared_schema_before_serving_queries() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path).with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        runtime.execute_query("CREATE TABLE recovery_memory (id INTEGER PRIMARY KEY, payload TEXT, dimension INTEGER)").expect("table");
+        for id in 0..128 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO recovery_memory (id,payload,dimension) VALUES ({id},'kept',{id})"
+                ))
+                .expect("insert");
+        }
+    }
+    for _ in 0..3 {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("reopen");
+        let manager = runtime
+            .inner
+            .db
+            .store()
+            .get_collection("recovery_memory")
+            .expect("collection");
+        let mut count = 0;
+        manager.for_each_entity(|entity| {
+            let row = entity.data.as_row().expect("row");
+            assert!(
+                row.named.is_none(),
+                "recovery must compact the named hash map"
+            );
+            assert_eq!(
+                row.get_field("payload"),
+                Some(&reddb_types::Value::text("kept"))
+            );
+            count += 1;
+            true
+        });
+        assert_eq!(count, 128);
+        let result = runtime
+            .execute_query(
+                "SELECT id,dimension FROM recovery_memory WHERE dimension >= 120 ORDER BY id",
+            )
+            .expect("filtered rows");
+        assert_eq!(result.result.records.len(), 8);
+        for (index, row) in result.result.records.iter().enumerate() {
+            assert_eq!(
+                row.get("id"),
+                Some(&reddb_types::Value::Integer(120 + index as i64))
+            );
+            assert_eq!(row.get("dimension"), row.get("id"));
+        }
+    }
+}
