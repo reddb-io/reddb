@@ -453,6 +453,13 @@ impl UnifiedStore {
                 && Arc::strong_count(&entry.tree) == 1
                 && !entry.tree.has_retirement_readers()
             {
+                // Deliberately unsafe experimental control: keep the old
+                // root in the catalog while releasing its pages. Never enable
+                // this outside the isolated recovery test.
+                #[cfg(test)]
+                if std::env::var_os("REDDB_EXPERIMENTAL_RETAIN_RELEASED_ROOT").is_some() {
+                    roots.push(entry.tree.root_page_id());
+                }
                 reclaim.extend(
                     entry
                         .tree
@@ -487,6 +494,16 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        #[cfg(test)]
+        if !reclaim.is_empty()
+            && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE").is_some()
+        {
+            eprintln!(
+                "experimental exit before retired free pages={}",
+                reclaim.len()
+            );
+            std::process::exit(184);
+        }
         let mut index = 0;
         retired.retain_mut(|entry| {
             let keep = !remove.contains(&index);
@@ -501,6 +518,14 @@ impl UnifiedStore {
             pager
                 .sync()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE").is_some() {
+                eprintln!(
+                    "experimental exit after retired free pages={}",
+                    reclaim.len()
+                );
+                std::process::exit(185);
+            }
         }
         pager
             .complete_deferred_publication(&retained_pages, &released_pages)
@@ -933,10 +958,25 @@ impl UnifiedStore {
                 self.retire_btree(previous);
             }
             self.mark_paged_registry_dirty();
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_REPLAY_REBUILD").is_some() {
+                if std::env::var_os("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC").is_none() {
+                    pager.sync().map_err(|error| {
+                        StoreError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                }
+                eprintln!("experimental replay rebuild exit before manifest");
+                std::process::exit(182);
+            }
         }
         drop(indices);
         drop(collections);
         self.flush_paged_state()?;
+        #[cfg(test)]
+        if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_REPLAY_PUBLICATION").is_some() {
+            eprintln!("experimental replay exit after manifest");
+            std::process::exit(182);
+        }
         // Opening has no concurrent writers. Replay has now durably reconciled
         // these raw trees; do not immediately rebuild them at the first flush.
         if self.snapshot_manager.get().is_none() && self.pending_vault_versions.read().is_empty() {
@@ -1454,6 +1494,14 @@ impl UnifiedStore {
             {
                 self.retire_btree(Arc::clone(previous));
             }
+        }
+        #[cfg(test)]
+        if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD").is_some() {
+            pager
+                .sync()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            eprintln!("experimental checkpoint exit before manifest");
+            std::process::exit(183);
         }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
 
