@@ -590,6 +590,43 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    /// Ownership intents must reach stable storage before the pager consumes
+    /// or changes a page, even when user transactions use async durability.
+    #[allow(dead_code)] // Activated with the pager recovery and format fence.
+    pub(super) fn append_durable_page_ownership(
+        &self,
+        record: reddb_file::page_ownership_journal::PageOwnershipRecord,
+    ) -> io::Result<()> {
+        // Validate before WalRecord::encode, which expects a valid file frame.
+        reddb_file::page_ownership_journal::encode(record)?;
+        let record = WalRecord::PageOwnership { record };
+        let _epoch = self.queue.epoch.read();
+        if matches!(self.mode, DurabilityMode::Strict) {
+            self.wal.lock().append(&record)?;
+            return self.force_sync();
+        }
+
+        let bytes = record.encode();
+        let length = bytes.len() as u64;
+        let target = self.queue.enqueue(bytes);
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.pending_target_lsn = state.pending_target_lsn.max(target);
+        state.pending_statements = state.pending_statements.saturating_add(1);
+        state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(length);
+        state.first_pending_at.get_or_insert_with(Instant::now);
+        cond.notify_all();
+        loop {
+            if let Some(error) = state.last_error.clone() {
+                return Err(io::Error::other(error));
+            }
+            if state.durable_lsn >= target {
+                return Ok(());
+            }
+            cond.wait(&mut state);
+        }
+    }
+
     pub(crate) fn force_sync(&self) -> io::Result<()> {
         // Strict append already owns a read lease. Do not wait behind a
         // checkpoint that needs that append to finish before resetting.
@@ -1430,6 +1467,45 @@ mod tests {
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    #[test]
+    fn ownership_intents_are_durable_in_every_mode() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        for mode in [
+            DurabilityMode::Strict,
+            DurabilityMode::WalDurableGrouped,
+            DurabilityMode::Async,
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL");
+            let path = directory.path().join("ownership");
+            let coordinator =
+                StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                    .expect("open coordinator");
+            let intent = PageOwnershipRecord::Reserve {
+                epoch: 1,
+                page_id: 67,
+            };
+            coordinator
+                .append_durable_page_ownership(intent)
+                .expect("durable intent");
+            assert!(
+                coordinator.fsync_count() > 0,
+                "ownership intent must be synced in {mode:?}"
+            );
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("open WAL")
+                .iter()
+                .collect::<io::Result<Vec<_>>>()
+                .expect("read records");
+            assert!(
+                matches!(records.as_slice(), [(_, WalRecord::PageOwnership { record })] if *record == intent)
+            );
+            assert!(coordinator
+                .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 0 })
+                .is_err());
+        }
+    }
 
     #[test]
     fn unresolved_ownership_intent_blocks_store_replay() {
