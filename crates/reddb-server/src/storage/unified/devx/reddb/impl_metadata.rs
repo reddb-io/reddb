@@ -346,23 +346,57 @@ impl RedDB {
 
     /// Get a key-value pair by key, returning the value and entity id
     ///
-    /// Scans the collection for an entity whose named field `key` matches.
+    /// Clone only the selected value. Legacy positional rows without an
+    /// indexed key use their collection schema in the borrowed fallback scan.
     pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
         let manager = self.store.get_collection(collection)?;
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if let EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            let value = named.get("value").cloned().unwrap_or(Value::Null);
-                            return Some((value, entity.id));
-                        }
-                    }
-                }
-            }
+        if let Some(value) = manager.project_key_entity(key, None, false, |entity| {
+            (
+                entity
+                    .data
+                    .as_row()
+                    .and_then(|row| row.get_field("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                entity.id,
+            )
+        }) {
+            return Some(value);
         }
-        None
+        let columns = manager.column_schema();
+        let key_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "key"));
+        let value_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "value"));
+        let mut found = None;
+        manager.for_each_entity(|entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            let legacy = row.named.is_none() && row.schema.is_none();
+            let stored_key = row.get_field("key").or_else(|| {
+                if legacy {
+                    key_index.and_then(|index| row.columns.get(index))
+                } else {
+                    None
+                }
+            });
+            if matches!(stored_key, Some(Value::Text(stored)) if stored.as_ref() == key) {
+                let value = row.get_field("value").or_else(|| {
+                    if legacy {
+                        value_index.and_then(|index| row.columns.get(index))
+                    } else {
+                        None
+                    }
+                });
+                found = Some((value.cloned().unwrap_or(Value::Null), entity.id));
+                return false;
+            }
+            true
+        });
+        found
     }
 
     /// Delete a key-value pair by key, returning whether it was found and removed
@@ -895,7 +929,12 @@ impl RedDB {
             let Some(artifact) = native_artifacts.iter().find(|artifact| {
                 artifact.collection == collection && artifact.artifact_kind == artifact_kind
             }) else {
-                index.build_state = "metadata-only".to_string();
+                index.build_state = if index.backend == "memory-budget-deferred" {
+                    "deferred-memory-budget"
+                } else {
+                    "metadata-only"
+                }
+                .to_string();
                 continue;
             };
             index.entries = artifact.vector_count as usize;
@@ -998,6 +1037,18 @@ impl RedDB {
                 if index.build_state == "catalog-derived" {
                     index.build_state = "registry-loaded".to_string();
                 }
+            }
+            if index.backend == "memory-budget-deferred"
+                || previous.is_some_and(|metadata| {
+                    metadata.indexes.iter().any(|previous| {
+                        previous.name == index.name && previous.backend == "memory-budget-deferred"
+                    })
+                })
+            {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
             }
         }
 
@@ -1340,7 +1391,34 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
-        let vector_artifact_records = self.native_vector_artifact_records();
+        let build = self.native_vector_artifact_records()?;
+        let vector_artifact_records = build.records;
+        let mut metadata = metadata.clone();
+        for index in &mut metadata.indexes {
+            let Some(kind) = Self::native_artifact_kind_for_index(index.kind) else {
+                continue;
+            };
+            let Some(collection) = &index.collection else {
+                continue;
+            };
+            if build.deferred_collections.contains(collection) {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
+            } else if let Some((summary, _)) =
+                vector_artifact_records.iter().find(|(summary, _)| {
+                    &summary.collection == collection && summary.artifact_kind == kind
+                })
+            {
+                index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+                index.build_state = "artifact-published".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_checksum = Some(summary.checksum);
+            }
+        }
+        let metadata = &metadata;
         let artifact_summaries = vector_artifact_records
             .iter()
             .map(|(summary, _)| summary.clone())
@@ -1397,6 +1475,9 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
+        if let Some(path) = self.path() {
+            metadata.save_for_data_path(path)?;
+        }
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;

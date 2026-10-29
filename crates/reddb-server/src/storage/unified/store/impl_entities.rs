@@ -426,6 +426,17 @@ impl UnifiedStore {
         self.resident.set_aux_metadata(bytes)
     }
 
+    /// Persist single-file contracts through the same commit fence as rows.
+    /// Memory-only stores retain the same auxiliary snapshot behavior.
+    pub(crate) fn persist_aux_metadata(&self, bytes: Vec<u8>) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        self.finish_paged_write([StoreWalAction::SetAuxMetadata {
+            bytes: bytes.clone(),
+        }])?;
+        self.resident.set_aux_metadata(bytes);
+        Ok(())
+    }
+
     /// Read the opaque store-level auxiliary metadata blob. Empty when unset.
     pub fn aux_metadata(&self) -> Vec<u8> {
         self.resident.aux_metadata()

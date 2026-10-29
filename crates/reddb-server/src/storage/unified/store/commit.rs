@@ -5,8 +5,11 @@ use reddb_engine::storage::resident_file::EMBEDDED_WAL_HEADROOM_LIMIT;
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+
+#[path = "checkpoint_undo.rs"]
+mod checkpoint_undo;
 
 struct NativeReplayTarget<'a> {
     store: &'a UnifiedStore,
@@ -14,6 +17,10 @@ struct NativeReplayTarget<'a> {
 }
 
 impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<'_> {
+    fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        self.store.resident.set_aux_metadata(bytes.to_vec());
+        Ok(())
+    }
     fn has_collection(&self, name: &str) -> bool {
         self.store.get_collection(name).is_some()
     }
@@ -324,6 +331,122 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
+    /// Includes recovered epochs that were never published in the catalog.
+    ownership_last_epoch: AtomicU64,
+    // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
+    ownership_wal_state: AtomicU8,
+}
+
+/// Connects a fenced pager ownership epoch to the store's durable WAL.
+#[allow(dead_code)] // Installed once recovery and format fencing are active.
+struct StoreOwnershipRecorder {
+    coordinator: Arc<StoreCommitCoordinator>,
+    epoch: u64,
+    images: parking_lot::Mutex<CheckpointPageImages>,
+}
+
+#[derive(Default)]
+struct CheckpointPageImages {
+    reserved: roaring::RoaringBitmap,
+    captured: roaring::RoaringBitmap,
+}
+
+impl StoreOwnershipRecorder {
+    #[allow(dead_code)]
+    fn begin(coordinator: Arc<StoreCommitCoordinator>, epoch: u64) -> io::Result<Self> {
+        coordinator.append_durable_page_ownership(
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Begin { epoch },
+        )?;
+        Ok(Self {
+            coordinator,
+            epoch,
+            images: parking_lot::Mutex::new(CheckpointPageImages::default()),
+        })
+    }
+
+    fn append_pages(
+        &self,
+        pages: &[u32],
+        make_record: impl Fn(u64, u32) -> reddb_file::page_ownership_journal::PageOwnershipRecord,
+    ) -> io::Result<()> {
+        for chunk in pages.chunks(256) {
+            let records: Vec<_> = chunk
+                .iter()
+                .map(|&id| make_record(self.epoch, id))
+                .collect();
+            self.coordinator
+                .append_durable_page_ownership_batch(&records)?;
+        }
+        Ok(())
+    }
+}
+
+impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipRecorder {
+    fn needs_page_image(&self, page_id: u32) -> io::Result<bool> {
+        // The manifest is the commit boundary, never an undo target. Its
+        // private overflow replacement is already covered by reservations.
+        if page_id < reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE {
+            return Ok(false);
+        }
+        let images = self.images.lock();
+        Ok(!images.reserved.contains(page_id) && !images.captured.contains(page_id))
+    }
+
+    fn capture_page_image(&self, page: &crate::storage::engine::Page) -> io::Result<()> {
+        let mut images = self.images.lock();
+        let page_id = page.page_id();
+        if images.reserved.contains(page_id) || images.captured.contains(page_id) {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        reddb_file::encode_main_wal_record_frame_into(
+            reddb_file::MainWalRecordFrameRef::FullPageImage {
+                tx_id: 0,
+                page_id,
+                ckpt_epoch: self.epoch,
+                data: page.as_bytes(),
+            },
+            crate::storage::wal::record::WAL_DEFAULT_TERM,
+            &mut bytes,
+        )?;
+        self.coordinator.append_durable_ownership_bytes(bytes)?;
+        images.captured.insert(page_id);
+        Ok(())
+    }
+
+    fn reserve_pages(&self, start: u32, count: u32) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+        let end = start.checked_add(count).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "ownership range overflow")
+        })?;
+        let mut next = start;
+        while next < end {
+            let chunk_end = next.saturating_add(256).min(end);
+            let records: Vec<_> = (next..chunk_end)
+                .map(|page_id| PageOwnershipRecord::Reserve {
+                    epoch: self.epoch,
+                    page_id,
+                })
+                .collect();
+            self.coordinator
+                .append_durable_page_ownership_batch(&records)?;
+            self.images.lock().reserved.insert_range(next..chunk_end);
+            next = chunk_end;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> io::Result<()> {
+        self.append_pages(pages, |epoch, page_id| {
+            reddb_file::page_ownership_journal::PageOwnershipRecord::DetachFree { epoch, page_id }
+        })
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> io::Result<()> {
+        self.append_pages(pages, |epoch, page_id| {
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Retire { epoch, page_id }
+        })
+    }
 }
 
 impl StoreCommitCoordinator {
@@ -391,6 +514,8 @@ impl StoreCommitCoordinator {
             state,
             fsync_count,
             wal_generation: AtomicU64::new(0),
+            ownership_last_epoch: AtomicU64::new(0),
+            ownership_wal_state: AtomicU8::new(0),
         })
     }
 
@@ -574,6 +699,12 @@ impl StoreCommitCoordinator {
     /// [`Self::append_actions`] so durability semantics are uniform
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        if matches!(record, WalRecord::PageOwnership { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "page ownership requires a durable append",
+            ));
+        }
         let _epoch = self.queue.epoch.read();
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
@@ -588,6 +719,68 @@ impl StoreCommitCoordinator {
         let commit_lsn = self.queue.enqueue(blob);
         self.wait_until_durable(commit_lsn, wal_bytes)?;
         Ok(())
+    }
+
+    /// Ownership intents must reach stable storage before the pager consumes
+    /// or changes a page, even when user transactions use async durability.
+    #[allow(dead_code)] // Activated with the pager recovery and format fence.
+    pub(super) fn append_durable_page_ownership(
+        &self,
+        record: reddb_file::page_ownership_journal::PageOwnershipRecord,
+    ) -> io::Result<()> {
+        self.append_durable_page_ownership_batch(&[record])
+    }
+
+    /// Append a bounded set of ownership intents behind one durability fence.
+    #[allow(dead_code)] // Activated with the pager recovery and format fence.
+    pub(super) fn append_durable_page_ownership_batch(
+        &self,
+        records: &[reddb_file::page_ownership_journal::PageOwnershipRecord],
+    ) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        for &record in records {
+            // Validate before WalRecord::encode, which expects a valid frame.
+            reddb_file::page_ownership_journal::encode(record)?;
+            WalRecord::PageOwnership { record }.encode_into(&mut bytes);
+        }
+        for record in records {
+            self.ownership_last_epoch
+                .fetch_max(record.epoch(), Ordering::AcqRel);
+        }
+        self.append_durable_ownership_bytes(bytes)
+    }
+
+    fn append_durable_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
+        let _epoch = self.queue.epoch.read();
+        // Set before writing: a failed or uncertain append must never allow
+        // checkpoint truncation to discard the ownership journal.
+        self.ownership_wal_state.store(2, Ordering::Release);
+        if matches!(self.mode, DurabilityMode::Strict) {
+            self.wal.lock().append_bytes(&bytes)?;
+            return self.force_sync();
+        }
+
+        let length = bytes.len() as u64;
+        let target = self.queue.enqueue(bytes);
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.pending_target_lsn = state.pending_target_lsn.max(target);
+        state.pending_statements = state.pending_statements.saturating_add(1);
+        state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(length);
+        state.first_pending_at.get_or_insert_with(Instant::now);
+        cond.notify_all();
+        loop {
+            if let Some(error) = state.last_error.clone() {
+                return Err(io::Error::other(error));
+            }
+            if state.durable_lsn >= target {
+                return Ok(());
+            }
+            cond.wait(&mut state);
+        }
     }
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
@@ -615,6 +808,30 @@ impl StoreCommitCoordinator {
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
         let _epoch = self.queue.epoch.write();
+        if self.ownership_wal_state.load(Ordering::Acquire) == 0 {
+            let reader = WalReader::open(&self.wal_path)?;
+            let mut protected = false;
+            for item in reader.iter() {
+                match item {
+                    Ok((_, WalRecord::PageOwnership { .. })) => {
+                        protected = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(error) => return Err(error),
+                }
+            }
+            self.ownership_wal_state
+                .store(if protected { 2 } else { 1 }, Ordering::Release);
+        }
+        if self.ownership_wal_state.load(Ordering::Acquire) == 2 {
+            // A Finish record alone cannot prove that both superblock copies
+            // are fenced; only recovery may eventually authorize truncation.
+            return Err(io::Error::other(
+                "cannot truncate WAL while page ownership records require recovery",
+            ));
+        }
         self.wal_generation.fetch_add(1, Ordering::AcqRel);
         let mut wal = self.wal.lock();
         wal.truncate()?;
@@ -640,6 +857,182 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    fn release_completed_ownership_wal(&self) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::{encode, pending_epoch, PageOwnershipRecord};
+        let _epoch = self.queue.epoch.write();
+        let mut journal = Vec::new();
+        let mut last = None;
+        for item in WalReader::open(&self.wal_path)?.iter() {
+            match item {
+                Ok((_, WalRecord::PageOwnership { record })) => {
+                    journal.extend_from_slice(&encode(record)?);
+                    last = Some(record);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "incomplete WAL before ownership completion",
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if pending_epoch(&journal)?.is_some()
+            || !matches!(last, Some(PageOwnershipRecord::Finish { .. }))
+        {
+            return Err(io::Error::other("page ownership WAL is not complete"));
+        }
+        self.ownership_wal_state.store(1, Ordering::Release);
+        Ok(())
+    }
+
+    fn recover_page_ownership(&self, store: &UnifiedStore, journal: &[u8]) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::{
+            pending_epoch, recovery_plan, PageOwnershipRecord,
+        };
+        if journal.is_empty() {
+            return Ok(());
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership WAL requires a pager"))?;
+        let header = pager
+            .header()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if header.version < reddb_file::file_format::PAGE_OWNERSHIP_FILE_VERSION {
+            return Err(io::Error::other(
+                "page ownership journal requires recovery with a fenced file version",
+            ));
+        }
+        let pending = pending_epoch(journal).map_err(|error| {
+            io::Error::other(format!("page ownership journal requires recovery: {error}"))
+        })?;
+        if let Some(mut pending) = pending {
+            let catalog_epoch = store.ownership_catalog_epoch.load(Ordering::Acquire);
+            let (_, retained_pages) = pager
+                .deferred_reclamation_pages()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            // A retirement intent precedes the catalog's deferred-free ledger.
+            // Publication does not release pages that this ledger still owns,
+            // including pages allocated and retired within the same epoch.
+            if catalog_epoch == pending.epoch {
+                for page in &retained_pages {
+                    pending.retired_pages.remove(page);
+                }
+            }
+            let mut plan = recovery_plan(
+                &pending,
+                catalog_epoch,
+                reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE,
+                header.page_count,
+            )?;
+            if retained_pages
+                .iter()
+                .any(|page| plan.release.binary_search(page).is_ok())
+            {
+                return Err(io::Error::other(
+                    "ownership recovery would release a catalog-retained page",
+                ));
+            }
+            plan.preserve.extend(retained_pages);
+            plan.preserve.sort_unstable();
+            plan.preserve.dedup();
+            pager
+                .validate_owned_pages(&plan.preserve)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            pager
+                .recover_unowned_pages(&plan.release)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY").is_some() {
+                std::process::exit(187);
+            }
+            pager
+                .sync_recovered_allocator()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC").is_some() {
+                std::process::exit(188);
+            }
+            self.append_durable_page_ownership(PageOwnershipRecord::Finish {
+                epoch: pending.epoch,
+            })?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH").is_some() {
+                std::process::exit(189);
+            }
+        }
+        self.release_completed_ownership_wal()
+    }
+
+    pub(super) fn next_page_ownership_epoch(&self, store: &UnifiedStore) -> io::Result<u64> {
+        self.ownership_last_epoch
+            .load(Ordering::Acquire)
+            .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))
+    }
+
+    /// Begin an epoch only when the caller has excluded all other pager mutators.
+    pub(super) fn begin_page_ownership_epoch(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+    ) -> io::Result<()> {
+        if store.ownership_active_epoch.load(Ordering::Acquire) != 0
+            || epoch <= store.ownership_catalog_epoch.load(Ordering::Acquire)
+            || epoch <= self.ownership_last_epoch.load(Ordering::Acquire)
+        {
+            return Err(io::Error::other("invalid page ownership epoch"));
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        pager
+            .fence_file_format_version(reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let coordinator = Arc::clone(
+            store
+                .commit
+                .as_ref()
+                .ok_or_else(|| io::Error::other("ownership epoch requires a WAL coordinator"))?,
+        );
+        let recorder = Arc::new(StoreOwnershipRecorder::begin(coordinator, epoch)?);
+        pager.install_ownership_recorder(recorder)?;
+        store.ownership_active_epoch.store(epoch, Ordering::Release);
+        Ok(())
+    }
+
+    /// Complete the epoch only while the same exclusion remains in force.
+    pub(super) fn finish_page_ownership_epoch(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+    ) -> io::Result<()> {
+        if epoch == 0 || store.ownership_active_epoch.load(Ordering::Acquire) != epoch {
+            return Err(io::Error::other("page ownership epoch is not active"));
+        }
+        if store.ownership_catalog_epoch.load(Ordering::Acquire) != epoch {
+            return Err(io::Error::other("page ownership epoch is not published"));
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        pager
+            .sync_recovered_allocator()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.append_durable_page_ownership(
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Finish { epoch },
+        )?;
+        pager.clear_ownership_recorder()?;
+        store.ownership_active_epoch.store(0, Ordering::Release);
+        self.release_completed_ownership_wal()
+    }
+
     pub(crate) fn replay_into(&self, store: &UnifiedStore) -> io::Result<()> {
         if !self.wal_path.exists() {
             return Ok(());
@@ -653,15 +1046,28 @@ impl StoreCommitCoordinator {
 
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
         let mut pending = Vec::<(u64, Vec<u8>)>::new();
+        let mut ownership_journal = Vec::new();
+        let mut latest_ownership_epoch = 0;
+        let mut incomplete_wal_tail = false;
         let mut applied = false;
 
         for record in reader.iter() {
             let (_lsn, record) = match record {
                 Ok(record) => record,
-                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    incomplete_wal_tail = true;
+                    break;
+                }
                 Err(err) => return Err(err),
             };
             match record {
+                WalRecord::PageOwnership { record } => {
+                    latest_ownership_epoch = latest_ownership_epoch.max(record.epoch());
+                    self.ownership_last_epoch
+                        .fetch_max(record.epoch(), Ordering::AcqRel);
+                    ownership_journal
+                        .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
+                }
                 WalRecord::TxCommitBatch { actions, .. } => {
                     for payload in actions {
                         let action = StoreWalAction::decode(&payload)?;
@@ -714,6 +1120,14 @@ impl StoreCommitCoordinator {
             }
         }
 
+        if incomplete_wal_tail && !ownership_journal.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete WAL prevents ownership recovery",
+            ));
+        }
+        self.recover_page_ownership(store, &ownership_journal)?;
+
         for (tx_id, payload) in pending {
             if !tx_states.get(&tx_id).copied().unwrap_or(false) {
                 continue;
@@ -726,9 +1140,20 @@ impl StoreCommitCoordinator {
         }
 
         if applied {
+            // Opening is exclusive: no client can mutate published trees
+            // while replay constructs replacement generations.
+            let epoch = latest_ownership_epoch
+                .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))?;
+            self.begin_page_ownership_epoch(store, epoch)?;
+            // Even when the replayed actions leave all B-trees unchanged, the
+            // epoch must be in the catalog before its journal can finish.
+            store.mark_paged_registry_dirty();
             store
                 .reconcile_replayed_btrees()
                 .map_err(|err| io::Error::other(err.to_string()))?;
+            self.finish_page_ownership_epoch(store, epoch)?;
         }
         Ok(())
     }
@@ -1419,12 +1844,406 @@ impl UnifiedStore {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "storage_apocalypse.rs"]
+mod storage_apocalypse;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    #[test]
+    fn ownership_epoch_rejects_nested_begin_and_wrong_finish() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(directory.path().join("data.rdb")).expect("store");
+        store.create_collection("rows").expect("collection");
+        store.persist().expect("baseline");
+        let coordinator = store.commit.as_ref().expect("WAL coordinator");
+        assert!(coordinator.begin_page_ownership_epoch(&store, 0).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 1).is_err());
+        coordinator
+            .begin_page_ownership_epoch(&store, 2)
+            .expect("begin epoch");
+        assert!(coordinator.begin_page_ownership_epoch(&store, 3).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 3).is_err());
+        assert!(coordinator.finish_page_ownership_epoch(&store, 2).is_err());
+        store.flush_paged_registry().expect("publish epoch");
+        coordinator
+            .finish_page_ownership_epoch(&store, 2)
+            .expect("finish epoch");
+        assert_eq!(store.ownership_active_epoch.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn native_pager_records_page_ownership_in_durable_wal() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let wal_path = reddb_file::layout::unified_wal_path(&path);
+        let pager = crate::storage::engine::Pager::open(&path, Default::default())
+            .expect("open native pager");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                &wal_path,
+                DurabilityMode::Async,
+                GroupCommitOptions::default(),
+            )
+            .expect("open WAL"),
+        );
+        let recorder = Arc::new(
+            StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch"),
+        );
+        pager
+            .install_ownership_recorder(recorder)
+            .expect("install recorder");
+        let page = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id();
+        pager
+            .record_retirement_intent(&[page])
+            .expect("record retirement");
+        pager.free_retired_pages(&[page]).expect("retire");
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .expect("read WAL")
+            .iter()
+            .map(|item| item.expect("WAL record").1)
+            .collect();
+        assert_eq!(
+            records,
+            vec![
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Begin { epoch: 7 }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Reserve {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Retire {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Retire {
+                        epoch: 7,
+                        page_id: page
+                    }
+                },
+            ]
+        );
+        assert!(
+            coordinator.fsync_count() >= 3,
+            "async ownership writes must sync"
+        );
+        assert!(
+            coordinator.truncate().is_err(),
+            "ownership WAL remains protected"
+        );
+    }
+
+    #[test]
+    fn replay_reclaims_unpublished_ownership_reservations() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).expect("create store");
+            store.create_collection("rows").expect("collection");
+            store.persist().expect("persist baseline");
+        }
+        let wal_path = reddb_file::layout::unified_wal_path(&path);
+        let ids;
+        {
+            let pager =
+                crate::storage::engine::Pager::open(&path, Default::default()).expect("pager");
+            let first = pager.page_count().expect("page count");
+            let coordinator = StoreCommitCoordinator::open(
+                &wal_path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("WAL");
+            coordinator
+                .append_durable_page_ownership_batch(&[
+                    PageOwnershipRecord::Begin { epoch: 2 },
+                    PageOwnershipRecord::Reserve {
+                        epoch: 2,
+                        page_id: first,
+                    },
+                    PageOwnershipRecord::Reserve {
+                        epoch: 2,
+                        page_id: first + 1,
+                    },
+                ])
+                .expect("reserve pages durably");
+            ids = [
+                pager
+                    .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+                pager
+                    .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+            ];
+            assert_eq!(ids, [first, first + 1]);
+            pager.sync().expect("persist abandoned pages");
+        }
+        let reopened = UnifiedStore::open(&path).expect("recover ownership");
+        let pager = reopened.pager.as_ref().expect("pager");
+        let a = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("reuse")
+            .page_id();
+        let b = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("reuse")
+            .page_id();
+        assert_ne!(a, b);
+        assert!(ids.contains(&a) && ids.contains(&b));
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .expect("read WAL")
+            .iter()
+            .collect::<io::Result<Vec<_>>>()
+            .expect("records");
+        assert!(matches!(
+            records.last(),
+            Some((
+                _,
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Finish { epoch: 2 }
+                }
+            ))
+        ));
+        reopened
+            .commit
+            .as_ref()
+            .expect("coordinator")
+            .truncate()
+            .expect("completed ownership can be truncated");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ownership_recovery_survives_interruption_and_retry() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        const CHILD: &str = "REDDB_EXPERIMENTAL_OWNERSHIP_RECOVERY_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let _store = UnifiedStore::open(path).expect("recover store");
+            panic!("recovery interruption hook was not reached");
+        }
+        for (published, hook, exit_code) in [
+            (
+                false,
+                "REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY",
+                187,
+            ),
+            (false, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC", 188),
+            (false, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH", 189),
+            (
+                true,
+                "REDDB_EXPERIMENTAL_EXIT_DURING_OWNERSHIP_RECOVERY",
+                187,
+            ),
+            (true, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC", 188),
+            (true, "REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_FINISH", 189),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open(&path).expect("create store");
+                store.create_collection("rows").expect("collection");
+                store.persist().expect("baseline");
+                if published {
+                    store.ownership_active_epoch.store(2, Ordering::Release);
+                    store.flush_paged_registry().expect("publish epoch");
+                    store.ownership_active_epoch.store(0, Ordering::Release);
+                }
+            }
+            let wal_path = reddb_file::layout::unified_wal_path(&path);
+            let ids;
+            {
+                let pager =
+                    crate::storage::engine::Pager::open(&path, Default::default()).expect("pager");
+                let first = pager.page_count().expect("page count");
+                let coordinator = StoreCommitCoordinator::open(
+                    &wal_path,
+                    DurabilityMode::Strict,
+                    GroupCommitOptions::default(),
+                )
+                .expect("WAL");
+                let intent = |page_id| {
+                    if published {
+                        PageOwnershipRecord::Retire { epoch: 2, page_id }
+                    } else {
+                        PageOwnershipRecord::Reserve { epoch: 2, page_id }
+                    }
+                };
+                coordinator
+                    .append_durable_page_ownership_batch(&[
+                        PageOwnershipRecord::Begin { epoch: 2 },
+                        intent(first),
+                        intent(first + 1),
+                    ])
+                    .expect("reserve");
+                ids = [
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                        .page_id(),
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                        .page_id(),
+                ];
+                pager.sync().expect("persist abandoned pages");
+            }
+            for _ in 0..if exit_code == 189 { 1 } else { 2 } {
+                let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", "storage::unified::store::commit::tests::ownership_recovery_survives_interruption_and_retry", "--nocapture"])
+                    .env(CHILD, &path)
+                    .env(hook, "1")
+                    .output().expect("run interrupted recovery");
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit_code),
+                    "published={published} {hook}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let reopened = UnifiedStore::open(&path).expect("recover after interruptions");
+            let pager = reopened.pager.as_ref().expect("pager");
+            let a = pager
+                .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                .expect("reuse")
+                .page_id();
+            let b = pager
+                .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                .expect("reuse")
+                .page_id();
+            assert_ne!(a, b, "published={published} {hook}: duplicate page");
+            assert!(
+                ids.contains(&a) && ids.contains(&b),
+                "published={published} {hook}: lost recovered page"
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_intents_are_durable_in_every_mode() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        for mode in [
+            DurabilityMode::Strict,
+            DurabilityMode::WalDurableGrouped,
+            DurabilityMode::Async,
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL");
+            let path = directory.path().join("ownership");
+            let coordinator =
+                StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                    .expect("open coordinator");
+            let intent = PageOwnershipRecord::Reserve {
+                epoch: 1,
+                page_id: 67,
+            };
+            let detach = PageOwnershipRecord::DetachFree {
+                epoch: 1,
+                page_id: 68,
+            };
+            coordinator
+                .append_durable_page_ownership_batch(&[intent, detach])
+                .expect("durable intent");
+            assert!(
+                coordinator.fsync_count() > 0,
+                "ownership intent must be synced in {mode:?}"
+            );
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("open WAL")
+                .iter()
+                .collect::<io::Result<Vec<_>>>()
+                .expect("read records");
+            assert!(
+                matches!(records.as_slice(), [(_, WalRecord::PageOwnership { record: first }), (_, WalRecord::PageOwnership { record: second })] if *first == intent && *second == detach)
+            );
+            assert!(coordinator
+                .append_single_record(WalRecord::PageOwnership { record: intent })
+                .is_err());
+            assert!(coordinator
+                .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 0 })
+                .is_err());
+            assert!(
+                coordinator.truncate().is_err(),
+                "active ownership must prevent truncation"
+            );
+            let before = std::fs::read(&path).expect("ownership WAL");
+            drop(coordinator);
+            let reopened = StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                .expect("reopen coordinator");
+            assert!(
+                reopened.truncate().is_err(),
+                "reopen must rediscover ownership records"
+            );
+            assert_eq!(std::fs::read(&path).expect("preserved WAL"), before);
+        }
+    }
+
+    #[test]
+    fn unresolved_ownership_intent_blocks_store_replay() {
+        for truncated in [false, true] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open(&path).expect("create store");
+                store.create_collection("rows").expect("create collection");
+                store.persist().expect("persist baseline");
+            }
+            let wal_path = reddb_file::layout::unified_wal_path(&path);
+            {
+                let mut writer = WalWriter::open(&wal_path).expect("open WAL");
+                writer
+                    .append(&WalRecord::PageOwnership {
+                        record: reddb_file::page_ownership_journal::PageOwnershipRecord::Reserve {
+                            epoch: 1,
+                            page_id: 67,
+                        },
+                    })
+                    .expect("append ownership intent");
+                writer.sync().expect("sync ownership intent");
+            }
+            if truncated {
+                let wal = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wal_path)
+                    .expect("WAL");
+                let length = wal.metadata().expect("length").len();
+                wal.set_len(length - 1).expect("truncate last byte");
+                wal.sync_all().expect("sync truncation");
+            }
+            let before = std::fs::read(&path).expect("baseline data");
+            let error = match UnifiedStore::open(&path) {
+                Ok(_) => panic!("unresolved ownership must prevent opening"),
+                Err(error) => error,
+            };
+            let expected = if truncated {
+                "incomplete page ownership WAL record"
+            } else {
+                "page ownership journal requires recovery"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(std::fs::read(&path).expect("preserved data"), before);
+        }
+    }
 
     #[test]
     fn logical_wal_replay_restores_a_deleted_physical_identity() {
@@ -1726,6 +2545,676 @@ mod tests {
                 char::from(b'!' + ((state >> 24) % 90) as u8)
             })
             .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_reclaims_unpublished_pages() {
+        interrupted_replay_reclaims_pages(false, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_reclaims_durable_unpublished_pages() {
+        interrupted_replay_reclaims_pages(false, true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_replay_preserves_published_pages() {
+        interrupted_replay_reclaims_pages(true, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_checkpoint_reclaims_unpublished_pages() {
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_REBUILD_PATH";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            // Inject resident changes without a WAL record: after the aborted
+            // checkpoint the old durable rows must remain authoritative.
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, 8))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+            store.persist().expect("must exit during checkpoint");
+            panic!("checkpoint rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let mut first = 0;
+        let mut last = 0;
+        for cycle in 1..=12 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_checkpoint_reclaims_unpublished_pages",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD", "1")
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(183),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("experimental checkpoint exit before manifest"));
+            last = std::fs::metadata(&path).unwrap().len();
+            if cycle == 1 {
+                first = last;
+            }
+            eprintln!("checkpoint_exit_cycle={cycle} data_logical={last}");
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(format!("initial-{id}"))]
+            );
+        }
+        assert!(last <= first + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted checkpoint must bound page growth: first={first}, after_12={last}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_checkpoint_with_wal_reclaims_unpublished_pages() {
+        use std::os::unix::fs::MetadataExt;
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_WAL_PATH";
+        const ROUND: &str = "REDDB_EXPERIMENTAL_CHECKPOINT_WAL_ROUND";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let round: u64 = std::env::var(ROUND).unwrap().parse().unwrap();
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            if round > 1 {
+                for id in 1..=200 {
+                    assert_eq!(
+                        store
+                            .get("rows", EntityId::new(id))
+                            .unwrap()
+                            .data
+                            .as_row()
+                            .unwrap()
+                            .columns,
+                        vec![Value::text(replay_crash_payload(id, round - 1))]
+                    );
+                }
+            }
+            let actions: Vec<_> = (1..=200)
+                .map(|id| {
+                    let entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text(replay_crash_payload(id, round))],
+                    );
+                    StoreWalAction::upsert_entity("rows", &entity, None, STORE_VERSION_V11)
+                })
+                .collect();
+            for action in &actions {
+                store.apply_replayed_action(action, false).unwrap();
+            }
+            // Use the actual strict WAL coordinator. No checkpoint proof is
+            // installed, so the replacement-tree path must still be taken.
+            store
+                .commit
+                .as_ref()
+                .unwrap()
+                .append_actions(&actions)
+                .unwrap();
+            store.persist().expect("must exit during checkpoint");
+            panic!("checkpoint rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let mut fourth = 0;
+        let mut last = 0;
+        for round in 1..=12 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_checkpoint_with_wal_reclaims_unpublished_pages",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env(ROUND, round.to_string())
+                .env("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD", "1")
+                .output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(183),
+                "round {round}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("experimental checkpoint exit before manifest"));
+            let meta = std::fs::metadata(&path).unwrap();
+            last = meta.len();
+            if round == 4 {
+                fourth = last;
+            }
+            eprintln!(
+                "checkpoint_wal_exit_round={round} data_logical={last} data_allocated={}",
+                meta.blocks() * 512
+            );
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 12))]
+            );
+        }
+        recovered.persist().unwrap();
+        drop(recovered);
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 12))]
+            );
+        }
+        assert!(last <= fourth + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted WAL-backed checkpoints must bound page growth: round4={fourth}, round12={last}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_retired_reclamation_preserves_reuse() {
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_RETIRED_PATH";
+        fn mutate(store: &UnifiedStore, round: u64) {
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, round))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+        }
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let store = UnifiedStore::open_with_config(path, config()).unwrap();
+            mutate(&store, 2);
+            store.persist().expect("must exit at retired free boundary");
+            panic!("retired free hook was not reached");
+        }
+        let mut reuse = Vec::new();
+        for (label, env_name, exit_code, message) in [
+            (
+                "before",
+                "REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE",
+                184,
+                "experimental exit before retired free",
+            ),
+            (
+                "enqueued",
+                "REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE",
+                186,
+                "experimental exit after retired enqueue",
+            ),
+            (
+                "after",
+                "REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE",
+                185,
+                "experimental exit after retired free",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("data.rdb");
+            {
+                let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+                store.create_collection("rows").unwrap();
+                for id in 1..=200 {
+                    store
+                        .insert(
+                            "rows",
+                            UnifiedEntity::table_row(
+                                EntityId::new(id),
+                                "rows",
+                                id,
+                                vec![Value::text(format!("initial-{id}"))],
+                            ),
+                        )
+                        .unwrap();
+                }
+                store.persist().unwrap();
+                mutate(&store, 1);
+                store.persist().unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage::unified::store::commit::tests::interrupted_retired_reclamation_preserves_reuse",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env(env_name, "1")
+                .output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(exit_code),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            eprintln!(
+                "retired_reclaim_{label} child={}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            for id in 1..=200 {
+                assert_eq!(
+                    store
+                        .get("rows", EntityId::new(id))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text(replay_crash_payload(id, 2))]
+                );
+            }
+            let pager = store.pager.as_ref().unwrap();
+            let before_pages = pager.page_count().unwrap();
+            let mut ids = std::collections::HashSet::new();
+            let mut reused = 0;
+            for _ in 0..256 {
+                let page = pager
+                    .allocate_page(crate::storage::engine::page::PageType::BTreeLeaf)
+                    .unwrap();
+                let id = page.page_id();
+                assert!(ids.insert(id), "duplicate allocation");
+                reused += u32::from(id < before_pages);
+                pager.write_page(id, page).unwrap();
+            }
+            pager.sync().unwrap();
+            eprintln!(
+                "retired_reclaim_{label} before_pages={before_pages} reused={reused} appended={}",
+                256 - reused
+            );
+            drop(store);
+            let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+            for id in 1..=200 {
+                assert_eq!(
+                    reopened
+                        .get("rows", EntityId::new(id))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text(replay_crash_payload(id, 2))]
+                );
+            }
+            reuse.push(reused);
+        }
+        assert!(
+            reuse[0] >= reuse[2] && reuse[1] >= reuse[2],
+            "recovery must not lose retired pages before allocator publication: before={} enqueued={} after={}",
+            reuse[0],
+            reuse[1],
+            reuse[2]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn experimental_retaining_released_root_is_not_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+            for id in 1..=200 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "rows",
+                    id,
+                    vec![Value::text(replay_crash_payload(id, 1))],
+                );
+                let record =
+                    UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_V11);
+                store.apply_replayed_upsert("rows", &record, false).unwrap();
+            }
+            store.persist().unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::unified::store::commit::tests::interrupted_retired_reclamation_preserves_reuse", "--nocapture"])
+            .env("REDDB_EXPERIMENTAL_RETIRED_PATH", &path)
+            .env("REDDB_EXPERIMENTAL_RETAIN_RELEASED_ROOT", "1")
+            .env("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE", "1")
+            .output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(185),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("experimental exit after retired free"));
+
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 2))]
+            );
+        }
+        let retired_roots: Vec<_> = reopened
+            .retired_btrees
+            .lock()
+            .iter()
+            .map(|entry| entry.tree.root_page_id())
+            .collect();
+        let pager = reopened.pager.as_ref().unwrap();
+        let root_types: Vec<_> = retired_roots
+            .iter()
+            .map(|id| pager.read_page(*id).unwrap().page_type().unwrap())
+            .collect();
+        assert!(
+            root_types.contains(&crate::storage::engine::page::PageType::FreelistTrunk),
+            "expected a retained root to have become a freelist trunk: {root_types:?}"
+        );
+        let error = reopened
+            .persist()
+            .expect_err("retained root was reused as allocator metadata");
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected retired tree page type"),
+            "{error}"
+        );
+        eprintln!("retained_root_types={root_types:?} persist_error={error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn interrupted_replay_reclaims_pages(after_publication: bool, force_sync: bool) {
+        use std::os::unix::fs::MetadataExt;
+        const CHILD_PATH: &str = "REDDB_EXPERIMENTAL_REPLAY_REBUILD_PATH";
+        let config = || {
+            UnifiedStoreConfig::default()
+                .with_durability_mode(DurabilityMode::Strict)
+                .with_page_cache_slots(4)
+        };
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let _store = UnifiedStore::open_with_config(path, config())
+                .expect("must exit while replay rebuilds");
+            panic!("replay rebuild hook was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+            store.create_collection("rows").unwrap();
+            for id in 1..=200 {
+                store
+                    .insert(
+                        "rows",
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            "rows",
+                            id,
+                            vec![Value::text(format!("initial-{id}"))],
+                        ),
+                    )
+                    .unwrap();
+            }
+            store.persist().unwrap();
+        }
+        {
+            let coordinator = StoreCommitCoordinator::open(
+                reddb_file::layout::unified_wal_path(&path),
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .unwrap();
+            let actions = (1..=200)
+                .map(|id| {
+                    let entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text(replay_crash_payload(id, 8))],
+                    );
+                    StoreWalAction::upsert_entity("rows", &entity, None, STORE_VERSION_V11)
+                })
+                .collect::<Vec<_>>();
+            coordinator.append_actions(&actions).unwrap();
+        }
+        let snapshot = || {
+            let data = std::fs::metadata(&path).unwrap();
+            let wal = std::fs::metadata(reddb_file::layout::unified_wal_path(&path)).unwrap();
+            (
+                data.len(),
+                data.blocks() * 512,
+                wal.len(),
+                wal.blocks() * 512,
+            )
+        };
+        let baseline = snapshot();
+        let mut previous = baseline;
+        let mut first_failure = baseline;
+        for cycle in 1..=12 {
+            let test_name = if after_publication {
+                "storage::unified::store::commit::tests::interrupted_replay_preserves_published_pages"
+            } else if force_sync {
+                "storage::unified::store::commit::tests::interrupted_replay_reclaims_durable_unpublished_pages"
+            } else {
+                "storage::unified::store::commit::tests::interrupted_replay_reclaims_unpublished_pages"
+            };
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD_PATH, &path);
+            if !force_sync {
+                command.env("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC", "1");
+            } else {
+                command.env_remove("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC");
+            }
+            let message = if after_publication {
+                command.env("REDDB_EXPERIMENTAL_EXIT_AFTER_REPLAY_PUBLICATION", "1");
+                "experimental replay exit after manifest"
+            } else {
+                command.env("REDDB_EXPERIMENTAL_EXIT_DURING_REPLAY_REBUILD", "1");
+                "experimental replay rebuild exit before manifest"
+            };
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(182),
+                "cycle {cycle}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            let now = snapshot();
+            eprintln!("replay_exit_cycle={cycle} data_logical={} data_allocated={} wal_logical={} wal_allocated={}",now.0,now.1,now.2,now.3);
+            if cycle == 1 {
+                first_failure = now;
+            }
+            previous = now;
+        }
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(recovered.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                recovered
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        let pages = recovered.pager.as_ref().unwrap().page_count().unwrap();
+        let free = recovered.pager.as_ref().unwrap().free_page_count().unwrap();
+        recovered.persist().unwrap();
+        drop(recovered);
+        let final_sizes = snapshot();
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(reopened.get_collection("rows").unwrap().count(), 200);
+        for id in 1..=200 {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        eprintln!("replay_rebuild baseline={baseline:?} after_12={previous:?} after_recovery_checkpoint={final_sizes:?} pages={pages} free={free}");
+        // Probe actual allocation rather than the cached free-page counter:
+        // newly allocated IDs reveal whether interrupted generations returned
+        // to the allocator after recovery and a completed checkpoint.
+        let pager = reopened.pager.as_ref().unwrap();
+        let before_probe = pager.page_count().unwrap();
+        let mut ids = std::collections::HashSet::new();
+        let mut reused = 0;
+        for _ in 0..256 {
+            let page = pager
+                .allocate_page(crate::storage::engine::page::PageType::BTreeLeaf)
+                .unwrap();
+            let id = page.page_id();
+            assert!(ids.insert(id), "allocator returned the same page twice");
+            reused += u32::from(id < before_probe);
+            pager.write_page(id, page).unwrap();
+        }
+        pager.sync().unwrap();
+        let after_probe = pager.page_count().unwrap();
+        eprintln!("replay_reuse_probe count=256 before_pages={before_probe} after_pages={after_probe} reused={reused} appended={}", 256 - reused);
+        drop(reopened);
+        let verified = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=200 {
+            assert_eq!(
+                verified
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::text(replay_crash_payload(id, 8))]
+            );
+        }
+        assert!(
+            previous.0 <= first_failure.0 + 2 * crate::storage::engine::PAGE_SIZE as u64,
+            "repeated interrupted replay must bound page growth: first={}, after_12={}",
+            first_failure.0,
+            previous.0
+        );
     }
 
     #[test]

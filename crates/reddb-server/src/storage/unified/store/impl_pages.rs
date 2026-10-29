@@ -141,6 +141,9 @@ fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
 
 fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerError> {
     let retired = existing_overflow_chain(pager)?;
+    if !retired.is_empty() {
+        pager.record_retirement_intent(&retired)?;
+    }
     let page = build_meta_page1_with_overflow(pager, meta_data)?;
     // Cache eviction order must not publish a root before its children.
     pager.sync()?;
@@ -453,6 +456,13 @@ impl UnifiedStore {
                 && Arc::strong_count(&entry.tree) == 1
                 && !entry.tree.has_retirement_readers()
             {
+                // Deliberately unsafe experimental control: keep the old
+                // root in the catalog while releasing its pages. Never enable
+                // this outside the isolated recovery test.
+                #[cfg(test)]
+                if std::env::var_os("REDDB_EXPERIMENTAL_RETAIN_RELEASED_ROOT").is_some() {
+                    roots.push(entry.tree.root_page_id());
+                }
                 reclaim.extend(
                     entry
                         .tree
@@ -483,10 +493,41 @@ impl UnifiedStore {
             .collect();
         reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let active_epoch = self.ownership_active_epoch.load(Ordering::Acquire);
+        let catalog_epoch = if active_epoch == 0 {
+            self.ownership_catalog_epoch.load(Ordering::Acquire)
+        } else {
+            active_epoch
+        };
+        if catalog_epoch != 0 {
+            reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        }
+        // Record the exact pages before the catalog can forget their owners.
+        // Recovery resolves this intent against the durable catalog epoch.
+        let mut retirement_intent = reclaim.clone();
+        retirement_intent.extend_from_slice(&released_pages);
+        if !retirement_intent.is_empty() {
+            pager
+                .record_retirement_intent(&retirement_intent)
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        }
         // Do not mutate retirement state or the free list before both the new
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        self.ownership_catalog_epoch
+            .store(catalog_epoch, Ordering::Release);
+        #[cfg(test)]
+        if !reclaim.is_empty()
+            && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE").is_some()
+        {
+            eprintln!(
+                "experimental exit before retired free pages={}",
+                reclaim.len()
+            );
+            std::process::exit(184);
+        }
         let mut index = 0;
         retired.retain_mut(|entry| {
             let keep = !remove.contains(&index);
@@ -498,9 +539,25 @@ impl UnifiedStore {
             pager
                 .free_retired_pages(&reclaim)
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE").is_some() {
+                eprintln!(
+                    "experimental exit after retired enqueue pages={}",
+                    reclaim.len()
+                );
+                std::process::exit(186);
+            }
             pager
                 .sync()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE").is_some() {
+                eprintln!(
+                    "experimental exit after retired free pages={}",
+                    reclaim.len()
+                );
+                std::process::exit(185);
+            }
         }
         pager
             .complete_deferred_publication(&retained_pages, &released_pages)
@@ -804,6 +861,8 @@ impl UnifiedStore {
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
+            ownership_catalog_epoch: AtomicU64::new(0),
+            ownership_active_epoch: AtomicU64::new(0),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
             commit: None,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
@@ -885,6 +944,8 @@ impl UnifiedStore {
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
+            ownership_catalog_epoch: AtomicU64::new(0),
+            ownership_active_epoch: AtomicU64::new(0),
             detached_native_blob_pages: parking_lot::Mutex::new(Default::default()),
             commit,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
@@ -895,6 +956,13 @@ impl UnifiedStore {
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };
 
+        // An interrupted structural edit may have reached home pages without
+        // publishing its catalog. Restore those pages before following roots.
+        if let Some(commit) = &store.commit {
+            commit
+                .restore_checkpoint_page_images(&store)
+                .map_err(StoreError::Io)?;
+        }
         // Load existing data from pages if database exists
         store.load_from_pages()?;
         if let Some(commit) = &store.commit {
@@ -933,10 +1001,25 @@ impl UnifiedStore {
                 self.retire_btree(previous);
             }
             self.mark_paged_registry_dirty();
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_REPLAY_REBUILD").is_some() {
+                if std::env::var_os("REDDB_EXPERIMENTAL_REPLAY_NO_SYNC").is_none() {
+                    pager.sync().map_err(|error| {
+                        StoreError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                }
+                eprintln!("experimental replay rebuild exit before manifest");
+                std::process::exit(182);
+            }
         }
         drop(indices);
         drop(collections);
         self.flush_paged_state()?;
+        #[cfg(test)]
+        if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_REPLAY_PUBLICATION").is_some() {
+            eprintln!("experimental replay exit after manifest");
+            std::process::exit(182);
+        }
         // Opening has no concurrent writers. Replay has now durably reconciled
         // these raw trees; do not immediately rebuild them at the first flush.
         if self.snapshot_manager.get().is_none() && self.pending_vault_versions.read().is_empty() {
@@ -1006,9 +1089,20 @@ impl UnifiedStore {
             .map_err(StoreError::Io)
     }
 
-    /// Load data from page-based storage
-    ///
-    /// Reads the B-tree indices and reconstructs collections from pages.
+    /// Read the commit boundary before following potentially interrupted trees.
+    pub(super) fn published_ownership_epoch(&self) -> Result<u64, StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(0);
+        };
+        let Some(content) = read_meta_payload(pager)? else {
+            return Ok(0);
+        };
+        reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(&content)
+            .map(|epoch| epoch.unwrap_or(0))
+            .map_err(|error| StoreError::Serialization(error.to_string()))
+    }
+
+    /// Read the B-tree indices and reconstruct collections from pages.
     fn load_from_pages(&self) -> Result<(), StoreError> {
         let pager = match &self.pager {
             Some(p) => p,
@@ -1223,6 +1317,13 @@ impl UnifiedStore {
                 pager
                     .restore_deferred_reclamation(&deferred)
                     .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                let ownership_epoch =
+                    reddb_file::native_store::decode_native_paged_ownership_epoch(
+                        content, &mut pos,
+                    )
+                    .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                self.ownership_catalog_epoch
+                    .store(ownership_epoch.unwrap_or(0), Ordering::Release);
             }
         }
 
@@ -1295,6 +1396,9 @@ impl UnifiedStore {
                 )));
             }
         };
+        // Prevent unrelated allocations or frees from being attributed to
+        // this checkpoint's ownership epoch.
+        let _ownership_guard = pager.lock_ownership_mutations();
 
         match pager.read_page(1) {
             Ok(_) => {}
@@ -1314,6 +1418,33 @@ impl UnifiedStore {
         if let Some(commit) = &self.commit {
             commit.force_sync().map_err(StoreError::Io)?;
         }
+
+        struct InterruptedOwnership<'a> {
+            pager: &'a Pager,
+            active: bool,
+        }
+        impl Drop for InterruptedOwnership<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    self.pager.fence_interrupted_ownership();
+                }
+            }
+        }
+        let mut ownership = InterruptedOwnership {
+            pager,
+            active: self.commit.is_some(),
+        };
+        let epoch = if let Some(commit) = &self.commit {
+            let epoch = commit
+                .next_page_ownership_epoch(self)
+                .map_err(StoreError::Io)?;
+            commit
+                .begin_page_ownership_epoch(self, epoch)
+                .map_err(StoreError::Io)?;
+            Some(epoch)
+        } else {
+            None
+        };
 
         let collections = self.resident.collections.read();
         let mut btree_indices = self.btree_indices.write();
@@ -1455,7 +1586,20 @@ impl UnifiedStore {
                 self.retire_btree(Arc::clone(previous));
             }
         }
+        #[cfg(test)]
+        if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD").is_some() {
+            pager
+                .sync()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            eprintln!("experimental checkpoint exit before manifest");
+            std::process::exit(183);
+        }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
+
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
+            std::process::exit(195);
+        }
 
         // Only the now-durable catalog may replace the live tree handles. The
         // previous generation is retained in the manifest retirement ledger.
@@ -1464,6 +1608,10 @@ impl UnifiedStore {
         *self.checkpoint_versions.write() = checkpoint_versions;
 
         if let Some(commit) = &self.commit {
+            commit
+                .finish_page_ownership_epoch(self, epoch.expect("WAL ownership epoch"))
+                .map_err(StoreError::Io)?;
+            ownership.active = false;
             commit.truncate().map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
@@ -1495,6 +1643,118 @@ impl UnifiedStore {
 #[cfg(test)]
 mod checkpoint_work_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_inline_sparse_checkpoint_replays_durable_rows() {
+        const CHILD: &str = "REDDB_TEST_INLINE_SPARSE_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let insert = std::env::var_os("REDDB_TEST_INLINE_SPARSE_INSERT").is_some();
+            let multi = std::env::var_os("REDDB_TEST_INLINE_SPARSE_MULTI").is_some();
+            let store = UnifiedStore::open(path).expect("open store");
+            let initial_count = if multi { 600 } else { 1 };
+            for id in 1..=initial_count {
+                store.insert_auto("rows", row(id, 1)).expect("seed");
+            }
+            store.persist().expect("baseline");
+            let manager = store.get_collection("rows").expect("collection");
+            let ids: Vec<u64> = if multi {
+                (1..=initial_count).collect()
+            } else {
+                vec![if insert { 2 } else { 1 }]
+            };
+            let mut actions = Vec::new();
+            for id in ids {
+                if insert {
+                    manager.insert(row(id, 9)).expect("insert version");
+                } else {
+                    manager.update(row(id, 9)).expect("update version");
+                }
+                let entity = manager.get(EntityId::new(id)).expect("changed entity");
+                actions.push(StoreWalAction::upsert_entity(
+                    "rows",
+                    &entity,
+                    None,
+                    store.format_version(),
+                ));
+            }
+            let references = store
+                .commit
+                .as_ref()
+                .expect("coordinator")
+                .append_checkpoint_actions(&actions)
+                .expect("durable WAL");
+            store.remember_checkpoint_rows(actions, references);
+            store.persist().expect("exit after sparse write");
+            panic!("inline sparse crash hook was not reached");
+        }
+        for (insert, multi) in [(false, false), (true, false), (false, true)] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args(["--exact", "storage::unified::store::impl_pages::checkpoint_work_tests::interrupted_inline_sparse_checkpoint_replays_durable_rows", "--nocapture"])
+                .env(CHILD, &path)
+                .env("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE", "1");
+            if insert {
+                command.env("REDDB_TEST_INLINE_SPARSE_INSERT", "1");
+            }
+            if multi {
+                command.env("REDDB_TEST_INLINE_SPARSE_MULTI", "1");
+            }
+            let output = command.output().expect("crash child");
+            assert_eq!(
+                output.status.code(),
+                Some(190),
+                "insert={insert} multi={multi}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let recovered = UnifiedStore::open(&path).expect("recover");
+            let ids: Vec<u64> = if multi {
+                (1..=600).collect()
+            } else {
+                vec![if insert { 2 } else { 1 }]
+            };
+            for id in ids {
+                assert_eq!(
+                    recovered
+                        .get("rows", EntityId::new(id))
+                        .expect("recovered row")
+                        .data
+                        .as_row()
+                        .expect("row")
+                        .columns,
+                    vec![Value::Integer(9)]
+                );
+            }
+            assert_eq!(
+                recovered.get_collection("rows").expect("rows").count(),
+                if multi {
+                    600
+                } else if insert {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_ownership_epoch_survives_reopen_and_later_publication() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).expect("open store");
+            store.create_collection("rows").expect("create collection");
+            store.persist().expect("publish ownership epoch");
+            assert_eq!(store.ownership_catalog_epoch.load(Ordering::Acquire), 1);
+            store.persist().expect("publish next ownership epoch");
+        }
+        let reopened = UnifiedStore::open(&path).expect("reopen store");
+        assert_eq!(reopened.ownership_catalog_epoch.load(Ordering::Acquire), 2);
+    }
 
     #[test]
     fn metadata_overflow_with_missing_continuation_fails_closed() {

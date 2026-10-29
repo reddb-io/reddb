@@ -1194,7 +1194,7 @@ enum WireColumnSource {
     Rid,
     CreatedAt,
     UpdatedAt,
-    RowIndexTrusted { index: usize },
+    RowIndexTrusted { index: usize, name: Arc<str> },
     RowIndex { index: usize, name: Arc<str> },
     RowName(Arc<str>),
 }
@@ -1270,7 +1270,10 @@ fn resolve_wire_columns_from_query_schema(tq: &TableQuery, schema: &[String]) ->
         ));
         out.extend(schema.iter().enumerate().map(|(idx, name)| WireColumn {
             name: Arc::<str>::from(name.as_str()),
-            source: WireColumnSource::RowIndexTrusted { index: idx },
+            source: WireColumnSource::RowIndexTrusted {
+                index: idx,
+                name: Arc::<str>::from(name.as_str()),
+            },
         }));
         return out;
     }
@@ -1366,7 +1369,10 @@ fn resolve_named_wire_column_from_schema(
         "created_at" => WireColumnSource::CreatedAt,
         "updated_at" => WireColumnSource::UpdatedAt,
         _ => match schema.iter().position(|col| col == source_column) {
-            Some(idx) => WireColumnSource::RowIndexTrusted { index: idx },
+            Some(idx) => WireColumnSource::RowIndexTrusted {
+                index: idx,
+                name: Arc::<str>::from(source_column),
+            },
             None => WireColumnSource::RowName(Arc::<str>::from(source_column)),
         },
     };
@@ -1412,10 +1418,22 @@ fn encode_entity_wire_value(
         WireColumnSource::Rid => encode_wire_u64(body, entity.logical_id().raw()),
         WireColumnSource::CreatedAt => encode_wire_u64(body, entity.created_at),
         WireColumnSource::UpdatedAt => encode_wire_u64(body, entity.updated_at),
-        WireColumnSource::RowIndexTrusted { index } => match row.columns.get(*index) {
-            Some(v) => encode_value(body, v),
-            None => encode_wire_null(body),
-        },
+        WireColumnSource::RowIndexTrusted { index, name } => {
+            let value = if row.named.is_none()
+                && row.schema.as_ref().is_none_or(|schema| {
+                    schema
+                        .get(*index)
+                        .is_some_and(|column| column.as_str() == name.as_ref())
+                }) {
+                row.columns.get(*index)
+            } else {
+                row.get_field(name.as_ref())
+            };
+            match value {
+                Some(value) => encode_value(body, value),
+                None => encode_wire_null(body),
+            }
+        }
         WireColumnSource::RowIndex { index, name } => {
             match row
                 .schema
@@ -1453,6 +1471,30 @@ fn encode_wire_u64(body: &mut Vec<u8>, value: u64) {
 mod tests {
     use super::*;
     use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn trusted_wire_column_checks_recovered_row_shape_and_keeps_alias() {
+        let mut entity =
+            UnifiedEntity::table_row(crate::storage::EntityId::new(1), "dynamic", 1, vec![]);
+        entity.data = EntityData::Row(RowData {
+            columns: vec![Value::Integer(999), Value::Integer(7)],
+            named: None,
+            schema: Some(Arc::new(vec!["a_dimension".into(), "id".into()])),
+        });
+        let column = resolve_named_wire_column_from_schema("chosen", "id", &["id".into()]);
+        let mut bytes = Vec::new();
+        encode_entity_wire_value(
+            &mut bytes,
+            &entity,
+            entity.data.as_row().expect("row"),
+            &column,
+        );
+        assert_eq!(column.name.as_ref(), "chosen");
+        assert_eq!(
+            crate::wire::protocol::decode_value(&bytes, &mut 0),
+            Value::Integer(7)
+        );
+    }
 
     fn mk_runtime() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory())

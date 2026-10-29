@@ -5,7 +5,7 @@ pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
 #[cfg(test)]
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
+const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 
 #[cfg(test)]
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
@@ -204,18 +204,14 @@ impl Pager {
             }
         }
 
-        // Acquire file lock (exclusive for writes, shared for read-only)
-        let lock_file = if !config.read_only {
-            let lf = OpenOptions::new().read(true).write(true).open(&path)?;
-            lf.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
-            Some(lf)
+        // Lock the same handle that performs page I/O. Windows byte-range
+        // locks deny reads/writes through a separately opened handle even in
+        // this process. The owned VFS handle holds the fence until it closes.
+        if !config.read_only {
+            file.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
         } else {
-            let lf = OpenOptions::new().read(true).open(&path)?;
-            match lf.try_lock_shared() {
-                Ok(_) => Some(lf),
-                Err(_) => None,
-            }
-        };
+            let _ = FileExt::try_lock_shared(&file);
+        }
 
         // ADR 0038 phase 3: the DWB sidecar is retired. When DWB is active,
         // the recovery frame is written to a reserved zone inside the data
@@ -262,7 +258,6 @@ impl Pager {
         )?;
         let mut pager = Self {
             core,
-            _lock_file: lock_file,
             config,
             encryption: None,
         };
@@ -487,6 +482,42 @@ impl Pager {
             .unwrap_or(false)
     }
 
+    /// Install an ownership recorder while all other mutators are fenced.
+    #[allow(dead_code)] // Used when ownership recovery is activated.
+    pub(crate) fn install_ownership_recorder(
+        &self,
+        recorder: Arc<dyn super::PageOwnershipRecorder>,
+    ) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.is_some() {
+            return Err(std::io::Error::other(
+                "ownership recorder already installed",
+            ));
+        }
+        *slot = Some(recorder);
+        Ok(())
+    }
+
+    /// Remove the recorder after allocator copies and journal completion are
+    /// durable, while other mutators remain fenced.
+    pub(crate) fn clear_ownership_recorder(&self) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.take().is_none() {
+            return Err(std::io::Error::other("ownership recorder is not installed"));
+        }
+        Ok(())
+    }
+
     /// Issue a best-effort OS read-ahead hint under the page-I/O lock.
     pub fn prefetch_hint(&self, page_id: u32) {
         let _ = self.core.with_file(|file| {
@@ -503,6 +534,41 @@ impl Pager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_scope_serializes_other_allocators_and_fences_errors() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pager = Arc::new(
+            Pager::open(directory.path().join("data.rdb"), Default::default()).expect("pager"),
+        );
+        let scope = pager.lock_ownership_mutations();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other_pager = Arc::clone(&pager);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal worker started");
+            let page = other_pager.allocate_page(PageType::BTreeLeaf);
+            done_tx
+                .send(page.map(|page| page.page_id()))
+                .expect("signal allocation");
+        });
+        started_rx.recv().expect("worker started");
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        let own = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("reentrant allocation");
+        drop(scope);
+        let other = done_rx
+            .recv()
+            .expect("worker result")
+            .expect("other allocation");
+        worker.join().expect("worker");
+        assert_ne!(own.page_id(), other);
+        pager.fence_interrupted_ownership();
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+    }
 
     fn temp_db_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

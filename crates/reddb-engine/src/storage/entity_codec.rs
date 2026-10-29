@@ -64,17 +64,31 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
     // EntityData
     match &entity.data {
         EntityData::Row(row) => {
-            if let Some(ref named) = row.named {
-                // Named row: type 6 = Row with named HashMap.
-                // Sort by key so the on-disk byte sequence is
-                // deterministic — replication relies on hashing the
-                // serialized record to detect divergence, and a
-                // HashMap-iteration-order race produces spurious
-                // mismatches.
+            if row.named.is_some()
+                || row
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.len() == row.columns.len())
+            {
+                // Both resident representations encode the same named record.
+                // Compaction must not lose field names on the next checkpoint.
                 buf.push(6);
-                write_varu32(buf, named.len() as u32);
-                let mut entries: Vec<_> = named.iter().collect();
-                entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                let mut entries: Vec<_> = if let Some(named) = &row.named {
+                    named
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value))
+                        .collect()
+                } else {
+                    row.schema
+                        .as_ref()
+                        .expect("validated schema")
+                        .iter()
+                        .map(String::as_str)
+                        .zip(&row.columns)
+                        .collect()
+                };
+                write_varu32(buf, entries.len() as u32);
+                entries.sort_by(|a, b| a.0.cmp(b.0));
                 for (key, value) in entries {
                     write_varu32(buf, key.len() as u32);
                     buf.extend_from_slice(key.as_bytes());

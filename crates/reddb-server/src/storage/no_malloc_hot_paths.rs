@@ -29,7 +29,7 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(layout.size()));
         unsafe { System.alloc(layout) }
     }
 
@@ -39,12 +39,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(layout.size()));
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(new_size));
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -52,12 +52,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AllocationCount {
     pub(crate) allocs: usize,
+    pub(crate) allocated_bytes: usize,
     deallocs: usize,
 }
 
 struct AllocationCounter {
     enabled: Cell<bool>,
     allocs: Cell<usize>,
+    allocated_bytes: Cell<usize>,
     deallocs: Cell<usize>,
 }
 
@@ -66,13 +68,16 @@ impl AllocationCounter {
         Self {
             enabled: Cell::new(false),
             allocs: Cell::new(0),
+            allocated_bytes: Cell::new(0),
             deallocs: Cell::new(0),
         }
     }
 
-    fn record_alloc(&mut self) {
+    fn record_alloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.allocs.set(self.allocs.get() + 1);
+            self.allocated_bytes
+                .set(self.allocated_bytes.get().saturating_add(bytes));
         }
     }
 
@@ -88,12 +93,14 @@ impl AllocationCounter {
             "allocation counter cannot be nested"
         );
         self.allocs.set(0);
+        self.allocated_bytes.set(0);
         self.deallocs.set(0);
     }
 
     fn finish(&self) -> AllocationCount {
         let count = AllocationCount {
             allocs: self.allocs.get(),
+            allocated_bytes: self.allocated_bytes.get(),
             deallocs: self.deallocs.get(),
         };
         self.enabled.set(false);

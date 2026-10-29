@@ -237,6 +237,9 @@ pub struct SegmentManager {
     /// Shared column schema: column_name → index in Vec<Value>.
     /// Populated on first bulk_insert. Enables columnar storage (Vec instead of HashMap per row).
     column_schema: RwLock<Option<Arc<Vec<String>>>>,
+    // A bounded set of exact named-row shapes. Dynamic collections have no
+    // declared schema; sharing their names must not invent a table contract.
+    recovery_row_schemas: RwLock<Vec<Arc<Vec<String>>>>,
     /// Statistics (slow path — not updated on every insert).
     stats: RwLock<ManagerStats>,
     /// Consolidation in flight, if any. Only `run_maintenance` touches it, so
@@ -274,6 +277,7 @@ impl SegmentManager {
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
             column_schema: RwLock::new(None),
+            recovery_row_schemas: RwLock::new(Vec::new()),
             stats: RwLock::new(ManagerStats::default()),
             consolidation: RwLock::new(None),
             events: RwLock::new(Vec::new()),
@@ -324,13 +328,49 @@ impl SegmentManager {
 
     #[doc(hidden)]
     pub fn set_column_schema_if_empty(&self, columns: Vec<String>) {
-        if columns.is_empty() {
+        if columns.is_empty()
+            || columns
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != columns.len()
+        {
             return;
         }
         let mut schema = self.column_schema.write();
         if schema.is_none() {
             *schema = Some(Arc::new(columns));
         }
+    }
+
+    /// Compact named records after recovery has restored the authoritative
+    /// column schema, before serving requests. Captured segments are skipped:
+    /// a cursor's immutable view must never change under it.
+    #[doc(hidden)]
+    pub fn compact_recovered_rows(&self) -> usize {
+        if self.recovery_preserves_named_rows() {
+            return 0;
+        }
+        let Some(schema) = self.column_schema() else {
+            return 0;
+        };
+        if schema
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != schema.len()
+        {
+            return 0;
+        }
+        let mut growing = self.growing.write();
+        let mut sealed = self.sealed.write();
+        let mut compacted = 0;
+        for segment in growing.iter_mut().chain(sealed.iter_mut()) {
+            if let Some(segment) = Arc::get_mut(segment) {
+                compacted += segment.get_mut().compact_recovered_rows(&schema);
+            }
+        }
+        compacted
     }
 
     /// Get collection name
@@ -553,9 +593,56 @@ impl SegmentManager {
         }
     }
 
+    fn recovery_preserves_named_rows(&self) -> bool {
+        // Internal catalog/configuration readers still consume named maps
+        // directly, including bootstrap before runtime initialization. Keep
+        // their established representation on both recovery compaction paths.
+        self.collection.starts_with("red_") || self.collection.starts_with("red.")
+    }
+
+    fn recovery_schema(&self, row: &super::entity::RowData) -> Option<Arc<Vec<String>>> {
+        if self.recovery_preserves_named_rows() {
+            return None;
+        }
+        let named = row.named.as_ref()?;
+        let matches = |schema: &Vec<String>| {
+            schema.len() == named.len() && schema.iter().all(|name| named.contains_key(name))
+        };
+        if let Some(schema) = self.column_schema().filter(|schema| matches(schema)) {
+            return Some(schema);
+        }
+        {
+            let schemas = self.recovery_row_schemas.read();
+            if let Some(schema) = schemas.iter().find(|schema| matches(schema)) {
+                return Some(Arc::clone(schema));
+            }
+        }
+        let mut schemas = self.recovery_row_schemas.write();
+        if let Some(schema) = schemas.iter().find(|schema| matches(schema)) {
+            return Some(Arc::clone(schema));
+        }
+        const MAX_RECOVERY_ROW_SCHEMAS: usize = 16;
+        if schemas.len() >= MAX_RECOVERY_ROW_SCHEMAS {
+            return None;
+        }
+        let mut names: Vec<_> = named.keys().cloned().collect();
+        names.sort_unstable();
+        let schema = Arc::new(names);
+        schemas.push(Arc::clone(&schema));
+        Some(schema)
+    }
+
     /// Restore a snapshot image without allocating a new sequence identity.
     #[doc(hidden)]
-    pub fn restore_snapshot_entity(&self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+    pub fn restore_snapshot_entity(
+        &self,
+        mut entity: UnifiedEntity,
+    ) -> Result<EntityId, SegmentError> {
+        if let super::entity::EntityData::Row(row) = &mut entity.data {
+            if let Some(schema) = self.recovery_schema(row) {
+                row.compact_with_schema(&schema);
+            }
+        }
         self.maybe_seal_growing()?;
         if self.get(entity.id).is_some() {
             return Err(SegmentError::AlreadyExists(entity.id));

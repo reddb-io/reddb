@@ -41,6 +41,7 @@ pub mod native_index_artifact;
 pub mod native_store;
 pub mod native_value;
 pub mod operational_manifest;
+pub mod page_ownership_journal;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;

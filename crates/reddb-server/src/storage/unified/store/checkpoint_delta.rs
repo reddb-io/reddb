@@ -273,6 +273,43 @@ impl UnifiedStore {
         // do not reread potentially changed manager payloads in a second pass.
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
+        let protected = self.ownership_active_epoch.load(Ordering::Acquire) != 0;
+        let tree = Arc::clone(tree);
+        let apply = |items: &[(Vec<u8>, Vec<u8>)]| -> Result<(), StoreError> {
+            if protected
+                && tree
+                    .try_upsert_inline_without_splits(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+            {
+                #[cfg(test)]
+                if std::env::var_os("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE").is_some() {
+                    self.pager
+                        .as_ref()
+                        .expect("paged checkpoint")
+                        .sync()
+                        .map_err(|error| {
+                            StoreError::Io(std::io::Error::other(error.to_string()))
+                        })?;
+                    std::process::exit(190);
+                }
+            } else {
+                // The ownership epoch records each old page before its first
+                // overwrite. Recovery restores those images before reading
+                // roots, then releases new pages and replays committed rows.
+                tree.upsert_batch_sorted(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            }
+            #[cfg(debug_assertions)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_SPARSE_BATCH").is_some() {
+                self.pager
+                    .as_ref()
+                    .expect("paged checkpoint")
+                    .sync()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                std::process::exit(193);
+            }
+            Ok(())
+        };
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;
         for (id, source) in upserts {
@@ -292,9 +329,10 @@ impl UnifiedStore {
             };
             let key = id.raw().to_be_bytes().to_vec();
             let bytes = key.len() + value.len();
-            if !batch.is_empty() && batch_bytes.saturating_add(bytes) > 1024 * 1024 {
-                tree.upsert_batch_sorted(&batch)
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            if !batch.is_empty()
+                && (batch_bytes.saturating_add(bytes) > 1024 * 1024 || batch.len() >= 512)
+            {
+                apply(&batch)?;
                 batch.clear();
                 batch_bytes = 0;
             }
@@ -302,8 +340,7 @@ impl UnifiedStore {
             batch.push((key, value));
         }
         if !batch.is_empty() {
-            tree.upsert_batch_sorted(&batch)
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            apply(&batch)?;
         }
         drop(retained);
         #[cfg(debug_assertions)]
@@ -317,7 +354,7 @@ impl UnifiedStore {
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             std::process::exit(176);
         }
-        Ok(Some(Arc::clone(tree)))
+        Ok(Some(tree))
     }
 }
 

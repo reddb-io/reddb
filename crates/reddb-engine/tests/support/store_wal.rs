@@ -20,6 +20,7 @@ pub const CASES: &[(&str, fn())] = &[
     ("store_wal_entity_record_replay", entity_record_replay),
     ("store_wal_host_index_boundaries", host_index_boundaries),
     ("store_wal_atomic_resident_refresh", atomic_resident_refresh),
+    ("store_wal_aux_metadata_replay", aux_metadata_replay),
     ("store_wal_recovery_fixture", recovery_fixture),
 ];
 
@@ -99,6 +100,9 @@ fn actions() -> Vec<StoreWalAction> {
             collection: "data".into(),
             records: vec![vec![5], vec![6]],
         },
+        StoreWalAction::SetAuxMetadata {
+            bytes: vec![0, 1, 255],
+        },
     ]
 }
 
@@ -123,6 +127,9 @@ fn canonical_action_frames() {
         StoreWalActionFrame::RefreshCollection {
             collection: "data".into(),
             records: vec![vec![5], vec![6]],
+        },
+        StoreWalActionFrame::SetAuxMetadata {
+            bytes: vec![0, 1, 255],
         },
     ];
     for (action, expected) in actions().into_iter().zip(expected) {
@@ -168,6 +175,19 @@ fn replay(store: &ResidentStore, action: StoreWalAction) {
     store
         .apply_replayed_action(&action, 12, &ManagerConfig::default())
         .expect("resident replay");
+}
+
+fn aux_metadata_replay() {
+    let store = ResidentStore::new();
+    for bytes in [vec![0, 1, 255], vec![0, 1, 255], vec![]] {
+        replay(
+            &store,
+            StoreWalAction::SetAuxMetadata {
+                bytes: bytes.clone(),
+            },
+        );
+        assert_eq!(store.aux_metadata(), bytes);
+    }
 }
 
 fn entity_record_replay() {

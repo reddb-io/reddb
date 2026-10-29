@@ -191,6 +191,35 @@ impl RowData {
         }
     }
 
+    /// Replace a decoded named row with values in the authoritative schema's
+    /// order. Different dynamic shapes retain their named representation.
+    pub(crate) fn compact_with_schema(&mut self, schema: &std::sync::Arc<Vec<String>>) -> bool {
+        let Some(named) = &self.named else {
+            return false;
+        };
+        if named.len() != schema.len() || schema.iter().any(|name| !named.contains_key(name)) {
+            return false;
+        }
+        // Existing positional values are independently observable. Only drop
+        // their duplicate copy when the declared order agrees with them.
+        if !self.columns.is_empty()
+            && (self.columns.len() != schema.len()
+                || schema
+                    .iter()
+                    .zip(&self.columns)
+                    .any(|(name, value)| named.get(name) != Some(value)))
+        {
+            return false;
+        }
+        let mut named = self.named.take().expect("validated named row");
+        self.columns = schema
+            .iter()
+            .map(|name| named.remove(name).expect("validated schema field"))
+            .collect();
+        self.schema = Some(std::sync::Arc::clone(schema));
+        true
+    }
+
     /// Get a named field value — checks named HashMap first, then schema+columns.
     pub fn get_field(&self, name: &str) -> Option<&Value> {
         // Fast path: named HashMap

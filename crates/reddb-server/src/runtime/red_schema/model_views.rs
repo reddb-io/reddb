@@ -898,19 +898,18 @@ pub(super) fn metrics_snapshot(
 fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
     let mut document_count: u64 = 0;
     let mut field_names: HashSet<String> = HashSet::new();
-    for (_, entity) in runtime
-        .db()
-        .store()
-        .query_all(|entity| entity.kind.collection() == collection)
-    {
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = runtime.db().store().get_collection(collection) else {
+        return (0, 0);
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         if !row
             .iter_fields()
             .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
         {
-            continue;
+            return true;
         }
         document_count = document_count.saturating_add(1);
         for (name, _) in row.iter_fields() {
@@ -926,6 +925,7 @@ fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
                 }
             }
         }
-    }
+        true
+    });
     (document_count, field_names.len() as u64)
 }

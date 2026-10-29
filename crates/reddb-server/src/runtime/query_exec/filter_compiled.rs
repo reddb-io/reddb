@@ -344,7 +344,13 @@ pub(crate) fn resolve_kind<'a>(
                     return Some(Cow::Owned(v));
                 }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
-                if row.named.is_none() {
+                if row.named.is_none()
+                    && row.schema.as_ref().is_none_or(|schema| {
+                        schema
+                            .get(*idx as usize)
+                            .is_some_and(|column| column == name)
+                    })
+                {
                     return row.columns.get(*idx as usize).map(Cow::Borrowed);
                 }
                 // Fallback (single-insert entities): named HashMap, also O(1).
@@ -377,12 +383,10 @@ pub(crate) fn resolve_kind<'a>(
 }
 
 fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool {
-    row.named.as_ref().is_some_and(|named| {
-        matches!(
-            named.get("body"),
-            Some(Value::Json(_)) | Some(Value::Blob(_))
-        )
-    })
+    matches!(
+        row.get_field("body"),
+        Some(Value::Json(_)) | Some(Value::Blob(_))
+    )
 }
 
 /// Offset-read a single-source document's top-level field from its body.

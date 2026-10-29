@@ -87,6 +87,47 @@ mod tests {
     }
 
     #[test]
+    fn inline_batch_fallback_does_not_partially_update_tree() {
+        let path = temp_db_path();
+        let pager = Arc::new(Pager::open_default(&path).expect("pager"));
+        let tree = BTree::new(pager);
+        tree.insert(b"a", b"old").expect("insert");
+        let root = tree.root_page_id();
+        let mut random = 0x1234_5678_u32;
+        let large: Vec<u8> = (0..reddb_engine::storage::btree::value_layout::OVERFLOW_THRESHOLD
+            * 3)
+            .map(|_| {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                random as u8
+            })
+            .collect();
+        let unsupported = vec![
+            (b"a".to_vec(), b"new".to_vec()),
+            (b"missing".to_vec(), large),
+        ];
+        assert!(!tree
+            .try_upsert_inline_without_splits(&unsupported)
+            .expect("preflight"));
+        assert_eq!(tree.get(b"a").expect("read"), Some(b"old".to_vec()));
+        assert_eq!(tree.get(b"missing").expect("read"), None);
+        assert!(tree
+            .try_upsert_inline_without_splits(&[(b"missing".to_vec(), b"x".to_vec())])
+            .expect("insert"));
+        assert_eq!(tree.get(b"missing").expect("read"), Some(b"x".to_vec()));
+        assert!(tree
+            .try_upsert_inline_without_splits(&[(b"a".to_vec(), b"longer".to_vec())])
+            .expect("repack"));
+        assert_eq!(tree.get(b"a").expect("read"), Some(b"longer".to_vec()));
+        assert!(tree
+            .try_upsert_inline_without_splits(&[(b"a".to_vec(), b"new".to_vec())])
+            .expect("overwrite"));
+        assert_eq!(tree.get(b"a").expect("read"), Some(b"new".to_vec()));
+        assert_eq!(tree.root_page_id(), root);
+    }
+
+    #[test]
     fn test_btree_single_insert() {
         let path = temp_db_path();
         cleanup(&path);

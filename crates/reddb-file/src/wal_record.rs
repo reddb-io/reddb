@@ -28,6 +28,7 @@ pub enum MainWalRecordType {
     FullPageImage = 8,
     VectorInsert = 9,
     ProbabilisticDelta = 10,
+    PageOwnership = 11,
 }
 
 impl MainWalRecordType {
@@ -43,6 +44,7 @@ impl MainWalRecordType {
             8 => Some(Self::FullPageImage),
             9 => Some(Self::VectorInsert),
             10 => Some(Self::ProbabilisticDelta),
+            11 => Some(Self::PageOwnership),
             _ => None,
         }
     }
@@ -67,6 +69,9 @@ impl MainWalCompression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MainWalRecordFrame {
+    PageOwnership {
+        record: crate::page_ownership_journal::PageOwnershipRecord,
+    },
     Begin {
         tx_id: u64,
     },
@@ -116,6 +121,9 @@ pub enum MainWalRecordFrame {
 /// by construction, not by convention.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MainWalRecordFrameRef<'a> {
+    PageOwnership {
+        record: crate::page_ownership_journal::PageOwnershipRecord,
+    },
     Begin {
         tx_id: u64,
     },
@@ -159,6 +167,9 @@ pub enum MainWalRecordFrameRef<'a> {
 impl<'a> From<&'a MainWalRecordFrame> for MainWalRecordFrameRef<'a> {
     fn from(frame: &'a MainWalRecordFrame) -> Self {
         match frame {
+            MainWalRecordFrame::PageOwnership { record } => {
+                MainWalRecordFrameRef::PageOwnership { record: *record }
+            }
             MainWalRecordFrame::Begin { tx_id } => MainWalRecordFrameRef::Begin { tx_id: *tx_id },
             MainWalRecordFrame::Commit { tx_id } => MainWalRecordFrameRef::Commit { tx_id: *tx_id },
             MainWalRecordFrame::Rollback { tx_id } => {
@@ -305,6 +316,11 @@ pub fn encode_main_wal_record_frame_with_authority_into<'a>(
 ) -> io::Result<()> {
     let start = out.len();
     match frame.into() {
+        MainWalRecordFrameRef::PageOwnership { record } => {
+            let payload = crate::page_ownership_journal::encode(record)?;
+            write_type_and_authority(out, MainWalRecordType::PageOwnership, authority);
+            out.extend_from_slice(&payload);
+        }
         MainWalRecordFrameRef::Begin { tx_id } => {
             write_type_and_authority(out, MainWalRecordType::Begin, authority);
             out.extend_from_slice(&tx_id.to_le_bytes());
@@ -443,10 +459,26 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
     let record_type = MainWalRecordType::from_u8(type_buf[0])
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid record type"))?;
 
+    // Unlike ordinary WAL tails, an incomplete ownership intent cannot be
+    // ignored: the pager may already have acted on an earlier durable record.
+    let strict_ownership = |error: io::Error| {
+        if record_type == MainWalRecordType::PageOwnership
+            && error.kind() == io::ErrorKind::UnexpectedEof
+        {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete page ownership WAL record",
+            )
+        } else {
+            error
+        }
+    };
+
     let authority = match format_version {
         WAL_FILE_VERSION => {
-            let term = read_u64_tracked(reader, &mut checksum_bytes)?;
-            let ownership_epoch = read_u64_tracked(reader, &mut checksum_bytes)?;
+            let term = read_u64_tracked(reader, &mut checksum_bytes).map_err(strict_ownership)?;
+            let ownership_epoch =
+                read_u64_tracked(reader, &mut checksum_bytes).map_err(strict_ownership)?;
             MainWalRecordAuthority {
                 term,
                 ownership_epoch: if ownership_epoch == 0 {
@@ -466,6 +498,22 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
     };
 
     let frame = match record_type {
+        MainWalRecordType::PageOwnership => {
+            if format_version != WAL_FILE_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "page ownership record in old WAL",
+                ));
+            }
+            let payload = read_array_tracked::<_, { crate::page_ownership_journal::RECORD_SIZE }>(
+                reader,
+                &mut checksum_bytes,
+            )
+            .map_err(strict_ownership)?;
+            MainWalRecordFrame::PageOwnership {
+                record: crate::page_ownership_journal::decode(&payload)?,
+            }
+        }
         MainWalRecordType::Begin => MainWalRecordFrame::Begin {
             tx_id: read_u64_tracked(reader, &mut checksum_bytes)?,
         },
@@ -585,7 +633,7 @@ pub fn decode_main_wal_record_frame_with_authority<R: Read>(
         },
     };
 
-    let stored_crc = read_u32_untracked(reader)?;
+    let stored_crc = read_u32_untracked(reader).map_err(strict_ownership)?;
     if crc32(&checksum_bytes) != stored_crc {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -721,12 +769,22 @@ mod tests {
             MainWalRecordType::from_u8(10),
             Some(MainWalRecordType::ProbabilisticDelta)
         );
-        assert_eq!(MainWalRecordType::from_u8(11), None);
+        assert_eq!(
+            MainWalRecordType::from_u8(11),
+            Some(MainWalRecordType::PageOwnership)
+        );
+        assert_eq!(MainWalRecordType::from_u8(12), None);
     }
 
     #[test]
     fn main_wal_records_round_trip_current_format() {
         let frames = vec![
+            MainWalRecordFrame::PageOwnership {
+                record: crate::page_ownership_journal::PageOwnershipRecord::Reserve {
+                    epoch: 9,
+                    page_id: 67,
+                },
+            },
             MainWalRecordFrame::Begin { tx_id: 1 },
             MainWalRecordFrame::Commit { tx_id: 2 },
             MainWalRecordFrame::Rollback { tx_id: 3 },
@@ -767,6 +825,24 @@ mod tests {
                 .unwrap();
             assert_eq!(term, 42);
             assert_eq!(decoded, frame);
+        }
+    }
+
+    #[test]
+    fn incomplete_page_ownership_wal_record_is_not_a_skippable_tail() {
+        let frame = MainWalRecordFrame::PageOwnership {
+            record: crate::page_ownership_journal::PageOwnershipRecord::Reserve {
+                epoch: 9,
+                page_id: 67,
+            },
+        };
+        let mut bytes = Vec::new();
+        encode_main_wal_record_frame_into(&frame, 1, &mut bytes).expect("encode");
+        for end in 1..bytes.len() {
+            let error =
+                decode_main_wal_record_frame(&mut Cursor::new(&bytes[..end]), WAL_FILE_VERSION, 0)
+                    .expect_err("a partial ownership record must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "prefix {end}");
         }
     }
 

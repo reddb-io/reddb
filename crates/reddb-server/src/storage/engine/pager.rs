@@ -93,7 +93,6 @@ impl Default for PagerConfig {
 /// Native host adapter for the shared pager.
 pub struct Pager {
     core: SharedPager<NativePagerFile, NativeWalBarrier>,
-    _lock_file: Option<File>,
     config: PagerConfig,
     pub(crate) encryption: Option<(
         crate::storage::encryption::PageEncryptor,
@@ -128,11 +127,49 @@ impl reddb_file::VfsFile for NativePagerFile {
     }
 }
 
+/// Durable ownership callbacks installed only while a fenced epoch is active.
+pub(crate) trait PageOwnershipRecorder: Send + Sync {
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 #[derive(Default)]
-pub struct NativeWalBarrier(RwLock<Option<Arc<Mutex<WalWriter>>>>);
+pub struct NativeWalBarrier(
+    RwLock<Option<Arc<Mutex<WalWriter>>>>,
+    RwLock<Option<Arc<dyn PageOwnershipRecorder>>>,
+);
+
+impl NativeWalBarrier {
+    fn ownership_recorder(&self) -> std::io::Result<Option<Arc<dyn PageOwnershipRecorder>>> {
+        Ok(self
+            .1
+            .read()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?
+            .clone())
+    }
+}
 
 impl WalBarrier for NativeWalBarrier {
+    fn needs_page_image(&self, page_id: u32) -> std::io::Result<bool> {
+        self.ownership_recorder()?
+            .map_or(Ok(false), |recorder| recorder.needs_page_image(page_id))
+    }
+
+    fn capture_page_image(&self, page: &Page) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.capture_page_image(page)?;
+        }
+        Ok(())
+    }
+
     fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
         let wal = self
             .0
@@ -146,6 +183,27 @@ impl WalBarrier for NativeWalBarrier {
             return Err(std::io::Error::other(
                 "nonzero page LSN requires a WAL durability barrier",
             ));
+        }
+        Ok(())
+    }
+
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.reserve_pages(start, count)?;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.detach_free_pages(pages)?;
+        }
+        Ok(())
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.retire_pages(pages)?;
         }
         Ok(())
     }
@@ -317,6 +375,42 @@ mod tests {
         }
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn native_pager_lock_guards_own_io_and_releases_on_drop() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("locked-io.rdb");
+        let pager = Pager::open_default(&path).expect("locked pager opens");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate under lock");
+        let id = page.page_id();
+        page.insert_cell(b"key", b"kept").expect("cell");
+        pager.write_page(id, page).expect("write under lock");
+        pager.sync().expect("sync under lock");
+        assert_eq!(
+            pager
+                .read_page(id)
+                .expect("read under lock")
+                .read_cell(0)
+                .expect("cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+        assert!(
+            matches!(Pager::open_default(&path), Err(PagerError::Locked)),
+            "the writer fence remains exclusive"
+        );
+        drop(pager);
+        let reopened = Pager::open_default(&path).expect("last I/O handle releases writer fence");
+        assert_eq!(
+            reopened
+                .read_page(id)
+                .expect("durable page")
+                .read_cell(0)
+                .expect("durable cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
     }
 
     #[test]

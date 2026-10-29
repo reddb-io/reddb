@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms test-chaos test-chaos-drills test-chaos-replication test-chaos-all test-dst-storage test-dst-sweep drill-nightly clean clean-package run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms test-chaos test-chaos-drills test-chaos-replication test-chaos-all test-storage-apocalypse test-dst-storage test-dst-sweep drill-nightly clean clean-package run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -24,6 +24,7 @@ help:
 	@echo "  make test-persistent-grimms - Run the Grimms-scale persistent storage fixture"
 	@echo "  make test-chaos    - Run local chaos tests"
 	@echo "  make test-chaos-all - Run local chaos, drill, replication harness, and storage fault tests"
+	@echo "  make test-storage-apocalypse - Run page reuse, crash, growth and transaction regressions"
 	@echo "  make test-dst-storage - Run seeded storage fault recovery tests"
 	@echo "  make test-dst-sweep - Run ignored DST replication seed sweep"
 	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
@@ -118,6 +119,23 @@ test-chaos-all:
 	./scripts/cargo-fast.sh test --locked --test grouped_chaos_drill_persistence --no-fail-fast
 	$(MAKE) test-chaos-replication
 	$(MAKE) test-dst-storage
+
+# Storage regressions are deliberately non-ignored and fail this target on any loss,
+# duplicate allocation, growth beyond the warmup plateau, or checkpoint regression.
+test-storage-apocalypse:
+	cargo test --locked -p reddb-io-engine --test portable -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib storage::unified::store::commit:: -- --test-threads=1 --nocapture
+	cargo test --locked -p reddb-io-server --lib inline_ -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib storage::engine:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test single_file_collection_model_recovery --test btree_delete_stack --test btree_mixed_width_split --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update --test vacuum_snapshot_horizon --no-fail-fast -- --test-threads=1
+
+.PHONY: test-memory-regressions
+test-memory-regressions:
+	cargo test --locked -p reddb-io-engine --test recovery_memory -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib runtime::mutation_memory_tests:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib scoped_stats_memory_tests -- --test-threads=1 --nocapture
+	cargo test --locked -p reddb-io-server --lib artifact_memory_tests -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias -- --test-threads=1
 
 test-dst-storage:
 	./scripts/cargo-fast.sh test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery --test tm_commit_path_recovery --test store_fork_lifecycle_recovery --test superblock_manifest_zone_recovery

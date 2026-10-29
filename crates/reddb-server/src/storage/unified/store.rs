@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -320,6 +320,9 @@ pub struct UnifiedStore {
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
+    /// Epoch in the durable catalog and the epoch being published, if any.
+    ownership_catalog_epoch: AtomicU64,
+    ownership_active_epoch: AtomicU64,
     /// Detached artifact pages stay unavailable until native metadata is durable.
     detached_native_blob_pages: parking_lot::Mutex<std::collections::BTreeSet<u32>>,
     /// Logical store WAL / grouped durability coordinator for paged mode.
