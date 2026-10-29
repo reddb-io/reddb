@@ -213,6 +213,8 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     allocation_fence_pending: std::sync::atomic::AtomicBool,
     /// Database header
     header: RwLock<DatabaseHeader>,
+    /// Serialize read-select-write sequences for the superblock pair.
+    superblock_publication: Mutex<()>,
     /// Configuration
     config: PagerConfig,
     /// Dirty flag for header
@@ -275,6 +277,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
             allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
+            superblock_publication: Mutex::new(()),
             config,
             header_dirty: Mutex::new(false),
             wal,
@@ -432,6 +435,17 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         &self,
         mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
     ) -> Result<(), PagerError> {
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        self.commit_superblock_locked(mutate)
+    }
+
+    fn commit_superblock_locked(
+        &self,
+        mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
+    ) -> Result<(), PagerError> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -439,6 +453,47 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         mutate(&mut image)?;
         let next_copy = reddb_file::paged_superblock_next_copy(Some(newest));
         self.write_superblock_slot(&mut image, next_copy, newest.generation.saturating_add(1))
+    }
+
+    /// Fence a file-format upgrade in both recoverable superblock copies.
+    ///
+    /// The caller must exclude other mutators while the fence is in progress
+    /// and may publish a new mandatory format only after this succeeds. A
+    /// failed write fences subsequent mutation until reopen and recovery.
+    pub fn fence_file_format_version(&self, version: u32) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if version < PHASE3_DWB_ZONE_FILE_VERSION || version > reddb_file::PAGE_FILE_VERSION {
+            return Err(PagerError::InvalidDatabase(
+                "unsupported file format fence".into(),
+            ));
+        }
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        if version < self.header_read()?.version {
+            return Err(PagerError::InvalidDatabase(
+                "file format downgrade is not supported".into(),
+            ));
+        }
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::set_database_header_version(image, version)
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                })?;
+            }
+            self.header_write()?.version = version;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Load the database header from the newest valid superblock copy.
