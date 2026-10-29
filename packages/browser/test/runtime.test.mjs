@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { createRuntime, createInteropRuntime, openDatabase, restoreDatabase, BrowserError } from '../src/index.js'
+import { createRuntime, createInteropRuntime, createDatabaseSession, openDatabase, restoreDatabase, BrowserError } from '../src/index.js'
 
 const info = {
   abiVersion: 1,
   valueEncoding: 'reddb-json-v1',
-  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, sync: false },
+  capabilities: { queryValidation: true, scalarQueries: true, storedQueries: true, storedQueryMode: 'read-write-tables', sqlWrites: true, transactions: true, queryParameters: true, databaseBackups: true, databaseInspection: true, sync: false },
 }
 class ScriptedWorker {
   messages = []
@@ -176,3 +176,134 @@ test('public runtime validates SQL arguments before cloning them to a worker', a
   assert.deepEqual(worker.messages.map(request => request.method), ['initialize'])
   await runtime.close()
 })
+
+async function withStorage(run) {
+  const originals = new Map(['isSecureContext', 'navigator'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  Object.defineProperty(globalThis, 'isSecureContext', { value: true, configurable: true })
+  Object.defineProperty(globalThis, 'navigator', { value: { storage: { getDirectory() {} }, locks: {} }, configurable: true })
+  try { await run() }
+  finally {
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  }
+}
+
+function reply(worker, request, error) {
+  worker.onmessage({ data: { abiVersion: 1, id: request.id, ...(error ? { error } : { result: undefined }) } })
+}
+
+test('a session initializes once, releases each file, and fences handles across reuse', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  const first = await session.openDatabase({ name: 'first', create: true })
+  await first.query('SELECT 1')
+  await first.close()
+  await first.close()
+  assert.equal(worker.terminated, 0)
+  const second = await session.openDatabase({ name: 'second' })
+  const sent = worker.messages.length
+  for (const operation of [() => first.query('DELETE FROM notes'), () => first.info(), () => first.exportBackup(), () => first.executeScalar('SELECT 1')]) {
+    await assert.rejects(operation(), { code: 'CLOSED' })
+  }
+  await first.close()
+  assert.equal(worker.messages.length, sent, 'a stale handle cannot send a query or release the next owner')
+  await second.query('SELECT $1', [42])
+  await session.close()
+  await second.close()
+  await session.close()
+  assert.equal(worker.terminated, 1)
+  assert.equal(worker.messages.filter(message => message.method === 'initialize').length, 1)
+  assert.deepEqual(worker.messages.filter(message => message.method === 'openDatabase').map(message => message.params), [{ name: 'first', create: true }, { name: 'second', create: false }])
+  await assert.rejects(second.query('SELECT 1'), { code: 'CLOSED' })
+  await assert.rejects(session.openDatabase({ name: 'third' }), { code: 'CLOSED' })
+}))
+
+test('a session refuses a second owner during open, use and asynchronous release', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  worker.defer = true
+  const opening = session.openDatabase({ name: 'first' })
+  await assert.rejects(session.openDatabase({ name: 'second' }), { code: 'INVALID_ARGUMENT' })
+  reply(worker, worker.messages.at(-1))
+  const first = await opening
+  await assert.rejects(session.openDatabase({ name: 'second' }), { code: 'INVALID_ARGUMENT' })
+  const closing = first.close()
+  await assert.rejects(first.query('SELECT 1'), { code: 'CLOSED' })
+  await assert.rejects(session.openDatabase({ name: 'second' }), { code: 'INVALID_ARGUMENT' })
+  reply(worker, worker.messages.at(-1))
+  await closing
+  worker.defer = false
+  const second = await session.openDatabase({ name: 'second' })
+  await second.close()
+  await session.close()
+}))
+
+test('open failures leave a healthy session reusable without another initialization', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  await assert.rejects(session.openDatabase({ name: '../bad' }), { code: 'INVALID_NAME' })
+  await assert.rejects(session.openDatabase({ name: 'first', create: 'yes' }), { code: 'INVALID_ARGUMENT' })
+  worker.defer = true
+  for (const code of ['FILE_BUSY', 'DATABASE_NOT_FOUND', 'DATABASE_ERROR']) {
+    const opening = session.openDatabase({ name: 'first' })
+    const rejected = assert.rejects(opening, { code })
+    await Promise.resolve()
+    reply(worker, worker.messages.at(-1), { code, message: 'Storage failure' })
+    await rejected
+  }
+  assert.equal(worker.terminated, 0)
+  worker.defer = false
+  const database = await session.openDatabase({ name: 'first', create: true })
+  await database.close()
+  await session.close()
+  assert.equal(worker.messages.filter(message => message.method === 'initialize').length, 1)
+}))
+
+test('closing a session during open drains the file release and never returns a live handle', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  worker.defer = true
+  const opening = session.openDatabase({ name: 'first' })
+  const rejected = assert.rejects(opening, { code: 'CLOSED' })
+  await Promise.resolve()
+  const request = worker.messages.at(-1)
+  const closing = session.close()
+  reply(worker, request)
+  await rejected
+  assert.equal(worker.terminated, 0)
+  assert.equal(worker.messages.at(-1).method, 'close')
+  reply(worker, worker.messages.at(-1))
+  await closing
+  assert.equal(worker.terminated, 1)
+}))
+
+test('a failed release fences the session and terminates its Worker', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  const database = await session.openDatabase({ name: 'first' })
+  worker.defer = true
+  const closing = database.close()
+  const rejected = assert.rejects(closing, { code: 'ARTIFACT_ERROR' })
+  reply(worker, worker.messages.at(-1), { code: 'ARTIFACT_ERROR', message: 'Unable to close file' })
+  await rejected
+  assert.equal(worker.terminated, 1)
+  await assert.rejects(session.openDatabase({ name: 'second' }), { code: 'CLOSED' })
+  await session.close()
+  assert.equal(worker.terminated, 1)
+}))
+
+test('a Worker crash rejects session queries and cannot lend an old handle to another file', () => withStorage(async () => {
+  const worker = new ScriptedWorker()
+  const session = await createDatabaseSession({ worker })
+  const database = await session.openDatabase({ name: 'first' })
+  worker.defer = true
+  const rejected = assert.rejects(database.query('SELECT 1'), { code: 'WORKER_FAILED' })
+  worker.onerror({ message: 'Worker crashed' })
+  await rejected
+  await assert.rejects(database.close(), { code: 'CLOSED' })
+  await assert.rejects(session.openDatabase({ name: 'second' }), { code: 'CLOSED' })
+  await session.close()
+  assert.equal(worker.terminated, 1)
+}))

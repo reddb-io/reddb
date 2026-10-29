@@ -1,7 +1,7 @@
 # reddb (Dart driver)
 
 For local Rust/WASM execution in a browser, see the [Browser/Flutter Web runtime](BROWSER.md).
-That separate adapter currently supports validation and scalar SELECTs only.
+That separate adapter supports local table SQL, positional parameters and durable transactions through the shared WASM Worker.
 
 Pure-Dart driver for [RedDB](https://github.com/reddb-io/reddb). Speaks
 the RedWire binary protocol over TCP / TLS and the REST/HTTP transport.

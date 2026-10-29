@@ -2116,7 +2116,13 @@ impl RedDBRuntime {
             .collection_topology_lock(&query.table);
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
-        let needs_rmw_lock = update_needs_rmw_lock(query);
+        // Autocommit table-row UPDATE replaces an MVCC version even when its
+        // assignments are constants. Resolve the current pre-image under the
+        // RMW lock. Explicit transactions keep their statement snapshot and
+        // first-committer-wins conflict detection.
+        let autocommit_table_update =
+            matches!(query.target, UpdateTarget::Rows) && self.current_xid().is_none();
+        let needs_rmw_lock = autocommit_table_update || update_needs_rmw_lock(query);
         let claim_model = update_model_name(update_target_model(query.target));
         if query.claim_limit.is_some() {
             self.inner
@@ -2185,11 +2191,36 @@ impl RedDBRuntime {
             scan_limit,
             query.target,
         );
-        if needs_rmw_lock {
+        if needs_rmw_lock && !autocommit_table_update {
             target_scan = target_scan.with_live_table_rows();
         }
         let ids_to_update = {
             let _topology_guard = topology_lock.read();
+            // The statement snapshot predates the table lock. Refresh it
+            // after acquiring that lock so earlier autocommits are visible,
+            // but never select an uncommitted physical tip. Historical
+            // versions can be absent from current indexes while a writer is
+            // active, so retain the snapshot-aware index fallback then.
+            let _fresh_snapshot = if autocommit_table_update {
+                let mut ctx =
+                    crate::runtime::impl_core::capture_current_snapshot().unwrap_or_else(|| {
+                        let manager = self.snapshot_manager();
+                        crate::runtime::impl_core::SnapshotContext {
+                            snapshot: manager.fresh_read_snapshot(),
+                            manager,
+                            own_xids: std::collections::HashSet::new(),
+                            requires_index_fallback: false,
+                            serializable_reader: None,
+                        }
+                    });
+                ctx.snapshot = ctx.manager.fresh_read_snapshot();
+                ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
+                Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
+                    ctx,
+                ))
+            } else {
+                None
+            };
             target_scan.find_target_ids()?
         };
         let order_limit = if query.claim_limit.is_some() {
@@ -2202,7 +2233,7 @@ impl RedDBRuntime {
         } else {
             ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
         };
-        let mut ids_to_update = if query.claim_limit.is_some() {
+        let mut ids_to_update = if query.claim_limit.is_some() || autocommit_table_update {
             self.filter_claim_locked_target_ids(&query.table, ids_to_update)
         } else {
             ids_to_update
@@ -2330,6 +2361,9 @@ impl RedDBRuntime {
     fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
         let conn_id = current_connection_id();
         let locks = self.inner.pending_claim_locks.read();
+        if locks.is_empty() {
+            return ids;
+        }
         ids.into_iter()
             .filter(|id| {
                 let Some(entity) = self.inner.db.store().get(table, *id) else {
@@ -2424,14 +2458,39 @@ impl RedDBRuntime {
         }
 
         let affected = applied_chunk.len() as u64;
-        if !applied_chunk.is_empty() {
+        let mut published = 0;
+        let persistence = (|| -> RedDBResult<()> {
             self.enforce_unique_update_post_images(&query.table, compiled_plan, &applied_chunk)?;
-            self.persist_update_chunk(&applied_chunk)?;
-            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
-            if !query.suppress_events {
-                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
+            for chunk in applied_chunk.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                if compiled_plan.row_touches_unique_columns
+                    || compiled_plan
+                        .row_contract_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.has_expressions)
+                {
+                    let db = self.db();
+                    let contract = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(self, &db, &query.table);
+                    for item in chunk {
+                        let fields =
+                            crate::application::ports::entity_row_fields_snapshot(&item.entity);
+                        let previous_id =
+                            item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
+                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                    }
+                }
+                self.persist_update_chunk(chunk)?;
+                published += chunk.len();
             }
+            Ok(())
+        })();
+        // Earlier chunks may have been published when a later constraint
+        // check fails. Finish their indexes and events before returning it.
+        let published_mutations = &applied_chunk[..published];
+        let lsns = self.flush_update_chunk(published_mutations, topology_guard)?;
+        if !query.suppress_events {
+            self.emit_update_events_for_collection(&query.table, published_mutations, &lsns)?;
         }
+        persistence?;
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2934,6 +2993,243 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::path::Path;
+
+    #[test]
+    fn concurrent_constant_updates_leave_one_visible_row_per_logical_id() {
+        use std::sync::{Arc, Barrier};
+
+        const WRITERS: usize = 3;
+        const ROUNDS: usize = 8;
+        let rt = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let rt = Arc::clone(&rt);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    for round in 0..ROUNDS {
+                        barrier.wait();
+                        rt.execute_query(&format!(
+                            "UPDATE capabilities SET observed_at = '{writer}-{round}' WHERE id = 'A'"
+                        ))
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let selected = rt
+            .execute_query("SELECT id, observed_at FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(
+            selected.result.records.len(),
+            1,
+            "concurrent updates published multiple visible versions"
+        );
+    }
+
+    #[test]
+    fn locked_constant_updates_preserve_unique_constraints() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT UNIQUE)")
+            .unwrap();
+        rt.execute_query("INSERT INTO accounts (id, email) VALUES (1, 'a'), (2, 'b')")
+            .unwrap();
+        assert!(rt
+            .execute_query("UPDATE accounts SET email = 'b' WHERE id = 1")
+            .is_err());
+        let selected = rt
+            .execute_query("SELECT id FROM accounts WHERE email = 'a'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_transactions_do_not_both_commit_the_same_row_update() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        for connection in [41, 42] {
+            set_current_connection_id(connection);
+            rt.execute_query("BEGIN").unwrap();
+        }
+        set_current_connection_id(41);
+        rt.execute_query("UPDATE capabilities SET observed_at = 'first' WHERE id = 'A'")
+            .unwrap();
+        set_current_connection_id(42);
+        let competing =
+            rt.execute_query("UPDATE capabilities SET observed_at = 'second' WHERE id = 'A'");
+        set_current_connection_id(41);
+        rt.execute_query("COMMIT").unwrap();
+        set_current_connection_id(42);
+        if competing.is_ok() {
+            assert!(
+                rt.execute_query("COMMIT").is_err(),
+                "both writers committed"
+            );
+        } else {
+            rt.execute_query("ROLLBACK").unwrap();
+        }
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT id FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn transaction_and_autocommit_update_do_not_publish_two_live_versions() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("UPDATE capabilities SET observed_at = 'transaction' WHERE id = 'A'")
+            .unwrap();
+        clear_current_connection_id();
+        let autocommit =
+            rt.execute_query("UPDATE capabilities SET observed_at = 'auto' WHERE id = 'A'");
+        set_current_connection_id(41);
+        let commit = rt.execute_query("COMMIT");
+        clear_current_connection_id();
+        assert!(
+            autocommit.is_err() || commit.is_err(),
+            "conflicting writers both committed"
+        );
+        let selected = rt
+            .execute_query("SELECT id FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn transaction_update_does_not_target_rows_created_after_snapshot() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("SELECT id FROM capabilities").unwrap();
+        clear_current_connection_id();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'after')")
+            .unwrap();
+        set_current_connection_id(41);
+        let updated = rt
+            .execute_query("UPDATE capabilities SET observed_at = 'changed' WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(
+            updated.affected_rows, 0,
+            "updated a row outside the transaction snapshot"
+        );
+        rt.execute_query("COMMIT").unwrap();
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT observed_at FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("observed_at"),
+            Some(&Value::text("after"))
+        );
+    }
+
+    #[test]
+    fn autocommit_update_does_not_filter_on_uncommitted_row_image() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, status TEXT, payload TEXT)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, status, payload) VALUES ('A', 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("UPDATE capabilities SET status = 'busy' WHERE id = 'A'")
+            .unwrap();
+        clear_current_connection_id();
+        let autocommit =
+            rt.execute_query("UPDATE capabilities SET payload = 'new' WHERE status = 'ready'");
+        if let Ok(result) = &autocommit {
+            assert_eq!(
+                result.affected_rows, 1,
+                "uncommitted status hid the committed target"
+            );
+        }
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT status, payload FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        if autocommit.is_ok() {
+            assert_eq!(
+                selected.result.records[0].get("payload"),
+                Some(&Value::text("new"))
+            );
+        }
+    }
+
+    #[test]
+    fn autocommit_update_skips_row_claimed_by_another_transaction() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id INT, rank INT, status TEXT, note TEXT)")
+            .unwrap();
+        rt.execute_query("CREATE INDEX capabilities_rank ON capabilities (rank)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, rank, status, note) VALUES (1, 10, 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        let claim = rt.execute_query("UPDATE capabilities SET status = 'claimed' WHERE status = 'ready' CLAIM LIMIT 1 ORDER BY rank ASC").unwrap();
+        assert_eq!(claim.affected_rows, 1);
+        set_current_connection_id(42);
+        let other = rt
+            .execute_query("UPDATE capabilities SET note = 'new' WHERE id = 1")
+            .unwrap();
+        assert_eq!(other.affected_rows, 0);
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let rows = rt
+            .execute_query("SELECT status, note FROM capabilities WHERE id = 1")
+            .unwrap();
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        assert_eq!(
+            rows.result.records[0].get("note"),
+            Some(&Value::text("old"))
+        );
+    }
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {
         RedDBOptions::persistent(path)

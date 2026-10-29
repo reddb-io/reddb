@@ -1,6 +1,6 @@
 //! Single-owner local SQL. Native formats and publication barriers remain canonical.
 use super::{
-    local_read::{query_resident_bound, LocalReadError},
+    local_read::{query_resident_bound, query_resident_scoped, LocalReadError, ReadScope},
     scalar::ScalarResult,
 };
 use crate::{
@@ -91,6 +91,82 @@ impl<F: VfsFile> LocalDatabase<F> {
     pub fn check_healthy(&self) -> Result<()> {
         self.store.committed_resident()?;
         Ok(())
+    }
+
+    /// Read actual persisted contracts without inferring schemas from row payloads.
+    pub fn catalog(&self) -> Result<ScalarResult> {
+        self.check_healthy()?;
+        if self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.aborted)
+        {
+            return Err(query_error("transaction is aborted; ROLLBACK is required"));
+        }
+        let (_, contracts) = self.visible()?;
+        let mut tables: Vec<_> = contracts.values().collect();
+        tables.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut rows = Vec::new();
+        for table in tables {
+            for column in crate::catalog::schema::resolved_contract_columns(table)
+                .map_err(|error| LocalReadError::Catalog(error.to_string()))?
+            {
+                rows.push(vec![
+                    Value::text(table.name.as_str()),
+                    Value::text(column.name),
+                    Value::text(column.data_type_name),
+                    Value::Boolean(!column.not_null),
+                ]);
+            }
+        }
+        Ok(ScalarResult {
+            columns: ["table_name", "column_name", "data_type", "nullable"]
+                .map(String::from)
+                .to_vec(),
+            rows,
+        })
+    }
+
+    /// Only SELECT is admitted; a caller cannot widen the host's source-row scope.
+    pub fn read_query(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        scopes: &[ReadScope],
+    ) -> Result<ScalarResult> {
+        self.check_healthy()?;
+        if parameters.len() > MAX_QUERY_PARAMETERS || scopes.len() > 64 {
+            return Err(query_error("inspection arguments exceed their limit"));
+        }
+        if self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.aborted)
+        {
+            return Err(query_error("transaction is aborted; ROLLBACK is required"));
+        }
+        let statement = reddb_rql::parse_frontend(sql)
+            .map_err(LocalReadError::Parse)?
+            .into_query_expr();
+        let statement =
+            super::parameters::bind(&statement, parameters).map_err(LocalReadError::Parameters)?;
+        let QueryExpr::Table(query) = statement else {
+            return Err(LocalReadError::Unsupported(
+                "inspection accepts table SELECT only",
+            ));
+        };
+        let mut tables = HashSet::new();
+        if scopes.iter().any(|scope| !tables.insert(&scope.table)) {
+            return Err(query_error("duplicate inspection table scope"));
+        }
+        let scope = scopes
+            .iter()
+            .find(|scope| scope.table == query.table)
+            .ok_or(LocalReadError::Unsupported(
+                "table is outside the inspection scope",
+            ))?;
+        let (resident, contracts) = self.visible()?;
+        query_resident_scoped(resident, contracts, query, scope)
     }
 
     pub fn query_with_params(

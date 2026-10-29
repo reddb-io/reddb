@@ -163,6 +163,15 @@ async function execute(method, params) {
   }
   if (!artifact && !database) throw error('CLOSED', 'The file is not open')
   if (database) {
+    if (method === 'catalog') {
+      if (typeof database.catalog !== 'function') throw error('VERSION_MISMATCH', 'WASM catalog inspection is missing')
+      return database.catalog()
+    }
+    if (method === 'readQuery') {
+      if (typeof params.sql !== 'string' || !Array.isArray(params.params) || params.params.length > MAX_QUERY_PARAMETERS || !Array.isArray(params.scopes) || params.scopes.length > 64) throw error('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes')
+      if (typeof database.readQuery !== 'function') throw error('VERSION_MISMATCH', 'WASM scoped reads are missing')
+      return database.readQuery(params.sql, params.params, params.scopes)
+    }
     if (method === 'exportBackup') {
       try { return exportBackup() }
       catch (failure) {

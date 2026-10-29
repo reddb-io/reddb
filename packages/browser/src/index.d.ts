@@ -16,6 +16,7 @@ export interface RuntimeInfo {
     readonly transactions: boolean
     readonly queryParameters?: boolean
     readonly databaseBackups?: boolean
+    readonly databaseInspection?: boolean
     readonly sync: boolean
   }
 }
@@ -70,11 +71,15 @@ export function openArtifact(options: {
 export type QueryParameter = null | boolean | number | string | bigint
 
 export interface Database extends Runtime {
+  /** Persisted catalog columns: table_name, column_name, data_type, nullable. */
+  catalog(): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** SELECT only, over the host's allowed tables and equality-filtered source rows. */
+  readQuery(sql: string, params: readonly QueryParameter[], scopes: readonly {table: string; field: string; value: QueryParameter}[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** SELECT and table SQL mutations; mutations return an affectedRows column. */
   query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Complete native .rdb image of committed state, at most 256 MiB. Pending SQL changes are excluded. */
   exportBackup(): Promise<Uint8Array>
-  /** Release exclusive ownership of the local file and terminate its worker. */
+  /** Release file ownership; standalone handles also terminate their Worker. */
   close(): Promise<void>
 }
 
@@ -86,9 +91,28 @@ export function openDatabase(options: {
   worker?: Worker
 }): Promise<Database>
 
+/** One initialized Worker, with at most one open database at a time. */
+export interface DatabaseSession {
+  /** The returned handle releases its file, but retains this session's Worker, on close. */
+  openDatabase(options: { name: string; create?: boolean }): Promise<Database>
+  /** Close the current file, discard uncommitted changes, and terminate the Worker. */
+  close(): Promise<void>
+}
+
+/** Retain WASM initialization between file owners; callers must close the session when finished. */
+export function createDatabaseSession(options?: { worker?: Worker }): Promise<DatabaseSession>
+
 /** Restore a native .rdb image to a new name. Existing files are never overwritten. */
 export function restoreDatabase(options: {
   name: string
   backup: Uint8Array
   worker?: Worker
 }): Promise<Database>
+
+/** JSON-safe, token-fenced session operations for JS-interop consumers. */
+export interface DatabaseSessionBridge {
+  /** ready, openDatabase, info, query, closeDatabase, close. Failures resolve as envelopes. */
+  invoke(method: string, params?: Record<string, unknown>): Promise<InteropResult>
+}
+
+export function createInteropDatabaseSession(options?: { worker?: Worker }): DatabaseSessionBridge

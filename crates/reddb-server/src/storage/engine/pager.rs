@@ -195,6 +195,10 @@ impl WalBarrier for NativeWalBarrier {
         if let Some(wal) = wal {
             let mut writer = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             writer.flush_until(lsn)?;
+        } else if lsn != 0 {
+            return Err(std::io::Error::other(
+                "nonzero page LSN requires a WAL durability barrier",
+            ));
         }
         Ok(())
     }
@@ -966,6 +970,32 @@ mod tests {
         let path = temp_db_path();
         let pager = Pager::open(&path, PagerConfig::default()).expect("open() should succeed");
         assert!(!pager.has_wal_writer());
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn flush_refuses_nonzero_lsn_without_a_wal_writer() {
+        let path = temp_db_path();
+        let pager = Pager::open(&path, PagerConfig::default()).expect("open pager");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.set_lsn(42);
+        pager.write_page(page.page_id(), page).expect("write page");
+
+        assert!(
+            pager.flush().is_err(),
+            "a page with an LSN needs a WAL barrier"
+        );
+        assert!(
+            pager.dirty_page_count() > 0,
+            "failed flush must retain dirty pages"
+        );
+        assert!(
+            pager.flush().is_err(),
+            "failed writeback must remain fenced"
+        );
         drop(pager);
         cleanup(&path);
     }

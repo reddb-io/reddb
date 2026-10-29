@@ -52,6 +52,10 @@ jobs:
           corepack enable
           corepack prepare pnpm@9.15.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser
+          # Match the browser/release jobs: avoid the throttled Azure APT mirror.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           pnpm --filter @reddb-io/browser exec playwright install --with-deps chromium firefox webkit
       - name: Install checksummed wasm-bindgen
         env:

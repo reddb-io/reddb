@@ -5,7 +5,7 @@ calls its JavaScript API; a dedicated Worker runs the Rust engine as WebAssembly
 and owns an OPFS `.rdb` file. Local operations require no RedDB server, account,
 CDN or network service. Rust is needed to develop the engine, not to use the package.
 
-Version `0.4.0` exposes `openDatabase`, local table CRUD and single-owner SQL
+Version `0.6.0` adds local database sessions for Dart/Flutter Web and retains reusable Worker sessions and exposes `openDatabase`, local table CRUD and single-owner SQL
 transactions, alongside artifact persistence/recovery, RQL validation and
 storage-free scalar SELECT. Other collection models, observation and optional
 synchronization remain pending. `append` and `checkpoint` retain their separate
@@ -63,6 +63,27 @@ for admitted functions and exact-value/secret behavior.
 Cache the application, SDK, Worker and WASM together for offline startup.
 Installed TS/Vite package tests create and mutate tables across two complete
 offline browser restarts, with the HTTP listener stopped.
+
+## Reuse initialization for frequent operations
+
+`createDatabaseSession({ worker? })` retains one initialized Worker/WASM runtime
+across sequential `session.openDatabase({ name, create? })` calls. Each returned
+handle has the usual SQL, parameter and backup APIs. Close it before opening
+another database in that session; an overlapping open is rejected.
+
+A session-owned handle's `close()` releases its OPFS/Web Lock and discards staged
+SQL changes, while `session.close()` also terminates the Worker. Closed handles
+cannot send operations to later file owners. A failed file release terminates
+and fences the session. Dispose failed sessions and create a new session before
+retrying after a Worker failure. Standalone `openDatabase()` continues to own and
+terminate its Worker on close.
+
+For multiple tabs, retain the application's writer/slot locks and use an outer
+Web Lock around each open/operation/close to queue access. A session never keeps
+a file open while idle after its handle has closed. It does keep initialized
+WASM memory; dispose the session to release it. Reopening still performs native
+file recovery, so measure realistic datasets before claiming a performance gain.
+See the [session example](https://github.com/reddb-io/reddb/tree/main/packages/browser#reuse-the-worker-between-file-owners).
 
 ## Bind JavaScript/TypeScript values
 
