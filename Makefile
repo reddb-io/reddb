@@ -134,6 +134,7 @@ test-memory-regressions:
 	cargo test --locked -p reddb-io-engine --test recovery_memory -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib runtime::mutation_memory_tests:: -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib scoped_stats_memory_tests -- --test-threads=1 --nocapture
+	cargo test --locked -p reddb-io-server --lib artifact_memory_tests -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias -- --test-threads=1
 
 test-dst-storage:

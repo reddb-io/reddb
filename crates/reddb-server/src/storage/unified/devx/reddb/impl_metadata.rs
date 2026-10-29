@@ -895,7 +895,12 @@ impl RedDB {
             let Some(artifact) = native_artifacts.iter().find(|artifact| {
                 artifact.collection == collection && artifact.artifact_kind == artifact_kind
             }) else {
-                index.build_state = "metadata-only".to_string();
+                index.build_state = if index.backend == "memory-budget-deferred" {
+                    "deferred-memory-budget"
+                } else {
+                    "metadata-only"
+                }
+                .to_string();
                 continue;
             };
             index.entries = artifact.vector_count as usize;
@@ -998,6 +1003,18 @@ impl RedDB {
                 if index.build_state == "catalog-derived" {
                     index.build_state = "registry-loaded".to_string();
                 }
+            }
+            if index.backend == "memory-budget-deferred"
+                || previous.is_some_and(|metadata| {
+                    metadata.indexes.iter().any(|previous| {
+                        previous.name == index.name && previous.backend == "memory-budget-deferred"
+                    })
+                })
+            {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
             }
         }
 
@@ -1340,7 +1357,34 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
-        let vector_artifact_records = self.native_vector_artifact_records();
+        let build = self.native_vector_artifact_records()?;
+        let vector_artifact_records = build.records;
+        let mut metadata = metadata.clone();
+        for index in &mut metadata.indexes {
+            let Some(kind) = Self::native_artifact_kind_for_index(index.kind) else {
+                continue;
+            };
+            let Some(collection) = &index.collection else {
+                continue;
+            };
+            if build.deferred_collections.contains(collection) {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
+            } else if let Some((summary, _)) =
+                vector_artifact_records.iter().find(|(summary, _)| {
+                    &summary.collection == collection && summary.artifact_kind == kind
+                })
+            {
+                index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+                index.build_state = "artifact-published".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_checksum = Some(summary.checksum);
+            }
+        }
+        let metadata = &metadata;
         let artifact_summaries = vector_artifact_records
             .iter()
             .map(|(summary, _)| summary.clone())
@@ -1397,6 +1441,9 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
+        if let Some(path) = self.path() {
+            metadata.save_for_data_path(path)?;
+        }
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;

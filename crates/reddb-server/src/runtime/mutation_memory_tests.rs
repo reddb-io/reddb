@@ -842,6 +842,157 @@ fn paged_recovery_keeps_bootstrap_and_declared_schema_metadata_readable() {
 }
 
 #[test]
+fn metadata_publication_memory_does_not_copy_large_unrelated_payloads() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let observe = |payload_bytes| {
+        let directory = tempfile::tempdir().expect("directory");
+        let options = RedDBOptions::persistent(directory.path().join("ddl-memory.rdb"))
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+            .with_memory_budget(32 * 1024 * 1024);
+        let runtime = RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE source (id INTEGER, payload BLOB)")
+            .expect("source");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("source")
+            .expect("source manager");
+        for id in 1..=32 {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(1000 + id), "source", id, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![
+                    Value::Integer(id as i64),
+                    Value::Blob(vec![255; payload_bytes]),
+                ],
+                vec!["id".into(), "payload".into()],
+            ));
+            manager.insert(entity).expect("source row");
+        }
+        runtime
+            .checkpoint()
+            .expect("publish source before unrelated DDL");
+        let (result, allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.execute_query("CREATE TABLE unrelated_empty (id INTEGER)")
+            });
+        result.expect("DDL succeeds independently of unrelated payload size");
+        assert_eq!(manager.count(), 32);
+        assert_eq!(
+            manager
+                .get(EntityId::new(1001))
+                .expect("source survives")
+                .data
+                .as_row()
+                .expect("row")
+                .get_field("payload"),
+            Some(&Value::Blob(vec![255; payload_bytes]))
+        );
+        allocations
+    };
+    let baseline = observe(0);
+    let measured = observe(64 * 1024);
+    eprintln!(
+        "DDL allocation bytes: {} -> {}",
+        baseline.allocated_bytes, measured.allocated_bytes
+    );
+    assert!(measured.allocated_bytes <= baseline.allocated_bytes + 1024 * 1024,
+        "metadata publication must not copy unrelated payloads for derived search artifacts: {baseline:?} -> {measured:?}");
+}
+
+#[test]
+fn native_artifact_budget_deferral_is_visible_recoverable_and_reversible() {
+    let directory = tempfile::tempdir().expect("directory");
+    let options = RedDBOptions::persistent(directory.path().join("artifact-budget.rdb"))
+        .with_capability(crate::api::Capability::FullText)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    let payload = "alpha beta ".repeat(1024);
+    let state = |runtime: &RedDBRuntime| {
+        let metadata = runtime
+            .db()
+            .physical_metadata()
+            .expect("published metadata");
+        let index = metadata
+            .indexes
+            .iter()
+            .find(|index| {
+                index.collection.as_deref() == Some("artifact_budget")
+                    && index.artifact_kind.as_deref() == Some("text.fulltext")
+            })
+            .expect("fulltext index state");
+        index.build_state.clone()
+    };
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        runtime
+            .execute_query("CREATE DOCUMENT artifact_budget")
+            .expect("document collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("artifact_budget")
+            .expect("manager");
+        for id in 0..32 {
+            // A legacy document can retain promoted named fields alongside
+            // its canonical JSON body. This exercises both native artifacts.
+            let mut entity = crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(1000 + id),
+                "artifact_budget",
+                id,
+                vec![],
+            );
+            entity.data = crate::storage::EntityData::Row(
+                crate::storage::unified::entity::RowData::with_names(
+                    vec![
+                        reddb_types::Value::Integer(id as i64),
+                        reddb_types::Value::text(payload.as_str()),
+                        reddb_types::Value::Json(br#"{"legacy":true}"#.to_vec()),
+                    ],
+                    vec!["id".into(), "payload".into(), "body".into()],
+                ),
+            );
+            manager.insert(entity).expect("legacy source row");
+        }
+        runtime.checkpoint().expect("bounded publication");
+        assert_eq!(state(&runtime), "deferred-memory-budget");
+    }
+    let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+    assert_eq!(state(&runtime), "deferred-memory-budget");
+    let records = runtime
+        .execute_query("SELECT id,payload FROM artifact_budget ORDER BY id")
+        .expect("canonical query after deferral")
+        .result
+        .records;
+    assert_eq!(records.len(), 32);
+    assert!(records
+        .iter()
+        .all(|row| row.get("payload") == Some(&reddb_types::Value::text(payload.as_str()))));
+    runtime
+        .execute_query("DELETE FROM artifact_budget WHERE id >= 1")
+        .expect("delete");
+    runtime
+        .execute_query("VACUUM artifact_budget")
+        .expect("reclaim");
+    runtime.checkpoint().expect("publish smaller artifact");
+    assert_ne!(state(&runtime), "deferred-memory-budget");
+    let store = runtime.db().store();
+    let header = store.physical_file_header().expect("header");
+    assert!(store
+        .read_native_vector_artifact_blob(
+            header.vector_artifact_page,
+            "artifact_budget",
+            Some("text.fulltext")
+        )
+        .expect("artifact read")
+        .is_some());
+}
+
+#[test]
 fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
     use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
     use reddb_types::Value;

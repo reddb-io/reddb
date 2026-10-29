@@ -1,5 +1,90 @@
 use super::*;
 
+pub(crate) struct NativeArtifactBuild {
+    pub records: Vec<(NativeVectorArtifactSummary, Vec<u8>)>,
+    pub deferred_collections: std::collections::HashSet<String>,
+}
+
+#[cfg(test)]
+mod artifact_memory_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_fulltext_does_not_copy_rows_or_publish_search_artifacts() {
+        let runtime =
+            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE source (payload BLOB)")
+            .expect("table");
+        let db = runtime.db();
+        let manager = db.store().get_collection("source").expect("manager");
+        let (_, baseline) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("empty build")
+        });
+        for id in 1..=32 {
+            manager
+                .insert(UnifiedEntity::table_row(
+                    EntityId::new(1000 + id),
+                    "source",
+                    id,
+                    vec![Value::Blob(vec![255; 64 * 1024])],
+                ))
+                .expect("source row");
+        }
+        let (build, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("disabled build")
+        });
+        assert!(build.records.is_empty());
+        assert!(
+            build.deferred_collections.is_empty(),
+            "disabled capabilities do not consume artifact allowance"
+        );
+        assert!(
+            measured.allocated_bytes <= baseline.allocated_bytes + 4096,
+            "disabled fulltext copied source payloads: {baseline:?} -> {measured:?}"
+        );
+    }
+
+    #[test]
+    fn document_artifact_traversal_is_ordered_and_bounded() {
+        let json = crate::json::from_slice::<JsonValue>(br#"{"a":{"b":1},"z":[2,3]}"#)
+            .expect("JSON fixture");
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        RedDB::collect_native_document_entries_from_json(
+            "body",
+            &json,
+            &mut entries,
+            &mut bytes,
+            4096,
+        )
+        .expect("small document fits");
+        assert_eq!(
+            entries,
+            vec![
+                ("body.a.b".into(), "1".into()),
+                ("body.z[0]".into(), "2".into()),
+                ("body.z[1]".into(), "3".into())
+            ]
+        );
+        let mut deep = JsonValue::Integer(1);
+        for _ in 0..64 {
+            deep = JsonValue::Object([("child".to_string(), deep)].into());
+        }
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        assert!(RedDB::collect_native_document_entries_from_json(
+            "body",
+            &deep,
+            &mut entries,
+            &mut bytes,
+            128
+        )
+        .is_err());
+        assert!(bytes <= 128);
+    }
+}
+
 impl RedDB {
     /// Access the quorum coordinator (Phase 2.6 PG parity).
     ///
@@ -142,17 +227,69 @@ impl RedDB {
 
     pub(crate) fn native_vector_artifact_records(
         &self,
-    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+    ) -> Result<NativeArtifactBuild, Box<dyn std::error::Error>> {
+        let budget = crate::storage::memory_budget::resolve_for_boot(
+            self.options.storage_profile.deploy_profile,
+            self.options.memory_budget_bytes,
+        )?
+        .resolved_bytes;
+        // These optional derived snapshots share a small, conservative slice
+        // of the process budget. Their builders amplify source memory through
+        // tokens, postings and encoded frames, so bound input before copying.
+        let source_limit = usize::try_from((budget / 256).clamp(1024, 2 * 1024 * 1024))
+            .expect("bounded source allowance");
+        let output_limit = usize::try_from((budget / 128).min(8 * 1024 * 1024))
+            .expect("bounded artifact allowance");
         let mut artifacts = Vec::new();
-        for collection in self.store.list_collections() {
+        let mut retained_bytes = 0usize;
+        let mut deferred_collections = std::collections::HashSet::new();
+        let mut collections = self.store.list_collections();
+        collections.sort_unstable();
+        'collections: for collection in collections {
             let Some(manager) = self.store.get_collection(&collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            if manager.count() == 0 {
+                continue;
+            }
+            let mut entities = Vec::new();
+            let mut source_bytes = 0usize;
+            let mut exceeded = false;
+            manager.for_each_entity(|entity| {
+                let eligible = match &entity.data {
+                    EntityData::Vector(vector) => {
+                        self.options.has_capability(Capability::Vector) && !vector.dense.is_empty()
+                    }
+                    EntityData::Edge(_) => self.options.has_capability(Capability::Graph),
+                    _ => self.options.has_capability(Capability::FullText),
+                };
+                if !eligible {
+                    return true;
+                }
+                let bytes = reddb_engine::storage::memory_size::entity_bytes(entity);
+                if bytes > source_limit.saturating_sub(source_bytes)
+                    || retained_bytes >= output_limit
+                {
+                    exceeded = true;
+                    return false;
+                }
+                source_bytes += bytes;
+                entities.push(entity.clone());
+                true
+            });
+            if exceeded {
+                deferred_collections.insert(collection);
+                continue;
+            }
+            if entities.is_empty() {
+                continue;
+            }
+            let first_artifact = artifacts.len();
             let mut vectors = Vec::new();
             let mut graph_edges = Vec::new();
             let mut fulltext_documents = Vec::new();
             let mut document_records = Vec::new();
+            let mut document_bytes = 0usize;
             for entity in entities {
                 match entity.data {
                     EntityData::Vector(vector) => {
@@ -176,9 +313,28 @@ impl RedDB {
                         if !text.trim().is_empty() {
                             fulltext_documents.push((entity.id, text));
                         }
-                        if let Some(document) =
-                            Self::native_document_pathvalue_for_entity(entity.id, &data)
-                        {
+                        let document = match Self::native_document_pathvalue_for_entity(
+                            entity.id,
+                            &data,
+                            source_limit.saturating_sub(document_bytes),
+                        ) {
+                            Ok(document) => document,
+                            Err(()) => {
+                                artifacts.truncate(first_artifact);
+                                deferred_collections.insert(collection);
+                                continue 'collections;
+                            }
+                        };
+                        if let Some(document) = document {
+                            document_bytes += document
+                                .1
+                                .iter()
+                                .map(|(path, value)| {
+                                    path.len()
+                                        + value.len()
+                                        + std::mem::size_of::<(String, String)>()
+                                })
+                                .sum::<usize>();
                             document_records.push(document);
                         }
                     }
@@ -297,8 +453,25 @@ impl RedDB {
                 };
                 artifacts.push((summary, bytes));
             }
+            let bytes = artifacts[first_artifact..]
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>();
+            if bytes > output_limit.saturating_sub(retained_bytes) {
+                artifacts.truncate(first_artifact);
+                deferred_collections.insert(collection);
+            } else {
+                retained_bytes += bytes;
+            }
         }
-        artifacts
+        for collection in &deferred_collections {
+            tracing::warn!(collection, source_bytes_limit=source_limit, retained_bytes_limit=output_limit,
+                "native search artifact deferred by memory budget; canonical records remain available");
+        }
+        Ok(NativeArtifactBuild {
+            records: artifacts,
+            deferred_collections,
+        })
     }
 
     fn serialize_native_graph_adjacency_artifact(
@@ -443,28 +616,54 @@ impl RedDB {
     fn native_document_pathvalue_for_entity(
         entity_id: EntityId,
         data: &EntityData,
-    ) -> Option<(EntityId, Vec<(String, String)>)> {
+        limit: usize,
+    ) -> Result<Option<(EntityId, Vec<(String, String)>)>, ()> {
         let mut entries = Vec::new();
+        let mut bytes = 0;
         match data {
             EntityData::Row(row) => {
                 if let Some(named) = &row.named {
                     for (key, value) in named {
-                        Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                        Self::collect_native_document_entries_from_value(
+                            key,
+                            value,
+                            &mut entries,
+                            &mut bytes,
+                            limit,
+                        )?;
                     }
                 }
                 for (idx, value) in row.columns.iter().enumerate() {
                     let path = format!("columns[{idx}]");
-                    Self::collect_native_document_entries_from_value(&path, value, &mut entries);
+                    Self::collect_native_document_entries_from_value(
+                        &path,
+                        value,
+                        &mut entries,
+                        &mut bytes,
+                        limit,
+                    )?;
                 }
             }
             EntityData::Node(node) => {
                 for (key, value) in &node.properties {
-                    Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                    Self::collect_native_document_entries_from_value(
+                        key,
+                        value,
+                        &mut entries,
+                        &mut bytes,
+                        limit,
+                    )?;
                 }
             }
             EntityData::Edge(edge) => {
                 for (key, value) in &edge.properties {
-                    Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                    Self::collect_native_document_entries_from_value(
+                        key,
+                        value,
+                        &mut entries,
+                        &mut bytes,
+                        limit,
+                    )?;
                 }
             }
             EntityData::Vector(_) => {}
@@ -472,9 +671,9 @@ impl RedDB {
             EntityData::QueueMessage(_) => {}
         }
         if entries.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some((entity_id, entries))
+            Ok(Some((entity_id, entries)))
         }
     }
 
@@ -482,45 +681,74 @@ impl RedDB {
         path: &str,
         value: &Value,
         out: &mut Vec<(String, String)>,
-    ) {
+        bytes: &mut usize,
+        limit: usize,
+    ) -> Result<(), ()> {
         match value {
-            Value::Json(bytes) | Value::Blob(bytes) => {
-                if let Ok(json) = crate::json::from_slice::<JsonValue>(bytes) {
-                    Self::collect_native_document_entries_from_json(path, &json, out);
+            Value::Json(payload) | Value::Blob(payload) => {
+                if let Ok(json) = crate::json::from_slice::<JsonValue>(payload) {
+                    Self::collect_native_document_entries_from_json(
+                        path, &json, out, bytes, limit,
+                    )?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn collect_native_document_entries_from_json(
         path: &str,
         value: &JsonValue,
         out: &mut Vec<(String, String)>,
-    ) {
-        match value {
-            JsonValue::Object(entries) => {
-                for (key, value) in entries {
-                    let next = if path.is_empty() {
-                        key.clone()
-                    } else {
-                        format!("{path}.{key}")
-                    };
-                    Self::collect_native_document_entries_from_json(&next, value, out);
+        bytes: &mut usize,
+        limit: usize,
+    ) -> Result<(), ()> {
+        let mut pending = vec![(path.to_string(), value)];
+        let mut pending_bytes = path.len() + std::mem::size_of::<(String, &JsonValue)>();
+        while let Some((path, value)) = pending.pop() {
+            pending_bytes -= path.len() + std::mem::size_of::<(String, &JsonValue)>();
+            match value {
+                JsonValue::Object(entries) => {
+                    for (key, value) in entries.iter().rev() {
+                        let next = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        let cost = next.len() + std::mem::size_of::<(String, &JsonValue)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        pending_bytes += cost;
+                        pending.push((next, value));
+                    }
                 }
-            }
-            JsonValue::Array(items) => {
-                for (idx, value) in items.iter().enumerate() {
-                    let next = format!("{path}[{idx}]");
-                    Self::collect_native_document_entries_from_json(&next, value, out);
+                JsonValue::Array(items) => {
+                    for (idx, value) in items.iter().enumerate().rev() {
+                        let next = format!("{path}[{idx}]");
+                        let cost = next.len() + std::mem::size_of::<(String, &JsonValue)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        pending_bytes += cost;
+                        pending.push((next, value));
+                    }
                 }
-            }
-            _ => {
-                if let Some(text) = Self::native_json_scalar_text(value) {
-                    out.push((path.to_string(), text));
+                _ => {
+                    if let Some(text) = Self::native_json_scalar_text(value) {
+                        let cost =
+                            path.len() + text.len() + std::mem::size_of::<(String, String)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        *bytes += cost;
+                        out.push((path, text));
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     fn native_json_scalar_text(value: &JsonValue) -> Option<String> {

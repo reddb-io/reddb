@@ -115,6 +115,22 @@ the same observation results and no corresponding allocation growth.
 `make test-memory-regressions` runs these gates in the storage CI even when an
 earlier storage or power-cut step fails.
 
+Metadata publication also admits optional native search-artifact snapshots
+before cloning source rows. Disabled capabilities do not build artifacts or copy
+source rows: in particular, full-text-disabled table collections must not acquire
+full-text snapshots during unrelated DDL. The input allowance is budget / 256 (at most 2 MiB)
+per collection; encoded artifacts retained by one publication share budget / 128
+(at most 8 MiB). JSON path expansion uses a bounded explicit stack and accounts
+for retained paths and scalar values. Larger derived snapshots are omitted and
+reported as `deferred-memory-budget`; stale artifact blobs are retired through
+the existing publication path. Canonical records and live runtime indexes remain
+the source of queries. This limits persisted derived acceleration: it does not
+implement a spill-to-disk builder for arbitrarily large native artifacts.
+The regression checks DDL with unrelated binary payloads, cold reopen after
+deferral, correct canonical reads, and publication after VACUUM makes the
+collection fit again. Native artifact shrink/reopen tests still verify the
+published path for collections that fit.
+
 Run the focused gates with:
 
 ```sh
