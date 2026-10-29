@@ -29,22 +29,38 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| {
+            let mut counter = counter.borrow_mut();
+            counter.record_alloc();
+            counter.record_bytes(layout.size() as isize);
+        });
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        COUNTER.with(|counter| counter.borrow_mut().record_dealloc());
+        COUNTER.with(|counter| {
+            let mut counter = counter.borrow_mut();
+            counter.record_dealloc();
+            counter.record_bytes(-(layout.size() as isize));
+        });
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| {
+            let mut counter = counter.borrow_mut();
+            counter.record_alloc();
+            counter.record_bytes(layout.size() as isize);
+        });
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| {
+            let mut counter = counter.borrow_mut();
+            counter.record_alloc();
+            counter.record_bytes(new_size as isize - layout.size() as isize);
+        });
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -52,6 +68,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AllocationCount {
     pub(crate) allocs: usize,
+    pub(crate) peak_bytes: usize,
     deallocs: usize,
 }
 
@@ -59,6 +76,8 @@ struct AllocationCounter {
     enabled: Cell<bool>,
     allocs: Cell<usize>,
     deallocs: Cell<usize>,
+    current_bytes: Cell<isize>,
+    peak_bytes: Cell<usize>,
 }
 
 impl AllocationCounter {
@@ -67,6 +86,8 @@ impl AllocationCounter {
             enabled: Cell::new(false),
             allocs: Cell::new(0),
             deallocs: Cell::new(0),
+            current_bytes: Cell::new(0),
+            peak_bytes: Cell::new(0),
         }
     }
 
@@ -82,6 +103,15 @@ impl AllocationCounter {
         }
     }
 
+    fn record_bytes(&mut self, delta: isize) {
+        if self.enabled.get() {
+            let current = self.current_bytes.get().saturating_add(delta);
+            self.current_bytes.set(current);
+            self.peak_bytes
+                .set(self.peak_bytes.get().max(current.max(0) as usize));
+        }
+    }
+
     fn begin(&self) {
         assert!(
             !self.enabled.replace(true),
@@ -89,11 +119,14 @@ impl AllocationCounter {
         );
         self.allocs.set(0);
         self.deallocs.set(0);
+        self.current_bytes.set(0);
+        self.peak_bytes.set(0);
     }
 
     fn finish(&self) -> AllocationCount {
         let count = AllocationCount {
             allocs: self.allocs.get(),
+            peak_bytes: self.peak_bytes.get(),
             deallocs: self.deallocs.get(),
         };
         self.enabled.set(false);

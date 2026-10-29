@@ -10,6 +10,7 @@ use reddb_engine::transaction::{
     read::SnapshotContext,
     snapshot::{Snapshot, SnapshotManager},
 };
+use reddb_types::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -25,10 +26,62 @@ pub const CASES: &[(&str, fn())] = &[
     ),
     ("resident_store_models_and_cache", models_and_cache),
     (
+        "resident_store_cache_reads_current_headers_and_payloads",
+        cache_reads_current_headers_and_payloads,
+    ),
+    (
         "resident_store_graph_metadata_and_references",
         graph_metadata_and_references,
     ),
 ];
+
+fn cache_reads_current_headers_and_payloads() {
+    let store = ResidentStore::new();
+    let manager = collection(&store, "cached");
+    let id = EntityId::new(1);
+    manager
+        .insert(UnifiedEntity::table_row(id, "cached", 1, vec![]))
+        .expect("row");
+    manager.force_seal().expect("sealed row");
+    assert_eq!(store.get_any(id).expect("warm cache").1.xmax, 0);
+    manager
+        .compare_exchange_xmax(id, 0, 9)
+        .expect("delete header")
+        .expect("matched");
+    assert_eq!(
+        store.get_any(id).expect("current header").1.xmax,
+        9,
+        "a cached pre-delete image must never escape after a completed stamp"
+    );
+    manager
+        .compare_exchange_xmax(id, 9, 0)
+        .expect("rollback")
+        .expect("matched");
+    assert_eq!(store.get_any(id).expect("revived header").1.xmax, 0);
+    let mut replacement = manager.get(id).expect("row");
+    replacement.data = UnifiedEntity::table_row(id, "cached", 1, vec![Value::Integer(42)]).data;
+    manager
+        .update(replacement.clone())
+        .expect("new authoritative payload");
+    assert_eq!(
+        store
+            .get_any(id)
+            .expect("updated payload")
+            .1
+            .data
+            .as_row()
+            .expect("row")
+            .columns,
+        vec![Value::Integer(42)],
+        "a cache hit must hydrate current storage"
+    );
+    manager.delete(id).expect("physical reclamation");
+    store.entity_cache.insert(id.raw(), "cached".into());
+    assert!(
+        store.get_any(id).is_none(),
+        "a stale cached row must not survive reclamation"
+    );
+}
 
 fn collection(store: &ResidentStore, name: &str) -> Arc<SegmentManager> {
     Arc::clone(

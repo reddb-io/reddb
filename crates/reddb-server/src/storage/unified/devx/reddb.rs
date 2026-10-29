@@ -69,6 +69,11 @@ pub struct RedDB {
     /// Per-collection HNSW vector index cache for fast approximate nearest neighbor search.
     /// Lazily built on first vector similarity query per collection.
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
+    /// Only revision proofs and published page references, never index payloads.
+    native_artifact_versions: parking_lot::Mutex<HashMap<String, NativeArtifactVersion>>,
+    /// Admit one derived-payload preparation, without excluding row/WAL writes.
+    /// Publishers already holding the store fence only try this gate.
+    native_artifact_preparation: parking_lot::ReentrantMutex<()>,
     /// Default TTL policy declared at the collection level, in milliseconds.
     collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
     /// In-memory cache of collection contracts keyed by collection name.
@@ -367,13 +372,35 @@ pub struct NativeVectorArtifactBatchInspection {
     pub failures: Vec<(String, String, String)>,
 }
 
+#[derive(Clone)]
+struct NativeArtifactVersion {
+    manager: std::sync::Weak<super::super::manager::SegmentManager>,
+    segments: Vec<(u64, u64)>,
+    summaries: Vec<NativeVectorArtifactSummary>,
+    pages: Vec<NativeVectorArtifactPageSummary>,
+    fulltext_document_ids_complete: bool,
+    source_digest: Option<[u8; 32]>,
+}
+
+struct NativeArtifactPublication {
+    records: Vec<(NativeVectorArtifactSummary, Vec<u8>)>,
+    retained: Vec<NativeVectorArtifactPageSummary>,
+    summaries: Vec<NativeVectorArtifactSummary>,
+    versions: HashMap<String, NativeArtifactVersion>,
+}
+
 mod contract_cache;
 mod impl_access;
 mod impl_core_a;
 mod impl_core_b;
 mod impl_ec;
+mod impl_fulltext_delta;
 mod impl_metadata;
+mod impl_native_source;
 mod impl_registry;
+mod native_fulltext_delta;
+#[cfg(test)]
+mod native_source_tests;
 
 impl Default for RedDB {
     fn default() -> Self {
@@ -457,7 +484,21 @@ fn fnv1a_hash_bytes(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
-    let rendered = format!("{value:?}");
-    fnv1a_hash_bytes(hash, rendered.as_bytes());
+struct Fnv1aWriter<'a>(&'a mut u64);
+
+impl std::fmt::Write for Fnv1aWriter<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        fnv1a_hash_bytes(self.0, text.as_bytes());
+        Ok(())
+    }
 }
+
+fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
+    // Keep the exact Debug byte stream used by persisted fingerprints without
+    // allocating a rendered copy of every field or large row payload.
+    std::fmt::write(&mut Fnv1aWriter(hash), format_args!("{value:?}"))
+        .expect("metadata fingerprint formatting");
+}
+
+#[cfg(test)]
+mod metadata_fingerprint_tests;

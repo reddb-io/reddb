@@ -1,0 +1,863 @@
+[
+  {
+    "changed_payload_bytes": 0,
+    "changed_rows": 0,
+    "checkpoint_seconds": 0.070219668,
+    "cycle": 0,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/.audit.log"
+      },
+      {
+        "allocated_bytes": 1474560,
+        "logical_bytes": 1474560,
+        "path": "256/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "256/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 42595,
+        "path": "256/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "256/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "256/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 32300,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 32300,
+      "checksum": 1528951861,
+      "collection": "scaling_rows",
+      "page_count": 2,
+      "root_page": 87
+    },
+    "page_count": 90,
+    "pager_accesses": 802,
+    "rows": 256,
+    "main_logical_bytes": 1474560,
+    "main_allocated_bytes": 1474560,
+    "prepared_duration_ms": 6,
+    "prepared_artifacts": 4,
+    "prepared_retained_artifacts": 1,
+    "prepared_payload_bytes": 34273,
+    "metadata_ms": 31
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.049803025,
+    "cycle": 1,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/.audit.log"
+      },
+      {
+        "allocated_bytes": 1490944,
+        "logical_bytes": 1490944,
+        "path": "256/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "256/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43098,
+        "path": "256/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "256/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "256/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 32938,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 32938,
+      "checksum": 1517258527,
+      "collection": "scaling_rows",
+      "page_count": 3,
+      "root_page": 87
+    },
+    "page_count": 91,
+    "pager_accesses": 126,
+    "rows": 256,
+    "main_logical_bytes": 1490944,
+    "main_allocated_bytes": 1490944,
+    "prepared_duration_ms": 3,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 32938,
+    "metadata_ms": 23
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.051608217,
+    "cycle": 2,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/.audit.log"
+      },
+      {
+        "allocated_bytes": 1490944,
+        "logical_bytes": 1490944,
+        "path": "256/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "256/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43604,
+        "path": "256/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "256/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "256/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 33534,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 33534,
+      "checksum": 3974316668,
+      "collection": "scaling_rows",
+      "page_count": 3,
+      "root_page": 87
+    },
+    "page_count": 91,
+    "pager_accesses": 124,
+    "rows": 256,
+    "main_logical_bytes": 1490944,
+    "main_allocated_bytes": 1490944,
+    "prepared_duration_ms": 2,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 33534,
+    "metadata_ms": 28
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.065261749,
+    "cycle": 3,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/.audit.log"
+      },
+      {
+        "allocated_bytes": 1490944,
+        "logical_bytes": 1490944,
+        "path": "256/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "256/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 44106,
+        "path": "256/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "256/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "256/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "256/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 34130,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 34130,
+      "checksum": 2436852817,
+      "collection": "scaling_rows",
+      "page_count": 3,
+      "root_page": 87
+    },
+    "page_count": 91,
+    "pager_accesses": 124,
+    "rows": 256,
+    "main_logical_bytes": 1490944,
+    "main_allocated_bytes": 1490944,
+    "prepared_duration_ms": 2,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 34130,
+    "metadata_ms": 42
+  },
+  {
+    "cold_checkpoint_seconds": 0.053142201,
+    "cold_recovery": true,
+    "full_derivation_equal": true,
+    "rows": 256,
+    "prepared_duration_ms": 7,
+    "prepared_artifacts": 2,
+    "prepared_retained_artifacts": 3,
+    "prepared_payload_bytes": 43717,
+    "metadata_ms": 32
+  },
+  {
+    "changed_payload_bytes": 0,
+    "changed_rows": 0,
+    "checkpoint_seconds": 0.142522793,
+    "cycle": 0,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/.audit.log"
+      },
+      {
+        "allocated_bytes": 1916928,
+        "logical_bytes": 1916928,
+        "path": "2048/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "2048/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 42606,
+        "path": "2048/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "2048/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "2048/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 260932,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 260932,
+      "checksum": 2204985399,
+      "collection": "scaling_rows",
+      "page_count": 1,
+      "root_page": 114
+    },
+    "page_count": 117,
+    "pager_accesses": 6178,
+    "rows": 2048,
+    "main_logical_bytes": 1916928,
+    "main_allocated_bytes": 1916928,
+    "prepared_duration_ms": 35,
+    "prepared_artifacts": 4,
+    "prepared_retained_artifacts": 1,
+    "prepared_payload_bytes": 262905,
+    "metadata_ms": 34
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.086320847,
+    "cycle": 1,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/.audit.log"
+      },
+      {
+        "allocated_bytes": 1916928,
+        "logical_bytes": 1916928,
+        "path": "2048/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "2048/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43109,
+        "path": "2048/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "2048/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "2048/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 261570,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 261570,
+      "checksum": 741129198,
+      "collection": "scaling_rows",
+      "page_count": 1,
+      "root_page": 114
+    },
+    "page_count": 117,
+    "pager_accesses": 123,
+    "rows": 2048,
+    "main_logical_bytes": 1916928,
+    "main_allocated_bytes": 1916928,
+    "prepared_duration_ms": 27,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 261570,
+    "metadata_ms": 33
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.082346416,
+    "cycle": 2,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/.audit.log"
+      },
+      {
+        "allocated_bytes": 1933312,
+        "logical_bytes": 1933312,
+        "path": "2048/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "2048/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43616,
+        "path": "2048/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "2048/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "2048/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 262166,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 262166,
+      "checksum": 475052159,
+      "collection": "scaling_rows",
+      "page_count": 2,
+      "root_page": 114
+    },
+    "page_count": 118,
+    "pager_accesses": 118,
+    "rows": 2048,
+    "main_logical_bytes": 1933312,
+    "main_allocated_bytes": 1933312,
+    "prepared_duration_ms": 25,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 262166,
+    "metadata_ms": 32
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.064574046,
+    "cycle": 3,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/.audit.log"
+      },
+      {
+        "allocated_bytes": 1933312,
+        "logical_bytes": 1933312,
+        "path": "2048/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "2048/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 44120,
+        "path": "2048/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "2048/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "2048/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "2048/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 262762,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 262762,
+      "checksum": 2994920782,
+      "collection": "scaling_rows",
+      "page_count": 2,
+      "root_page": 114
+    },
+    "page_count": 118,
+    "pager_accesses": 121,
+    "rows": 2048,
+    "main_logical_bytes": 1933312,
+    "main_allocated_bytes": 1933312,
+    "prepared_duration_ms": 15,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 262762,
+    "metadata_ms": 29
+  },
+  {
+    "cold_checkpoint_seconds": 0.091244921,
+    "cold_recovery": true,
+    "full_derivation_equal": true,
+    "rows": 2048,
+    "prepared_duration_ms": 43,
+    "prepared_artifacts": 2,
+    "prepared_retained_artifacts": 3,
+    "prepared_payload_bytes": 272349,
+    "metadata_ms": 30
+  },
+  {
+    "changed_payload_bytes": 0,
+    "changed_rows": 0,
+    "checkpoint_seconds": 0.491251562,
+    "cycle": 0,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/.audit.log"
+      },
+      {
+        "allocated_bytes": 3538944,
+        "logical_bytes": 3538944,
+        "path": "8192/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "8192/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 42603,
+        "path": "8192/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "8192/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "8192/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 1047364,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 1047364,
+      "checksum": 3253912614,
+      "collection": "scaling_rows",
+      "page_count": 4,
+      "root_page": 212
+    },
+    "page_count": 216,
+    "pager_accesses": 24610,
+    "rows": 8192,
+    "main_logical_bytes": 3538944,
+    "main_allocated_bytes": 3538944,
+    "prepared_duration_ms": 150,
+    "prepared_artifacts": 4,
+    "prepared_retained_artifacts": 1,
+    "prepared_payload_bytes": 1049337,
+    "metadata_ms": 43
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.165968599,
+    "cycle": 1,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/.audit.log"
+      },
+      {
+        "allocated_bytes": 3538944,
+        "logical_bytes": 3538944,
+        "path": "8192/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "8192/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43107,
+        "path": "8192/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "8192/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "8192/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 1048002,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 1048002,
+      "checksum": 1645969905,
+      "collection": "scaling_rows",
+      "page_count": 4,
+      "root_page": 212
+    },
+    "page_count": 216,
+    "pager_accesses": 132,
+    "rows": 8192,
+    "main_logical_bytes": 3538944,
+    "main_allocated_bytes": 3538944,
+    "prepared_duration_ms": 79,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 1048002,
+    "metadata_ms": 53
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.137353603,
+    "cycle": 2,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/.audit.log"
+      },
+      {
+        "allocated_bytes": 3538944,
+        "logical_bytes": 3538944,
+        "path": "8192/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "8192/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 43614,
+        "path": "8192/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "8192/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "8192/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 1048598,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 1048598,
+      "checksum": 2296522777,
+      "collection": "scaling_rows",
+      "page_count": 4,
+      "root_page": 212
+    },
+    "page_count": 216,
+    "pager_accesses": 127,
+    "rows": 8192,
+    "main_logical_bytes": 3538944,
+    "main_allocated_bytes": 3538944,
+    "prepared_duration_ms": 58,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 1048598,
+    "metadata_ms": 51
+  },
+  {
+    "changed_payload_bytes": 324,
+    "changed_rows": 6,
+    "checkpoint_seconds": 0.140170526,
+    "cycle": 3,
+    "files": [
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/.audit.log"
+      },
+      {
+        "allocated_bytes": 3538944,
+        "logical_bytes": 3538944,
+        "path": "8192/database.rdb"
+      },
+      {
+        "allocated_bytes": 16777216,
+        "logical_bytes": 8,
+        "path": "8192/database.rdb-uwal"
+      },
+      {
+        "allocated_bytes": 45056,
+        "logical_bytes": 44118,
+        "path": "8192/database.rdb.meta.rdbx"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/red.topology.cluster.rcol"
+      },
+      {
+        "allocated_bytes": 0,
+        "logical_bytes": 0,
+        "path": "8192/database.rdb.ops/collections/scaling_rows.rcol"
+      },
+      {
+        "allocated_bytes": 4096,
+        "logical_bytes": 285,
+        "path": "8192/database.rdb.ops/manifest.json"
+      },
+      {
+        "allocated_bytes": 1097728,
+        "logical_bytes": 1097728,
+        "path": "8192/database.result-cache.l2"
+      }
+    ],
+    "free_page_count": 0,
+    "full_derivation_equal": true,
+    "fulltext_logical_bytes": 1049194,
+    "fulltext_reference": {
+      "artifact_kind": "text.fulltext",
+      "byte_len": 1049194,
+      "checksum": 3171629589,
+      "collection": "scaling_rows",
+      "page_count": 4,
+      "root_page": 212
+    },
+    "page_count": 216,
+    "pager_accesses": 127,
+    "rows": 8192,
+    "main_logical_bytes": 3538944,
+    "main_allocated_bytes": 3538944,
+    "prepared_duration_ms": 55,
+    "prepared_artifacts": 1,
+    "prepared_retained_artifacts": 4,
+    "prepared_payload_bytes": 1049194,
+    "metadata_ms": 51
+  },
+  {
+    "cold_checkpoint_seconds": 0.247938332,
+    "cold_recovery": true,
+    "full_derivation_equal": true,
+    "rows": 8192,
+    "prepared_duration_ms": 175,
+    "prepared_artifacts": 2,
+    "prepared_retained_artifacts": 3,
+    "prepared_payload_bytes": 1058781,
+    "metadata_ms": 48
+  }
+]

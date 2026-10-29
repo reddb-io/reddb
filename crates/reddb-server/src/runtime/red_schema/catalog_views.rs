@@ -1004,10 +1004,10 @@ fn append_document_stats(
     let mut key_counts = BTreeMap::<String, u64>::new();
     let mut type_counts = BTreeMap::<String, BTreeMap<&'static str, u64>>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         let EntityData::Row(row) = entity.data else {
             continue;
         };
@@ -1110,10 +1110,10 @@ fn append_kv_stats(
     let mut total_value_bytes = 0u64;
     let mut type_counts = BTreeMap::<&'static str, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         let EntityData::Row(row) = entity.data else {
             continue;
         };
@@ -1171,10 +1171,10 @@ fn append_graph_stats(
     let mut node_labels = BTreeMap::<String, u64>::new();
     let mut edge_labels = BTreeMap::<String, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         match &entity.kind {
             crate::storage::unified::EntityKind::GraphNode(node) => {
                 node_count += 1;
@@ -1258,10 +1258,10 @@ fn append_vector_stats(
     let mut observed_dimension = None;
     let mut hybrid_count = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         let EntityData::Vector(vector) = entity.data else {
             continue;
         };
@@ -1316,10 +1316,10 @@ fn append_queue_stats(
     let mut acked_count = 0u64;
     let mut max_attempts_seen = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         let EntityData::QueueMessage(message) = entity.data else {
             continue;
         };
@@ -1383,10 +1383,10 @@ fn append_timeseries_stats(
     let mut oldest = None::<u64>;
     let mut newest = None::<u64>;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    for entity in manager.query_all(|_| true) {
         let EntityData::TimeSeries(point) = entity.data else {
             continue;
         };
@@ -1534,18 +1534,27 @@ fn timeseries_series_key(metric: &str, tags: &std::collections::HashMap<String, 
     key
 }
 
-/// Extract the single collection targeted by a `collection = '<name>'`
-/// equality filter (as produced by `SHOW STATS <name>`). Returns `None`
-/// for any other shape so the caller profiles every visible row table.
+/// Find a mandatory collection equality in the effective predicate. Expression
+/// resolution can clear the legacy filter. Only descend through AND: an equality
+/// inside an OR branch cannot restrict the entire profiling query.
 fn stats_target_collection(query: &TableQuery) -> Option<String> {
-    match query.filter.as_ref() {
-        Some(Filter::Compare {
-            field: FieldRef::TableColumn { column, .. },
-            op: CompareOp::Eq,
-            value: Value::Text(collection),
-        }) if column == "collection" => Some(collection.to_string()),
-        _ => None,
+    let filter = effective_table_filter(query)?;
+    let mut pending = vec![&filter];
+    while let Some(filter) = pending.pop() {
+        match filter {
+            Filter::And(left, right) => {
+                pending.push(left);
+                pending.push(right);
+            }
+            Filter::Compare {
+                field: FieldRef::TableColumn { column, .. },
+                op: CompareOp::Eq,
+                value: Value::Text(collection),
+            } if column == "collection" => return Some(collection.to_string()),
+            _ => {}
+        }
     }
+    None
 }
 
 fn most_common_values(

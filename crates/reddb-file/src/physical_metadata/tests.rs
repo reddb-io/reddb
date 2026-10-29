@@ -74,12 +74,14 @@ fn physical_metadata_saves_are_atomic_for_concurrent_readers() {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 let mut torn_reads = 0usize;
+                let mut first_error = None;
                 while !stop.load(Ordering::Acquire) {
-                    if read_physical_metadata_document(&path).is_err() {
+                    if let Err(error) = read_physical_metadata_document(&path) {
                         torn_reads += 1;
+                        first_error.get_or_insert_with(|| format!("{path:?}: {error:?}"));
                     }
                 }
-                torn_reads
+                (torn_reads, first_error)
             })
         })
         .collect();
@@ -89,11 +91,15 @@ fn physical_metadata_saves_are_atomic_for_concurrent_readers() {
         write_physical_metadata_json_document(&json_path, document).unwrap();
     }
     stop.store(true, Ordering::Release);
-    let torn_reads: usize = readers
+    let observations: Vec<_> = readers
         .into_iter()
         .map(|reader| reader.join().expect("reader thread"))
-        .sum();
-    assert_eq!(torn_reads, 0, "readers observed a torn metadata document");
+        .collect();
+    let torn_reads: usize = observations.iter().map(|(count, _)| count).sum();
+    assert_eq!(
+        torn_reads, 0,
+        "concurrent metadata reads failed; first errors: {observations:?}"
+    );
 
     let mut leftovers: Vec<_> = fs::read_dir(&root)
         .unwrap()

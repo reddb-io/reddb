@@ -303,14 +303,22 @@ fn serializable_vault_predicates() {
 }
 
 fn autocommit_reservations_and_replay() {
-    let manager = SnapshotManager::new();
+    let manager = Arc::new(SnapshotManager::new());
     let first = manager.allocate_committed_xid();
+    let (pooled_snapshot, retained) = manager.fresh_retained_snapshot();
+    let pooled_later = manager.allocate_committed_xid();
+    assert!(
+        pooled_later < pooled_snapshot.xid,
+        "exercise the reserved range"
+    );
+    assert!(!pooled_snapshot.sees(pooled_later, 0));
+    assert!(pooled_snapshot.sees(first, pooled_later));
     let reader = manager.begin();
     let captured = manager.snapshot(reader);
     let later = manager.allocate_committed_xid();
     assert!(
-        later < reader,
-        "exercise an unused reserved xid below the reader"
+        later > reader,
+        "BEGIN retires unused lower slots instead of issuing them after the reader"
     );
     assert!(captured.sees(first, 0));
     assert!(!captured.sees(later, 0));
@@ -321,6 +329,14 @@ fn autocommit_reservations_and_replay() {
     assert!(manager.fresh_read_snapshot().sees(recovered, 0));
     assert!(manager.allocate_committed_xid() > recovered);
     manager.rollback(reader);
+    assert!(manager.oldest_required_xid().expect("held old horizon") <= pooled_later);
+    drop(retained);
+    let (fresh, _retained) = manager.fresh_retained_snapshot();
+    assert!(!fresh.sees(first, recovered));
+    assert!(
+        manager.oldest_required_xid().expect("fresh horizon") > recovered,
+        "new snapshots must not pin a delete they already see"
+    );
 }
 
 pub const CASES: &[(&str, fn())] = &[

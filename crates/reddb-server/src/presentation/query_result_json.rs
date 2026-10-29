@@ -38,6 +38,32 @@ pub(crate) fn runtime_query_json(
         capabilities,
     );
 
+    let rendered = if result.statement == "ask" {
+        unified_result_json_with_rendered_records(
+            &result.result,
+            super::query_result::ask_json(&records)
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        unified_result_json_with_records(&result.result, &records)
+    };
+    JsonValue::Object(runtime_query_object(
+        result,
+        &records,
+        entity_types,
+        capabilities,
+        rendered,
+    ))
+}
+
+fn runtime_query_object(
+    result: &RuntimeQueryResult,
+    records: &[UnifiedRecord],
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+    rendered: JsonValue,
+) -> Map<String, JsonValue> {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(true));
     object.insert("query".to_string(), JsonValue::String(result.query.clone()));
@@ -82,28 +108,123 @@ pub(crate) fn runtime_query_json(
     if let Some(notice) = result.notice.as_deref() {
         object.insert("notice".to_string(), JsonValue::String(notice.to_string()));
     }
-    object.insert(
-        "result".to_string(),
-        if result.statement == "ask" {
-            unified_result_json_with_rendered_records(
-                &result.result,
-                super::query_result::ask_json(&records)
-                    .into_iter()
-                    .collect(),
-            )
-        } else {
-            unified_result_json_with_records(&result.result, &records)
-        },
-    );
+    object.insert("result".to_string(), rendered);
     object.insert(
         "descriptor".to_string(),
-        descriptor_json(&result.result, &records),
+        descriptor_json(&result.result, records),
     );
     object.insert(
         "selection".to_string(),
         crate::presentation::query_view::search_selection_json(entity_types, capabilities),
     );
-    JsonValue::Object(object)
+    object
+}
+
+/// Serialize records one at a time, retaining the canonical metadata and key
+/// order without a second heap tree containing the complete result set.
+pub(crate) fn runtime_query_json_string(
+    result: &RuntimeQueryResult,
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+) -> String {
+    let mut out = String::new();
+    write_runtime_query_json(&mut out, result, entity_types, capabilities)
+        .expect("invariant: writing canonical JSON to a String cannot fail");
+    out
+}
+
+pub(crate) fn runtime_query_json_string_limited(
+    result: &RuntimeQueryResult,
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+    limit: usize,
+) -> Option<String> {
+    let mut out = BoundedQueryJson {
+        body: String::new(),
+        limit,
+    };
+    write_runtime_query_json(&mut out, result, entity_types, capabilities).ok()?;
+    Some(out.body)
+}
+
+struct BoundedQueryJson {
+    body: String,
+    limit: usize,
+}
+
+impl std::fmt::Write for BoundedQueryJson {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self
+            .body
+            .len()
+            .checked_add(value.len())
+            .is_none_or(|length| length > self.limit)
+        {
+            return Err(std::fmt::Error);
+        }
+        self.body.push_str(value);
+        Ok(())
+    }
+}
+
+fn write_runtime_query_json(
+    out: &mut impl std::fmt::Write,
+    result: &RuntimeQueryResult,
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+) -> std::fmt::Result {
+    if result.statement == "ask" {
+        return out.write_str(
+            &runtime_query_json(result, entity_types, capabilities).to_string_compact(),
+        );
+    }
+    let records = crate::presentation::query_view::filter_query_records(
+        &result.result.records,
+        entity_types,
+        capabilities,
+    );
+    let metadata = unified_result_json_with_rendered_records(&result.result, Vec::new());
+    let object = runtime_query_object(result, &records, entity_types, capabilities, metadata);
+    out.write_char('{')?;
+    for (index, (key, value)) in object.iter().enumerate() {
+        if index != 0 {
+            out.write_char(',')?;
+        }
+        append_key(out, key)?;
+        if let ("result", JsonValue::Object(result_object)) = (key.as_str(), value) {
+            out.write_char('{')?;
+            for (index, (field, value)) in result_object.iter().enumerate() {
+                if index != 0 {
+                    out.write_char(',')?;
+                }
+                append_key(out, field)?;
+                if field == "records" {
+                    out.write_char('[')?;
+                    for (index, record) in records.iter().enumerate() {
+                        if index != 0 {
+                            out.write_char(',')?;
+                        }
+                        out.write_str(
+                            &unified_record_json(record, &result.result.columns)
+                                .to_string_compact(),
+                        )?;
+                    }
+                    out.write_char(']')?;
+                } else {
+                    out.write_str(&value.to_string_compact())?;
+                }
+            }
+            out.write_char('}')?;
+        } else {
+            out.write_str(&value.to_string_compact())?;
+        }
+    }
+    out.write_char('}')
+}
+
+fn append_key(out: &mut impl std::fmt::Write, key: &str) -> std::fmt::Result {
+    out.write_str(&JsonValue::String(key.to_string()).to_string_compact())?;
+    out.write_char(':')
 }
 
 /// #737 — additive query-result descriptor metadata.

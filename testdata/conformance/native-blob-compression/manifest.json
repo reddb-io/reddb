@@ -1,0 +1,25 @@
+{
+  "encodedPageHex": "5244425a00000000400000003000010000000000049b960f28b52ffd6030ffb50100b402524446540c000000666978747572655f726f7773010000000100000000000100610100000007000300000002006028e1ffebe009",
+  "decodedBytes": 65584,
+  "decodedCrc32": 261528324,
+  "format": {
+    "magic": "RDBZ",
+    "headerBytes": 24,
+    "nextPageOffset": 4,
+    "chunkLengthOffset": 8,
+    "decodedLengthOffset": 12,
+    "checksumOffset": 20
+  },
+  "decodedSha256": "96aca4178abe067fc22bf572888488ecdc8edb78b141a7b2de2ed87646f88c26",
+  "nextPage": 0,
+  "decodedLimitBytes": 1048576,
+  "logicalFrame": {
+    "magic": "RDFT",
+    "collection": "fixture_rows",
+    "documentCount": 1,
+    "termCount": 1,
+    "termBytes": 65536,
+    "entityId": 7,
+    "termFrequency": 3
+  }
+}

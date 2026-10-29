@@ -31,6 +31,11 @@ source-to-merged footprint reduction. It is not immediate physical reclamation
 while readers hold the sources. Admission refreshes live usage instead of taking
 that counter as available capacity.
 
+The counter compares conservative source and destination estimates. Flat and
+hash storage can have different directory padding, so it may report zero even
+when measured live allocation decreases. [Row and metadata accounting](resident-row-memory-accounting.md)
+documents the separate allocator and source-lifetime regressions.
+
 After pressure reclamation, admission still requires used bytes plus estimated
 growth to fit the budget. Merely bringing current usage below the ceiling does
 not authorize an operation that would cross it again. Rejections retain the

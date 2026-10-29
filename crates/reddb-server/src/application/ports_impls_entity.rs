@@ -25,7 +25,7 @@ fn refresh_context_index(
     id: crate::storage::EntityId,
 ) -> RedDBResult<()> {
     let store = db.store();
-    let Some(entity) = store.get(collection, id) else {
+    let Some(entity) = store.try_get(collection, id)? else {
         return Ok(());
     };
 
@@ -1200,11 +1200,15 @@ impl RedDBRuntime {
         // keeps `body` as the single source of truth. Reflect non-body SET
         // assignments into `body` as patch operations so dotted paths update
         // nested JSON instead of becoming literal top-level keys.
-        let is_document_collection = db
+        let collection_model = db
             .collection_contract(&collection)
-            .map(|contract| contract.declared_model == crate::catalog::CollectionModel::Document)
-            .unwrap_or(false);
-        let kv_key = if row.get_field("value").is_some() || row.columns.len() >= 2 {
+            .map(|contract| contract.declared_model);
+        let is_document_collection =
+            collection_model == Some(crate::catalog::CollectionModel::Document);
+        // Row width and field names cannot identify a KV collection. Otherwise
+        // an ordinary columnar UPDATE invents a key and retains stale columns
+        // beside the named post-image, invalidating native proofs on reopen.
+        let kv_key = if collection_model == Some(crate::catalog::CollectionModel::Kv) {
             row.get_field("key")
                 .cloned()
                 .or_else(|| row.columns.first().cloned())
@@ -1763,7 +1767,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -1806,7 +1810,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 }
@@ -1943,7 +1947,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // create_row() p50 roughly in half on the hot path.
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&collection, id),
+            entity: db.store().try_get(&collection, id)?,
         })
     }
 
@@ -2010,19 +2014,19 @@ impl RuntimeEntityPort for RedDBRuntime {
             })
             .collect();
 
-        let result = engine
-            .apply(collection.clone(), mutation_rows)
-            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+        let result = engine.apply(collection.clone(), mutation_rows)?;
 
         let store = db.store();
-        Ok(result
+        result
             .ids
             .into_iter()
-            .map(|id| CreateEntityOutput {
-                id,
-                entity: store.get(&collection, id),
+            .map(|id| {
+                Ok(CreateEntityOutput {
+                    id,
+                    entity: store.try_get(&collection, id)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn create_rows_batch_prevalidated_columnar(
@@ -2182,18 +2186,18 @@ impl RuntimeEntityPort for RedDBRuntime {
                 engine
             }
         };
-        let result = engine
-            .apply(collection.clone(), mutation_rows)
-            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+        let result = engine.apply(collection.clone(), mutation_rows)?;
         let store = db.store();
-        Ok(result
+        result
             .ids
             .into_iter()
-            .map(|id| CreateEntityOutput {
-                id,
-                entity: store.get(&collection, id),
+            .map(|id| {
+                Ok(CreateEntityOutput {
+                    id,
+                    entity: store.try_get(&collection, id)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
@@ -2246,7 +2250,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // The transaction stamp must be present on the first published version.
         // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
         let id = builder.save_with_xmin(self.current_xid())?;
-        let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
+        let dense_for_turbo = match db.store().try_get(&input.collection, id)?.map(|e| e.data) {
             Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
             _ => None,
         };
@@ -2290,7 +2294,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -2350,7 +2354,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&input.collection, id),
+            entity: db.store().try_get(&input.collection, id)?,
         })
     }
 
@@ -2402,7 +2406,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         Ok(CreateEntityOutput {
             id,
-            entity: db.store().get(&collection, id),
+            entity: db.store().try_get(&collection, id)?,
         })
     }
 

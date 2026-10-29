@@ -34,6 +34,8 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
+    config.native_blob_decode_limit_bytes =
+        usize::try_from(budget.resolved_bytes / 8).unwrap_or(usize::MAX);
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
@@ -583,6 +585,8 @@ impl RedDB {
             options: options.clone(),
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
+            native_artifact_versions: parking_lot::Mutex::new(HashMap::new()),
+            native_artifact_preparation: parking_lot::ReentrantMutex::new(()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
             collection_contract_cache: super::contract_cache::CollectionContractCache::default(),
             remote_backend: options.remote_backend.clone(),
@@ -623,19 +627,58 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Ordinary checkpoints serialize preparation before taking publication,
+        // preserving cold caches while another preparation admits their proofs.
+        // Nested publishers must never wait here while owning the row/WAL fence.
+        let _preparation = if self.paged_mode {
+            if self
+                .store
+                .vault_publication_lock
+                .is_owned_by_current_thread()
+            {
+                self.native_artifact_preparation.try_lock()
+            } else {
+                Some(self.native_artifact_preparation.lock())
+            }
+        } else {
+            None
+        };
+        let native_publication = if self.paged_mode {
+            let existing = self.current_native_artifact_pages()?;
+            Some(self.prepare_native_artifact_publication_with_admission(
+                &existing,
+                _preparation.is_some(),
+            ))
+        } else {
+            None
+        };
         let _vault_guard = self.store.vault_publication_lock.lock();
         let _ = self.ec_consolidate_all();
         if let Some(path) = &self.path {
             if self.paged_mode {
+                let started = std::time::Instant::now();
+                tracing::debug!(target: "reddb::checkpoint", "local store publication started");
                 self.store.persist()?;
+                tracing::debug!(
+                    target: "reddb::checkpoint",
+                    duration_ms = started.elapsed().as_millis(),
+                    "local store publication finished"
+                );
             } else if embedded_single_file_selected(&self.options) {
                 let snapshot = self.store.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot)?;
             } else {
                 self.store.save_to_file(path)?;
             }
+            let started = std::time::Instant::now();
+            tracing::debug!(target: "reddb::checkpoint", "append-only publication started");
             self.publish_append_only_segments(path)?;
-            self.persist_metadata()?;
+            tracing::debug!(
+                target: "reddb::checkpoint",
+                duration_ms = started.elapsed().as_millis(),
+                "append-only publication finished"
+            );
+            self.persist_metadata_with_native_publication(native_publication)?;
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight

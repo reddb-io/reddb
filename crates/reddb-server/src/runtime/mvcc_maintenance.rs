@@ -14,7 +14,8 @@ pub(super) struct MvccMaintenance {
 }
 
 impl RedDBRuntime {
-    pub(super) fn reclaim_history_tick(&self, state: &mut MvccMaintenance) {
+    /// Returns whether an eligible collection received a bounded scan attempt.
+    pub(super) fn reclaim_history_tick(&self, state: &mut MvccMaintenance) -> bool {
         let options = self.inner.db.options();
         // Replicated profiles need a distributed reader/replica low-water
         // mark before local physical history can be reclaimed automatically.
@@ -25,10 +26,10 @@ impl RedDBRuntime {
             || !self.config_bool("runtime.mvcc.autovacuum.enabled", true)
         {
             state.current = None;
-            return;
+            return false;
         }
         if state.retry_after.is_some_and(|at| Instant::now() < at) {
-            return;
+            return false;
         }
         let store = self.inner.db.store();
         if state
@@ -42,7 +43,7 @@ impl RedDBRuntime {
             let mut collections = store.list_collections();
             collections.sort_unstable();
             if collections.is_empty() {
-                return;
+                return false;
             }
             let index = state.after_collection.as_ref().map_or(0, |after| {
                 collections.partition_point(|name| name <= after) % collections.len()
@@ -50,7 +51,7 @@ impl RedDBRuntime {
             state.current = store.mvcc_reclaim_cursor(collections[index].clone());
         }
         let Some(cursor) = state.current.as_mut() else {
-            return;
+            return false;
         };
         let scan_budget = self
             .config_u64("runtime.mvcc.autovacuum.scan_rows_per_tick", 4096)
@@ -76,6 +77,7 @@ impl RedDBRuntime {
                     state.after_collection = Some(cursor.collection.clone());
                     state.current = None;
                 }
+                true
             }
             Err(error) => {
                 state.retry_after = Some(Instant::now() + Duration::from_secs(5));
@@ -88,6 +90,7 @@ impl RedDBRuntime {
                 }
                 // An unsuccessful WAL-backed batch is not recorded as progress.
                 state.current = None;
+                false
             }
         }
     }

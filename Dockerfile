@@ -60,6 +60,9 @@ ENV REDDB_VAULT=false
 ENV REDDB_AUTH=true
 ENV REDDB_REQUIRE_AUTH=true
 ENV RUST_MIN_STACK=8388608
+# Share freed checkpoint/index allocations across HTTP, maintenance and shutdown
+# threads. Per-thread glibc arenas can exhaust small container memory limits.
+ENV MALLOC_ARENA_MAX=1
 
 # Perf-parity config overlay — see docs/engine/perf-bench.md.
 # RedDB self-heals the Tier A keys (durability.mode, concurrency.*,

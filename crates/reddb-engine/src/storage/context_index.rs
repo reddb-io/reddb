@@ -27,6 +27,9 @@ use super::entity::{EntityData, EntityId, EntityKind, UnifiedEntity};
 use super::tokenization::{push_text_tokens, push_value_tokens, MAX_INDEX_TOKENS};
 use reddb_types::Value;
 
+mod memory;
+use memory::{insert_posting, keys_bytes, remove_postings, ContextMemory};
+
 const MAX_FIELD_INDEX_PAIRS: usize = 1024;
 
 // ============================================================================
@@ -88,6 +91,7 @@ pub struct ContextIndex {
     /// Writes to collections absent from this set are no-ops — OLTP tables
     /// skip tokenisation + 3-way RwLock write storm entirely.
     enabled_collections: RwLock<HashSet<String>>,
+    memory: ContextMemory,
 }
 
 impl ContextIndex {
@@ -99,6 +103,7 @@ impl ContextIndex {
             reverse: RwLock::new(HashMap::new()),
             indexed: RwLock::new(HashSet::new()),
             enabled_collections: RwLock::new(HashSet::new()),
+            memory: ContextMemory::default(),
         }
     }
 
@@ -107,15 +112,67 @@ impl ContextIndex {
     pub fn set_collection_enabled(&self, collection: &str, enabled: bool) {
         let mut set = self.enabled_collections.write();
         if enabled {
-            set.insert(collection.to_string());
+            let value = collection.to_string();
+            let bytes = value.capacity();
+            if set.insert(value) {
+                self.memory.add(bytes);
+            }
+            self.memory.enabled_capacity(set.capacity());
         } else {
-            set.remove(collection);
+            if let Some(value) = set.take(collection) {
+                self.memory.release(value.capacity());
+            }
         }
     }
 
     /// Whether writes to this collection should land in the index.
     pub fn is_collection_enabled(&self, collection: &str) -> bool {
         self.enabled_collections.read().contains(collection)
+    }
+
+    /// Conservative resident bound, maintained at mutations without scanning hits.
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory.bytes()
+    }
+
+    pub fn estimate_entity_growth(&self, collection: &str, entity: &UnifiedEntity) -> u64 {
+        if !self.is_collection_enabled(collection) {
+            return 0;
+        }
+        memory::estimate_entity(collection, entity)
+    }
+
+    pub fn estimate_fields_growth(&self, collection: &str, fields: &[(String, Value)]) -> u64 {
+        if !self.is_collection_enabled(collection) {
+            return 0;
+        }
+        if fields
+            .iter()
+            .any(|(_, v)| matches!(v, Value::Json(_) | Value::Array(_)))
+        {
+            let payload = fields.iter().fold(0usize, |sum, (name, value)| {
+                sum.saturating_add(name.len())
+                    .saturating_add(crate::storage::memory_size::value_heap_bytes(value))
+            });
+            return memory::complex_bound(
+                collection,
+                payload,
+                fields.iter().map(|(name, _)| name.len()).max().unwrap_or(0),
+            );
+        }
+        let entity = UnifiedEntity::new(
+            EntityId::new(u64::MAX),
+            EntityKind::TableRow {
+                table: std::sync::Arc::from(collection),
+                row_id: u64::MAX - 1,
+            },
+            EntityData::Row(super::entity::RowData {
+                columns: Vec::new(),
+                named: Some(fields.iter().cloned().collect()),
+                schema: None,
+            }),
+        );
+        memory::estimate_entity(collection, &entity)
     }
 
     /// Index an entity — extracts tokens and field:value pairs into posting lists.
@@ -166,7 +223,10 @@ impl ContextIndex {
             prepared
                 .iter()
                 .filter_map(|(entity_id, _, _, _)| {
-                    reverse.remove(entity_id).map(|keys| (*entity_id, keys))
+                    reverse.remove(entity_id).map(|keys| {
+                        self.memory.release(keys_bytes(&keys));
+                        (*entity_id, keys)
+                    })
                 })
                 .collect()
         };
@@ -176,26 +236,23 @@ impl ContextIndex {
             for (entity_id, keys) in &previous_keys {
                 let entity_id = EntityId::new(*entity_id);
                 for key in &keys.token_keys {
-                    if let Some(postings) = index.get_mut(key) {
-                        postings.retain(|posting| posting.entity_id != entity_id);
-                        if postings.is_empty() {
-                            index.remove(key);
-                        }
-                    }
+                    remove_postings(&mut index, key, entity_id, &self.memory);
                 }
             }
 
             for (entity_id, _, entity_tokens, _) in &prepared {
                 let entity_id = EntityId::new(*entity_id);
                 for (token, field) in entity_tokens {
-                    index
-                        .entry(token.clone())
-                        .or_default()
-                        .push(ContextPosting {
+                    insert_posting(
+                        &mut index,
+                        token.clone(),
+                        ContextPosting {
                             entity_id,
                             collection: collection.clone(),
                             field: field.clone(),
-                        });
+                        },
+                        &self.memory,
+                    );
                 }
             }
         }
@@ -205,26 +262,23 @@ impl ContextIndex {
             for (entity_id, keys) in &previous_keys {
                 let entity_id = EntityId::new(*entity_id);
                 for key in &keys.field_value_keys {
-                    if let Some(postings) = index.get_mut(key) {
-                        postings.retain(|posting| posting.entity_id != entity_id);
-                        if postings.is_empty() {
-                            index.remove(key);
-                        }
-                    }
+                    remove_postings(&mut index, key, entity_id, &self.memory);
                 }
             }
 
             for (entity_id, _, _, field_pairs) in &prepared {
                 let entity_id = EntityId::new(*entity_id);
                 for (field, value_token) in field_pairs {
-                    index
-                        .entry((field.clone(), value_token.clone()))
-                        .or_default()
-                        .push(ContextPosting {
+                    insert_posting(
+                        &mut index,
+                        (field.clone(), value_token.clone()),
+                        ContextPosting {
                             entity_id,
                             collection: collection.clone(),
                             field: field.clone(),
-                        });
+                        },
+                        &self.memory,
+                    );
                 }
             }
         }
@@ -232,7 +286,12 @@ impl ContextIndex {
         {
             let mut reverse = self.reverse.write();
             for (entity_id, keys, _, _) in &prepared {
-                reverse.insert(*entity_id, keys.clone());
+                let owned = keys.clone();
+                self.memory.add(keys_bytes(&owned));
+                if let Some(old) = reverse.insert(*entity_id, owned) {
+                    self.memory.release(keys_bytes(&old));
+                }
+                self.memory.reverse_capacity(reverse.capacity());
             }
         }
 
@@ -240,6 +299,7 @@ impl ContextIndex {
             let mut indexed = self.indexed.write();
             for (entity_id, _, _, _) in &prepared {
                 indexed.insert(*entity_id);
+                self.memory.indexed_capacity(indexed.capacity());
             }
         }
     }
@@ -248,7 +308,9 @@ impl ContextIndex {
     pub fn remove_entity(&self, entity_id: EntityId) {
         let keys = {
             let mut reverse = self.reverse.write();
-            reverse.remove(&entity_id.raw())
+            reverse
+                .remove(&entity_id.raw())
+                .inspect(|keys| self.memory.release(keys_bytes(keys)))
         };
 
         let Some(keys) = keys else {
@@ -258,24 +320,14 @@ impl ContextIndex {
         if !keys.token_keys.is_empty() {
             let mut index = self.tokens.write();
             for key in &keys.token_keys {
-                if let Some(postings) = index.get_mut(key) {
-                    postings.retain(|p| p.entity_id != entity_id);
-                    if postings.is_empty() {
-                        index.remove(key);
-                    }
-                }
+                remove_postings(&mut index, key, entity_id, &self.memory);
             }
         }
 
         if !keys.field_value_keys.is_empty() {
             let mut index = self.field_values.write();
             for key in &keys.field_value_keys {
-                if let Some(postings) = index.get_mut(key) {
-                    postings.retain(|p| p.entity_id != entity_id);
-                    if postings.is_empty() {
-                        index.remove(key);
-                    }
-                }
+                remove_postings(&mut index, key, entity_id, &self.memory);
             }
         }
 

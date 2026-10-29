@@ -422,10 +422,35 @@ impl RedDB {
         // Pending deliveries retain their persisted lock deadlines on recovery
         // (ADR 0020). The lifecycle lazily reclaims expired locks on delivery;
         // deleting every pending row here would redeliver still-owned work.
+        // Admit the unchanged recovered source before runtime boot/auditing can
+        // mutate it. A later checkpoint can then use the bounded mutation
+        // journal rather than losing the cold proof and rebuilding every term.
+        // Recovery has already replayed WAL; mismatching sources/payloads stay
+        // unproved and retain the ordinary conservative derivation path.
+        if self.paged_mode && !self.options.read_only {
+            let started = std::time::Instant::now();
+            if let Ok(existing) = self.current_native_artifact_pages() {
+                let recovered = self.recovered_native_artifact_versions(&existing);
+                tracing::debug!(
+                    target: "reddb::checkpoint",
+                    duration_ms = started.elapsed().as_millis(),
+                    sources = recovered.len(),
+                    "recovered native artifact sources admitted before runtime boot"
+                );
+                *self.native_artifact_versions.lock() = recovered;
+            }
+        }
         Ok(self)
     }
 
     pub(crate) fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_metadata_with_native_publication(None)
+    }
+
+    pub(super) fn persist_metadata_with_native_publication(
+        &self,
+        publication: Option<NativeArtifactPublication>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
@@ -443,6 +468,8 @@ impl RedDB {
             return Ok(());
         };
 
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "physical metadata preparation started");
         let _publication = self.store.vault_publication_lock.lock();
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let collection_roots = self.physical_collection_roots();
@@ -463,7 +490,12 @@ impl RedDB {
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
         metadata.save_for_data_path(path)?;
-        self.persist_native_physical_header(&metadata)?;
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            "physical metadata preparation finished"
+        );
+        self.persist_native_physical_header_with_publication(&metadata, publication)?;
         Ok(())
     }
 
@@ -1290,10 +1322,19 @@ impl RedDB {
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_native_physical_header_with_publication(metadata, None)
+    }
+
+    fn persist_native_physical_header_with_publication(
+        &self,
+        metadata: &PhysicalMetadataFile,
+        prepared: Option<NativeArtifactPublication>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
             return Ok(());
         }
 
+        tracing::debug!(target: "reddb::checkpoint", "native header preparation started");
         let _publication = self.store.vault_publication_lock.lock();
         let existing_page = self
             .store
@@ -1340,11 +1381,15 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
-        let vector_artifact_records = self.native_vector_artifact_records();
-        let artifact_summaries = vector_artifact_records
-            .iter()
-            .map(|(summary, _)| summary.clone())
-            .collect::<Vec<_>>();
+        let existing_artifacts = existing_vector_artifact_page
+            .map(|page| self.store.read_native_vector_artifact_store(page))
+            .transpose()?
+            .unwrap_or_default();
+        let mut publication = prepared
+            .unwrap_or_else(|| self.prepare_native_artifact_publication(&existing_artifacts));
+        self.validate_native_artifact_publication(&mut publication, &existing_artifacts);
+        let vector_artifact_records = publication.records;
+        let artifact_summaries = publication.summaries;
         let registry_summary = self.native_registry_summary_from_metadata(
             metadata,
             &artifact_summaries,
@@ -1367,21 +1412,38 @@ impl RedDB {
                 &metadata_state_summary,
                 existing_metadata_state_page,
             )?;
+        tracing::debug!(target: "reddb::checkpoint", "native artifact payload preparation started");
         let vector_artifact_payloads = vector_artifact_records
+            .into_iter()
+            .map(|(summary, bytes)| (summary.collection, summary.artifact_kind, bytes))
+            .collect::<Vec<_>>();
+        tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication started");
+        let source_proofs = publication
+            .versions
             .iter()
-            .map(|(summary, bytes)| {
-                (
-                    summary.collection.clone(),
-                    summary.artifact_kind.clone(),
-                    bytes.clone(),
+            .filter_map(|(collection, version)| {
+                Some(
+                    reddb_file::native_artifact_source::NativeArtifactSourceProof {
+                        collection: collection.clone(),
+                        source_digest: version.source_digest?,
+                        summaries: version.summaries.clone(),
+                        pages: Vec::new(),
+                        fulltext_document_ids_complete: version.fulltext_document_ids_complete,
+                    },
                 )
             })
             .collect::<Vec<_>>();
-        let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) =
-            self.store.write_native_vector_artifact_store(
+        let (vector_artifact_page, vector_artifact_checksum, vector_artifact_pages) =
+            self.store.write_native_vector_artifact_store_with_sources(
                 &vector_artifact_payloads,
+                &publication.retained,
+                &source_proofs,
                 existing_vector_artifact_page,
             )?;
+        // The pager owns these bytes now. Do not retain a second artifact set
+        // across the store flush and its dirty-page staging buffers.
+        drop(vector_artifact_payloads);
+        tracing::debug!(target: "reddb::checkpoint", "native artifact blob publication finished");
         let mut header = Self::native_header_from_metadata(metadata);
         header.manifest_page = manifest_page;
         header.manifest_checksum = manifest_checksum;
@@ -1398,8 +1460,34 @@ impl RedDB {
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
         self.store.update_physical_file_header(header)?;
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "reddb::checkpoint", "native header store publication started");
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;
+        let mut versions = publication.versions;
+        // The publication fence serializes ordinary mutations. Raw manager
+        // access still invalidates reuse if its revisions changed meanwhile.
+        versions.retain(|collection, version| {
+            self.store
+                .get_collection(collection)
+                .is_some_and(|manager| {
+                    version.manager.ptr_eq(&Arc::downgrade(&manager))
+                        && version.segments == manager.checkpoint_revisions()
+                })
+        });
+        for (collection, version) in &mut versions {
+            version.pages = vector_artifact_pages
+                .iter()
+                .filter(|page| page.collection == *collection)
+                .cloned()
+                .collect();
+        }
+        *self.native_artifact_versions.lock() = versions;
+        tracing::debug!(
+            target: "reddb::checkpoint",
+            duration_ms = started.elapsed().as_millis(),
+            "native header store publication finished"
+        );
         Ok(())
     }
 

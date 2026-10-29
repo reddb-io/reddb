@@ -55,7 +55,9 @@ impl RedDBRuntime {
         accounting.report(MemoryPool::SegmentArena, store.segment_memory_bytes());
         accounting.report(
             MemoryPool::IndexMemory,
-            self.index_store_ref().memory_bytes(),
+            self.index_store_ref()
+                .memory_bytes()
+                .saturating_add(store.context_index().memory_bytes()),
         );
         // Paged stores keep a resident group-commit writer and queue; embedded
         // single-file stores append WAL payloads synchronously to the artifact

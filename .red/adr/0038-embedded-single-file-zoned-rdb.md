@@ -58,6 +58,49 @@ every profile. Rationale: bursty maintenance destroys p99 on embedded, billing
 on serverless, and replica lag on the fleet; the TigerBeetle-style paced model
 is strictly more predictable and composes with the memory/CPU budget.
 
+2026-10-25 proposed exception — local paged CLI recovery WAL. Version 1.26.8
+retains a 131,931,435-byte unified WAL after 100 whole-table updates of 1,000
+512-byte rows and 65 seconds idle. An explicit checkpoint drains its logical
+length to the 8-byte header in 770 ms. The existing CLI periodic checkpoint
+requires remote-backup configuration, so a default local server never drains it.
+This is separate from physical tree retirement and MVCC history reclamation.
+
+Until checkpoint publication is incremental, the CLI proposes one owned local
+checkpoint worker for actual paged, writable, standalone stores without a remote
+backend. It observes logical disk WAL length once per second, skips empty WAL,
+and requests the existing atomic checkpoint at 16 MiB pressure or 60 seconds
+of observed dirty age. There is at least 30 seconds between completion of an
+attempt and the next attempt, including failures. Replication, remote archival,
+embedded single-file stores and SDK-only runtimes retain their existing policy.
+
+This **does contradict the bounded per-tick work rule above**: rate-limited full
+checkpoints are not incremental checkpoints. It is an explicit transitional
+proposal, not a claim that the architecture requirement has been met. The
+existing publication fence, WAL sync/truncation order and recovery format are
+unchanged. Failed checkpoints retain their recovery WAL. No external truncation
+or hard disk-space guarantee is introduced. A single large transaction, slower
+storage, long-lived transaction or checkpoint failure can exceed the trigger.
+
+Cost sketch: a 14.675 GB historical Auth bundle (68.6 MB encoded physical payload)
+needed 5.19–6.73 seconds per warm checkpoint and 9.10 seconds cold under a 2 GiB
+cgroup / 1 GiB engine budget, with concurrent query p99 22 ms and peak memory
+1.67 GB. At a 60-second dirty cadence that can occupy roughly 9–15% of one
+checkpoint worker. These are one frozen Auth copy, not a bound for other stores;
+writer latency and the larger Platform copy still require qualification before
+fleet activation. The smaller local reproduction is the before/after regression
+workload. Incremental publication remains required to remove this exception.
+
+2026-10-25 amendment — successful double-write publication restores only the
+largest page-aligned prefix overwritten by that call's frames. Untouched reserved
+pages retain their existing checksums. Raw byte-I/O on a new short file still
+initializes the complete zone. Interrupted-write recovery clears the full zone,
+because the prior frame high-water mark is unknown. Staging sync, home-page sync
+and final clear sync remain in the same order; the disk format does not change.
+Cost sketch: one protected 16 KiB page previously wrote 1,081,360 bytes including
+the 1 MiB clear; restoring its two touched reserved pages writes 65,552 bytes,
+about 16.5 times less I/O with the same three sync barriers. This bounds clearing
+work by the touched prefix, not the complete checkpoint or writer latency.
+
 ### 4. Phases with exit criteria (the honesty mechanism)
 
 Each sidecar family retires only when its phase's exit criteria hold. A phase

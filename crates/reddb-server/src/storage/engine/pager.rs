@@ -104,6 +104,25 @@ pub struct Pager {
 #[doc(hidden)]
 pub struct NativePagerFile(File);
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NativePageIoCounts {
+    pub native_home_writes: usize,
+    pub blank_native_home_writes: usize,
+    pub syncs: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static NATIVE_PAGE_IO_COUNTS: std::cell::Cell<NativePageIoCounts> =
+        const { std::cell::Cell::new(NativePageIoCounts {
+            native_home_writes: 0,
+            blank_native_home_writes: 0,
+            syncs: 0,
+        }) };
+    pub(crate) static FAIL_NATIVE_HOME_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl reddb_file::VfsFile for NativePagerFile {
     fn try_clone(&self) -> std::io::Result<Self> {
         Err(std::io::ErrorKind::Unsupported.into())
@@ -115,7 +134,34 @@ impl reddb_file::VfsFile for NativePagerFile {
         self.0.set_len(len)
     }
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        std::io::Write::write_all(&mut self.0, bytes)
+        #[cfg(test)]
+        if let Ok(bytes) = <&[u8; PAGE_SIZE]>::try_from(bytes) {
+            if matches!(
+                Page::from_bytes(*bytes).page_type(),
+                Ok(PageType::NativeMeta)
+            ) && FAIL_NATIVE_HOME_WRITE.replace(false)
+            {
+                return Err(std::io::Error::other("injected native home write failure"));
+            }
+        }
+        std::io::Write::write_all(&mut self.0, bytes)?;
+        #[cfg(test)]
+        if let Ok(bytes) = <&[u8; PAGE_SIZE]>::try_from(bytes) {
+            let page = Page::from_bytes(*bytes);
+            if matches!(page.page_type(), Ok(PageType::NativeMeta)) {
+                NATIVE_PAGE_IO_COUNTS.with(|counter| {
+                    let mut counts = counter.get();
+                    counts.native_home_writes += 1;
+                    counts.blank_native_home_writes += usize::from(
+                        bytes[super::page::HEADER_SIZE..]
+                            .iter()
+                            .all(|byte| *byte == 0),
+                    );
+                    counter.set(counts);
+                });
+            }
+        }
+        Ok(())
     }
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         std::io::Read::read(&mut self.0, bytes)
@@ -124,7 +170,14 @@ impl reddb_file::VfsFile for NativePagerFile {
         std::io::Seek::seek(&mut self.0, pos)
     }
     fn sync_all(&self) -> std::io::Result<()> {
-        self.0.sync_all()
+        self.0.sync_all()?;
+        #[cfg(test)]
+        NATIVE_PAGE_IO_COUNTS.with(|counter| {
+            let mut counts = counter.get();
+            counts.syncs += 1;
+            counter.set(counts);
+        });
+        Ok(())
     }
 }
 

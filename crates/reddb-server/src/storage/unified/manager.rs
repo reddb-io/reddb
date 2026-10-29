@@ -385,7 +385,10 @@ mod tests {
         use crate::storage::memory_pools::MemoryPool;
         use crate::{RedDBOptions, RedDBRuntime};
 
-        let budget = 128 * 1024;
+        // The catalog, original and merged directories must fit together.
+        // The requested growth below still consumes all remaining headroom
+        // plus half the pinned source, regardless of this fixture's budget.
+        let budget = 512 * 1024;
         let runtime =
             RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
                 .expect("runtime");

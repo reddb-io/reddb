@@ -31,6 +31,10 @@
 //! type Key   = u64;                    // EntityId::raw()
 //! type Value = (String, UnifiedEntity);// (collection, entity)
 //! ```
+//!
+//! `EntityLocationCache` shares these LRU mechanics but stores only collection
+//! names. Resident stores use it and hydrate current segment state on every
+//! lookup; an independently cached payload cannot track MVCC header changes.
 
 #![allow(clippy::len_without_is_empty)] // Retain the native cache API.
 
@@ -70,13 +74,13 @@ fn shard_capacity(total: usize) -> usize {
 /// borrow-checker pain of a hand-rolled doubly-linked list. If we ever
 /// want true O(1), the `lru` crate is a drop-in replacement — but the
 /// hot path in #85 is the *invalidation*, not the read.
-struct Shard {
-    entries: HashMap<u64, (String, UnifiedEntity)>,
+struct Shard<V> {
+    entries: HashMap<u64, V>,
     order: VecDeque<u64>,
     capacity: usize,
 }
 
-impl Shard {
+impl<V: Clone> Shard<V> {
     fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
@@ -93,14 +97,14 @@ impl Shard {
         self.order.push_back(key);
     }
 
-    fn get(&mut self, key: u64) -> Option<(String, UnifiedEntity)> {
+    fn get(&mut self, key: u64) -> Option<V> {
         let value = self.entries.get(&key).cloned()?;
         self.touch(key);
         Some(value)
     }
 
     /// Insert and return the number of evicted entries (0 or 1).
-    fn insert(&mut self, key: u64, value: (String, UnifiedEntity)) -> usize {
+    fn insert(&mut self, key: u64, value: V) -> usize {
         if self.entries.insert(key, value).is_some() {
             self.touch(key);
             return 0;
@@ -128,7 +132,7 @@ impl Shard {
 
     fn retain<F>(&mut self, mut keep: F)
     where
-        F: FnMut(u64, &(String, UnifiedEntity)) -> bool,
+        F: FnMut(u64, &V) -> bool,
     {
         self.entries.retain(|k, v| keep(*k, v));
         self.order.retain(|k| self.entries.contains_key(k));
@@ -139,15 +143,22 @@ impl Shard {
     }
 }
 
-/// Sharded, bounded LRU cache for `UnifiedStore::get_any` lookups.
-pub struct EntityCache {
-    shards: [RwLock<Shard>; N_SHARDS],
+/// Payload cache retained for callers that explicitly own invalidation.
+pub type EntityCache = LookupCache<(String, UnifiedEntity)>;
+
+/// Resident stores cache only locations. Payload and visibility always come
+/// from the current manager, including after a raced stale-location insertion.
+pub type EntityLocationCache = LookupCache<String>;
+
+/// Shared sharded LRU mechanics; aliases define the supported value shapes.
+pub struct LookupCache<V> {
+    shards: [RwLock<Shard<V>>; N_SHARDS],
     hits: AtomicU64,
     misses: AtomicU64,
     evictions: AtomicU64,
 }
 
-impl EntityCache {
+impl<V: Clone> LookupCache<V> {
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
@@ -166,7 +177,7 @@ impl EntityCache {
     }
 
     #[inline]
-    fn shard_for(&self, key: u64) -> &RwLock<Shard> {
+    fn shard_for(&self, key: u64) -> &RwLock<Shard<V>> {
         &self.shards[(key & SHARD_MASK) as usize]
     }
 
@@ -175,7 +186,7 @@ impl EntityCache {
     /// Acquires the shard write lock on a hit (LRU touch needs it). If the
     /// touch cost ever shows up in profiles we can split into a fast read-only
     /// probe + deferred touch, but at shard size ≈ 625 it's not the bottleneck.
-    pub fn get(&self, key: u64) -> Option<(String, UnifiedEntity)> {
+    pub fn get(&self, key: u64) -> Option<V> {
         let mut shard = self.shard_for(key).write();
         match shard.get(key) {
             Some(v) => {
@@ -190,7 +201,7 @@ impl EntityCache {
     }
 
     /// Insert. Counts evictions for observability.
-    pub fn insert(&self, key: u64, value: (String, UnifiedEntity)) {
+    pub fn insert(&self, key: u64, value: V) {
         let mut shard = self.shard_for(key).write();
         let evicted = shard.insert(key, value);
         if evicted > 0 {
@@ -248,11 +259,11 @@ impl EntityCache {
         }
     }
 
-    /// Drop every entry whose `(collection, entity)` value fails `keep`.
+    /// Drop every entry whose value fails `keep`.
     /// Used by collection-drop paths.
     pub fn retain<F>(&self, mut keep: F)
     where
-        F: FnMut(u64, &(String, UnifiedEntity)) -> bool,
+        F: FnMut(u64, &V) -> bool,
     {
         for shard in &self.shards {
             shard.write().retain(&mut keep);
@@ -287,7 +298,7 @@ impl EntityCache {
     }
 }
 
-impl Default for EntityCache {
+impl<V: Clone> Default for LookupCache<V> {
     fn default() -> Self {
         Self::new()
     }

@@ -37,6 +37,15 @@ HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
 empty beyond-end pages describe the same physical scan, including historical
 versions; this does not introduce logical MVCC filtering or a transaction snapshot.
 
+Canonical HTTP and RedWire query envelopes encode records one at a time using
+the shared record renderer and envelope metadata. They do not retain a JSON
+value tree for the complete record set alongside the executor result. The
+executor result and encoded response buffer remain resident; this does not bound
+every executor intermediate. RedWire stops encoding at its existing frame limit,
+including the header. HTTP preserves `max_result_bytes` and rejects an oversized
+document instead of returning a truncated success. ASK retains its grounding
+envelope renderer.
+
 ## Checkpoint reuse
 
 Double-write page batches synchronize each frame's staging image before its
@@ -62,6 +71,11 @@ Owned row reads restore missing positional column names from the collection's
 shared schema before mutation or index backfill. Explicit row schemas and named
 fields remain authoritative. This changes neither the stored record format nor
 the raw segment revisions used by checkpoint reuse.
+
+Borrowed aggregate scans resolve filters, grouping keys and aggregate arguments
+using the collection schema when native positional rows omit their column names.
+Expression fallback materialization uses that same schema, so checkpoint and
+reopen preserve COUNT/SUM and grouped-query results without copying all rows.
 
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Active and aborted transaction visibility, pending vault
@@ -95,6 +109,36 @@ fingerprints additionally retain their existing statistics seed. The caches do
 not change persistent formats or release the checkpoint writer fence. A first
 metadata fingerprint or a changed collection still requires work proportional
 to that collection; unchanged history is not serialized on every checkpoint.
+For a row collection with only a full-text artifact, bounded mutation journals
+can update the previously published frame without retokenizing unchanged rows.
+Admission requires matching manager identity, complete journals, exact published
+references and a volatile proof that every counted nonempty document had postings.
+Nonempty documents without tokens invalidate that proof; subsequent changes use
+full derivation. JSON/blob additions, other artifacts and oversized inputs also
+fall back. Frames remain in the existing format, with postings ordered by entity
+ID, and their revision proofs advance only after durable publication.
+Cold reuse additionally requires an optional `RASR` reference after the native
+artifact descriptors. It names an in-file blob of versioned `RASP` source
+proofs, owned by `reddb-file`. Each proof binds a BLAKE3 digest of the raw
+collection source to its exact artifact descriptors and summaries. Cold
+admission checks that digest, the descriptor set and every payload checksum
+before seeding volatile manager/revision proofs. Writable paged opens perform
+this admission after recovery and before runtime boot observations or audited
+requests can mutate the source. Later changes still require the mutation journal;
+opening plus first publication must be measured together because cold admission
+continues to scan source and artifact bytes. Replay, omitted or normalized
+transaction rows, replaced source content, corrupt payloads and unsupported
+proof versions retain full derivation. Legacy files lack the reference and
+derive their first proof; older writers drop it and cannot reclaim an unknown
+proof blob. Writer downgrades require a separately qualified recovery procedure.
+The proof blob uses the existing native blob replacement/quarantine mechanism.
+It introduces no sidecar and does not change the WAL, double-write or final
+header publication order. Source hashing is linear in changed collection bytes;
+cold validation is linear in source plus artifact bytes. Unchanged warm
+publications retain their digest. This does not make incremental full-text
+publication proportional to the journal delta. Runtime boot updates
+`red_config` with current process/system observations, so its source actually
+changes even when customer collections remain unchanged.
 Fingerprint scans sort compact entity ID/source references and borrow one row at
 a time. They preserve the existing hash order and values without materializing
 a second collection of payloads; source segments remain pinned for the scan.
@@ -159,6 +203,24 @@ unpublished allocations remain conservative recovery garbage; this mechanism
 does not claim a general orphan-page vacuum of pre-upgrade files.
 
 Native index blob replacement terminates the chain at the new payload boundary.
+Large full-text (`RDFT`) blobs may use a lossless Zstd level-1 physical encoding
+owned by `reddb-file`. Their first page uses `RDBZ` with decoded length and CRC32;
+continuations use `RDBL`. Artifact descriptors retain logical length/checksum,
+but page counts describe actual physical pages, independently of decoded length.
+Inputs below 64 KiB, beyond the configured decode workspace or saving less than
+12.5% remain raw. Readers enforce the decoded budget before allocation, a bounded
+decoder window, one complete frame, exact decoded length and CRC32. Runtime
+workspace limits derive from one eighth of the resolved memory budget; direct
+store callers default to 64 MiB. Opening compressed artifacts with a smaller
+workspace can reject their reads; lowering memory requires qualification too.
+Legacy raw blobs remain readable. Older engines do not understand `RDBZ`;
+rollback must use a compatible engine or restore a verified pre-upgrade copy,
+never assume that an old writer can open the upgraded file safely. Compression
+changes neither source proof semantics nor publication/reclamation barriers.
+Growing blobs allocate and fill the new tail with one-page lookahead before
+changing the published prefix. This avoids evicting a complete blank generation
+under cache pressure and preserves that prefix if tail allocation/writeback
+fails. Protected page-write barriers and final native publication are unchanged.
 Shrunk tails, empty blobs and removed artifacts remain outside the allocator
 until the native summary and physical header have been synced. They then enter
 the existing `RDF1` quarantine and become reusable after a later durable catalog
@@ -183,6 +245,16 @@ to successful appends in the existing WAL. A reference includes its truncation
 generation, byte offset, length and checksum; projection compares the exact WAL
 bytes with the current canonical row before modifying the tree. Missing images
 can use those proofs, while missing or stale proofs retain full validation.
+
+Cross-segment reads retain the growing topology gate through their sealed probes.
+Relocating a sealed row publishes its replacement under the exclusive topology
+gate and pins sealed membership against consolidation. The writable destination
+receives the preserved sequence identity and metadata before the source is removed.
+This prevents a visible preimage from disappearing between scan phases; rejected
+destination admission leaves the source intact. The transient work is one row,
+without materializing a collection. Bounded cursor consumers still execute after
+their source and topology guards have been released. Persistent formats and WAL
+publication order are unchanged.
 
 ## Fault model & integrity tooling
 

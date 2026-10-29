@@ -2,6 +2,24 @@
 
 Status: Accepted (2026-05-04)
 
+2026-10-27 amendment: resident stores cache entity **locations**, not payloads.
+The shared `EntityLocationCache` maps raw IDs to collection names using the
+same 16-shard bounded LRU, invalidation probes and counters. Every hit hydrates
+the entity under the current catalog and segment read locks; stale locations
+fall back to the collection scan. A late cache refill after DELETE, rollback,
+physical reclamation or collection replacement can therefore only leave a
+stale hint, never a stale payload or MVCC header. No store-wide publication
+lock is added to reads. The explicit payload-cache alias remains available to
+callers that own its invalidation contract.
+
+This corrects a reproduced case where `get_any` cached a live row, a confirmed
+MVCC DELETE changed its stored `xmax`, and subsequent cache hits still returned
+`xmax = 0`. It also removes retained payload copies: an entry-count bound is
+not a payload-byte bound. Portable resident-store tests cover current headers,
+rollback, payload replacement and stale hints after physical removal. The
+independent allocation observer verifies that retained cache memory does not
+scale with vector payload size. WAL and persisted formats are unchanged.
+
 Tracking issue: #114 (follow-up of #85, see
 [`docs/perf/delete-sequential-2026-05-06.md`](../perf/delete-sequential-2026-05-06.md)).
 

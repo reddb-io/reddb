@@ -124,6 +124,12 @@ impl crate::RedDBRuntime {
         (entity_bytes as u64)
             .saturating_add(key_growth as u64)
             .saturating_add(index_growth)
+            .saturating_add(
+                self.db()
+                    .store()
+                    .context_index()
+                    .estimate_entity_growth(&applied.collection, &applied.entity),
+            )
     }
 
     pub(crate) fn admit_non_evictable_growth(
@@ -140,25 +146,27 @@ impl crate::RedDBRuntime {
         let used = accounting.total_used_bytes();
         if pool == MemoryPool::SegmentArena {
             let store = self.db().store();
-            if store.reclaimable_segment_bytes() > 0 {
-                let before = used;
-                let mut reclaimed = 0;
-                for _ in 0..MAX_PRESSURE_TICKS {
-                    let pressure_advanced = store.pressure_consolidation_tick();
-                    let maintenance_advanced = store.run_maintenance().is_ok();
-                    if !pressure_advanced && !maintenance_advanced {
-                        break;
-                    }
-                    let reservation = self.try_reserve_memory_growth(growth_bytes);
-                    let after = accounting.total_used_bytes();
-                    reclaimed = before.saturating_sub(after);
-                    if let Some(reservation) = reservation {
-                        accounting.record_pressure_reclamation(reclaimed);
-                        return Ok(reservation);
-                    }
+            let mut history = super::mvcc_maintenance::MvccMaintenance::default();
+            let mut reclaimed = 0;
+            for _ in 0..MAX_PRESSURE_TICKS {
+                // Logical deletes retain payloads until the snapshot/retention
+                // horizon allows physical removal. Use the ordinary bounded,
+                // WAL-backed collector with its standalone/profile guards.
+                // It try-locks publication instead of waiting under admission.
+                let history_advanced = self.reclaim_history_tick(&mut history);
+                let pressure_advanced = store.pressure_consolidation_tick();
+                let maintenance_advanced = pressure_advanced && store.run_maintenance().is_ok();
+                let reservation = self.try_reserve_memory_growth(growth_bytes);
+                reclaimed = used.saturating_sub(accounting.total_used_bytes());
+                if let Some(reservation) = reservation {
+                    accounting.record_pressure_reclamation(reclaimed);
+                    return Ok(reservation);
                 }
-                accounting.record_pressure_reclamation(reclaimed);
+                if !history_advanced && !pressure_advanced && !maintenance_advanced {
+                    break;
+                }
             }
+            accounting.record_pressure_reclamation(reclaimed);
         }
 
         self.refresh_memory_accounting();

@@ -443,9 +443,8 @@ impl RedDBRuntime {
         }
         for (collection, id, xid, _previous_xmax) in tombstones {
             if let Some(manager) = store.get_collection(&collection) {
-                if let Some(mut entity) = manager.get(id) {
-                    entity.set_xmax(xid);
-                    let _ = manager.update(entity);
+                if let Some(entity) = manager.get(id) {
+                    let _ = manager.compare_exchange_xmax(id, entity.xmax, xid);
                 }
             }
         }
@@ -576,12 +575,7 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
-            if let Some(mut entity) = manager.get(id) {
-                if entity.xmax == xid {
-                    entity.set_xmax(previous_xmax);
-                    let _ = manager.update(entity);
-                }
-            }
+            let _ = manager.compare_exchange_xmax(id, xid, previous_xmax);
         }
     }
 
@@ -703,12 +697,11 @@ impl RedDBRuntime {
                 return true;
             }
             if let Some(manager) = store.get_collection(collection) {
-                if let Some(mut entity) = manager.get(*id) {
-                    if entity.xmax == *xid {
-                        entity.set_xmax(*previous_xmax);
-                        let _ = manager.update(entity);
-                        revived += 1;
-                    }
+                if matches!(
+                    manager.compare_exchange_xmax(*id, *xid, *previous_xmax),
+                    Ok(Some(_))
+                ) {
+                    revived += 1;
                 }
             }
             false

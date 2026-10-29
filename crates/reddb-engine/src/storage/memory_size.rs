@@ -5,6 +5,40 @@
 use super::entity::{EntityData, UnifiedEntity};
 use reddb_types::Value;
 
+/// Hash tables reserve control bytes and empty buckets in addition to live slots.
+/// The next bucket power covers the standard library's 7/8 load factor (and its
+/// smaller initial tables). Capacity is observed while the owner is locked.
+pub(crate) fn hash_table_bytes<K, V>(capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    capacity
+        .saturating_add(1)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+        .saturating_mul(std::mem::size_of::<(K, V)>().saturating_add(1))
+        .saturating_add(32)
+}
+
+fn shared_text_bytes(length: usize) -> usize {
+    let word = std::mem::size_of::<usize>();
+    length.div_ceil(word).saturating_add(2).saturating_mul(word)
+}
+
+/// A root may remain allocated after the last removal. Other B-tree nodes are
+/// at least half full; three slots per entry cover their unused slots, links
+/// and headers. The root allowance covers the small, partly occupied root.
+pub(crate) fn btree_map_bytes<K, V>(entries: usize, root_allocated: bool) -> usize {
+    if !root_allocated {
+        return 0;
+    }
+    let slot = std::mem::size_of::<(K, V)>();
+    entries
+        .saturating_mul(slot.saturating_mul(3).saturating_add(64))
+        .saturating_add(slot.saturating_mul(12))
+        .saturating_add(256)
+}
+
 /// Amortized hash bucket growth plus the initial four-ID version bucket.
 /// Fingerprints retain no key payload; the complete key stays in the entity.
 pub fn key_lookup_growth_bytes(value: Option<&Value>) -> usize {
@@ -20,10 +54,12 @@ pub fn key_lookup_growth_bytes(value: Option<&Value>) -> usize {
 pub fn canonical_heap_bytes(key: &reddb_types::CanonicalKey) -> usize {
     use reddb_types::CanonicalKey;
     match key {
-        CanonicalKey::Text(_, value) => value.len(),
-        CanonicalKey::Bytes(_, value) => value.len(),
-        CanonicalKey::PairTextU64(_, value, _) => value.len(),
-        CanonicalKey::PairTextText(_, first, second) => first.len().saturating_add(second.len()),
+        CanonicalKey::Text(_, value) => shared_text_bytes(value.len()),
+        CanonicalKey::Bytes(_, value) => value.capacity(),
+        CanonicalKey::PairTextU64(_, value, _) => value.capacity(),
+        CanonicalKey::PairTextText(_, first, second) => {
+            first.capacity().saturating_add(second.capacity())
+        }
         _ => 0,
     }
 }
@@ -73,7 +109,11 @@ fn array_heap_bytes(value: &Value) -> usize {
                     // limits. An unrepresentable estimate cannot be admitted.
                     return usize::MAX;
                 }
-                bytes = bytes.saturating_add(std::mem::size_of_val(values.as_slice()));
+                bytes = bytes.saturating_add(
+                    values
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Value>()),
+                );
                 stack[depth] = values.iter();
                 depth += 1;
             } else {
@@ -92,9 +132,9 @@ fn array_heap_bytes(value: &Value) -> usize {
 
 fn scalar_heap_bytes(value: &Value) -> usize {
     match value {
-        Value::Text(value) => value.len(),
-        Value::Blob(value) | Value::Json(value) | Value::Secret(value) => value.len(),
-        Value::Vector(value) => std::mem::size_of_val(value.as_slice()),
+        Value::Text(value) => shared_text_bytes(value.len()),
+        Value::Blob(value) | Value::Json(value) | Value::Secret(value) => value.capacity(),
+        Value::Vector(value) => value.capacity().saturating_mul(std::mem::size_of::<f32>()),
         Value::NodeRef(value)
         | Value::EdgeRef(value)
         | Value::VectorRef(value, _)
@@ -105,31 +145,42 @@ fn scalar_heap_bytes(value: &Value) -> usize {
         | Value::Url(value)
         | Value::Password(value)
         | Value::DecimalText(value)
-        | Value::AssetCode(value) => value.len(),
-        Value::KeyRef(collection, key) => collection.len().saturating_add(key.len()),
-        Value::Money { asset_code, .. } => asset_code.len(),
+        | Value::AssetCode(value) => value.capacity(),
+        Value::KeyRef(collection, key) => collection.capacity().saturating_add(key.capacity()),
+        Value::Money { asset_code, .. } => asset_code.capacity(),
         _ => 0,
     }
 }
 
 fn named_fields_bytes(fields: &std::collections::HashMap<String, Value>) -> usize {
-    fields.iter().fold(0usize, |bytes, (name, value)| {
-        bytes
-            .saturating_add(64)
-            .saturating_add(name.len())
-            .saturating_add(value_heap_bytes(value))
-    })
+    fields.iter().fold(
+        hash_table_bytes::<String, Value>(fields.capacity()),
+        |bytes, (name, value)| {
+            bytes
+                .saturating_add(name.capacity())
+                .saturating_add(value_heap_bytes(value))
+        },
+    )
 }
 
 pub fn entity_bytes(entity: &UnifiedEntity) -> usize {
     let data = match &entity.data {
         EntityData::Row(row) => {
-            let columns = row.columns.iter().fold(0usize, |bytes, value| {
-                bytes
-                    .saturating_add(64)
-                    .saturating_add(value_heap_bytes(value))
+            let slots = row
+                .columns
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Value>());
+            let columns = row.columns.iter().fold(slots, |bytes, value| {
+                bytes.saturating_add(value_heap_bytes(value))
             });
-            columns.saturating_add(row.named.as_ref().map_or(0, named_fields_bytes))
+            columns
+                .saturating_add(row.named.as_ref().map_or(0, named_fields_bytes))
+                .saturating_add(match &entity.kind {
+                    super::entity::EntityKind::TableRow { table, .. } => {
+                        shared_text_bytes(table.len())
+                    }
+                    _ => 0,
+                })
         }
         EntityData::Node(node) => {
             named_fields_bytes(&node.properties).saturating_add(match &entity.kind {
@@ -180,7 +231,7 @@ mod tests {
         let value = Value::Array(vec![shared.clone(), Value::Array(vec![shared])]);
         assert_eq!(
             value_heap_bytes(&value),
-            3 * std::mem::size_of::<Value>() + 2 * "shared payload".len()
+            3 * std::mem::size_of::<Value>() + 2 * shared_text_bytes("shared payload".len())
         );
         let another_owner = value.clone();
         assert_eq!(value_heap_bytes(&value), value_heap_bytes(&another_owner));

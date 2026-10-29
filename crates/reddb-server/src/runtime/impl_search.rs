@@ -1171,6 +1171,13 @@ impl RedDBRuntime {
                         if score >= min_score {
                             scan_found = true;
                             if do_reindex {
+                                let _reservation = self.admit_non_evictable_growth(
+                                    crate::storage::memory_pools::MemoryPool::IndexMemory,
+                                    "context reindex",
+                                    store
+                                        .context_index()
+                                        .estimate_entity_growth(collection_name, &entity),
+                                )?;
                                 store.context_index().index_entity(collection_name, &entity);
                                 entities_reindexed += 1;
                             }

@@ -38,11 +38,6 @@ impl RedDBServer {
                     }
                     return response;
                 }
-                let value = crate::presentation::query_result_json::runtime_query_json(
-                    &result,
-                    &entity_types,
-                    &capabilities,
-                );
                 if result.statement_type == "select" {
                     if let Some(limit) = self
                         .runtime
@@ -50,9 +45,12 @@ impl RedDBServer {
                         .max_result_bytes
                         .filter(|value| *value > 0)
                     {
-                        return match value
-                            .to_string_compact_limited(usize::try_from(limit).unwrap_or(usize::MAX))
-                        {
+                        return match crate::presentation::query_result_json::runtime_query_json_string_limited(
+                            &result,
+                            &entity_types,
+                            &capabilities,
+                            usize::try_from(limit).unwrap_or(usize::MAX),
+                        ) {
                             Some(body) => HttpResponse {
                                 status: 200,
                                 body: body.into_bytes(),
@@ -63,7 +61,17 @@ impl RedDBServer {
                         };
                     }
                 }
-                json_response(200, value)
+                HttpResponse {
+                    status: 200,
+                    body: crate::presentation::query_result_json::runtime_query_json_string(
+                        &result,
+                        &entity_types,
+                        &capabilities,
+                    )
+                    .into_bytes(),
+                    content_type: "application/json",
+                    extra_headers: Vec::new(),
+                }
             }
             Err(err) => {
                 if stream_ask {

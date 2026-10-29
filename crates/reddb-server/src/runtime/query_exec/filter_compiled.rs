@@ -345,6 +345,13 @@ pub(crate) fn resolve_kind<'a>(
                 }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
                 if row.named.is_none() {
+                    // A collection schema is a fallback for disk-decoded rows.
+                    // An explicit row schema can use a different column order.
+                    if row.schema.as_ref().is_some_and(|schema| {
+                        schema.get(*idx as usize).map(String::as_str) != Some(name.as_str())
+                    }) {
+                        return row.get_field(name).map(Cow::Borrowed);
+                    }
                     return row.columns.get(*idx as usize).map(Cow::Borrowed);
                 }
                 // Fallback (single-insert entities): named HashMap, also O(1).
