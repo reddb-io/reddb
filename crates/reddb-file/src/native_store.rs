@@ -90,6 +90,41 @@ const PAGED_RETIRED_TREES_MAGIC: &[u8; 4] = b"RDR1";
 
 const PAGED_DEFERRED_PAGES_MAGIC: &[u8; 4] = b"RDF1";
 
+const PAGED_OWNERSHIP_EPOCH_MAGIC: &[u8; 4] = b"RDOE";
+
+/// Append the ownership epoch committed by this catalog image.
+/// Callers must fence the mandatory file version in both superblocks before
+/// publishing a catalog that relies on this extension.
+pub fn encode_native_paged_ownership_epoch(out: &mut Vec<u8>, epoch: u64) -> RdbFileResult<()> {
+    if epoch == 0 {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid ownership epoch".into(),
+        ));
+    }
+    out.extend_from_slice(PAGED_OWNERSHIP_EPOCH_MAGIC);
+    out.extend_from_slice(&epoch.to_le_bytes());
+    Ok(())
+}
+
+/// Decode the committed epoch. Legacy catalogs may omit the extension;
+/// callers using the new mandatory format must reject a missing value.
+pub fn decode_native_paged_ownership_epoch(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<Option<u64>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_OWNERSHIP_EPOCH_MAGIC.as_slice()) {
+        return Ok(None);
+    }
+    *pos += 4;
+    let epoch = read_native_u64(data, pos, "truncated ownership epoch")?;
+    if epoch == 0 {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid ownership epoch".into(),
+        ));
+    }
+    Ok(Some(epoch))
+}
+
 /// Optional trailing ledger of detached pages awaiting durable reclamation.
 /// Older readers stop after retired tree roots and ignore this extension.
 pub fn encode_native_paged_deferred_pages(out: &mut Vec<u8>, pages: &[u32]) -> RdbFileResult<()> {
@@ -176,6 +211,30 @@ pub fn decode_native_paged_retired_trees(data: &[u8], pos: &mut usize) -> RdbFil
 #[cfg(test)]
 mod paged_retirement_tests {
     use super::*;
+
+    #[test]
+    fn ownership_epoch_is_optional_for_legacy_and_strict_when_present() {
+        let mut legacy_pos = 0;
+        assert_eq!(
+            decode_native_paged_ownership_epoch(&[0; 16], &mut legacy_pos).unwrap(),
+            None
+        );
+        assert_eq!(legacy_pos, 0);
+        let mut bytes = Vec::new();
+        encode_native_paged_ownership_epoch(&mut bytes, 42).unwrap();
+        let mut pos = 0;
+        assert_eq!(
+            decode_native_paged_ownership_epoch(&bytes, &mut pos).unwrap(),
+            Some(42)
+        );
+        assert_eq!(pos, bytes.len());
+        for length in 4..bytes.len() {
+            assert!(decode_native_paged_ownership_epoch(&bytes[..length], &mut 0).is_err());
+        }
+        assert!(encode_native_paged_ownership_epoch(&mut Vec::new(), 0).is_err());
+        bytes[4..].fill(0);
+        assert!(decode_native_paged_ownership_epoch(&bytes, &mut 0).is_err());
+    }
 
     #[test]
     fn retirement_extension_accepts_legacy_padding_and_roundtrips() {
