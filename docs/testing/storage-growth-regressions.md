@@ -107,6 +107,14 @@ open checks the durable bootstrap marker before runtime initialization, then
 repeated runtime opens check the selected preset and declared column schema.
 Compacting user data must never cause an existing vault to bootstrap again.
 
+Document statistics, inferred columns and document counts borrow stored fields.
+Document statistics decode one body at a time and reuse the planner's bounded
+column samples, scanning each column instead of retaining every document's
+payload. The allocation regression adds 8 MiB of binary fields while requiring
+the same observation results and no corresponding allocation growth.
+`make test-memory-regressions` runs these gates in the storage CI even when an
+earlier storage or power-cut step fails.
+
 Run the focused gates with:
 
 ```sh

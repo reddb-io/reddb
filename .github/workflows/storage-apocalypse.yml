@@ -7,6 +7,9 @@ on:
       - 'crates/reddb-file/**'
       - 'crates/reddb-server/src/storage/**'
       - 'crates/reddb-server/src/runtime/transaction_state.rs'
+      - 'crates/reddb-server/src/runtime/mutation_memory_tests.rs'
+      - 'crates/reddb-server/src/runtime/impl_tenant_registry.rs'
+      - 'crates/reddb-server/src/runtime/red_schema/**'
       - 'crates/reddb-server/tests/**'
       - 'crates/unreliable-libc/**'
       - 'Cargo.toml'
@@ -54,6 +57,12 @@ jobs:
           mkdir -p target/storage-recovery
           set -o pipefail
           make test-dst-storage 2>&1 | tee target/storage-recovery/power-loss.log
+      - name: Recovery and catalog memory regressions
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target/storage-recovery
+          set -o pipefail
+          make test-memory-regressions 2>&1 | tee target/storage-recovery/memory.log
       - name: Preserve reproduction and space measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

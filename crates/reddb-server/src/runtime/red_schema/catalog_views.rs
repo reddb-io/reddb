@@ -1019,7 +1019,8 @@ fn append_document_stats(
     store: &UnifiedStore,
     collection: &str,
 ) {
-    let mut entities = Vec::new();
+    let mut row_count = 0usize;
+    let mut field_names = std::collections::BTreeSet::new();
     let mut key_counts = BTreeMap::<String, u64>::new();
     let mut type_counts = BTreeMap::<String, BTreeMap<&'static str, u64>>::new();
 
@@ -1032,18 +1033,15 @@ fn append_document_stats(
             return true;
         };
 
-        let mut fields: Vec<(String, Value)> = row
-            .iter_fields()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect();
+        row_count += 1;
+        for (name, _) in row.iter_fields() {
+            if !field_names.contains(name) {
+                field_names.insert(name.to_string());
+            }
+        }
         if row.named.is_none() && row.schema.is_none() {
             if let Some(columns) = &column_schema {
-                fields.extend(
-                    columns
-                        .iter()
-                        .zip(&row.columns)
-                        .map(|(name, value)| (name.clone(), value.clone())),
-                );
+                field_names.extend(columns.iter().take(row.columns.len()).cloned());
             }
         }
         let body_fields = stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "body")
@@ -1058,27 +1056,52 @@ fn append_document_stats(
                 .entry(document_value_type_name(value))
                 .or_default() += 1;
         }
-        for (name, value) in body_fields {
-            if fields.iter().all(|(existing, _)| existing != &name) {
-                fields.push((name, value));
-            }
-        }
-
-        entities.push((entity.id, fields));
+        field_names.extend(body_fields.into_iter().map(|(name, _)| name));
         true
     });
-
-    let analyzed =
-        crate::storage::query::planner::stats_catalog::analyze_entity_fields(collection, &entities);
 
     rows.push(stats_row(
         schema,
         collection,
         Value::Null,
         "row_count",
-        Value::UnsignedInteger(analyzed.row_count),
+        Value::UnsignedInteger(row_count as u64),
     ));
-    for column in &analyzed.columns {
+    for name in field_names {
+        // Revisit borrowed rows for one column at a time. The analyzer bounds
+        // its samples; decoded document fields live for just one row, never
+        // alongside a materialized copy of every document in the collection.
+        let column = crate::storage::query::planner::stats_catalog::analyze_column_scan(
+            &name,
+            row_count,
+            |visit| {
+                manager.for_each_entity(|entity| {
+                    let EntityData::Row(row) = &entity.data else {
+                        return true;
+                    };
+                    if let Some(value) =
+                        stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), &name)
+                    {
+                        visit(Some(value));
+                    } else {
+                        let body_fields = stats_row_field(
+                            row,
+                            column_schema.as_deref().map(Vec::as_slice),
+                            "body",
+                        )
+                        .and_then(document_body_top_level_fields)
+                        .unwrap_or_default();
+                        visit(
+                            body_fields
+                                .iter()
+                                .find(|(field, _)| field == &name)
+                                .map(|(_, value)| value),
+                        );
+                    }
+                    true
+                });
+            },
+        );
         rows.push(stats_row(
             schema,
             collection,
@@ -1103,10 +1126,10 @@ fn append_document_stats(
     }
 
     for (name, count) in key_counts {
-        let coverage = if analyzed.row_count == 0 {
+        let coverage = if row_count == 0 {
             0.0
         } else {
-            count as f64 / analyzed.row_count as f64
+            count as f64 / row_count as f64
         };
         rows.push(stats_row(
             schema,
@@ -1703,19 +1726,18 @@ fn infer_document_columns(
     let mut fields: BTreeMap<String, InferredColumn> = BTreeMap::new();
     let mut document_count = 0usize;
 
-    for (_, entity) in runtime
-        .db()
-        .store()
-        .query_all(|entity| entity.kind.collection() == collection)
-    {
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = runtime.db().store().get_collection(collection) else {
+        return Vec::new();
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         if !row
             .iter_fields()
             .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
         {
-            continue;
+            return true;
         }
 
         document_count += 1;
@@ -1726,18 +1748,8 @@ fn infer_document_columns(
         // container and no longer promote top-level columns onto the row, so
         // schema inference must offset-read the body's top-level fields —
         // mirroring the GET presentation derive in `named_fields_json`.
-        let mut recorded: Vec<(String, Value)> = row
-            .iter_fields()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect();
-        if let Some(Value::Json(bytes)) = row.get_field("body") {
-            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
-                recorded.extend(body_fields);
-            }
-        }
-
-        for (name, value) in recorded {
-            let entry = fields.entry(name).or_insert(InferredColumn {
+        let mut record = |name: &str, value: &Value| {
+            let entry = fields.entry(name.to_string()).or_insert(InferredColumn {
                 data_type: None,
                 seen: 0,
                 saw_null: false,
@@ -1745,7 +1757,7 @@ fn infer_document_columns(
             entry.seen += 1;
             if value.is_null() {
                 entry.saw_null = true;
-                continue;
+                return;
             }
             let value_type = value.data_type();
             entry.data_type = match entry.data_type {
@@ -1753,8 +1765,19 @@ fn infer_document_columns(
                 Some(existing) if existing == value_type => Some(existing),
                 Some(_) => Some(DataType::Unknown),
             };
+        };
+        for (name, value) in row.iter_fields() {
+            record(name, value);
         }
-    }
+        if let Some(Value::Json(bytes)) = row.get_field("body") {
+            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
+                for (name, value) in &body_fields {
+                    record(name, value);
+                }
+            }
+        }
+        true
+    });
 
     if document_count == 0 {
         return Vec::new();
@@ -1829,5 +1852,73 @@ mod scoped_stats_memory_tests {
         );
         assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
             "profiling one collection must not allocate copies of every other collection: {baseline:?} -> {measured:?}");
+    }
+
+    #[test]
+    fn document_observation_does_not_clone_payloads_to_infer_types() {
+        let observe = |payload_bytes| {
+            let runtime =
+                RedDBRuntime::with_options(crate::RedDBOptions::in_memory()).expect("runtime");
+            runtime
+                .execute_query("CREATE DOCUMENT target")
+                .expect("document");
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection("target")
+                .expect("manager");
+            for id in 1..=128 {
+                let mut entity = crate::storage::UnifiedEntity::table_row(
+                    crate::storage::EntityId::new(id),
+                    "target",
+                    id,
+                    vec![],
+                );
+                entity.data =
+                    EntityData::Row(crate::storage::unified::entity::RowData::with_names(
+                        vec![
+                            Value::Json(br#"{"retained":7}"#.to_vec()),
+                            Value::Blob(vec![7; payload_bytes]),
+                        ],
+                        vec!["body".into(), "attachment".into()],
+                    ));
+                manager.insert(entity).expect("document row");
+            }
+            let visible = HashSet::from(["target".to_string()]);
+            measure_allocations(|| {
+                let mut stats = Vec::new();
+                let schema = Arc::new(
+                    STATS_COLUMNS
+                        .iter()
+                        .map(|name| Arc::<str>::from(*name))
+                        .collect(),
+                );
+                append_document_stats(&mut stats, &schema, runtime.db().store().as_ref(), "target");
+                let documents = crate::runtime::red_schema::model_views::documents_snapshot(
+                    &runtime,
+                    None,
+                    Some(&visible),
+                );
+                assert_eq!(documents.len(), 1);
+                assert_eq!(
+                    documents[0].get("document_count"),
+                    Some(&Value::UnsignedInteger(128))
+                );
+                assert_eq!(
+                    documents[0].get("inferred_field_count"),
+                    Some(&Value::UnsignedInteger(2))
+                );
+                (columns_snapshot(&runtime, Some(&visible)), stats)
+            })
+        };
+        let (before, baseline) = observe(0);
+        let (after, measured) = observe(64 * 1024);
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
+        eprintln!(
+            "document catalog allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
+            "document catalog observation must not copy stored payloads: {baseline:?} -> {measured:?}");
     }
 }

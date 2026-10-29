@@ -304,6 +304,18 @@ fn analyze_column(
     })
 }
 
+pub(crate) fn analyze_column_scan(
+    column: &str,
+    row_count: usize,
+    scan: impl FnOnce(&mut dyn FnMut(Option<&Value>)),
+) -> AnalyzedColumnStats {
+    analyze_column_values(
+        column,
+        &sample_indices(row_count, DEFAULT_SAMPLE_TARGET),
+        scan,
+    )
+}
+
 fn analyze_column_values(
     column: &str,
     sample_indices: &[usize],
