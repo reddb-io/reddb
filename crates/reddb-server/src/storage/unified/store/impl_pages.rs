@@ -515,6 +515,14 @@ impl UnifiedStore {
             pager
                 .free_retired_pages(&reclaim)
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE").is_some() {
+                eprintln!(
+                    "experimental exit after retired enqueue pages={}",
+                    reclaim.len()
+                );
+                std::process::exit(186);
+            }
             pager
                 .sync()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
