@@ -10,9 +10,11 @@ pub const PAGE_FILE_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x42];
 
 /// The first version with durable page-ownership recovery.
 pub const PAGE_OWNERSHIP_FILE_VERSION: u32 = 0x0001_0002;
+/// Checkpoint before-images must be restored before following published roots.
+pub const PAGE_CHECKPOINT_UNDO_FILE_VERSION: u32 = 0x0001_0003;
 /// Current database file version. The phase-3 DWB layout itself starts at
 /// 1.0.1; older readers reject this version before using the new contract.
-pub const PAGE_FILE_VERSION: u32 = PAGE_OWNERSHIP_FILE_VERSION;
+pub const PAGE_FILE_VERSION: u32 = PAGE_CHECKPOINT_UNDO_FILE_VERSION;
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;

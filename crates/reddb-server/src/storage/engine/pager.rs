@@ -132,6 +132,12 @@ pub(crate) trait PageOwnershipRecorder: Send + Sync {
     fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
     fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
     fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -152,6 +158,18 @@ impl NativeWalBarrier {
 }
 
 impl WalBarrier for NativeWalBarrier {
+    fn needs_page_image(&self, page_id: u32) -> std::io::Result<bool> {
+        self.ownership_recorder()?
+            .map_or(Ok(false), |recorder| recorder.needs_page_image(page_id))
+    }
+
+    fn capture_page_image(&self, page: &Page) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.capture_page_image(page)?;
+        }
+        Ok(())
+    }
+
     fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
         let wal = self
             .0

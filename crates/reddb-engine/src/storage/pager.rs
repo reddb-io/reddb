@@ -179,6 +179,18 @@ impl Default for PagerConfig {
 pub trait WalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()>;
 
+    /// A checkpoint host can preserve the first image of an existing page
+    /// before the cache accepts an overwrite. Newly reserved pages need no undo.
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Must make the image durable before returning. The pager may evict the
+    /// replacement immediately; recording only at flush time is too late.
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
+
     /// Called before pages are removed from allocator ownership.
     fn reserve_pages(&self, _start: u32, _count: u32) -> std::io::Result<()> {
         Ok(())
@@ -691,6 +703,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::ReadOnly);
         }
 
+        self.capture_page_before_write(page_id)?;
+
         // Update checksum
         page.update_checksum();
 
@@ -717,6 +731,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::ReadOnly);
         }
 
+        self.capture_page_before_write(page_id)?;
+
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
         if let Some(dirty_page) = self.cache.insert(page_id, page) {
@@ -724,6 +740,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         self.cache.mark_dirty(page_id);
 
+        Ok(())
+    }
+
+    fn capture_page_before_write(&self, page_id: u32) -> Result<(), PagerError> {
+        let mut required = false;
+        self.record_ownership(|wal| {
+            required = wal.needs_page_image(page_id)?;
+            Ok(())
+        })?;
+        if required {
+            let previous = self.read_page(page_id)?;
+            self.record_ownership(|wal| wal.capture_page_image(&previous))?;
+        }
         Ok(())
     }
 

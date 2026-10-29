@@ -437,6 +437,32 @@ pub fn decode_native_paged_metadata_header(
     }))
 }
 
+/// Read the publication epoch without following any collection's tree. Undo
+/// recovery must determine this boundary before loading possibly changed pages.
+pub fn decode_native_paged_catalog_ownership_epoch(data: &[u8]) -> RdbFileResult<Option<u64>> {
+    let mut position = 0;
+    let collections = match decode_native_paged_metadata_header(data)? {
+        Some(header) => {
+            position = METADATA_HEADER_BYTES;
+            header.collection_count
+        }
+        None => read_native_u32(data, &mut position, "truncated collection count")?,
+    };
+    for _ in 0..collections {
+        decode_native_paged_collection_root(data, &mut position)?;
+    }
+    if position == data.len() {
+        return Ok(None);
+    }
+    let cross_refs = read_native_u32(data, &mut position, "truncated cross reference count")?;
+    for _ in 0..cross_refs {
+        decode_native_paged_cross_ref(data, &mut position)?;
+    }
+    decode_native_paged_retired_trees(data, &mut position)?;
+    decode_native_paged_deferred_pages(data, &mut position)?;
+    decode_native_paged_ownership_epoch(data, &mut position)
+}
+
 pub fn encode_native_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);

@@ -358,25 +358,6 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
-    /// Copy a published tree in bounded batches before applying sparse updates.
-    pub(super) fn copy_checkpoint_tree(&self, previous: &BTree) -> Result<Arc<BTree>, StoreError> {
-        let pager = self.pager.as_ref().ok_or_else(|| {
-            StoreError::Io(std::io::Error::other("checkpoint tree requires a pager"))
-        })?;
-        let mut builder = CheckpointTreeBuilder::new(pager);
-        let mut cursor = previous
-            .cursor_first()
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        while let Some(record) = cursor
-            .next()
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-        {
-            builder.push(record)?;
-        }
-        builder.flush()?;
-        Ok(builder.tree)
-    }
-
     /// Compare and encode one borrowed row at a time. Begin a new tree only at
     /// the first difference, copying its already-verified prefix in bounded
     /// batches. Unchanged trees require no replacement allocation.
@@ -975,6 +956,13 @@ impl UnifiedStore {
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };
 
+        // An interrupted structural edit may have reached home pages without
+        // publishing its catalog. Restore those pages before following roots.
+        if let Some(commit) = &store.commit {
+            commit
+                .restore_checkpoint_page_images(&store)
+                .map_err(StoreError::Io)?;
+        }
         // Load existing data from pages if database exists
         store.load_from_pages()?;
         if let Some(commit) = &store.commit {
@@ -1101,9 +1089,20 @@ impl UnifiedStore {
             .map_err(StoreError::Io)
     }
 
-    /// Load data from page-based storage
-    ///
-    /// Reads the B-tree indices and reconstructs collections from pages.
+    /// Read the commit boundary before following potentially interrupted trees.
+    pub(super) fn published_ownership_epoch(&self) -> Result<u64, StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(0);
+        };
+        let Some(content) = read_meta_payload(pager)? else {
+            return Ok(0);
+        };
+        reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(&content)
+            .map(|epoch| epoch.unwrap_or(0))
+            .map_err(|error| StoreError::Serialization(error.to_string()))
+    }
+
+    /// Read the B-tree indices and reconstruct collections from pages.
     fn load_from_pages(&self) -> Result<(), StoreError> {
         let pager = match &self.pager {
             Some(p) => p,
@@ -1596,6 +1595,11 @@ impl UnifiedStore {
             std::process::exit(183);
         }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
+
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
+            std::process::exit(195);
+        }
 
         // Only the now-durable catalog may replace the live tree handles. The
         // previous generation is retained in the manifest retirement ledger.

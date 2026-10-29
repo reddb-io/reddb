@@ -357,6 +357,78 @@ fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
 }
 
 #[test]
+fn checkpoint_before_image_failure_prevents_cache_and_disk_overwrite() {
+    use reddb_engine::storage::{
+        page::{Page, PageType},
+        pager::{Pager, PagerConfig, WalBarrier},
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    struct Barrier(Rc<Cell<bool>>);
+    impl WalBarrier for Barrier {
+        fn flush_until(&self, _: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn needs_page_image(&self, _: u32) -> std::io::Result<bool> {
+            Ok(self.0.get())
+        }
+        fn capture_page_image(&self, page: &Page) -> std::io::Result<()> {
+            assert_eq!(page.content()[0], 17, "capture the pre-overwrite image");
+            page.verify_checksum().expect("valid original page");
+            Err(std::io::Error::other(
+                "injected before-image append failure",
+            ))
+        }
+    }
+    for unchecked in [false, true] {
+        let capture = Rc::new(Cell::new(false));
+        let pager = Pager::open_owned(
+            pager::MemoryFile::default(),
+            "before-image-failure.rdb".into(),
+            PagerConfig::default(),
+            Barrier(Rc::clone(&capture)),
+            true,
+        )
+        .expect("create pager");
+        let mut original = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        let id = original.page_id();
+        original.content_mut()[0] = 17;
+        pager.write_page(id, original).expect("write baseline");
+        pager.sync().expect("durable baseline");
+        let durable = pager
+            .with_file(|file| file.durable.borrow().clone())
+            .expect("baseline bytes");
+        let mut replacement = pager.read_page(id).expect("original");
+        replacement.content_mut()[0] = 29;
+        capture.set(true);
+        let result = if unchecked {
+            pager.write_page_no_checksum(id, replacement)
+        } else {
+            pager.write_page(id, replacement)
+        };
+        assert!(result.is_err());
+        assert_eq!(
+            pager.read_page(id).expect("cached original").content()[0],
+            17
+        );
+        capture.set(false);
+        assert!(
+            pager.sync().is_err(),
+            "uncertain WAL append fences writeback"
+        );
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        assert_eq!(
+            pager
+                .with_file(|file| file.durable.borrow().clone())
+                .expect("disk bytes"),
+            durable
+        );
+    }
+}
+
+#[test]
 fn recovery_reclaims_pages_idempotently_across_superblock_fallbacks() {
     use reddb_engine::storage::{
         page::PageType,

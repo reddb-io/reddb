@@ -34,6 +34,8 @@ must separately require the workflow if it is to be a mandatory merge gate.
 | Dirty eviction, torn writes, partial DWB and sync failure | Portable pager tests (`pager_multiframe_checkpoint_io_and_crash_recovery`, `pager_recovery_failure_boundaries`, `pager_dirty_eviction_recovers_a_torn_home_write`); `pager_allocation_recovery`, `pager_freelist_flush_recovery`, `pager_flush_transaction`; `make test-dst-storage` |
 | Pending or aborted transactions enter checkpoint, or snapshots lose versions | `checkpoint_open_transaction`, `checkpoint_concurrent_transaction`, `checkpoint_gc_provenance`, `vacuum_snapshot_horizon` |
 | Checkpoint falls back to whole-tree work for sparse changes | `checkpoint_sparse_update`, including `same_collection_pending_pressure_keeps_checkpoint_incremental`; keep the existing performance assertion, do not waive it to make this lane green |
+| Structural sparse checkpoint overwrites published pages before its catalog commits | `overflow_checkpoint_undo_survives_interrupted_recovery_and_publication`: overflow payloads, four cache slots, interrupted undo twice, post-publication crash, full payload checks and three further checkpoints/reopens |
+| Undo WAL append fails, or an image is corrupt/incomplete | `checkpoint_before_image_failure_prevents_cache_and_disk_overwrite` fences both write APIs before cache changes; the overflow undo fixture rejects invalid ownership, page size/checksum, duplicate images and truncated WAL before restoring any page |
 | Native KV model becomes table after an unclean restart (#2536) | `kv_model_and_value_survive_kill_without_bootstrap_checkpoint`: kill after acknowledged CREATE/PUT, verify model and value on 3 reopens; fresh embedded, fresh paged and embedded options opening a paged file |
 | Document contracts and native indexes disappear on replay | `paged_checkpoint_rebuild`, including `document_indexes_survive_reused_checkpoints_and_uncheckpointed_wal_recovery` and `legacy_paged_document_definition_survives_exit_without_checkpoint` |
 
@@ -62,14 +64,10 @@ checkpoint syscall has been swept under every physical fault combination.
 The KV fixture exercises the contract in #2536, not the private Windows Hunter
 RedWire workload. A passing Linux run does not qualify that Windows incident.
 
-The known structural sparse-checkpoint regression remains a release blocker until
-its existing test passes. The new KV fixture also fails on Linux for a fresh
-embedded file: after acknowledged CREATE/PUT and process kill, the contract is
-absent on the first reopen. Its fresh-paged and embedded-on-paged variants pass.
-The embedded save path updates the auxiliary contract blob in memory without
-recording that change in the logical WAL. This is a new confirmed regression,
-not proof that the private Windows incident has the same cause. Keep the failing
-fixture enabled until durable contract publication is corrected. Encryption/vault, native indexes, long-lived readers,
+The structural sparse-checkpoint and acknowledged KV fixtures remain required
+release gates. Structural projection now uses the checkpoint undo protocol below;
+embedded auxiliary contracts are durably appended to the logical WAL. These
+fixes must pass on the final artifact. Encryption/vault, native indexes, long-lived readers,
 metadata overflow and true ENOSPC recovery need their relevant regression suites
 and workload-specific qualification; the new matrix alone does not certify them.
 
@@ -81,6 +79,34 @@ revision, RedDB version and RedRouter AI token/cost records. Missing samples are
 not zero. OCI downscale requires workload headroom evidence and a validated
 volume migration; these local tests do not authorize an in-place volume shrink.
 
+## Structural checkpoints and recovery memory
+
+Paged format `0x0001_0003` requires checkpoint undo recovery. Both superblock
+copies are fenced to this version before the first ownership epoch; older
+readers reject it. Rollback to an older binary requires restoring the complete
+pre-upgrade backup, including its WAL and metadata.
+
+Sparse overflow updates and splits no longer copy the entire collection tree.
+The first overwrite of each existing allocatable page synchronously appends its
+before-image using the existing `FullPageImage` WAL record, with transaction 0
+and the ownership epoch. Newly reserved pages need no undo. The callback runs
+before inserting the replacement in cache because eviction can write immediately.
+Append failure fences all further page writes. The catalog remains the commit
+boundary and is never itself an undo target.
+
+Before following collection roots, recovery validates the journal and every
+image, then reads the publication epoch directly from catalog metadata. An
+unpublished epoch is restored in a second streaming pass, one page at a time,
+and synced before its reservations are reclaimed. A published epoch is not
+undone. Allocator recovery preserves every page still named by the catalog's
+deferred-free ledger, including a page reserved and retired in the same epoch.
+An interrupted restoration repeats safely from the same durable images.
+
+Cost sketch: N first-touched existing pages add N × 16 KiB of WAL and up to N
+synchronous appends per checkpoint; recovery retains ownership records, page-ID
+sets and one image at a time, instead of N image payloads. This exchanges WAL I/O for bounded recovery
+payload memory and avoids whole-tree copying for a sparse structural change.
+It does not eliminate full replacement for pinned readers or unknown mutations.
 
 ## Memory regressions during recovery and observation
 

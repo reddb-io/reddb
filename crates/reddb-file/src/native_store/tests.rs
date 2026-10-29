@@ -136,6 +136,48 @@ fn native_paged_metadata_header_round_trips_and_skips_legacy_payloads() {
 }
 
 #[test]
+fn catalog_epoch_is_decoded_without_following_roots() {
+    for legacy in [false, true] {
+        let mut bytes = Vec::new();
+        if legacy {
+            bytes.extend_from_slice(&1_u32.to_le_bytes());
+        } else {
+            encode_native_paged_metadata_header(
+                &mut bytes,
+                NativePagedMetadataHeader {
+                    format_version: STORE_VERSION_CURRENT,
+                    collection_count: 1,
+                },
+            );
+        }
+        encode_native_paged_collection_root(&mut bytes, "rows", 42);
+        let roots_end = bytes.len();
+        assert_eq!(
+            decode_native_paged_catalog_ownership_epoch(&bytes).expect("legacy catalog"),
+            None
+        );
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        encode_native_paged_cross_ref(&mut bytes, 10, 20, 3, "rows");
+        encode_native_paged_retired_trees(&mut bytes, &[43]).expect("retired roots");
+        encode_native_paged_deferred_pages(&mut bytes, &[44, 45]).expect("deferred pages");
+        let epoch_start = bytes.len();
+        encode_native_paged_ownership_epoch(&mut bytes, 67).expect("epoch");
+        assert_eq!(
+            decode_native_paged_catalog_ownership_epoch(&bytes).expect("epoch without pages"),
+            Some(67)
+        );
+        for end in roots_end + 1..roots_end + 4 {
+            assert!(decode_native_paged_catalog_ownership_epoch(&bytes[..end]).is_err());
+        }
+        for end in epoch_start + 4..bytes.len() {
+            assert!(decode_native_paged_catalog_ownership_epoch(&bytes[..end]).is_err());
+        }
+        bytes[epoch_start + 4..].fill(0);
+        assert!(decode_native_paged_catalog_ownership_epoch(&bytes).is_err());
+    }
+}
+
+#[test]
 fn native_len_prefixed_string_and_bytes_round_trip() {
     let mut bytes = Vec::new();
     encode_native_len_prefixed_str(&mut bytes, "collection");

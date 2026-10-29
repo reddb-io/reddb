@@ -274,38 +274,41 @@ impl UnifiedStore {
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
         let protected = self.ownership_active_epoch.load(Ordering::Acquire) != 0;
-        let mut tree = Arc::clone(tree);
-        let mut copied = false;
-        let mut apply = |items: &[(Vec<u8>, Vec<u8>)]| -> Result<(), StoreError> {
-            if protected && !copied {
-                // Inline values can be upserted without changing page
-                // ownership or tree links when the leaves have room. Every
-                // image was checked against the durable WAL above, so replay
-                // can finish a partially applied batch after a crash.
-                if tree
+        let tree = Arc::clone(tree);
+        let apply = |items: &[(Vec<u8>, Vec<u8>)]| -> Result<(), StoreError> {
+            if protected
+                && tree
                     .try_upsert_inline_without_splits(items)
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                {
-                    #[cfg(test)]
-                    if std::env::var_os("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE").is_some() {
-                        self.pager
-                            .as_ref()
-                            .expect("paged checkpoint")
-                            .sync()
-                            .map_err(|error| {
-                                StoreError::Io(std::io::Error::other(error.to_string()))
-                            })?;
-                        std::process::exit(190);
-                    }
-                    return Ok(());
+            {
+                #[cfg(test)]
+                if std::env::var_os("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE").is_some() {
+                    self.pager
+                        .as_ref()
+                        .expect("paged checkpoint")
+                        .sync()
+                        .map_err(|error| {
+                            StoreError::Io(std::io::Error::other(error.to_string()))
+                        })?;
+                    std::process::exit(190);
                 }
-                // Structural changes must leave the published generation
-                // untouched until the catalog points at their replacement.
-                tree = self.copy_checkpoint_tree(&tree)?;
-                copied = true;
+            } else {
+                // The ownership epoch records each old page before its first
+                // overwrite. Recovery restores those images before reading
+                // roots, then releases new pages and replays committed rows.
+                tree.upsert_batch_sorted(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             }
-            tree.upsert_batch_sorted(items)
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+            #[cfg(debug_assertions)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_SPARSE_BATCH").is_some() {
+                self.pager
+                    .as_ref()
+                    .expect("paged checkpoint")
+                    .sync()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                std::process::exit(193);
+            }
+            Ok(())
         };
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;

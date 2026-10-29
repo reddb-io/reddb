@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+#[path = "checkpoint_undo.rs"]
+mod checkpoint_undo;
+
 struct NativeReplayTarget<'a> {
     store: &'a UnifiedStore,
     update_btrees: bool,
@@ -339,6 +342,13 @@ pub(crate) struct StoreCommitCoordinator {
 struct StoreOwnershipRecorder {
     coordinator: Arc<StoreCommitCoordinator>,
     epoch: u64,
+    images: parking_lot::Mutex<CheckpointPageImages>,
+}
+
+#[derive(Default)]
+struct CheckpointPageImages {
+    reserved: roaring::RoaringBitmap,
+    captured: roaring::RoaringBitmap,
 }
 
 impl StoreOwnershipRecorder {
@@ -347,7 +357,11 @@ impl StoreOwnershipRecorder {
         coordinator.append_durable_page_ownership(
             reddb_file::page_ownership_journal::PageOwnershipRecord::Begin { epoch },
         )?;
-        Ok(Self { coordinator, epoch })
+        Ok(Self {
+            coordinator,
+            epoch,
+            images: parking_lot::Mutex::new(CheckpointPageImages::default()),
+        })
     }
 
     fn append_pages(
@@ -368,6 +382,38 @@ impl StoreOwnershipRecorder {
 }
 
 impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipRecorder {
+    fn needs_page_image(&self, page_id: u32) -> io::Result<bool> {
+        // The manifest is the commit boundary, never an undo target. Its
+        // private overflow replacement is already covered by reservations.
+        if page_id < reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE {
+            return Ok(false);
+        }
+        let images = self.images.lock();
+        Ok(!images.reserved.contains(page_id) && !images.captured.contains(page_id))
+    }
+
+    fn capture_page_image(&self, page: &crate::storage::engine::Page) -> io::Result<()> {
+        let mut images = self.images.lock();
+        let page_id = page.page_id();
+        if images.reserved.contains(page_id) || images.captured.contains(page_id) {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        reddb_file::encode_main_wal_record_frame_into(
+            reddb_file::MainWalRecordFrameRef::FullPageImage {
+                tx_id: 0,
+                page_id,
+                ckpt_epoch: self.epoch,
+                data: page.as_bytes(),
+            },
+            crate::storage::wal::record::WAL_DEFAULT_TERM,
+            &mut bytes,
+        )?;
+        self.coordinator.append_durable_ownership_bytes(bytes)?;
+        images.captured.insert(page_id);
+        Ok(())
+    }
+
     fn reserve_pages(&self, start: u32, count: u32) -> io::Result<()> {
         use reddb_file::page_ownership_journal::PageOwnershipRecord;
         let end = start.checked_add(count).ok_or_else(|| {
@@ -384,6 +430,7 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
                 .collect();
             self.coordinator
                 .append_durable_page_ownership_batch(&records)?;
+            self.images.lock().reserved.insert_range(next..chunk_end);
             next = chunk_end;
         }
         Ok(())
@@ -703,6 +750,10 @@ impl StoreCommitCoordinator {
             self.ownership_last_epoch
                 .fetch_max(record.epoch(), Ordering::AcqRel);
         }
+        self.append_durable_ownership_bytes(bytes)
+    }
+
+    fn append_durable_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
         let _epoch = self.queue.epoch.read();
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
@@ -858,13 +909,36 @@ impl StoreCommitCoordinator {
         let pending = pending_epoch(journal).map_err(|error| {
             io::Error::other(format!("page ownership journal requires recovery: {error}"))
         })?;
-        if let Some(pending) = pending {
-            let plan = recovery_plan(
+        if let Some(mut pending) = pending {
+            let catalog_epoch = store.ownership_catalog_epoch.load(Ordering::Acquire);
+            let (_, retained_pages) = pager
+                .deferred_reclamation_pages()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            // A retirement intent precedes the catalog's deferred-free ledger.
+            // Publication does not release pages that this ledger still owns,
+            // including pages allocated and retired within the same epoch.
+            if catalog_epoch == pending.epoch {
+                for page in &retained_pages {
+                    pending.retired_pages.remove(page);
+                }
+            }
+            let mut plan = recovery_plan(
                 &pending,
-                store.ownership_catalog_epoch.load(Ordering::Acquire),
+                catalog_epoch,
                 reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE,
                 header.page_count,
             )?;
+            if retained_pages
+                .iter()
+                .any(|page| plan.release.binary_search(page).is_ok())
+            {
+                return Err(io::Error::other(
+                    "ownership recovery would release a catalog-retained page",
+                ));
+            }
+            plan.preserve.extend(retained_pages);
+            plan.preserve.sort_unstable();
+            plan.preserve.dedup();
             pager
                 .validate_owned_pages(&plan.preserve)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -918,7 +992,7 @@ impl StoreCommitCoordinator {
             .as_ref()
             .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
         pager
-            .fence_file_format_version(reddb_file::file_format::PAGE_OWNERSHIP_FILE_VERSION)
+            .fence_file_format_version(reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let coordinator = Arc::clone(
             store
