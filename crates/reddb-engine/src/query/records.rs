@@ -646,6 +646,13 @@ pub fn runtime_table_record_with_col_indices(
     if row.named.is_some() || row.columns.is_empty() {
         return None;
     }
+    if row.schema.as_ref().is_some_and(|schema| {
+        idx_map
+            .iter()
+            .any(|&(ci, si)| schema.get(si) != columns.get(ci))
+    }) {
+        return None;
+    }
     let mut record = UnifiedRecord::with_capacity(6 + idx_map.len());
     for &(ci, si) in idx_map {
         if let Some(value) = row.columns.get(si) {

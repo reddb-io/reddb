@@ -15,6 +15,8 @@ fn named_row(id: u64, extra: bool) -> UnifiedEntity {
     }
     let mut row = UnifiedEntity::table_row(EntityId::new(id), "telemetry", id, vec![]);
     row.data = EntityData::Row(RowData::with_names(values, fields));
+    row.created_at = 123456;
+    row.updated_at = 123456;
     row
 }
 
@@ -36,7 +38,7 @@ fn named_snapshot_recovery_does_not_expand_the_resident_working_set() {
         recovered.restore_snapshot_entity(row).unwrap();
     }
     recovered.set_column_schema_if_empty(live.column_schema().unwrap().as_ref().clone());
-    assert_eq!(recovered.compact_recovered_rows(), 4096);
+    assert_eq!(recovered.compact_recovered_rows(), 0);
     eprintln!(
         "live={} recovered={}",
         live.resident_bytes(),
@@ -69,7 +71,7 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
     for id in 1..=8 {
         let bytes = encoded(&named_row(id, false));
         manager
-            .restore_snapshot_entity(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
+            .insert(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
             .unwrap();
     }
     assert_eq!(
@@ -77,6 +79,9 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
         0,
         "never guess a missing schema"
     );
+    let original: Vec<_> = (1..=8)
+        .map(|id| encoded(&manager.get(EntityId::new(id)).unwrap()))
+        .collect();
     let schema = (0..16)
         .rev()
         .map(|i| format!("telemetry_dimension_{i:02}"))
@@ -99,7 +104,7 @@ fn compaction_preserves_dynamic_shapes_and_captured_cursors() {
             row.data.as_row().unwrap().columns[0],
             Value::Integer(id as i64 + 15)
         );
-        assert_eq!(encoded(&row), encoded(&named_row(id, false)));
+        assert_eq!(encoded(&row), original[(id - 1) as usize]);
     }
     let extra = named_row(9, true);
     manager.restore_snapshot_entity(extra.clone()).unwrap();
@@ -129,7 +134,7 @@ fn repeated_named_recovery_keeps_memory_and_every_native_record_stable() {
                 .unwrap();
         }
         recovered.set_column_schema_if_empty(schema.clone());
-        assert_eq!(recovered.compact_recovered_rows(), 256);
+        assert_eq!(recovered.compact_recovered_rows(), 0);
         let bytes = recovered.resident_bytes();
         assert_eq!(*warm_bytes.get_or_insert(bytes), bytes);
         images = (1..=256)
@@ -140,4 +145,77 @@ fn repeated_named_recovery_keeps_memory_and_every_native_record_stable() {
             "recovery cannot change durable row identity"
         );
     }
+}
+
+#[test]
+fn recovery_compacts_each_row_when_its_schema_is_already_known() {
+    let manager = SegmentManager::new("telemetry");
+    manager.set_column_schema_if_empty(
+        (0..16)
+            .map(|i| format!("telemetry_dimension_{i:02}"))
+            .collect(),
+    );
+    for id in 1..=256 {
+        let bytes = encoded(&named_row(id, false));
+        manager
+            .restore_snapshot_entity(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
+            .unwrap();
+        let row = manager.get(EntityId::new(id)).unwrap();
+        assert!(
+            row.data.as_row().unwrap().named.is_none(),
+            "compaction after the full snapshot loads is too late for its memory peak"
+        );
+        assert_eq!(encoded(&row), bytes);
+    }
+}
+
+#[test]
+fn recovery_shares_dynamic_row_shapes_without_declaring_columns_or_unbounded_cache() {
+    let manager = SegmentManager::new("dynamic");
+    for id in 1..=64 {
+        let mut row = UnifiedEntity::table_row(EntityId::new(id), "dynamic", id, vec![]);
+        row.data = EntityData::Row(RowData::with_names(
+            vec![Value::Integer(id as i64)],
+            vec![format!("field_{id}")],
+        ));
+        let bytes = encoded(&row);
+        manager
+            .restore_snapshot_entity(read_entity_binary(&bytes, &mut 0, STORE_VERSION_V11).unwrap())
+            .unwrap();
+        let recovered = manager.get(row.id).unwrap();
+        assert_eq!(encoded(&recovered), bytes);
+        assert_eq!(
+            recovered.data.as_row().unwrap().named.is_none(),
+            id <= 16,
+            "shape cache is capped"
+        );
+    }
+    assert!(
+        manager.column_schema().is_none(),
+        "row shapes are not a declared collection schema"
+    );
+}
+
+#[test]
+fn compiled_projection_rejects_a_different_explicit_row_shape() {
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1), "dynamic", 1, vec![]);
+    entity.data = EntityData::Row(RowData {
+        columns: vec![Value::Integer(999), Value::Integer(7)],
+        named: None,
+        schema: Some(std::sync::Arc::new(vec!["a_dimension".into(), "id".into()])),
+    });
+    let columns = vec!["id".into()];
+    assert!(
+        reddb_engine::query::records::runtime_table_record_with_col_indices(
+            &entity,
+            &columns,
+            &[(0, 0)]
+        )
+        .is_none()
+    );
+    let row = reddb_engine::query::records::runtime_table_record_from_entity_ref_projected(
+        &entity, &columns,
+    )
+    .unwrap();
+    assert_eq!(row.get("id"), Some(&Value::Integer(7)));
 }

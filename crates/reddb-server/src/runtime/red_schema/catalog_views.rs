@@ -994,6 +994,25 @@ fn append_table_stats(
     }
 }
 
+/// Legacy positional records get names from the collection schema without
+/// cloning their payloads. Explicit per-row names remain authoritative.
+fn stats_row_field<'a>(
+    row: &'a crate::storage::unified::entity::RowData,
+    columns: Option<&[String]>,
+    name: &str,
+) -> Option<&'a Value> {
+    row.get_field(name).or_else(|| {
+        if row.named.is_none() && row.schema.is_none() {
+            columns?
+                .iter()
+                .position(|column| column == name)
+                .and_then(|index| row.columns.get(index))
+        } else {
+            None
+        }
+    })
+}
+
 fn append_document_stats(
     rows: &mut Vec<UnifiedRecord>,
     schema: &Arc<Vec<Arc<str>>>,
@@ -1004,20 +1023,30 @@ fn append_document_stats(
     let mut key_counts = BTreeMap::<String, u64>::new();
     let mut type_counts = BTreeMap::<String, BTreeMap<&'static str, u64>>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    let column_schema = manager.column_schema();
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
 
         let mut fields: Vec<(String, Value)> = row
             .iter_fields()
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
-        let body_fields = row
-            .get_field("body")
+        if row.named.is_none() && row.schema.is_none() {
+            if let Some(columns) = &column_schema {
+                fields.extend(
+                    columns
+                        .iter()
+                        .zip(&row.columns)
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+            }
+        }
+        let body_fields = stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "body")
             .and_then(document_body_top_level_fields)
             .unwrap_or_default();
 
@@ -1036,7 +1065,8 @@ fn append_document_stats(
         }
 
         entities.push((entity.id, fields));
-    }
+        true
+    });
 
     let analyzed =
         crate::storage::query::planner::stats_catalog::analyze_entity_fields(collection, &entities);
@@ -1110,22 +1140,28 @@ fn append_kv_stats(
     let mut total_value_bytes = 0u64;
     let mut type_counts = BTreeMap::<&'static str, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    let column_schema = manager.column_schema();
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         entry_count += 1;
-        if let Some(Value::Text(key)) = row.get_field("key") {
+        if let Some(Value::Text(key)) =
+            stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "key")
+        {
             total_key_bytes += key.len() as u64;
         }
-        if let Some(value) = row.get_field("value") {
+        if let Some(value) =
+            stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "value")
+        {
             total_value_bytes += value_estimated_bytes(value);
             *type_counts.entry(value_type_name(value)).or_default() += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1171,10 +1207,10 @@ fn append_graph_stats(
     let mut node_labels = BTreeMap::<String, u64>::new();
     let mut edge_labels = BTreeMap::<String, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
         match &entity.kind {
             crate::storage::unified::EntityKind::GraphNode(node) => {
                 node_count += 1;
@@ -1189,7 +1225,8 @@ fn append_graph_stats(
             }
             _ => {}
         }
-    }
+        true
+    });
 
     let max_degree = degree.values().copied().max().unwrap_or(0);
     let avg_degree = degree
@@ -1258,19 +1295,20 @@ fn append_vector_stats(
     let mut observed_dimension = None;
     let mut hybrid_count = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Vector(vector) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Vector(vector) = &entity.data else {
+            return true;
         };
         vector_count += 1;
         observed_dimension.get_or_insert_with(|| vector.dimension());
         if vector.is_hybrid() {
             hybrid_count += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1316,12 +1354,12 @@ fn append_queue_stats(
     let mut acked_count = 0u64;
     let mut max_attempts_seen = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::QueueMessage(message) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::QueueMessage(message) = &entity.data else {
+            return true;
         };
         message_count += 1;
         max_attempts_seen = max_attempts_seen.max(message.attempts as u64);
@@ -1332,7 +1370,8 @@ fn append_queue_stats(
         } else {
             delivered_count += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1383,12 +1422,12 @@ fn append_timeseries_stats(
     let mut oldest = None::<u64>;
     let mut newest = None::<u64>;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::TimeSeries(point) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::TimeSeries(point) = &entity.data else {
+            return true;
         };
         point_count += 1;
         series_keys.insert(timeseries_series_key(&point.metric, &point.tags));
@@ -1399,7 +1438,8 @@ fn append_timeseries_stats(
         newest = Some(newest.map_or(point.timestamp_ns, |current| {
             current.max(point.timestamp_ns)
         }));
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1741,4 +1781,53 @@ fn infer_document_columns(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scoped_stats_memory_tests {
+    use super::*;
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+    #[test]
+    fn collection_stats_do_not_clone_unrelated_database_rows() {
+        let store = UnifiedStore::new();
+        store.create_collection("target").expect("target");
+        store.create_collection("unrelated").expect("unrelated");
+        let schema = Arc::new(
+            STATS_COLUMNS
+                .iter()
+                .map(|name| Arc::<str>::from(*name))
+                .collect(),
+        );
+        let observe = || {
+            let mut rows = Vec::new();
+            append_document_stats(&mut rows, &schema, &store, "target");
+            append_kv_stats(&mut rows, &schema, &store, "target");
+            append_graph_stats(&mut rows, &schema, &store, "target");
+            append_vector_stats(&mut rows, &schema, &store, "target", None, None);
+            append_queue_stats(&mut rows, &schema, &store, "target");
+            append_timeseries_stats(&mut rows, &schema, &store, "target");
+            rows
+        };
+        let (before, baseline) = measure_allocations(observe);
+        let manager = store.get_collection("unrelated").expect("manager");
+        for id in 1..=2048 {
+            manager
+                .insert(crate::storage::UnifiedEntity::table_row(
+                    crate::storage::EntityId::new(id),
+                    "unrelated",
+                    id,
+                    (0..16).map(reddb_types::Value::Integer).collect(),
+                ))
+                .expect("unrelated row");
+        }
+        let (after, measured) = measure_allocations(observe);
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
+        eprintln!(
+            "stats allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
+            "profiling one collection must not allocate copies of every other collection: {baseline:?} -> {measured:?}");
+    }
 }

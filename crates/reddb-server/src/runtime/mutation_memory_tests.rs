@@ -736,3 +736,90 @@ fn recovered_named_rows_share_declared_schema_before_serving_queries() {
         }
     }
 }
+
+#[test]
+fn paged_recovery_compacts_named_rows_before_runtime_initialization() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("early-recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        runtime
+            .execute_query(
+                "CREATE TABLE early_recovery_memory (id INTEGER PRIMARY KEY, payload TEXT)",
+            )
+            .expect("table");
+        for id in 0..128 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO early_recovery_memory (id,payload) VALUES ({id},'kept')"
+                ))
+                .expect("insert");
+        }
+    }
+    // Open storage alone. No runtime bootstrap or late schema hydration has
+    // run yet, so this pins the memory-saving path to snapshot reconstruction.
+    let db = crate::storage::RedDB::open_with_options(&options).expect("cold storage open");
+    let manager = db
+        .store()
+        .get_collection("early_recovery_memory")
+        .expect("collection");
+    let mut count = 0;
+    manager.for_each_entity(|entity| {
+        let row = entity.data.as_row().expect("row");
+        assert!(
+            row.named.is_none(),
+            "paged hydration must compact before full materialization"
+        );
+        assert_eq!(
+            row.get_field("payload"),
+            Some(&reddb_types::Value::text("kept"))
+        );
+        count += 1;
+        true
+    });
+    assert_eq!(count, 128);
+}
+
+#[test]
+fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE dynamic_recovery (id INTEGER)")
+        .expect("table");
+    let manager = runtime
+        .inner
+        .db
+        .store()
+        .get_collection("dynamic_recovery")
+        .expect("manager");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1000), "dynamic_recovery", 1, vec![]);
+    entity.data = EntityData::Row(RowData {
+        columns: vec![],
+        named: Some(
+            [
+                ("a_dimension".into(), Value::Integer(999)),
+                ("id".into(), Value::Integer(7)),
+                ("z_payload".into(), Value::Integer(42)),
+            ]
+            .into(),
+        ),
+        schema: None,
+    });
+    manager
+        .restore_snapshot_entity(entity)
+        .expect("recover dynamic row");
+    let records = runtime
+        .execute_query("SELECT id,z_payload FROM dynamic_recovery WHERE id = 7")
+        .expect("compiled read")
+        .result
+        .records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].get("id"), Some(&Value::Integer(7)));
+    assert_eq!(records[0].get("z_payload"), Some(&Value::Integer(42)));
+}

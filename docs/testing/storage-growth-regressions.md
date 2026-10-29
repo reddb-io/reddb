@@ -80,3 +80,39 @@ latency, and source-to-BigQuery CPU/RAM/storage/traffic in/out, requested config
 revision, RedDB version and RedRouter AI token/cost records. Missing samples are
 not zero. OCI downscale requires workload headroom evidence and a validated
 volume migration; these local tests do not authorize an in-place volume shrink.
+
+
+## Memory regressions during recovery and observation
+
+`crates/reddb-engine/tests/recovery_memory.rs` checks named-row recovery against
+bulk-load resident accounting, 32 native-record reopen cycles, dynamic fields,
+a bounded cache of row shapes, captured-cursor immutability and compiled column
+projection. Shared row names never declare a collection schema. Native records
+keep their names on the next checkpoint through the existing named-row encoding.
+This is reader compatible, but changes compact positional rows to self-describing
+named records when a schema is available; validate mixed-version replication
+before qualifying a release.
+
+The native runtime tests cover storage-only paged reopening before runtime
+initialization, repeated runtime reopening, filters/projection against a different
+dynamic row shape and aliased RedWire columns. The scoped-stats allocation test
+observes all six model profilers while an unrelated collection grows. It measures
+allocated bytes as well as allocation count, since worker-thread cloning can
+leave only a few large allocations on the calling thread.
+
+Run the focused gates with:
+
+```sh
+cargo test -p reddb-io-engine --test recovery_memory
+cargo test -p reddb-io-server --lib recovery
+cargo test -p reddb-io-server --lib collection_stats_do_not_clone_unrelated_database_rows
+cargo test -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias
+```
+
+Resident accounting is not process RSS. STG qualification must also record
+container RSS/working set and memory limit, engine budget, exact image digest,
+Pod UID, OOM/restart state, original collection models/counts and acknowledged
+payloads through cold open and concurrent observation. A failed constrained-memory
+run remains a failed gate, even when the unit tests pass. Never run broad
+profiling diagnostics on a serving database while qualifying their memory bounds;
+use an isolated clone first.
