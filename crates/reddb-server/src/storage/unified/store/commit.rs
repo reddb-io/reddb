@@ -5,7 +5,7 @@ use reddb_engine::storage::resident_file::EMBEDDED_WAL_HEADROOM_LIMIT;
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 struct NativeReplayTarget<'a> {
@@ -324,6 +324,8 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
+    // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
+    ownership_wal_state: AtomicU8,
 }
 
 impl StoreCommitCoordinator {
@@ -391,6 +393,7 @@ impl StoreCommitCoordinator {
             state,
             fsync_count,
             wal_generation: AtomicU64::new(0),
+            ownership_wal_state: AtomicU8::new(0),
         })
     }
 
@@ -574,6 +577,12 @@ impl StoreCommitCoordinator {
     /// [`Self::append_actions`] so durability semantics are uniform
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        if matches!(record, WalRecord::PageOwnership { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "page ownership requires a durable append",
+            ));
+        }
         let _epoch = self.queue.epoch.read();
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
@@ -601,6 +610,9 @@ impl StoreCommitCoordinator {
         reddb_file::page_ownership_journal::encode(record)?;
         let record = WalRecord::PageOwnership { record };
         let _epoch = self.queue.epoch.read();
+        // Set before writing: a failed or uncertain append must never allow
+        // checkpoint truncation to discard the ownership journal.
+        self.ownership_wal_state.store(2, Ordering::Release);
         if matches!(self.mode, DurabilityMode::Strict) {
             self.wal.lock().append(&record)?;
             return self.force_sync();
@@ -652,6 +664,30 @@ impl StoreCommitCoordinator {
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
         let _epoch = self.queue.epoch.write();
+        if self.ownership_wal_state.load(Ordering::Acquire) == 0 {
+            let reader = WalReader::open(&self.wal_path)?;
+            let mut protected = false;
+            for item in reader.iter() {
+                match item {
+                    Ok((_, WalRecord::PageOwnership { .. })) => {
+                        protected = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(error) => return Err(error),
+                }
+            }
+            self.ownership_wal_state
+                .store(if protected { 2 } else { 1 }, Ordering::Release);
+        }
+        if self.ownership_wal_state.load(Ordering::Acquire) == 2 {
+            // A Finish record alone cannot prove that both superblock copies
+            // are fenced; only recovery may eventually authorize truncation.
+            return Err(io::Error::other(
+                "cannot truncate WAL while page ownership records require recovery",
+            ));
+        }
         self.wal_generation.fetch_add(1, Ordering::AcqRel);
         let mut wal = self.wal.lock();
         wal.truncate()?;
@@ -1504,6 +1540,19 @@ mod tests {
             assert!(coordinator
                 .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 0 })
                 .is_err());
+            assert!(
+                coordinator.truncate().is_err(),
+                "active ownership must prevent truncation"
+            );
+            let before = std::fs::read(&path).expect("ownership WAL");
+            drop(coordinator);
+            let reopened = StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                .expect("reopen coordinator");
+            assert!(
+                reopened.truncate().is_err(),
+                "reopen must rediscover ownership records"
+            );
+            assert_eq!(std::fs::read(&path).expect("preserved WAL"), before);
         }
     }
 
