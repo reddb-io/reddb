@@ -160,6 +160,11 @@ impl FreeList {
         self.free_pages.len()
     }
 
+    /// Test whether a batch overlaps free pages already loaded into memory.
+    pub(crate) fn contains_any(&self, pages: &std::collections::HashSet<u32>) -> bool {
+        self.free_pages.iter().any(|id| pages.contains(id))
+    }
+
     /// Load free pages from a trunk page
     pub fn load_from_trunk(&mut self, trunk: &Page) -> Result<Option<u32>, FreeListError> {
         // Verify page type

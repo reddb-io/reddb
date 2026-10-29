@@ -856,6 +856,44 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::InvalidDatabase("duplicate retired page".into()));
         }
         let mut freelist = self.freelist_write()?;
+        if freelist.contains_any(&seen) {
+            return Err(PagerError::InvalidDatabase(
+                "retired page is already free".into(),
+            ));
+        }
+        // Some free pages remain in on-disk trunks until allocation reaches
+        // them. Check those too before changing the cache or the allocator.
+        // The allocator lock prevents concurrent consumption or publication.
+        let mut trunk_id = freelist.trunk_head();
+        let mut visited = std::collections::HashSet::new();
+        while trunk_id != 0 && !seen.is_empty() {
+            if trunk_id < FIRST_ALLOCATABLE_PAGE
+                || trunk_id >= page_count
+                || !visited.insert(trunk_id)
+            {
+                return Err(PagerError::InvalidDatabase(
+                    "invalid freelist trunk chain".into(),
+                ));
+            }
+            let trunk = self.read_page(trunk_id)?;
+            let mut loaded = FreeList::new();
+            let next = loaded
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+            while let Some(id) = loaded.allocate() {
+                if id < FIRST_ALLOCATABLE_PAGE || id >= page_count {
+                    return Err(PagerError::InvalidDatabase(
+                        "invalid free page range".into(),
+                    ));
+                }
+                if seen.contains(&id) {
+                    return Err(PagerError::InvalidDatabase(
+                        "retired page is already free".into(),
+                    ));
+                }
+            }
+            trunk_id = next.unwrap_or(0);
+        }
         for id in pages {
             self.cache.remove(*id);
         }
