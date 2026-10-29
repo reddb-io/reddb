@@ -105,6 +105,80 @@ pub struct PendingOwnershipEpoch {
     pub detached_free_pages: std::collections::BTreeSet<u32>,
 }
 
+/// Page sets selected for allocator reconciliation after a crash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnershipRecoveryPlan {
+    pub release: Vec<u32>,
+    pub preserve: Vec<u32>,
+}
+
+/// Select pages using the epoch present in the durable catalog.
+///
+/// The caller must prove the journal epoch had exclusive ownership of new
+/// allocations and that unpublished work did not modify a published tree.
+/// A page in both reserve and retire sets is ambiguous after publication and
+/// is rejected until a stronger reachability proof exists.
+pub fn recovery_plan(
+    pending: &PendingOwnershipEpoch,
+    catalog_epoch: u64,
+    first_allocatable_page: u32,
+    page_count: u32,
+) -> io::Result<OwnershipRecoveryPlan> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid ownership recovery state",
+        )
+    };
+    if pending.epoch == 0 || catalog_epoch > pending.epoch || page_count < first_allocatable_page {
+        return Err(invalid());
+    }
+    let published = catalog_epoch == pending.epoch;
+    let mut release = std::collections::BTreeSet::new();
+    let mut preserve = std::collections::BTreeSet::new();
+
+    for &page in &pending.reserved_pages {
+        if page < first_allocatable_page {
+            return Err(invalid());
+        }
+        if page >= page_count {
+            // A reservation can be durable before the new page is allocated.
+            if published {
+                return Err(invalid());
+            }
+            continue;
+        }
+        if published {
+            if pending.retired_pages.contains(&page) {
+                return Err(invalid());
+            }
+            preserve.insert(page);
+        } else {
+            release.insert(page);
+        }
+    }
+    for &page in &pending.detached_free_pages {
+        if page < first_allocatable_page || page >= page_count {
+            return Err(invalid());
+        }
+        if !preserve.contains(&page) {
+            release.insert(page);
+        }
+    }
+    for &page in &pending.retired_pages {
+        if page < first_allocatable_page || page >= page_count {
+            return Err(invalid());
+        }
+        if published {
+            release.insert(page);
+        }
+    }
+    Ok(OwnershipRecoveryPlan {
+        release: release.into_iter().collect(),
+        preserve: preserve.into_iter().collect(),
+    })
+}
+
 /// Validate a complete journal and return the unfinished epoch, if any.
 ///
 /// A completion record can be written only after the caller has durably
@@ -268,5 +342,37 @@ mod tests {
         let mut partial = bytes(&[begin, reserve]);
         partial.pop();
         assert!(pending_epoch(&partial).is_err());
+    }
+
+    #[test]
+    fn recovery_plan_uses_catalog_epoch_and_preserves_published_reservations() {
+        let pending = PendingOwnershipEpoch {
+            epoch: 7,
+            reserved_pages: [70, 71, 120].into_iter().collect(),
+            retired_pages: [80].into_iter().collect(),
+            detached_free_pages: [70, 72].into_iter().collect(),
+        };
+        let before = recovery_plan(&pending, 6, 67, 100).expect("unpublished plan");
+        assert_eq!(before.release, [70, 71, 72]);
+        assert!(before.preserve.is_empty());
+        assert!(
+            recovery_plan(&pending, 7, 67, 100).is_err(),
+            "published page is outside the file"
+        );
+
+        let mut published = pending.clone();
+        published.reserved_pages.remove(&120);
+        let after = recovery_plan(&published, 7, 67, 100).expect("published plan");
+        assert_eq!(after.preserve, [70, 71]);
+        assert_eq!(after.release, [72, 80]);
+        published.retired_pages.insert(70);
+        assert!(
+            recovery_plan(&published, 7, 67, 100).is_err(),
+            "ambiguous live page must not be freed"
+        );
+        assert!(
+            recovery_plan(&pending, 8, 67, 100).is_err(),
+            "catalog must not outrun the journal"
+        );
     }
 }

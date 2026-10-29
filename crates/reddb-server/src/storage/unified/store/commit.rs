@@ -795,6 +795,81 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    fn release_completed_ownership_wal(&self) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::{encode, pending_epoch, PageOwnershipRecord};
+        let _epoch = self.queue.epoch.write();
+        let mut journal = Vec::new();
+        let mut last = None;
+        for item in WalReader::open(&self.wal_path)?.iter() {
+            match item {
+                Ok((_, WalRecord::PageOwnership { record })) => {
+                    journal.extend_from_slice(&encode(record)?);
+                    last = Some(record);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "incomplete WAL before ownership completion",
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if pending_epoch(&journal)?.is_some()
+            || !matches!(last, Some(PageOwnershipRecord::Finish { .. }))
+        {
+            return Err(io::Error::other("page ownership WAL is not complete"));
+        }
+        self.ownership_wal_state.store(1, Ordering::Release);
+        Ok(())
+    }
+
+    fn recover_page_ownership(&self, store: &UnifiedStore, journal: &[u8]) -> io::Result<()> {
+        use reddb_file::page_ownership_journal::{
+            pending_epoch, recovery_plan, PageOwnershipRecord,
+        };
+        if journal.is_empty() {
+            return Ok(());
+        }
+        let pager = store
+            .pager
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ownership WAL requires a pager"))?;
+        let header = pager
+            .header()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if header.version < reddb_file::file_format::PAGE_OWNERSHIP_FILE_VERSION {
+            return Err(io::Error::other(
+                "page ownership journal requires recovery with a fenced file version",
+            ));
+        }
+        let pending = pending_epoch(journal).map_err(|error| {
+            io::Error::other(format!("page ownership journal requires recovery: {error}"))
+        })?;
+        if let Some(pending) = pending {
+            let plan = recovery_plan(
+                &pending,
+                store.ownership_catalog_epoch.load(Ordering::Acquire),
+                reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE,
+                header.page_count,
+            )?;
+            pager
+                .validate_owned_pages(&plan.preserve)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            pager
+                .recover_unowned_pages(&plan.release)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            pager
+                .sync_recovered_allocator()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            self.append_durable_page_ownership(PageOwnershipRecord::Finish {
+                epoch: pending.epoch,
+            })?;
+        }
+        self.release_completed_ownership_wal()
+    }
+
     pub(crate) fn replay_into(&self, store: &UnifiedStore) -> io::Result<()> {
         if !self.wal_path.exists() {
             return Ok(());
@@ -808,19 +883,23 @@ impl StoreCommitCoordinator {
 
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
         let mut pending = Vec::<(u64, Vec<u8>)>::new();
+        let mut ownership_journal = Vec::new();
+        let mut incomplete_wal_tail = false;
         let mut applied = false;
 
         for record in reader.iter() {
             let (_lsn, record) = match record {
                 Ok(record) => record,
-                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    incomplete_wal_tail = true;
+                    break;
+                }
                 Err(err) => return Err(err),
             };
             match record {
-                WalRecord::PageOwnership { .. } => {
-                    return Err(io::Error::other(
-                        "page ownership journal requires recovery before WAL replay",
-                    ));
+                WalRecord::PageOwnership { record } => {
+                    ownership_journal
+                        .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
                 WalRecord::TxCommitBatch { actions, .. } => {
                     for payload in actions {
@@ -873,6 +952,14 @@ impl StoreCommitCoordinator {
                 }
             }
         }
+
+        if incomplete_wal_tail && !ownership_journal.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete WAL prevents ownership recovery",
+            ));
+        }
+        self.recover_page_ownership(store, &ownership_journal)?;
 
         for (tx_id, payload) in pending {
             if !tx_states.get(&tx_id).copied().unwrap_or(false) {
@@ -1656,6 +1743,89 @@ mod tests {
             coordinator.truncate().is_err(),
             "ownership WAL remains protected"
         );
+    }
+
+    #[test]
+    fn replay_reclaims_unpublished_ownership_reservations() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).expect("create store");
+            store.create_collection("rows").expect("collection");
+            store.persist().expect("persist baseline");
+        }
+        let wal_path = reddb_file::layout::unified_wal_path(&path);
+        let ids;
+        {
+            let pager =
+                crate::storage::engine::Pager::open(&path, Default::default()).expect("pager");
+            let first = pager.page_count().expect("page count");
+            let coordinator = StoreCommitCoordinator::open(
+                &wal_path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("WAL");
+            coordinator
+                .append_durable_page_ownership_batch(&[
+                    PageOwnershipRecord::Begin { epoch: 1 },
+                    PageOwnershipRecord::Reserve {
+                        epoch: 1,
+                        page_id: first,
+                    },
+                    PageOwnershipRecord::Reserve {
+                        epoch: 1,
+                        page_id: first + 1,
+                    },
+                ])
+                .expect("reserve pages durably");
+            ids = [
+                pager
+                    .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+                pager
+                    .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+            ];
+            assert_eq!(ids, [first, first + 1]);
+            pager.sync().expect("persist abandoned pages");
+        }
+        let reopened = UnifiedStore::open(&path).expect("recover ownership");
+        let pager = reopened.pager.as_ref().expect("pager");
+        let a = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("reuse")
+            .page_id();
+        let b = pager
+            .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+            .expect("reuse")
+            .page_id();
+        assert_ne!(a, b);
+        assert!(ids.contains(&a) && ids.contains(&b));
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .expect("read WAL")
+            .iter()
+            .collect::<io::Result<Vec<_>>>()
+            .expect("records");
+        assert!(matches!(
+            records.last(),
+            Some((
+                _,
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Finish { epoch: 1 }
+                }
+            ))
+        ));
+        reopened
+            .commit
+            .as_ref()
+            .expect("coordinator")
+            .truncate()
+            .expect("completed ownership can be truncated");
     }
 
     #[test]

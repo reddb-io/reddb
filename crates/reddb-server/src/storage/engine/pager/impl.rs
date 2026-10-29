@@ -5,7 +5,7 @@ pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
 #[cfg(test)]
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
+const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 
 #[cfg(test)]
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;

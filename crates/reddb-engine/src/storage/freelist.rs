@@ -169,6 +169,19 @@ impl FreeList {
         self.free_pages.iter().any(|id| pages.contains(id))
     }
 
+    pub(crate) fn remove_existing_from(
+        &self,
+        requested: &std::collections::HashSet<u32>,
+        remaining: &mut std::collections::HashSet<u32>,
+    ) -> Result<(), FreeListError> {
+        for id in &self.free_pages {
+            if requested.contains(id) && !remaining.remove(id) {
+                return Err(FreeListError::Corrupted("duplicate recovery page".into()));
+            }
+        }
+        Ok(())
+    }
+
     /// Load free pages from a trunk page
     pub fn load_from_trunk(&mut self, trunk: &Page) -> Result<Option<u32>, FreeListError> {
         // Verify page type

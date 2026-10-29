@@ -141,6 +141,9 @@ fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
 
 fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerError> {
     let retired = existing_overflow_chain(pager)?;
+    if !retired.is_empty() {
+        pager.record_retirement_intent(&retired)?;
+    }
     let page = build_meta_page1_with_overflow(pager, meta_data)?;
     // Cache eviction order must not publish a root before its children.
     pager.sync()?;

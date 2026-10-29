@@ -480,7 +480,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
-        if version < PHASE3_DWB_ZONE_FILE_VERSION || version > reddb_file::PAGE_FILE_VERSION {
+        if !(PHASE3_DWB_ZONE_FILE_VERSION..=reddb_file::PAGE_FILE_VERSION).contains(&version) {
             return Err(PagerError::InvalidDatabase(
                 "unsupported file format fence".into(),
             ));
@@ -1048,6 +1048,125 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         freelist.free_batch(pages);
         *self.header_dirty_lock()? = true;
         Ok(())
+    }
+
+    fn pages_not_in_freelist(
+        &self,
+        pages: &[u32],
+        freelist: &FreeList,
+        page_count: u32,
+    ) -> Result<std::collections::HashSet<u32>, PagerError> {
+        let mut remaining = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= page_count || !remaining.insert(*id))
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid recovery page set".into(),
+            ));
+        }
+        let requested = remaining.clone();
+        freelist
+            .remove_existing_from(&requested, &mut remaining)
+            .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+        let mut trunk_id = freelist.trunk_head();
+        let mut visited = std::collections::HashSet::new();
+        while trunk_id != 0 {
+            if trunk_id < FIRST_ALLOCATABLE_PAGE
+                || trunk_id >= page_count
+                || !visited.insert(trunk_id)
+            {
+                return Err(PagerError::InvalidDatabase(
+                    "invalid freelist trunk chain".into(),
+                ));
+            }
+            let trunk = self.read_page(trunk_id)?;
+            if trunk.page_id() != trunk_id {
+                return Err(PagerError::InvalidDatabase(
+                    "misdirected freelist trunk".into(),
+                ));
+            }
+            let mut loaded = FreeList::new();
+            let next = loaded
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+            while let Some(id) = loaded.allocate() {
+                if id < FIRST_ALLOCATABLE_PAGE || id >= page_count {
+                    return Err(PagerError::InvalidDatabase(
+                        "invalid free page range".into(),
+                    ));
+                }
+                if requested.contains(&id) && !remaining.remove(&id) {
+                    return Err(PagerError::InvalidDatabase(
+                        "duplicate recovery page".into(),
+                    ));
+                }
+            }
+            trunk_id = next.unwrap_or(0);
+        }
+        Ok(remaining)
+    }
+
+    /// Add proven-unowned pages to the allocator exactly once during recovery.
+    /// The caller must exclude all allocation and publication until this state
+    /// has been synced to both superblocks and the journal is completed.
+    pub fn recover_unowned_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let page_count = self.page_count()?;
+        let mut freelist = self.freelist_write()?;
+        let remaining = self.pages_not_in_freelist(pages, &freelist, page_count)?;
+        if !remaining.is_empty() {
+            let mut missing: Vec<_> = remaining.into_iter().collect();
+            missing.sort_unstable();
+            for id in &missing {
+                self.cache.remove(*id);
+            }
+            freelist.free_batch(&missing);
+            *self.header_dirty_lock()? = true;
+        }
+        Ok(())
+    }
+
+    /// Reject a recovery plan if any page it must preserve is already free.
+    /// The caller must exclude allocation and freelist mutation during recovery.
+    pub fn validate_owned_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let page_count = self.page_count()?;
+        let freelist = self.freelist_write()?;
+        let absent = self.pages_not_in_freelist(pages, &freelist, page_count)?;
+        if absent.len() != pages.len() {
+            return Err(PagerError::InvalidDatabase(
+                "owned recovery page is free".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Persist the current allocator in both fallback copies during recovery.
+    /// The caller must exclude allocation until journal completion is durable.
+    pub fn sync_recovered_allocator(&self) -> Result<(), PagerError> {
+        let result = (|| {
+            self.sync()?;
+            let _publication = self
+                .superblock_publication
+                .lock()
+                .map_err(|_| PagerError::LockPoisoned)?;
+            let header = self.header_read()?.clone();
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::encode_database_header(image, &header)
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                })?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Get database header

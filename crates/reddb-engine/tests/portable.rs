@@ -357,6 +357,233 @@ fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
 }
 
 #[test]
+fn recovery_reclaims_pages_idempotently_across_superblock_fallbacks() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    use reddb_file::{PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE};
+
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "recovery-free.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open pager")
+    };
+    let pager = open(pager::MemoryFile::default(), true);
+    let a = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    let b = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    pager.sync().expect("persist allocations");
+    pager
+        .validate_owned_pages(&[a, b])
+        .expect("allocated pages are not free");
+    pager.recover_unowned_pages(&[a, b]).expect("recover pages");
+    assert!(
+        pager.validate_owned_pages(&[a]).is_err(),
+        "a free page cannot be preserved as owned"
+    );
+    pager
+        .recover_unowned_pages(&[a, b])
+        .expect("repeat recovery");
+    pager.sync_recovered_allocator().expect("fence allocator");
+    let bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable file");
+    drop(pager);
+
+    for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+        let mut damaged = bytes.clone();
+        damaged[copy * PAGED_SUPERBLOCK_SLOT_SIZE + 64] ^= 1;
+        let reopened = open(pager::MemoryFile::from_bytes(damaged), false);
+        reopened
+            .recover_unowned_pages(&[a, b])
+            .expect("repeat after restart");
+        reopened
+            .sync_recovered_allocator()
+            .expect("fence recovered allocator");
+        let first = reopened
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id();
+        let second = reopened
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id();
+        assert_ne!(first, second, "a page cannot be handed out twice");
+        assert!([a, b].contains(&first) && [a, b].contains(&second));
+    }
+}
+
+#[test]
+fn recovery_rejects_a_requested_page_duplicated_in_a_freelist_trunk() {
+    use reddb_engine::storage::{
+        page::{Page, PageType, HEADER_SIZE, PAGE_SIZE},
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "recovery-duplicate.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open pager")
+    };
+    let pager = open(pager::MemoryFile::default(), true);
+    let a = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    let b = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate")
+        .page_id();
+    pager.free_retired_pages(&[a, b]).expect("free");
+    pager.sync().expect("sync");
+    let head = pager.header().expect("header").freelist_head;
+    let mut bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("file");
+    drop(pager);
+    let offset = head as usize * PAGE_SIZE;
+    let mut trunk = Page::from_bytes(bytes[offset..offset + PAGE_SIZE].try_into().expect("page"));
+    trunk.as_bytes_mut()[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&2u32.to_le_bytes());
+    trunk.as_bytes_mut()[HEADER_SIZE + 8..HEADER_SIZE + 12].copy_from_slice(&a.to_le_bytes());
+    trunk.as_bytes_mut()[HEADER_SIZE + 12..HEADER_SIZE + 16].copy_from_slice(&a.to_le_bytes());
+    trunk.update_checksum();
+    bytes[offset..offset + PAGE_SIZE].copy_from_slice(trunk.as_bytes());
+    let reopened = open(pager::MemoryFile::from_bytes(bytes), false);
+    assert!(reopened.recover_unowned_pages(&[a]).is_err());
+}
+
+#[test]
+fn interrupted_allocator_recovery_can_be_retried_after_another_interruption() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+
+    let open = |bytes: Option<Vec<u8>>| {
+        let create = bytes.is_none();
+        let file = bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes);
+        Pager::open_owned(
+            file,
+            "recovery-interruption.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open pager")
+    };
+    let initial = open(None);
+    let ids = [
+        initial
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id(),
+        initial
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id(),
+    ];
+    initial.sync().expect("persist allocations");
+    let baseline = initial
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("baseline");
+    drop(initial);
+
+    let probe = open(Some(baseline.clone()));
+    probe.recover_unowned_pages(&ids).expect("recover pages");
+    probe
+        .with_file(|file| file.operations.borrow_mut().clear())
+        .expect("reset operations");
+    probe
+        .sync_recovered_allocator()
+        .expect("count recovery boundaries");
+    let boundaries = probe
+        .with_file(|file| file.operations.borrow().len())
+        .expect("operations");
+    drop(probe);
+    assert!(boundaries > 4);
+
+    for fail_at in 1..=boundaries {
+        for retain_pending in [false, true] {
+            let first = open(Some(baseline.clone()));
+            first.recover_unowned_pages(&ids).expect("recover pages");
+            first
+                .with_file(|file| {
+                    file.operations.borrow_mut().clear();
+                    file.fail_at = Some(fail_at);
+                })
+                .expect("inject first interruption");
+            assert!(
+                first.sync_recovered_allocator().is_err(),
+                "boundary {fail_at}"
+            );
+            let image = first
+                .with_file(|file| {
+                    if retain_pending {
+                        file.bytes.borrow().clone()
+                    } else {
+                        file.durable.borrow().clone()
+                    }
+                })
+                .expect("interrupted image");
+            drop(first);
+
+            let second = open(Some(image));
+            second.recover_unowned_pages(&ids).expect("retry recovery");
+            second
+                .with_file(|file| {
+                    file.operations.borrow_mut().clear();
+                    file.fail_at = Some(1);
+                })
+                .expect("inject recovery interruption");
+            assert!(
+                second.sync_recovered_allocator().is_err(),
+                "retry boundary {fail_at}"
+            );
+            let image = second
+                .with_file(|file| file.durable.borrow().clone())
+                .expect("second image");
+            drop(second);
+
+            let recovered = open(Some(image));
+            recovered
+                .recover_unowned_pages(&ids)
+                .expect("recover after repeated interruption");
+            recovered
+                .sync_recovered_allocator()
+                .expect("persist recovered allocator");
+            let first = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate")
+                .page_id();
+            let second = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate")
+                .page_id();
+            assert_ne!(first, second, "boundary {fail_at} allocated a page twice");
+            assert!(
+                ids.contains(&first) && ids.contains(&second),
+                "boundary {fail_at} lost free pages"
+            );
+        }
+    }
+}
+
+#[test]
 fn retired_batch_rejects_duplicate_pages_without_modifying_allocator() {
     use reddb_engine::storage::{
         page::PageType,
