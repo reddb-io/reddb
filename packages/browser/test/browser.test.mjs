@@ -57,6 +57,8 @@ async function sharedConformance(browserPage) {
     'scalar_goldens', 'scalar_failures', 'row_execution', 'binary_document_evaluation', 'join_execution',
     'aggregation_execution', 'window_execution', 'set_execution', 'cancellation',
     'page_layout_and_corruption', 'freelist_trunk_recovery', 'cache_eviction_and_writeback',
+    'pager_eviction_batch_stays_within_one_frame', 'pager_sparse_dirty_pages_share_a_protected_batch',
+    'pager_dirty_eviction_recovers_a_torn_home_write', 'pager_dirty_eviction_obeys_wal_barrier',
     'btree_persisted_round_trip', 'btree_reclamation_and_cursor_lifetime', 'btree_bounds_and_corruption',
     'pager_orchestration_restart', 'pager_orchestration_allocation_fence', 'pager_orchestration_wal_barrier',
     'pager_orchestration_checkpoint_recovery', 'pager_orchestration_open_policy',
