@@ -37,7 +37,41 @@ must separately require the workflow if it is to be a mandatory merge gate.
 | Structural sparse checkpoint overwrites published pages before its catalog commits | `overflow_checkpoint_undo_survives_interrupted_recovery_and_publication`: overflow payloads, four cache slots, interrupted undo twice, post-publication crash, full payload checks and three further checkpoints/reopens |
 | Undo WAL append fails, or an image is corrupt/incomplete | `checkpoint_before_image_failure_prevents_cache_and_disk_overwrite` fences both write APIs before cache changes; the overflow undo fixture rejects invalid ownership, page size/checksum, duplicate images and truncated WAL before restoring any page |
 | Native KV model becomes table after an unclean restart (#2536) | `kv_model_and_value_survive_kill_without_bootstrap_checkpoint`: kill after acknowledged CREATE/PUT, verify model and value on 3 reopens; fresh embedded, fresh paged and embedded options opening a paged file |
+| Network-acknowledged native KV initialization loses its model/value on process death | `scripts/test-native-kv-crash-recovery.py`: real Rust RedWire client, four fresh/paged/catalog cases, immediate kill after the last write ACK; Linux and Windows |
 | Document contracts and native indexes disappear on replay | `paged_checkpoint_rebuild`, including `document_indexes_survive_reused_checkpoints_and_uncheckpointed_wal_recovery` and `legacy_paged_document_definition_survives_exit_without_checkpoint` |
+
+## Native KV recovery through RedWire
+
+The process contract in #2536 also has an external client/server fixture:
+
+```sh
+CARGO_BUILD_JOBS=2 cargo build --locked --bin red
+REDDB_TEST_BINARY=target/debug/red python3 scripts/test-native-kv-crash-recovery.py \
+  --output /var/tmp/reddb-wire-kv-unique
+```
+
+The output directory must not exist. It retains synthetic databases, per-boot
+logs, the executable SHA-256 and JSON receipts even on failure. The storage
+workflow runs this fixture against its just-built executable on Linux and
+Windows and uploads those artifacts. `red query --bind red://...` uses the Rust
+RedWire driver; a negative control requires queries to fail while the owned
+server is dead, ruling out an embedded/in-memory fallback.
+
+Four cases cover fresh default and serverless stores, default options reopening
+an existing paged store, and a paged catalog with 320 long collection names whose
+combined bytes exceed one page. Each case creates two native KV collections
+beside a table, writes numeric values, nested JSON and deterministic 12-KiB
+payloads, then kills the server immediately after the final write acknowledgement.
+There is no explicit checkpoint between KV initialization/writes and either of
+the first two kills. The existing-paged and large-catalog cases checkpoint their
+prelude before any KV initialization. A final checkpoint/kill/open checks the
+published path too. All reopens verify KV models, every expected value, table
+balances and the padded catalog models.
+
+`Popen.kill()` means SIGKILL on Unix and TerminateProcess on Windows, not power
+loss. This is a standalone public-contract fixture; it does not contain the
+private Hunter schema, migration sequence or client application from #2536.
+Its success must not be described as reproducing or qualifying that private run.
 
 ## Interpreting space checks
 

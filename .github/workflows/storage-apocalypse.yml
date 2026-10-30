@@ -12,6 +12,7 @@ on:
       - 'crates/reddb-server/src/runtime/red_schema/**'
       - 'crates/reddb-server/tests/**'
       - 'crates/unreliable-libc/**'
+      - 'scripts/test-native-kv-crash-recovery.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Makefile'
@@ -42,6 +43,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: storage-recovery-rust-1.91.0
@@ -63,12 +67,20 @@ jobs:
           mkdir -p target/storage-recovery
           set -o pipefail
           make test-memory-regressions 2>&1 | tee target/storage-recovery/memory.log
+      - name: Build current CLI for RedWire process recovery
+        if: ${{ !cancelled() }}
+        run: cargo build --locked --bin red
+      - name: Recover acknowledged RedWire KV writes after forced termination
+        if: ${{ !cancelled() }}
+        run: REDDB_TEST_BINARY=target/debug/red python scripts/test-native-kv-crash-recovery.py --output target/storage-recovery/redwire
       - name: Preserve reproduction and space measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: storage-recovery-${{ github.run_id }}
-          path: target/storage-recovery/*.log
+          path: |
+            target/storage-recovery/*.log
+            target/storage-recovery/redwire/
 
   windows-kv-recovery:
     name: Windows KV acknowledged-write recovery
@@ -80,6 +92,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: storage-recovery-windows-rust-1.91.0
@@ -90,8 +105,15 @@ jobs:
           mkdir -p target/storage-recovery
           set -o pipefail
           cargo test --locked -p reddb-io-server --test single_file_collection_model_recovery -- --test-threads=1 --nocapture 2>&1 | tee target/storage-recovery/windows-kv.log
+      - name: Build current CLI for Windows RedWire process recovery
+        run: cargo build --locked --bin red
+      - name: Recover acknowledged RedWire KV writes after TerminateProcess
+        shell: bash
+        run: REDDB_TEST_BINARY=target/debug/red.exe python scripts/test-native-kv-crash-recovery.py --output target/storage-recovery/redwire
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: storage-recovery-windows-${{ github.run_id }}
-          path: target/storage-recovery/*.log
+          path: |
+            target/storage-recovery/*.log
+            target/storage-recovery/redwire/
