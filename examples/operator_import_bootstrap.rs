@@ -13,7 +13,9 @@ use std::sync::Arc;
 use reddb::auth::vault::{KeyPair, Vault, VaultState};
 use reddb::json::Value as Json;
 use reddb::runtime::query_request::ParamValue;
-use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use reddb::storage::{
+    EntityData, EntityId, EntityKind, RowData, StorageDeployPreset, UnifiedEntity,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -229,6 +231,12 @@ fn insert_rows(runtime: &reddb::RedDBRuntime, collection: &str, rows: &[Json]) -
     Ok(())
 }
 
+fn paged_runtime(path: &Path) -> Result<reddb::RedDBRuntime> {
+    let options = reddb::api::RedDBOptions::persistent(path)
+        .with_storage_profile(StorageDeployPreset::Serverless.selection())?;
+    Ok(reddb::RedDBRuntime::with_options(options)?)
+}
+
 fn import(input: &Json, destination: &Path, certificate: &str) -> Result<()> {
     validate(input)?;
     let blob = input
@@ -261,7 +269,7 @@ fn import(input: &Json, destination: &Path, certificate: &str) -> Result<()> {
     #[cfg(not(unix))]
     fs::create_dir(destination)?;
     let path = destination.join("data.rdb");
-    let runtime = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path))?;
+    let runtime = paged_runtime(&path)?;
     insert_rows(&runtime, "red_config", rows(input, "config")?)?;
     // SQL correctly keeps this collection read-only. Only this offline tool,
     // with a new destination and a validated source, uses the storage API.
@@ -344,9 +352,7 @@ mod tests {
     fn imports_complete_vault_typed_config_audit_and_empty_registry_index_then_reopens(
     ) -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let source = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
-            directory.path().join("source.rdb"),
-        ))?;
+        let source = paged_runtime(&directory.path().join("source.rdb"))?;
         let pager = Arc::clone(source.db().store().pager().ok_or("source pager")?);
         let auth = reddb::auth::AuthStore::with_vault(
             reddb::auth::AuthConfig::default(),
@@ -380,9 +386,7 @@ mod tests {
             "existing destination must be refused"
         );
         assert_eq!(fs::read(target.join("data.rdb"))?, before);
-        let reopened = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
-            target.join("data.rdb"),
-        ))?;
+        let reopened = paged_runtime(&target.join("data.rdb"))?;
         let pager = Arc::clone(reopened.db().store().pager().ok_or("target pager")?);
         let restored = Vault::with_certificate(&pager, &certificate)?
             .load(&pager)?
