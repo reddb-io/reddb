@@ -132,6 +132,179 @@ fn paged_layout_version_is_independent_of_current_writer_version() {
 }
 
 #[test]
+fn unjournaled_trunk_allocation_preserves_unconsumed_free_pages_after_crash() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "free-reuse.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open allocator fixture")
+    };
+    let initial = open(pager::MemoryFile::default(), true);
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..32 {
+        ids.insert(
+            initial
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("seed page")
+                .page_id(),
+        );
+    }
+    initial.sync().expect("publish allocations");
+    initial
+        .free_retired_pages(&ids.iter().copied().collect::<Vec<_>>())
+        .expect("free seed pages");
+    initial.sync().expect("publish free trunk");
+    let baseline_count = initial.page_count().expect("page count");
+    let image = initial
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable seed");
+    let allocation = open(pager::MemoryFile::from_bytes(image), false);
+    let reserved = allocation
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("consume one free page")
+        .page_id();
+    assert!(ids.remove(&reserved));
+    // Capture only the durable bytes, before Drop or a checkpoint can flush the
+    // remaining in-memory free IDs. This models the native non-epoch WAL barrier.
+    let crash = allocation
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("crash image");
+    let recovered = open(pager::MemoryFile::from_bytes(crash), false);
+    for _ in 0..ids.len() {
+        let id = recovered
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("reuse untouched page")
+            .page_id();
+        assert_ne!(id, reserved, "an already reserved page became free again");
+        assert!(
+            ids.remove(&id),
+            "allocator lost the detached trunk remainder: {id}"
+        );
+    }
+    assert!(
+        ids.is_empty(),
+        "all untouched free pages must be reused exactly once"
+    );
+    assert_eq!(recovered.page_count().expect("page count"), baseline_count);
+}
+
+#[test]
+fn unjournaled_trunk_rewrite_io_failures_preserve_remaining_ownership() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    let open = |file, create| {
+        Pager::open_owned(
+            file,
+            "trunk-fault.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            create,
+        )
+        .expect("open allocator fixture")
+    };
+    let seed = open(pager::MemoryFile::default(), true);
+    let ids: Vec<_> = (0..8)
+        .map(|_| {
+            seed.allocate_page(PageType::BTreeLeaf)
+                .expect("seed page")
+                .page_id()
+        })
+        .collect();
+    seed.sync().expect("seed allocations");
+    seed.free_retired_pages(&ids).expect("retire pages");
+    seed.sync().expect("seed trunk");
+    let baseline = seed.page_count().expect("seed count");
+    let image = seed
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("seed image");
+    for fail_at in 1..=12 {
+        let attempt = open(pager::MemoryFile::from_bytes(image.clone()), false);
+        attempt
+            .with_file(|file| {
+                file.operations.borrow_mut().clear();
+                file.fail_at = Some(fail_at);
+            })
+            .expect("inject I/O failure");
+        let allocated = attempt
+            .allocate_page(PageType::BTreeLeaf)
+            .ok()
+            .map(|page| page.page_id());
+        let crash = attempt
+            .with_file(|file| file.durable.borrow().clone())
+            .expect("crash image");
+        let recovered = open(pager::MemoryFile::from_bytes(crash), false);
+        let mut reused = std::collections::HashSet::new();
+        loop {
+            let id = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("recovery allocation")
+                .page_id();
+            if id >= baseline {
+                break;
+            }
+            assert!(
+                ids.contains(&id),
+                "unexpected free page at boundary {fail_at}"
+            );
+            assert_ne!(
+                Some(id),
+                allocated,
+                "published reservation aliased at boundary {fail_at}"
+            );
+            assert!(reused.insert(id), "duplicate reuse at boundary {fail_at}");
+        }
+        // An uncertain allocation may have reserved its one ID. Every other
+        // free ID must survive either side of the protected trunk rewrite.
+        assert!(
+            reused.len() >= ids.len() - 1,
+            "lost remainder at boundary {fail_at}"
+        );
+    }
+}
+
+#[test]
+fn incremental_test_file_matches_full_image_durability() {
+    use reddb_file::VfsFile;
+    use std::io::SeekFrom;
+    let mut full = pager::MemoryFile::from_bytes(vec![19; 8192]);
+    let mut incremental = pager::MemoryFile::from_bytes(vec![19; 8192]);
+    incremental.incremental_sync = true;
+    for cycle in 0..32_u64 {
+        for file in [&mut full, &mut incremental] {
+            file.seek(SeekFrom::Start(cycle * 173)).expect("seek");
+            file.write_all(&[u8::try_from(cycle).expect("test cycle fits in a byte"); 97])
+                .expect("overlapping write");
+            if cycle % 4 == 0 {
+                file.set_len(1024).expect("truncate");
+                file.set_len(8192).expect("extend with zeros");
+            }
+            let before = file.durable.borrow().clone();
+            file.fail_at = Some(file.operations.borrow().len() + 1);
+            assert!(file.sync_all().is_err());
+            assert_eq!(
+                *file.durable.borrow(),
+                before,
+                "failed sync must not publish"
+            );
+            file.fail_at = None;
+            file.sync_all().expect("successful sync");
+        }
+        assert_eq!(*incremental.bytes.borrow(), *full.bytes.borrow());
+        assert_eq!(*incremental.durable.borrow(), *full.durable.borrow());
+    }
+}
+
+#[test]
 fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
     use reddb_engine::storage::{
         page::PageType,
@@ -240,6 +413,10 @@ fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
         fail: Rc<Cell<bool>>,
     }
     impl WalBarrier for Barrier {
+        fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+            Ok(true)
+        }
+
         fn flush_until(&self, _: u64) -> std::io::Result<()> {
             Ok(())
         }
@@ -1096,8 +1273,10 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
 
     let open = |bytes: Option<Vec<u8>>| {
         let create = bytes.is_none();
+        let mut file = bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes);
+        file.incremental_sync = true;
         Pager::open_owned(
-            bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes),
+            file,
             "multi-trunk-reuse.rdb".into(),
             PagerConfig {
                 // This fixture targets allocator trunks. Tiny-cache eviction is

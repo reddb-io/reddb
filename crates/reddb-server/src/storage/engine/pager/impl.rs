@@ -725,14 +725,11 @@ mod tests {
     fn failed_trunk_fence_is_completed_before_retrying_allocation() {
         let path = temp_db_path("retry-trunk-fence");
         let pager = Pager::open_default(&path).expect("pager");
-        let mut pages = Vec::new();
-        for _ in 0..8 {
-            pages.push(pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id());
-        }
+        // An empty trunk is itself reusable, so consuming its last page must
+        // still fence both superblocks even outside an ownership epoch.
+        let page = pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id();
         pager.sync().unwrap();
-        for id in pages {
-            pager.free_page(id).unwrap();
-        }
+        pager.free_page(page).unwrap();
         pager.sync().unwrap();
         let trunk = pager.header().unwrap().freelist_head;
         assert_ne!(trunk, 0);
@@ -759,6 +756,60 @@ mod tests {
             );
         }
         drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failed_unjournaled_trunk_write_requires_reopen_and_preserves_free_pages() {
+        let path = temp_db_path("failed-trunk-rewrite");
+        let pager = Pager::open_default(&path).expect("pager");
+        let mut pages = std::collections::HashSet::new();
+        for _ in 0..8 {
+            pages.insert(
+                pager
+                    .allocate_page(PageType::BTreeLeaf)
+                    .expect("seed page")
+                    .page_id(),
+            );
+        }
+        pager.sync().expect("persist seed");
+        for &id in &pages {
+            pager.free_page(id).expect("free seed page");
+        }
+        pager.sync().expect("persist free list");
+        let baseline = pager.page_count().expect("page count");
+        let writable = pager
+            .core
+            .with_file(|file| std::mem::replace(&mut file.0, File::open(&path).expect("read only")))
+            .expect("inject write failure");
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        pager
+            .core
+            .with_file(|file| file.0 = writable)
+            .expect("restore file");
+        let error = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect_err("writeback must stay fenced");
+        assert!(error.to_string().contains("reopen"), "{error}");
+        drop(pager);
+
+        let recovered = Pager::open_default(&path).expect("recover protected write");
+        let mut reused = std::collections::HashSet::new();
+        for _ in 0..pages.len() {
+            let id = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("reuse after recovery")
+                .page_id();
+            if id >= baseline {
+                break;
+            }
+            assert!(pages.contains(&id), "unexpected free page {id}");
+            assert!(reused.insert(id), "duplicate reuse {id}");
+        }
+        // Only the single uncertain reservation may have been removed. The
+        // protected write must never detach and lose the rest of the trunk.
+        assert!(reused.len() >= pages.len() - 1, "lost free-page remainder");
+        drop(recovered);
         cleanup(&path);
     }
 
