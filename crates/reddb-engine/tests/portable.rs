@@ -282,7 +282,7 @@ fn incremental_test_file_matches_full_image_durability() {
     for cycle in 0..32_u64 {
         for file in [&mut full, &mut incremental] {
             file.seek(SeekFrom::Start(cycle * 173)).expect("seek");
-            file.write_all(&vec![cycle as u8; 97])
+            file.write_all(&[u8::try_from(cycle).expect("test cycle fits in a byte"); 97])
                 .expect("overlapping write");
             if cycle % 4 == 0 {
                 file.set_len(1024).expect("truncate");
