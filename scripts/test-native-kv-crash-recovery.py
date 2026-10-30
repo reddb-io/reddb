@@ -140,7 +140,7 @@ def run_case(binary, output, name, preset, existing_paged, catalog_entries=0):
         for collection in padding:
             engine.execute('CREATE TABLE ' + collection + ' (id INTEGER PRIMARY KEY, note TEXT)')
         if padding:
-            assert sum(len(collection.encode()) for collection in padding) > 4096, 'Catalog did not exceed one page'
+            assert sum(len(collection.encode()) for collection in padding) > 16_384, 'Catalog did not exceed one page'
         if existing_paged or padding:
             # Prepare an existing paged/overflow catalog before native KV DDL.
             # No checkpoint follows that later KV initialization before its kills.
@@ -205,7 +205,7 @@ def run():
         for name, preset, existing, catalog in [('default', None, False, 0),
                                                 ('serverless', 'serverless', False, 0),
                                                 ('default-on-paged', None, True, 0),
-                                                ('catalog-overflow', 'serverless', False, 96)]:
+                                                ('catalog-overflow', 'serverless', False, 320)]:
             receipt['cases'].append(run_case(binary, args.output, name, preset, existing, catalog))
         receipt['passed'] = True
     finally:

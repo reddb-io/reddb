@@ -58,7 +58,7 @@ RedWire driver; a negative control requires queries to fail while the owned
 server is dead, ruling out an embedded/in-memory fallback.
 
 Four cases cover fresh default and serverless stores, default options reopening
-an existing paged store, and a paged catalog with 96 long collection names whose
+an existing paged store, and a paged catalog with 320 long collection names whose
 combined bytes exceed one page. Each case creates two native KV collections
 beside a table, writes numeric values, nested JSON and deterministic 12-KiB
 payloads, then kills the server immediately after the final write acknowledgement.
