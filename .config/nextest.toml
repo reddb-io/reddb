@@ -57,6 +57,14 @@ filter = 'test(=multi_trunk_recovery_reuses_every_page_without_growing)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# The full checkpoint/recovery crash matrix repeatedly starts child processes
+# and fsyncs real files. The shared runner reached its final cases at the 120s
+# cutoff. Preserve every case and assertion with exclusive, bounded execution.
+[[profile.default.overrides]]
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # CI profile: same hard per-test timeout, plus a single retry to absorb
 # genuinely flaky integration tests, and a JUnit report the runner can ingest.
 [profile.ci]
@@ -76,6 +84,12 @@ retries = 0
 filter = 'test(=multi_trunk_recovery_reuses_every_page_without_growing)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 10 }
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 5 }
 retries = 0
 
 [profile.ci.junit]
