@@ -1968,6 +1968,20 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
+        self.project_all_zoned_with_stats(zone_preds, |entity| {
+            filter(entity).then(|| entity.clone())
+        })
+    }
+
+    fn project_all_zoned_with_stats<T, F>(
+        &self,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        project: F,
+    ) -> (Vec<T>, SegmentScanStats)
+    where
+        T: Send,
+        F: Fn(&UnifiedEntity) -> Option<T> + Sync,
+    {
         let mut results = Vec::new();
         let mut scan_stats = SegmentScanStats::default();
 
@@ -1981,7 +1995,7 @@ impl SegmentManager {
             } else {
                 growing_arc.read()
             };
-            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            results.extend(growing.iter().filter_map(&project));
         }
 
         // Sealed segments: zone-prune on main thread, then scan in parallel.
@@ -2009,8 +2023,8 @@ impl SegmentManager {
         let use_parallel = surviving.len() > 1 && crate::execution::should_parallelize();
 
         if use_parallel {
-            let filter_ref = &filter;
-            let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
+            let project_ref = &project;
+            let segment_results: Vec<Vec<T>> = std::thread::scope(|s| {
                 surviving
                     .iter()
                     .map(|segment| {
@@ -2018,14 +2032,16 @@ impl SegmentManager {
                             segment
                                 .read()
                                 .iter()
-                                .filter(|e| filter_ref(e))
-                                .cloned()
+                                .filter_map(project_ref)
                                 .collect::<Vec<_>>()
                         })
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .map(|handle| handle.join().unwrap_or_default())
+                    .map(|handle| match handle.join() {
+                        Ok(batch) => batch,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    })
                     .collect()
             });
             for batch in segment_results {
@@ -2034,7 +2050,7 @@ impl SegmentManager {
         } else {
             for segment_arc in surviving {
                 let seg = segment_arc.read();
-                results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                results.extend(seg.iter().filter_map(&project));
             }
         }
 
@@ -2320,6 +2336,28 @@ impl SegmentManager {
     {
         self.query_all_zoned_with_stats(zone_preds, |entity| {
             Self::scan_entity_visible(snapshot, entity) && filter(entity)
+        })
+    }
+
+    /// Project visible zone-map candidates while borrowing each source entity.
+    /// Only the owned projection leaves the segment read guard. The callback
+    /// must not mutate or re-enter the source collection.
+    pub fn scan_project_zoned_with_stats<T, F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        project: F,
+    ) -> (Vec<T>, SegmentScanStats)
+    where
+        T: Send,
+        F: Fn(&UnifiedEntity) -> Option<T> + Sync,
+    {
+        self.project_all_zoned_with_stats(zone_preds, |entity| {
+            if Self::scan_entity_visible(snapshot, entity) {
+                project(entity)
+            } else {
+                None
+            }
         })
     }
 
@@ -3744,6 +3782,145 @@ mod tests {
         assert_eq!(stats.segments_total, 3);
         assert_eq!(stats.segments_scanned, 2);
         assert_eq!(stats.segments_pruned, 1);
+    }
+
+    #[test]
+    fn projected_zoned_scan_preserves_segment_order_and_pruning() {
+        let manager = SegmentManager::with_config(
+            "events",
+            ManagerConfig {
+                segment_config: SegmentConfig {
+                    max_entities: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        for (index, value) in [10, 20, 100, 110, 200].into_iter().enumerate() {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(index as u64 + 1),
+                "events",
+                index as u64 + 1,
+                vec![],
+            );
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::Integer(value)],
+                vec!["ts".into()],
+            ));
+            manager.insert(entity).expect("test row");
+        }
+        assert_eq!(manager.stats().sealed_count, 2);
+        let project = |entity: &UnifiedEntity| match entity.data.as_row()?.get_field("ts")? {
+            Value::Integer(value) => Some(*value),
+            _ => None,
+        };
+        let (all, stats) = manager.scan_project_zoned_with_stats(None, &[], project);
+        let (legacy, _) = manager.scan_zoned_with_stats(None, &[], |_| true);
+        assert_eq!(all, legacy.iter().filter_map(project).collect::<Vec<_>>());
+        assert_eq!(all[0], 200, "growing segment first");
+        assert!(all[1..3].iter().all(|value| [10, 20].contains(value)));
+        assert!(all[3..5].iter().all(|value| [100, 110].contains(value)));
+        assert_eq!(stats.segments_total, 3);
+        assert_eq!(stats.segments_scanned, 3);
+        assert_eq!(stats.segments_pruned, 0);
+        let probe = Value::Integer(100);
+        let (pruned, stats) = manager.scan_project_zoned_with_stats(
+            None,
+            &[("ts", ZoneColPred::Gte(&probe))],
+            |entity| project(entity).filter(|value| *value >= 100),
+        );
+        assert_eq!(
+            pruned,
+            all.into_iter()
+                .filter(|value| *value >= 100)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(stats.segments_total, 3);
+        assert_eq!(stats.segments_scanned, 2);
+        assert_eq!(stats.segments_pruned, 1);
+        let (empty, _) = manager.scan_project_zoned_with_stats(None, &[], |_| None::<u64>);
+        assert!(empty.is_empty(), "projection may reject every candidate");
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.scan_project_zoned_with_stats(None, &[], |entity| {
+                let value = project(entity)?;
+                assert_ne!(value, 10, "injected projection worker failure");
+                Some(value)
+            })
+        }));
+        assert!(
+            failure.is_err(),
+            "a failed worker must not return a successful partial scan"
+        );
+    }
+
+    #[test]
+    fn projected_zoned_scan_checks_visibility_before_projection_on_workers() {
+        let manager = SegmentManager::with_config(
+            "accounts",
+            ManagerConfig {
+                segment_config: SegmentConfig {
+                    max_entities: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        for (id, xmin, xmax) in [(1, 3, 12), (2, 12, 0), (3, 3, 0), (4, 3, 4), (5, 3, 0)] {
+            let mut entity = UnifiedEntity::table_row(EntityId::new(id), "accounts", id, vec![]);
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+            manager.insert(entity).expect("versioned test row");
+        }
+        let mut hidden = UnifiedEntity::table_row(EntityId::new(6), "accounts", 6, vec![]);
+        hidden.data = EntityData::Row(RowData::with_names(
+            vec![Value::text("pending")],
+            vec!["__moderation_status".into()],
+        ));
+        manager.insert(hidden).expect("moderated row");
+        assert_eq!(manager.stats().sealed_count, 2);
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        std::thread::spawn(move || {
+            for (view, expected) in [(Some(&snapshot), vec![5, 1, 3, 4]), (None, vec![5, 2, 3])] {
+                let called = std::sync::Mutex::new(Vec::new());
+                let (rows, stats) = manager.scan_project_zoned_with_stats(view, &[], |entity| {
+                    let id = entity.id.raw();
+                    assert!(
+                        expected.contains(&id),
+                        "invisible entity reached projection: {id}"
+                    );
+                    called.lock().expect("callback log").push(id);
+                    Some(id)
+                });
+                let (legacy, _) = manager.scan_zoned_with_stats(view, &[], |_| true);
+                assert_eq!(
+                    rows,
+                    legacy
+                        .iter()
+                        .map(|entity| entity.id.raw())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(rows[0], 5, "visible growing row first");
+                let mut called = called.into_inner().expect("callback log");
+                called.sort_unstable();
+                let mut expected = expected;
+                expected.sort_unstable();
+                assert_eq!(called, expected, "each visible row projected exactly once");
+                assert_eq!(stats.segments_total, 3);
+                assert_eq!(stats.segments_scanned, 3);
+            }
+        })
+        .join()
+        .expect("projected scan worker");
     }
 
     #[test]
