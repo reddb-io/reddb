@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.27.1
+
+### Patch Changes
+
+- [#2556](https://github.com/reddb-io/reddb/pull/2556) [`764c7cb`](https://github.com/reddb-io/reddb/commit/764c7cb8b9f7ba0d3de81a9f4af5dcbf1d491d85) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reuse the checked native artifact directory within each catalog index reconciliation instead of rereading it for every index. Preserve fresh observations and decoding-error fallbacks between calls.
+
+- [#2552](https://github.com/reddb-io/reddb/pull/2552) [`7afd2ce`](https://github.com/reddb-io/reddb/commit/7afd2ce6cac0dadd0efc65940b8ccc3edee02ec6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Detect the memory limit of the current cgroup and its ancestors when RedDB runs in a nested Linux service, instead of incorrectly sizing memory pools from host RAM. Keep explicit configuration precedence and namespaced container detection unchanged.
+
+  Preserve unconsumed free pages across crashes when normal writes reuse a persisted freelist outside a checkpoint ownership epoch. Keep the untouched IDs on disk instead of detaching a whole trunk into volatile memory; checkpoint/replay epochs retain journaled batch allocation.
+
+- [#2555](https://github.com/reddb-io/reddb/pull/2555) [`d8c79e8`](https://github.com/reddb-io/reddb/commit/d8c79e8d1ef3acdd3f4c3f0c638741c2dca80de5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reuse unchanged collection trees during committed WAL recovery and project sparse table-row changes using bounded exact WAL images. Keep full validation when proof is unavailable and retain the existing durable page-ownership, undo and catalog-publication ordering.
+
 ## 1.27.0
 
 ### Dependency corrections
