@@ -181,12 +181,12 @@ jobs:
           # version, unlike the glibc-linked `linux-x86_64`. Same Docker musl-
           # cross path as aarch64.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-musl, asset_name: linux-x86_64-static, cross: true }
-          # Build Intel macOS on the ARM macOS pool. The macos-13 Intel pool
-          # frequently queues long enough to block publishing; cross-building
-          # from macos-14 still produces the x86_64-apple-darwin asset, but we
+          # Build Intel macOS on the supported ARM macOS pool. macos-14
+          # brownouts cancel the matrix and skip dependent publication jobs.
+          # Cross-building still produces the x86_64-apple-darwin asset, but we
           # cannot rely on Rosetta being available for a local smoke test.
-          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: true,  smoke: false, optional: true }
-          - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
+          - { os: macos-15,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: true,  smoke: false, optional: true }
+          - { os: macos-15,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
