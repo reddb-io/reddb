@@ -278,6 +278,7 @@ fn import(input: &Json, destination: &Path, certificate: &str) -> Result<()> {
         "red.control_events",
         rows(input, "control_events")?,
     )?;
+    import_indexes(&runtime, input)?;
     let pager = Arc::clone(
         runtime
             .db()
@@ -406,9 +407,27 @@ mod tests {
             |event| event.data.as_row().and_then(|row| row.get_field("ts"))
                 == Some(&reddb_types::Value::Integer(1699999999999999999))
         ));
-        let restored_auth = reddb::auth::AuthStore::with_vault(
+        let indexes = reopened.execute_query("SHOW INDEXES ON red_index_registry")?;
+        let index = indexes
+            .result
+            .records
+            .iter()
+            .find(|row| {
+                row.get("name") == Some(&reddb_types::Value::Text("retained_registry_index".into()))
+            })
+            .ok_or("imported registry index missing after reopen")?;
+        assert_eq!(
+            index.get("kind"),
+            Some(&reddb_types::Value::Text("BTREE".into()))
+        );
+        assert_eq!(
+            index.get("unique"),
+            Some(&reddb_types::Value::Boolean(true))
+        );
+        let restored_auth = reddb::auth::AuthStore::with_vault_certificate(
             reddb::auth::AuthConfig::default(),
             Arc::clone(&pager),
+            &certificate,
         )?;
         restored_auth.authenticate("fixture_admin", "fixture-password-is-private")?;
         Ok(())
