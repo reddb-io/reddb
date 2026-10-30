@@ -201,6 +201,12 @@ pub trait WalBarrier {
         Ok(())
     }
 
+    /// True only while detached free IDs have durable recovery ownership.
+    /// No-op callbacks must not authorize moving a whole trunk into RAM.
+    fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
     /// Called before retired pages enter the free list.
     fn retire_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
         Ok(())
@@ -810,32 +816,41 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     }
                     pages.push(id);
                 }
-                self.record_ownership(|wal| wal.detach_free_pages(&pages))?;
+                let mut journaled = false;
+                self.record_ownership(|wal| {
+                    journaled = wal.has_page_ownership_journal()?;
+                    Ok(())
+                })?;
+                if !journaled {
+                    self.allocate_unjournaled_trunk(&mut freelist, trunk, &pages)?
+                } else {
+                    self.record_ownership(|wal| wal.detach_free_pages(&pages))?;
 
-                freelist
-                    .load_from_trunk(&trunk)
-                    .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
-                let mut header = self.header_write()?;
-                header.freelist_head = freelist.trunk_head();
-                *self.header_dirty_lock()? = true;
-                drop(header);
-                // The consumed trunk itself becomes reusable. Forget its old
-                // allocator role durably before cache eviction can overwrite it.
-                // Keep the allocator locked so another allocator cannot race
-                // ahead of this fence. A failed fence leaves allocation stopped.
-                self.allocation_fence_pending
-                    .store(true, std::sync::atomic::Ordering::Release);
-                self.complete_allocation_fence()?;
-                let next = freelist.next_in_memory_page().ok_or_else(|| {
-                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
-                })?;
-                self.record_ownership(|wal| wal.reserve_pages(next, 1))?;
-                let id = freelist.allocate().ok_or_else(|| {
-                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
-                })?;
-                self.allocation_reused
-                    .store(true, std::sync::atomic::Ordering::Release);
-                id
+                    freelist
+                        .load_from_trunk(&trunk)
+                        .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
+                    let mut header = self.header_write()?;
+                    header.freelist_head = freelist.trunk_head();
+                    *self.header_dirty_lock()? = true;
+                    drop(header);
+                    // The consumed trunk itself becomes reusable. Forget its old
+                    // allocator role durably before cache eviction can overwrite it.
+                    // Keep the allocator locked so another allocator cannot race
+                    // ahead of this fence. A failed fence leaves allocation stopped.
+                    self.allocation_fence_pending
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    self.complete_allocation_fence()?;
+                    let next = freelist.next_in_memory_page().ok_or_else(|| {
+                        PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                    })?;
+                    self.record_ownership(|wal| wal.reserve_pages(next, 1))?;
+                    let id = freelist.allocate().ok_or_else(|| {
+                        PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                    })?;
+                    self.allocation_reused
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    id
+                }
             } else {
                 // No free pages, extend file
                 let mut header = self.header_write()?;
@@ -869,6 +884,45 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.cache.mark_dirty(page_id);
 
         Ok(page)
+    }
+
+    /// Keep untouched free IDs reachable on disk when no ownership epoch can
+    /// recover a detached trunk. Removing one ID costs one protected page write;
+    /// checkpoint/replay epochs retain their batched, journaled allocation path.
+    fn allocate_unjournaled_trunk(
+        &self,
+        freelist: &mut FreeList,
+        mut trunk: Page,
+        pages: &[u32],
+    ) -> Result<u32, PagerError> {
+        let id = *pages
+            .first()
+            .expect("validated trunk includes its own page");
+        self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+        if pages.len() > 1 {
+            let remaining =
+                u32::try_from(pages.len() - 2).expect("a validated trunk fits in one page");
+            trunk.content_mut()[4..8].copy_from_slice(&remaining.to_le_bytes());
+            trunk.update_checksum();
+            self.cache.remove(trunk.page_id());
+            self.write_pages_through_dwb(&[(trunk.page_id(), trunk)])?;
+            freelist.note_durable_trunk_allocation(remaining);
+        } else {
+            // The empty trunk itself is the last available page. Fence both
+            // superblocks before it can be overwritten as user data.
+            freelist
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+            self.header_write()?.freelist_head = freelist.trunk_head();
+            *self.header_dirty_lock()? = true;
+            self.allocation_fence_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.complete_allocation_fence()?;
+            assert_eq!(freelist.allocate(), Some(id));
+        }
+        self.allocation_reused
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(id)
     }
 
     /// Reserve a contiguous extent of vector pages.

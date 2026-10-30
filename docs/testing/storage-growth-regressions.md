@@ -227,3 +227,14 @@ or failed recovery. It is a local runtime qualification tool, not a substitute
 for the existing crash-boundary tests or measurements on OCI storage. It does
 not qualify a sustained production workload, authenticated application sessions,
 all possible page states, or power-loss behavior.
+
+The allocator also has direct crash regressions for a WAL barrier with no active
+page-ownership journal: `unjournaled_trunk_allocation_preserves_unconsumed_free_pages_after_crash`
+reserves one page from a persisted trunk, discards volatile state, then requires
+every untouched ID to be reused exactly once without file growth.
+`unjournaled_trunk_rewrite_io_failures_preserve_remaining_ownership` interrupts
+reads/writes/syncs around the protected trunk rewrite. Recovery may retain the
+single uncertain reservation, but cannot lose the trunk remainder or return a
+successfully reserved ID again. Outside an ownership epoch, this path pays one
+protected page write per reused ID; journaled checkpoint/replay allocation keeps
+its batched path. No file format change is introduced.

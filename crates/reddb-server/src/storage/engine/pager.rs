@@ -158,6 +158,10 @@ impl NativeWalBarrier {
 }
 
 impl WalBarrier for NativeWalBarrier {
+    fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+        Ok(self.ownership_recorder()?.is_some())
+    }
+
     fn needs_page_image(&self, page_id: u32) -> std::io::Result<bool> {
         self.ownership_recorder()?
             .map_or(Ok(false), |recorder| recorder.needs_page_image(page_id))
