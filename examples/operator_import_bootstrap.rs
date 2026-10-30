@@ -176,7 +176,7 @@ fn import_indexes(runtime: &reddb::RedDBRuntime, input: &Json) -> Result<()> {
         runtime
             .db()
             .store()
-            .get_or_create_collection("red_index_registry")?;
+            .get_or_create_collection("red_index_registry");
         let name = index
             .get("name")
             .and_then(Json::as_str)
@@ -195,7 +195,7 @@ fn import_indexes(runtime: &reddb::RedDBRuntime, input: &Json) -> Result<()> {
             .collect::<Vec<_>>()
             .join(",");
         runtime.execute_query(&format!(
-            "CREATE {unique}INDEX \"{name}\" ON red_index_registry ({columns})"
+            "CREATE {unique}INDEX \"{name}\" ON red_index_registry ({columns}) USING BTREE"
         ))?;
     }
     Ok(())
@@ -210,7 +210,7 @@ fn canonical_vault(state: &VaultState) -> Result<Vec<String>> {
 
 fn insert_rows(runtime: &reddb::RedDBRuntime, collection: &str, rows: &[Json]) -> Result<()> {
     let store = runtime.db().store();
-    store.get_or_create_collection(collection)?;
+    store.get_or_create_collection(collection);
     for row in rows {
         let entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -259,15 +259,17 @@ fn import(input: &Json, destination: &Path, certificate: &str) -> Result<()> {
         "red.control_events",
         rows(input, "control_events")?,
     )?;
-    let pager = runtime
-        .db()
-        .store()
-        .pager()
-        .ok_or("persistent pager required")?;
-    let vault = Vault::with_certificate(pager, certificate)?;
-    vault.save(pager, &state)?;
+    let pager = Arc::clone(
+        runtime
+            .db()
+            .store()
+            .pager()
+            .ok_or("persistent pager required")?,
+    );
+    let vault = Vault::with_certificate(&pager, certificate)?;
+    vault.save(&pager, &state)?;
     runtime.checkpoint()?;
-    let restored = vault.load(pager)?.ok_or("restored Vault missing")?;
+    let restored = vault.load(&pager)?.ok_or("restored Vault missing")?;
     if canonical_vault(&state)? != canonical_vault(&restored)? {
         return Err("complete Vault readback differs".into());
     }
@@ -328,15 +330,15 @@ mod tests {
         let source = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
             directory.path().join("source.rdb"),
         ))?;
-        let pager = source.db().store().pager().ok_or("source pager")?;
+        let pager = Arc::clone(source.db().store().pager().ok_or("source pager")?);
         let auth = reddb::auth::AuthStore::with_vault(
             reddb::auth::AuthConfig::default(),
-            Arc::clone(pager),
+            Arc::clone(&pager),
         )?;
         let bootstrap = auth.bootstrap("fixture_admin", "fixture-password-is-private")?;
         let certificate = bootstrap.certificate.ok_or("certificate")?;
-        let vault = Vault::with_certificate(pager, &certificate)?;
-        let mut state = vault.load(pager)?.ok_or("source Vault")?;
+        let vault = Vault::with_certificate(&pager, &certificate)?;
+        let mut state = vault.load(&pager)?.ok_or("source Vault")?;
         state
             .kv
             .insert("red.secret.fixture".into(), "private fixture value".into());
@@ -360,8 +362,8 @@ mod tests {
         let reopened = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
             target.join("data.rdb"),
         ))?;
-        let pager = reopened.db().store().pager().ok_or("target pager")?;
-        let restored = Vault::with_certificate(pager, &certificate)?
+        let pager = Arc::clone(reopened.db().store().pager().ok_or("target pager")?);
+        let restored = Vault::with_certificate(&pager, &certificate)?
             .load(pager)?
             .ok_or("restored Vault")?;
         assert_eq!(canonical_vault(&state)?, canonical_vault(&restored)?);
@@ -381,7 +383,7 @@ mod tests {
         ));
         let restored_auth = reddb::auth::AuthStore::with_vault(
             reddb::auth::AuthConfig::default(),
-            Arc::clone(pager),
+            Arc::clone(&pager),
         )?;
         restored_auth.authenticate("fixture_admin", "fixture-password-is-private")?;
         Ok(())
