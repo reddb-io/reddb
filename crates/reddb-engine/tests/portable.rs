@@ -273,6 +273,38 @@ fn unjournaled_trunk_rewrite_io_failures_preserve_remaining_ownership() {
 }
 
 #[test]
+fn incremental_test_file_matches_full_image_durability() {
+    use reddb_file::VfsFile;
+    use std::io::SeekFrom;
+    let mut full = pager::MemoryFile::from_bytes(vec![19; 8192]);
+    let mut incremental = pager::MemoryFile::from_bytes(vec![19; 8192]);
+    incremental.incremental_sync = true;
+    for cycle in 0..32_u64 {
+        for file in [&mut full, &mut incremental] {
+            file.seek(SeekFrom::Start(cycle * 173)).expect("seek");
+            file.write_all(&vec![cycle as u8; 97])
+                .expect("overlapping write");
+            if cycle % 4 == 0 {
+                file.set_len(1024).expect("truncate");
+                file.set_len(8192).expect("extend with zeros");
+            }
+            let before = file.durable.borrow().clone();
+            file.fail_at = Some(file.operations.borrow().len() + 1);
+            assert!(file.sync_all().is_err());
+            assert_eq!(
+                *file.durable.borrow(),
+                before,
+                "failed sync must not publish"
+            );
+            file.fail_at = None;
+            file.sync_all().expect("successful sync");
+        }
+        assert_eq!(*incremental.bytes.borrow(), *full.bytes.borrow());
+        assert_eq!(*incremental.durable.borrow(), *full.durable.borrow());
+    }
+}
+
+#[test]
 fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
     use reddb_engine::storage::{
         page::PageType,
@@ -1241,8 +1273,10 @@ fn multi_trunk_recovery_reuses_every_page_without_growing() {
 
     let open = |bytes: Option<Vec<u8>>| {
         let create = bytes.is_none();
+        let mut file = bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes);
+        file.incremental_sync = true;
         Pager::open_owned(
-            bytes.map_or_else(pager::MemoryFile::default, pager::MemoryFile::from_bytes),
+            file,
             "multi-trunk-reuse.rdb".into(),
             PagerConfig {
                 // This fixture targets allocator trunks. Tiny-cache eviction is

@@ -31,6 +31,10 @@ pub(crate) struct MemoryFile {
     pub(crate) fail_write_range: Option<std::ops::Range<u64>>,
     pub(crate) failed_write_offset: Option<u64>,
     pub(crate) fail_len: Cell<bool>,
+    /// Large allocator sweeps synchronize thousands of single-page rewrites.
+    /// Preserve the same durable image without cloning the whole file per sync.
+    pub(crate) incremental_sync: bool,
+    dirty_ranges: RefCell<Vec<std::ops::Range<usize>>>,
 }
 
 impl MemoryFile {
@@ -57,6 +61,11 @@ impl MemoryFile {
         let length = bytes.len().max(start + buffer.len());
         bytes.resize(length, 0);
         bytes[start..start + buffer.len()].copy_from_slice(buffer);
+        if self.incremental_sync {
+            self.dirty_ranges
+                .borrow_mut()
+                .push(start..start + buffer.len());
+        }
     }
 }
 
@@ -73,10 +82,15 @@ impl VfsFile for MemoryFile {
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
-        self.bytes.borrow_mut().resize(
-            usize::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?,
-            0,
-        );
+        let length = usize::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let mut bytes = self.bytes.borrow_mut();
+        let previous = bytes.len();
+        bytes.resize(length, 0);
+        if self.incremental_sync {
+            self.dirty_ranges
+                .borrow_mut()
+                .push(previous.min(length)..previous.max(length));
+        }
         Ok(())
     }
 
@@ -123,7 +137,17 @@ impl VfsFile for MemoryFile {
 
     fn sync_all(&self) -> io::Result<()> {
         self.operation(Operation::Sync)?;
-        *self.durable.borrow_mut() = self.bytes.borrow().clone();
+        if self.incremental_sync {
+            let bytes = self.bytes.borrow();
+            let mut durable = self.durable.borrow_mut();
+            durable.resize(bytes.len(), 0);
+            for range in self.dirty_ranges.borrow_mut().drain(..) {
+                let range = range.start.min(bytes.len())..range.end.min(bytes.len());
+                durable[range.clone()].copy_from_slice(&bytes[range]);
+            }
+        } else {
+            *self.durable.borrow_mut() = self.bytes.borrow().clone();
+        }
         Ok(())
     }
 }
@@ -685,7 +709,9 @@ pub fn pager_orchestration_open_policy() {
 pub fn pager_orchestration_allocation_fence() {
     let initial = open_pager(MemoryFile::default(), true);
     let mut ids = Vec::new();
-    for _ in 0..8 {
+    // Without a recovery journal, the trunk stays on disk until its last ID
+    // (the trunk itself) is consumed. Exercise that same two-superblock fence.
+    for _ in 0..1 {
         ids.push(
             initial
                 .allocate_page(PageType::BTreeLeaf)

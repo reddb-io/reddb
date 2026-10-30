@@ -112,10 +112,7 @@ impl FreeList {
 
     /// A tail ID was durably removed without detaching the trunk into memory.
     pub(crate) fn note_durable_trunk_allocation(&mut self, remaining_in_trunk: u32) {
-        self.total_free = self
-            .total_free
-            .saturating_sub(1)
-            .max(remaining_in_trunk + 1);
+        self.total_free = self.total_free.saturating_sub(1).max(remaining_in_trunk);
     }
 
     /// Check if freelist is empty
