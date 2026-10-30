@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.3
+
+### Patch Changes
+
+- [#2559](https://github.com/reddb-io/reddb/pull/2559) [`23b2167`](https://github.com/reddb-io/reddb/commit/23b216758564b47143c22df9172d99d60cd57275) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Filter and project parallel table scans from borrowed entities instead of cloning full matching rows before materialization. This avoids copying unselected binary payloads while preserving snapshot visibility, segment pruning, and scan ordering. Worker panics now propagate instead of returning an apparently successful partial scan.
+
 ## 1.27.2
 
 ### Patch Changes
