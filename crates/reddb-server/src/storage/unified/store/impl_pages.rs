@@ -63,6 +63,7 @@ impl CheckpointTreeBuilder {
 #[cfg(test)]
 thread_local! {
     static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static REPLAY_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHECKPOINT_BUFFERED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -982,15 +983,65 @@ impl UnifiedStore {
         };
         let collections = self.resident.collections.read();
         let mut indices = self.btree_indices.write();
+        let previous_versions = self.checkpoint_versions.read();
+        let raw_replay =
+            self.snapshot_manager.get().is_none() && self.pending_vault_versions.read().is_empty();
         for (name, manager) in collections.iter() {
-            let tree =
-                self.checkpoint_tree(pager, manager, indices.get(name), |entity, metadata| {
-                    Some(Self::serialize_entity_record(
-                        entity,
-                        metadata.as_ref(),
-                        self.format_version(),
-                    ))
-                })?;
+            let mut reusable = None;
+            if raw_replay {
+                if let (Some(previous), Some(tree)) =
+                    (previous_versions.get(name), indices.get(name))
+                {
+                    let mut current = CheckpointVersion {
+                        manager: Arc::downgrade(manager),
+                        segments: manager.checkpoint_revisions(),
+                        visibility_revision: 0,
+                        untracked_visibility_revision: 0,
+                        excluded_xids: Arc::default(),
+                        pending_vault: Arc::default(),
+                        format_version: self.format_version(),
+                        deferred_rows: Some(Arc::default()),
+                        has_unprojected_rows: false,
+                    };
+                    if previous.manager.ptr_eq(&current.manager)
+                        && previous.format_version == current.format_version
+                    {
+                        if previous.segments == current.segments
+                            && !previous.has_unprojected_rows
+                            && checkpoint_visibility_matches(previous, &current)
+                        {
+                            reusable = Some(Arc::clone(tree));
+                        } else {
+                            // The replay ownership epoch protects in-place
+                            // changes with the same undo/publication protocol
+                            // used by normal sparse checkpoints. Missing WAL
+                            // proof, old formats and exhausted journals retain
+                            // the full comparison/rebuild path below.
+                            reusable = self.sparse_checkpoint_tree(
+                                name,
+                                manager,
+                                tree,
+                                previous,
+                                &mut current,
+                            )?;
+                        }
+                    }
+                }
+            }
+            let tree = match reusable {
+                Some(tree) => tree,
+                None => {
+                    self.checkpoint_tree(pager, manager, indices.get(name), |entity, metadata| {
+                        #[cfg(test)]
+                        REPLAY_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
+                        Some(Self::serialize_entity_record(
+                            entity,
+                            metadata.as_ref(),
+                            self.format_version(),
+                        ))
+                    })?
+                }
+            };
             if indices
                 .get(name)
                 .is_some_and(|previous| Arc::ptr_eq(previous, &tree))
@@ -1012,6 +1063,7 @@ impl UnifiedStore {
                 std::process::exit(182);
             }
         }
+        drop(previous_versions);
         drop(indices);
         drop(collections);
         self.flush_paged_state()?;
@@ -1944,6 +1996,231 @@ mod checkpoint_work_tests {
         CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
         reopened.persist().expect("unchanged recovered generation");
         assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn sparse_wal_replay_does_not_reencode_complete_collections() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        for (name, first) in [("rows", 1), ("cold", 129)] {
+            store.create_collection(name).expect("collection");
+            for id in first..first + 128 {
+                store
+                    .insert(
+                        name,
+                        UnifiedEntity::table_row(
+                            EntityId::new(id),
+                            name,
+                            id,
+                            vec![Value::text(format!("{id}:{}", "x".repeat(8192)))],
+                        ),
+                    )
+                    .expect("seed");
+            }
+        }
+        store.persist().expect("durable baseline");
+        let action = super::super::commit::StoreWalAction::upsert_entity(
+            "rows",
+            &row(1, 42),
+            None,
+            STORE_VERSION_V11,
+        );
+        // The acknowledged WAL image has not reached its home B-tree yet.
+        store
+            .commit
+            .as_ref()
+            .unwrap()
+            .append_actions(&[action])
+            .unwrap();
+        drop(store);
+
+        REPLAY_SERIALIZED_ROWS.with(|count| count.set(0));
+        let recovered = UnifiedStore::open(&path).expect("replay committed change");
+        assert_eq!(
+            recovered
+                .get("rows", EntityId::new(1))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            vec![Value::Integer(42)]
+        );
+        for name in ["rows", "cold"] {
+            assert_eq!(recovered.get_collection(name).unwrap().count(), 128);
+        }
+        assert_eq!(
+            REPLAY_SERIALIZED_ROWS.with(|count| count.get()),
+            0,
+            "one WAL-backed row must not reencode its whole collection or unrelated cold rows"
+        );
+        for (name, first) in [("rows", 2), ("cold", 129)] {
+            let end = if name == "rows" { 129 } else { 257 };
+            for id in first..end {
+                assert_eq!(
+                    recovered
+                        .get(name, EntityId::new(id))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text(format!("{id}:{}", "x".repeat(8192)))],
+                );
+            }
+        }
+
+        drop(recovered);
+        let reopened = UnifiedStore::open(&path).expect("durable sparse replay");
+        assert_eq!(
+            reopened
+                .get("rows", EntityId::new(1))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            vec![Value::Integer(42)]
+        );
+    }
+
+    #[test]
+    fn wal_replay_with_exhausted_row_proof_keeps_full_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
+        let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+        for id in 1..=16 {
+            store.insert_auto("rows", row(id, 1)).unwrap();
+        }
+        store.persist().unwrap();
+        // Larger than the retained-image allowance, so replay must fall back.
+        let mut state = 0x1234_5678_u32;
+        let payload: String = (0..64 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                char::from(b'!' + (state % 90) as u8)
+            })
+            .collect();
+        let changed =
+            UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::text(payload)]);
+        let action = StoreWalAction::upsert_entity("rows", &changed, None, store.format_version());
+        store
+            .commit
+            .as_ref()
+            .unwrap()
+            .append_actions(&[action])
+            .unwrap();
+        drop(store);
+        REPLAY_SERIALIZED_ROWS.with(|count| count.set(0));
+        let recovered = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert!(REPLAY_SERIALIZED_ROWS.with(|count| count.get()) >= 16);
+        assert_eq!(
+            recovered
+                .get("rows", EntityId::new(1))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            changed.data.as_row().unwrap().columns
+        );
+        drop(recovered);
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(reopened.get_collection("rows").unwrap().count(), 16);
+        assert_eq!(
+            reopened
+                .get("rows", EntityId::new(1))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            changed.data.as_row().unwrap().columns
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_sparse_replay_preserves_rows_and_bounds_growth() {
+        const CHILD: &str = "REDDB_TEST_SPARSE_REPLAY_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let _store = UnifiedStore::open(path).unwrap();
+            panic!("replay crash hook was not reached");
+        }
+        for overflow in [false, true] {
+            for (hook, code) in [
+                ("REDDB_TEST_EXIT_AFTER_SPARSE_BATCH", 193),
+                ("REDDB_EXPERIMENTAL_EXIT_AFTER_REPLAY_PUBLICATION", 182),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("data.rdb");
+                let store = UnifiedStore::open(&path).unwrap();
+                for id in 1..=128 {
+                    store.insert_auto("rows", row(id, 1)).unwrap();
+                }
+                store.persist().unwrap();
+                let changed = if overflow {
+                    UnifiedEntity::table_row(
+                        EntityId::new(1),
+                        "rows",
+                        1,
+                        vec![Value::text("payload".repeat(2048))],
+                    )
+                } else {
+                    row(1, 42)
+                };
+                let action =
+                    StoreWalAction::upsert_entity("rows", &changed, None, store.format_version());
+                store
+                    .commit
+                    .as_ref()
+                    .unwrap()
+                    .append_actions(&[action])
+                    .unwrap();
+                drop(store);
+                let mut first_size = 0;
+                for cycle in 0..12 {
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", "storage::unified::store::impl_pages::checkpoint_work_tests::interrupted_sparse_replay_preserves_rows_and_bounds_growth", "--nocapture"])
+                        .env(CHILD, &path).env(hook, "1").output().unwrap();
+                    assert_eq!(
+                        output.status.code(),
+                        Some(code),
+                        "overflow={overflow} hook={hook} cycle={cycle}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let size = std::fs::metadata(&path).unwrap().len();
+                    if cycle == 0 {
+                        first_size = size;
+                    }
+                    assert!(
+                        size <= first_size + 2 * crate::storage::engine::PAGE_SIZE as u64,
+                        "repeated recovery must reuse reservations: {first_size} -> {size}"
+                    );
+                }
+                for _ in 0..2 {
+                    let recovered = UnifiedStore::open(&path).unwrap();
+                    assert_eq!(recovered.get_collection("rows").unwrap().count(), 128);
+                    for id in 1..=128 {
+                        let expected = if id == 1 { changed.clone() } else { row(id, 1) };
+                        assert_eq!(
+                            recovered
+                                .get("rows", EntityId::new(id))
+                                .unwrap()
+                                .data
+                                .as_row()
+                                .unwrap()
+                                .columns,
+                            expected.data.as_row().unwrap().columns
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
