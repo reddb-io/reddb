@@ -1075,6 +1075,10 @@ impl StoreCommitCoordinator {
                         store.apply_replayed_action(&action, false).map_err(|err| {
                             io::Error::other(format!("failed to replay store wal action: {err}"))
                         })?;
+                        // Retain only the existing bounded exact-row proof.
+                        // These images came from a complete committed WAL batch;
+                        // replay need not rebuild a whole tree for a sparse edit.
+                        store.remember_checkpoint_rows(vec![action], Default::default());
                     }
                 }
                 WalRecord::Begin { tx_id } => {
@@ -1137,6 +1141,7 @@ impl StoreCommitCoordinator {
             store.apply_replayed_action(&action, false).map_err(|err| {
                 io::Error::other(format!("failed to replay store wal action: {err}"))
             })?;
+            store.remember_checkpoint_rows(vec![action], Default::default());
         }
 
         if applied {

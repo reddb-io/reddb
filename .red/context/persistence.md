@@ -70,7 +70,10 @@ Visibility changes outside a collection are checked against borrowed row headers
 without serializing its payloads. Each checkpoint shares one frozen excluded-XID
 set across collections for both reuse admission and row normalization.
 WAL replay and every entity or metadata mutation invalidate the corresponding
-generation. New mutation paths must advance the segment revision before exposing mutable data.
+generation. Exclusive startup recovery reuses unchanged loaded trees and can
+project sparse committed table-row changes from bounded exact WAL images under
+the same ownership epoch and undo protocol as checkpoints. Missing proof,
+tracking exhaustion, replaced managers and older formats keep full validation. New mutation paths must advance the segment revision before exposing mutable data.
 Segment checkpoint journals retain the latest revision of each of at most 8,192
 distinct physical IDs. Repeated updates and GC do not spend the bound on duplicate
 entries; removed versions remain tracked. Evicting an ID invalidates older
