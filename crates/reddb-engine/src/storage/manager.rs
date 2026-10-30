@@ -2038,7 +2038,10 @@ impl SegmentManager {
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .map(|handle| handle.join().unwrap_or_default())
+                    .map(|handle| match handle.join() {
+                        Ok(batch) => batch,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    })
                     .collect()
             });
             for batch in segment_results {
@@ -3837,6 +3840,18 @@ mod tests {
         assert_eq!(stats.segments_pruned, 1);
         let (empty, _) = manager.scan_project_zoned_with_stats(None, &[], |_| None::<u64>);
         assert!(empty.is_empty(), "projection may reject every candidate");
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.scan_project_zoned_with_stats(None, &[], |entity| {
+                let value = project(entity)?;
+                assert_ne!(value, 10, "injected projection worker failure");
+                Some(value)
+            })
+        }));
+        assert!(
+            failure.is_err(),
+            "a failed worker must not return a successful partial scan"
+        );
     }
 
     #[test]
