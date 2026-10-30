@@ -1540,7 +1540,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         };
 
         // A5 — parallel scan: when there's no explicit LIMIT and the collection
-        // is large enough, use scan_zoned_with_stats which parallelises filter eval
+        // is large enough, project borrowed entities while parallelising filter eval
         // across sealed segments using std::thread::scope. Sequential path kept
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
@@ -1582,79 +1582,75 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
             let (matching, scan_stats) =
-                manager.scan_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
+                manager.scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
-                            return false;
+                            return None;
                         };
                         if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
-                            return false;
+                            return None;
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
+                    }
+                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                        return None;
                     }
                     let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    db.replica_allows_entity_at_read(&query.table, entity)
-                        && compiled.as_ref().is_none_or(|compiled| {
-                            residual_filter.as_ref().is_some_and(|filter| {
-                                compiled_entity_filter_matches(
-                                    db,
-                                    compiled,
-                                    &hydrated,
-                                    filter,
-                                    table_name,
-                                    table_alias,
+                    if !compiled.as_ref().is_none_or(|compiled| {
+                        residual_filter.as_ref().is_some_and(|filter| {
+                            compiled_entity_filter_matches(
+                                db,
+                                compiled,
+                                &hydrated,
+                                filter,
+                                table_name,
+                                table_alias,
+                            )
+                        })
+                    }) {
+                        return None;
+                    }
+                    if !select_cols.is_empty() {
+                        if let Some(ref idx_map) = schema_col_indices {
+                            super::super::record_search::runtime_table_record_with_col_indices(
+                                &hydrated,
+                                &select_cols,
+                                idx_map,
+                            )
+                            .or_else(|| {
+                                super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                    &hydrated, &select_cols,
                                 )
                             })
-                        })
-                });
-            record_segment_scan_stats(scan_stats);
-            for entity in &matching {
-                let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
-                    hydrate_store.as_ref(),
-                    entity,
-                );
-                let record = if !select_cols.is_empty() {
-                    if let Some(ref idx_map) = schema_col_indices {
-                        super::super::record_search::runtime_table_record_with_col_indices(
-                            &hydrated,
-                            &select_cols,
-                            idx_map,
-                        )
-                        .or_else(|| {
+                            .or_else(|| {
+                                runtime_table_record_from_entity_projected(hydrated.as_ref().clone(), &select_cols)
+                            })
+                        } else {
                             super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                                &hydrated, &select_cols,
-                            )
-                        })
-                        .or_else(|| {
-                            runtime_table_record_from_entity_projected(hydrated.as_ref().clone(), &select_cols)
-                        })
-                    } else {
-                        super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                            &hydrated,
-                            &select_cols,
-                        )
-                        .or_else(|| {
-                            runtime_table_record_from_entity_projected(
-                                hydrated.as_ref().clone(),
+                                &hydrated,
                                 &select_cols,
                             )
-                        })
+                            .or_else(|| {
+                                runtime_table_record_from_entity_projected(
+                                    hydrated.as_ref().clone(),
+                                    &select_cols,
+                                )
+                            })
+                        }
+                    } else if lean_select_star {
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            hydrated.as_ref().clone(),
+                            &query.table,
+                        )
+                    } else {
+                        runtime_table_record_from_entity(hydrated.as_ref().clone())
                     }
-                } else if lean_select_star {
-                    super::super::record_search::runtime_table_record_lean_in_collection(
-                        hydrated.as_ref().clone(),
-                        &query.table,
-                    )
-                } else {
-                    runtime_table_record_from_entity(hydrated.as_ref().clone())
-                };
-                if let Some(record) = record {
-                    records.push(record);
-                }
-            }
+                });
+            record_segment_scan_stats(scan_stats);
+            records = matching;
         } else {
             let scan_stats = crate::runtime::function_budget::scan(
                 |visit| {
@@ -2787,6 +2783,101 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn projected_filtered_scans_do_not_clone_unreturned_payloads() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+
+        let observe = |payload_bytes, columnar| {
+            let runtime = rt();
+            exec(
+                &runtime,
+                "CREATE TABLE projected_scan (id INTEGER, cohort INTEGER, payload BLOB)",
+            );
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection("projected_scan")
+                .expect("manager");
+            let schema = std::sync::Arc::new(vec!["id".into(), "cohort".into(), "payload".into()]);
+            for id in 1..=4096 {
+                let mut entity = UnifiedEntity::table_row(
+                    EntityId::new(1_000_000 + id),
+                    "projected_scan",
+                    id,
+                    vec![],
+                );
+                let values = vec![
+                    Value::Integer(id as i64),
+                    Value::Integer(0),
+                    Value::Blob(vec![7; payload_bytes]),
+                ];
+                let row = if columnar {
+                    RowData {
+                        columns: values,
+                        named: None,
+                        schema: Some(schema.clone()),
+                    }
+                } else {
+                    RowData::with_names(values, schema.as_ref().clone())
+                };
+                entity.data = EntityData::Row(row);
+                manager.insert(entity).expect("row");
+            }
+            // One growing segment keeps the allocation observation on this
+            // thread while exercising the parallel-eligible query branch.
+            assert_eq!(manager.stats().sealed_count, 0);
+            let sql = "SELECT id FROM projected_scan WHERE cohort >= 0";
+            runtime.execute_query(sql).expect("warm planner");
+            runtime.invalidate_result_cache();
+            let (result, allocations) = measure_allocations(|| runtime.execute_query(sql));
+            let result = result.expect("projected scan");
+            assert_eq!(result.result.records.len(), 4096);
+            let ids: std::collections::BTreeSet<_> = result
+                .result
+                .records
+                .iter()
+                .map(|row| match row.get("id") {
+                    Some(Value::Integer(id)) => *id,
+                    other => panic!("integer id: {other:?}"),
+                })
+                .collect();
+            assert_eq!(ids, (1..=4096).collect());
+            let ordered = runtime.execute_query(
+                "SELECT id FROM projected_scan WHERE cohort >= 0 ORDER BY id DESC LIMIT 2 OFFSET 1"
+            ).expect("ordered projected scan");
+            assert_eq!(ordered.result.records.len(), 2);
+            assert_eq!(
+                ordered.result.records[0].get("id"),
+                Some(&Value::Integer(4095))
+            );
+            assert_eq!(
+                ordered.result.records[1].get("id"),
+                Some(&Value::Integer(4094))
+            );
+            let selected = runtime
+                .execute_query("SELECT payload FROM projected_scan WHERE id = 4096")
+                .expect("selected payload");
+            assert_eq!(selected.result.records.len(), 1);
+            assert_eq!(
+                selected.result.records[0].get("payload"),
+                Some(&Value::Blob(vec![7; payload_bytes]))
+            );
+            allocations
+        };
+        for columnar in [false, true] {
+            let baseline = observe(0, columnar);
+            let measured = observe(8192, columnar);
+            eprintln!(
+                "projected scan allocation bytes (columnar={columnar}): {} -> {}",
+                baseline.allocated_bytes, measured.allocated_bytes
+            );
+            assert!(measured.allocated_bytes <= baseline.allocated_bytes + 1024 * 1024,
+                "unreturned payloads must not be cloned before projection: {baseline:?} -> {measured:?}");
+        }
     }
 
     #[test]
