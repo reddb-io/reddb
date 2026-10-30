@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.2
+
+### Patch Changes
+
+- [#2557](https://github.com/reddb-io/reddb/pull/2557) [`bfcc29f`](https://github.com/reddb-io/reddb/commit/bfcc29ffc02157b9e6bb6b5b7905ce082848c3bd) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep automatically derived ASK seeds within the nonnegative signed 32-bit range accepted by OpenAI-compatible providers such as Gemini through OpenRouter. Preserve deterministic derivation, audit/payload agreement, provider capability gating and explicit user seed overrides.
+
 ## 1.27.1
 
 ### Patch Changes

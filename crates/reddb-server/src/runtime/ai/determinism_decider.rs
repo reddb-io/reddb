@@ -35,7 +35,9 @@
 //! - Per-query override wins for providers that honor `seed`.
 //! - Otherwise the seed is derived deterministically from
 //!   `sha256(question || 0x1f || sources_fingerprint)`, taking the
-//!   first 8 bytes as a little-endian `u64`. Same question + same
+//!   low 31 bits of the first 8 bytes as a little-endian `u64` so the
+//!   generated value fits providers' nonnegative signed 32-bit range.
+//!   Explicit overrides retain their provider-specific range. Same question + same
 //!   data ⇒ same seed, every call, every process.
 //! - Providers that don't honor seed (Anthropic, HuggingFace, `local`,
 //!   `custom`) drop the seed to `None`.
@@ -130,7 +132,8 @@ fn resolve_seed(caps: Capabilities, override_s: Option<u64>, inputs: Inputs<'_>)
     Some(derive_seed(inputs.question, inputs.sources_fingerprint))
 }
 
-/// `sha256(question || 0x1f || fingerprint) -> u64 little-endian`.
+/// Low 31 bits of `sha256(question || 0x1f || fingerprint) -> u64 little-endian`.
+/// Generated seeds fit signed 32-bit provider APIs and are exact in JSON f64.
 ///
 /// 0x1f (ASCII US, "unit separator") is used as the field delimiter
 /// because it cannot appear in a question (the SQL parser would have
@@ -144,7 +147,7 @@ pub fn derive_seed(question: &str, sources_fingerprint: &str) -> u64 {
     let digest = hasher.finalize();
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&digest[..8]);
-    u64::from_le_bytes(buf)
+    u64::from_le_bytes(buf) & i32::MAX as u64
 }
 
 #[cfg(test)]
@@ -211,6 +214,39 @@ mod tests {
         );
         let expected = derive_seed(inputs().question, inputs().sources_fingerprint);
         assert_eq!(out.seed, Some(expected));
+    }
+
+    #[test]
+    fn default_seed_fits_provider_signed_32_bit_range() {
+        for index in 0..1024 {
+            let question = format!("question {index}");
+            let fingerprint = format!("fingerprint {index}");
+            let out = decide(
+                Inputs {
+                    question: &question,
+                    sources_fingerprint: &fingerprint,
+                },
+                full_caps(),
+                Overrides::default(),
+                Settings::default(),
+            );
+            assert!(out.seed.unwrap() <= i32::MAX as u64);
+        }
+    }
+
+    #[test]
+    fn explicit_seed_above_portable_range_is_not_reinterpreted() {
+        let seed = i32::MAX as u64 + 1;
+        let out = decide(
+            inputs(),
+            full_caps(),
+            Overrides {
+                temperature: None,
+                seed: Some(seed),
+            },
+            Settings::default(),
+        );
+        assert_eq!(out.seed, Some(seed));
     }
 
     // ---- overrides ---------------------------------------------------
