@@ -63,3 +63,6 @@ jobs:
 
       - name: Audit node addon lockfile
         run: cargo audit --deny warnings --file drivers/node/Cargo.lock
+
+      - name: Audit fuzz harness lockfile
+        run: cargo audit --deny warnings --file fuzz/Cargo.lock

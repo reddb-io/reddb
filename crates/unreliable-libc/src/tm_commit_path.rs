@@ -321,7 +321,7 @@ pub fn recover_tm_commit_path(dir: &Path) -> io::Result<Vec<TmRecoveredTx>> {
     let mut committed = Vec::new();
 
     loop {
-        let record_start = cursor.position() as usize;
+        let record_start = usize::try_from(cursor.position()).map_err(io::Error::other)?;
         let frame = match decode_main_wal_record_frame(&mut cursor, version, WORKLOAD_TERM) {
             Ok(Some((_term, frame))) => frame,
             Ok(None) => break,

@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-client-connector"
-version = "1.26.8"
+version = "1.27.0"
 edition.workspace = true
 authors.workspace = true
 description = "Deprecated compatibility shim for the authenticated client now provided by reddb-grpc-proto."

@@ -162,7 +162,8 @@ fn scan_wal_prefix(bytes: &[u8]) -> Result<(u64, u64, u64), RecoveryError> {
     let mut last_valid_end = WAL_FILE_HEADER_BYTES as u64;
 
     loop {
-        let record_start = cursor.position() as usize;
+        let record_start = usize::try_from(cursor.position())
+            .map_err(|error| RecoveryError::WalUnreadable(error.to_string()))?;
         match decode_main_wal_record_frame(&mut cursor, version, 1) {
             Ok(Some((_term, frame))) => {
                 validate_frame(&frame, &mut prev_begin, &mut open_tx, &mut last_committed)?;

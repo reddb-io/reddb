@@ -2429,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.3"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c3a14896dfa883796f1cb410461aef38810ea05f2b2c33c5aded3649095fdad"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags",
  "memchr",
@@ -2682,13 +2682,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "jsonwebtoken",
  "proptest",
  "prost",
  "rcgen",
  "reddb-io-client",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
@@ -2710,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "async-trait",
  "csv",
@@ -2738,14 +2739,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client-connector"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "reddb-io-grpc-proto",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "aes-gcm",
  "reddb-io-types",
@@ -2753,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "crc32fast",
  "hex",
@@ -2769,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2788,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2800,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "proptest",
  "reddb-io-types",
@@ -2809,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2882,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2918,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "bytes",
  "http-body",
@@ -2931,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2952,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "hmac",
  "insta",

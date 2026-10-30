@@ -1975,9 +1975,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags",
  "memchr",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "reddb-io-client",
  "reddb-io-file",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -2200,14 +2200,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "aes-gcm",
 ]
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "crc32fast",
  "hex",
@@ -2222,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-node"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -2261,14 +2261,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "bytes",
  "prost",
@@ -2369,14 +2369,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.26.8"
+version = "1.27.0"
 dependencies = [
  "hmac",
  "reddb-io-types",
