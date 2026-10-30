@@ -1,0 +1,833 @@
+[
+  {
+    "sha256": "d8df3b29870b9f6b1c6e66497ffe5e2f80a9e413ab91cf2a29facff92af27124",
+    "parameters": {
+      "memory_mib": 512,
+      "cpu_percent": 100,
+      "disk_limit_mib": 1024,
+      "workers": 4,
+      "rows": 256,
+      "steps": 1000,
+      "steps_per_second": 20
+    },
+    "cases": [
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 8832185,
+            "user_usec": 7471557,
+            "system_usec": 1360629,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 500,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 49.96672484406736,
+        "requests": 8000,
+        "requestsPerSecond": 160.10655140927963,
+        "latencyMs": {
+          "write": {
+            "p50": 6.476833950728178,
+            "p95": 11.000616010278463,
+            "p99": 12.158017954789102,
+            "max": 14.738989062607288
+          },
+          "read": {
+            "p50": 1.0369369992986321,
+            "p95": 1.419329084455967,
+            "p99": 1.6160820377990603,
+            "max": 2.686099032871425
+          },
+          "scheduledPair": {
+            "p50": 7.963130949065089,
+            "p95": 12.407029047608376,
+            "p99": 13.627900974825025,
+            "max": 16.30451704841107
+          },
+          "lag": {
+            "p50": 0.4162420518696308,
+            "p95": 0.7839699974283576,
+            "p99": 0.9137279121205211,
+            "max": 1.5028580091893673
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159652096,
+          "mainBytes": 9682944,
+          "walBytes": 148828000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 159080448,
+          "logicalBytes": 142257065,
+          "mainBytes": 141115392,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 506556416
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 7130209,
+            "user_usec": 5728005,
+            "system_usec": 1402204,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 500,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 49.96350018295925,
+        "requests": 8000,
+        "requestsPerSecond": 160.11688473996287,
+        "latencyMs": {
+          "write": {
+            "p50": 5.77913096640259,
+            "p95": 8.51226004306227,
+            "p99": 10.07021008990705,
+            "max": 13.702590949833393
+          },
+          "read": {
+            "p50": 1.0027280077338219,
+            "p95": 1.4763600192964077,
+            "p99": 1.7336249584332108,
+            "max": 2.421639976091683
+          },
+          "scheduledPair": {
+            "p50": 7.2447380516678095,
+            "p95": 10.008846991695464,
+            "p99": 11.522621964104474,
+            "max": 15.249633928760886
+          },
+          "lag": {
+            "p50": 0.4073890158906579,
+            "p95": 0.8548999903723598,
+            "p99": 1.0967199923470616,
+            "max": 1.3140789233148098
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159754607,
+          "mainBytes": 9682944,
+          "walBytes": 148930504
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 35086336,
+          "logicalBytes": 18295724,
+          "mainBytes": 17154048,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 282193920
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 7476794,
+            "user_usec": 5890255,
+            "system_usec": 1586539,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 500,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 49.96205879293848,
+        "requests": 8000,
+        "requestsPerSecond": 160.121504062813,
+        "latencyMs": {
+          "write": {
+            "p50": 5.888513987883925,
+            "p95": 8.606155053712428,
+            "p99": 10.111269075423479,
+            "max": 15.0789589388296
+          },
+          "read": {
+            "p50": 1.064840005710721,
+            "p95": 1.5805939910933375,
+            "p99": 1.8503029132261872,
+            "max": 3.21259000338614
+          },
+          "scheduledPair": {
+            "p50": 7.331383996643126,
+            "p95": 10.051884921267629,
+            "p99": 11.536145932041109,
+            "max": 16.40442293137312
+          },
+          "lag": {
+            "p50": 0.4116109339520335,
+            "p95": 0.7402929477393627,
+            "p99": 1.0515839094296098,
+            "max": 1.6165550332516432
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159754204,
+          "mainBytes": 9682944,
+          "walBytes": 148930105
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 35606528,
+          "logicalBytes": 18820009,
+          "mainBytes": 17678336,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 283320320
+      },
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 9282422,
+            "user_usec": 7945168,
+            "system_usec": 1337254,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 500,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 49.96369057893753,
+        "requests": 8000,
+        "requestsPerSecond": 160.11627458465696,
+        "latencyMs": {
+          "write": {
+            "p50": 6.590349017642438,
+            "p95": 11.239946936257184,
+            "p99": 12.567706988193095,
+            "max": 17.02142006251961
+          },
+          "read": {
+            "p50": 1.0948750423267484,
+            "p95": 1.5571099938824773,
+            "p99": 1.9842460751533508,
+            "max": 4.37815603800118
+          },
+          "scheduledPair": {
+            "p50": 8.235051995143294,
+            "p95": 12.886942946352065,
+            "p99": 14.363402035087347,
+            "max": 18.35552603006363
+          },
+          "lag": {
+            "p50": 0.4842468770220876,
+            "p95": 0.8617191342636943,
+            "p99": 1.0037730680778623,
+            "max": 2.1849250188097358
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159652096,
+          "mainBytes": 9682944,
+          "walBytes": 148828000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 159068160,
+          "logicalBytes": 142257063,
+          "mainBytes": 141115392,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 507314176
+      }
+    ],
+    "comparison": {
+      "off": {
+        "medianRequestsPerSecond": 160.11141299696828,
+        "medianWriteP99Ms": 12.362862471491098,
+        "medianScheduledPairP99Ms": 13.995651504956186,
+        "maxPeakBytes": 507314176
+      },
+      "on": {
+        "medianRequestsPerSecond": 160.11919440138792,
+        "medianWriteP99Ms": 10.090739582665265,
+        "medianScheduledPairP99Ms": 11.529383948072791,
+        "maxPeakBytes": 283320320
+      }
+    },
+    "name": "counters-v2"
+  },
+  {
+    "sha256": "d8df3b29870b9f6b1c6e66497ffe5e2f80a9e413ab91cf2a29facff92af27124",
+    "parameters": {
+      "memory_mib": 512,
+      "cpu_percent": 100,
+      "disk_limit_mib": 1024,
+      "workers": 4,
+      "rows": 256,
+      "steps": 1000,
+      "steps_per_second": 50.0
+    },
+    "cases": [
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 8928399,
+            "user_usec": 7784520,
+            "system_usec": 1143879,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 200,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 19.995803427998908,
+        "requests": 8000,
+        "requestsPerSecond": 400.0839490549345,
+        "latencyMs": {
+          "write": {
+            "p50": 6.3120899721980095,
+            "p95": 10.862041031941772,
+            "p99": 12.280830997042358,
+            "max": 18.03551404736936
+          },
+          "read": {
+            "p50": 1.065760967321694,
+            "p95": 1.4715050347149372,
+            "p99": 1.7479349626228213,
+            "max": 2.664020052179694
+          },
+          "scheduledPair": {
+            "p50": 7.816371973603964,
+            "p95": 12.38617196213454,
+            "p99": 13.888139044865966,
+            "max": 19.258316955529153
+          },
+          "lag": {
+            "p50": 0.39722397923469543,
+            "p95": 0.7205279543995857,
+            "p99": 0.8335671154782176,
+            "max": 1.243846956640482
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159652103,
+          "mainBytes": 9682944,
+          "walBytes": 148828000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 159076352,
+          "logicalBytes": 142257069,
+          "mainBytes": 141115392,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 505954304
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 8341276,
+            "user_usec": 6954229,
+            "system_usec": 1387047,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 200,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 19.991447635926306,
+        "requests": 8000,
+        "requestsPerSecond": 400.17112045569576,
+        "latencyMs": {
+          "write": {
+            "p50": 6.091385032050312,
+            "p95": 9.302483987994492,
+            "p99": 10.848773992620409,
+            "max": 17.286209971643984
+          },
+          "read": {
+            "p50": 1.0771770030260086,
+            "p95": 1.6554939793422818,
+            "p99": 2.0237190183252096,
+            "max": 3.625664976425469
+          },
+          "scheduledPair": {
+            "p50": 7.471560034900904,
+            "p95": 10.81722299568355,
+            "p99": 12.291296035982668,
+            "max": 18.495835014618933
+          },
+          "lag": {
+            "p50": 0.2183800097554922,
+            "p95": 0.5385519471019506,
+            "p99": 0.7468959083780646,
+            "max": 2.0087630255147815
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159719146,
+          "mainBytes": 9682944,
+          "walBytes": 148895047
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 77799424,
+          "logicalBytes": 61008810,
+          "mainBytes": 59867136,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 371875840
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 9592106,
+            "user_usec": 7972824,
+            "system_usec": 1619281,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 200,
+            "nr_throttled": 9,
+            "throttled_usec": 432565,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 19.990645555080846,
+        "requests": 8000,
+        "requestsPerSecond": 400.1871764449703,
+        "latencyMs": {
+          "write": {
+            "p50": 6.298649939708412,
+            "p95": 11.075286893174052,
+            "p99": 15.908901928924024,
+            "max": 50.2393520437181
+          },
+          "read": {
+            "p50": 1.1803029337897897,
+            "p95": 2.311958931386471,
+            "p99": 4.542854032479227,
+            "max": 41.01540194824338
+          },
+          "scheduledPair": {
+            "p50": 7.793143973685801,
+            "p95": 15.866408939473331,
+            "p99": 96.62817406933755,
+            "max": 136.98049599770457
+          },
+          "lag": {
+            "p50": 0.2621120074763894,
+            "p95": 0.9142749477177858,
+            "p99": 77.253922005184,
+            "max": 119.03520300984383
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159745583,
+          "mainBytes": 9682944,
+          "walBytes": 148921483
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 45862912,
+          "logicalBytes": 29076394,
+          "mainBytes": 27934720,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 301150208
+      },
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 14110077,
+            "user_usec": 11935669,
+            "system_usec": 2174407,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 212,
+            "nr_throttled": 65,
+            "throttled_usec": 3197390,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 21.155946034938097,
+        "requests": 8000,
+        "requestsPerSecond": 378.1442808933412,
+        "latencyMs": {
+          "write": {
+            "p50": 7.8753120033070445,
+            "p95": 25.319157051853836,
+            "p99": 51.348434993997216,
+            "max": 61.68814597185701
+          },
+          "read": {
+            "p50": 1.390211982652545,
+            "p95": 4.501509014517069,
+            "p99": 23.03548203781247,
+            "max": 42.985958978533745
+          },
+          "scheduledPair": {
+            "p50": 9.42176696844399,
+            "p95": 1008.0158140044659,
+            "p99": 1052.342600072734,
+            "max": 1172.9959410149604
+          },
+          "lag": {
+            "p50": 0.28455606661736965,
+            "p95": 987.1416779933497,
+            "p99": 1031.022549024783,
+            "max": 1136.8774140719324
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 161832960,
+          "logicalBytes": 159652100,
+          "mainBytes": 9682944,
+          "walBytes": 148828000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 159076352,
+          "logicalBytes": 142257069,
+          "mainBytes": 141115392,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 507879424
+      }
+    ],
+    "comparison": {
+      "off": {
+        "medianRequestsPerSecond": 389.11411497413786,
+        "medianWriteP99Ms": 31.814632995519787,
+        "medianScheduledPairP99Ms": 533.1153695588,
+        "maxPeakBytes": 507879424
+      },
+      "on": {
+        "medianRequestsPerSecond": 400.17914845033306,
+        "medianWriteP99Ms": 13.378837960772216,
+        "medianScheduledPairP99Ms": 54.45973505266011,
+        "maxPeakBytes": 371875840
+      }
+    },
+    "name": "medium-load"
+  },
+  {
+    "sha256": "d8df3b29870b9f6b1c6e66497ffe5e2f80a9e413ab91cf2a29facff92af27124",
+    "parameters": {
+      "memory_mib": 1024,
+      "cpu_percent": 100,
+      "disk_limit_mib": 1024,
+      "workers": 4,
+      "rows": 256,
+      "steps": 2000,
+      "steps_per_second": 100.0
+    },
+    "cases": [
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 24500413,
+            "user_usec": 21501658,
+            "system_usec": 2998755,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 258,
+            "nr_throttled": 181,
+            "throttled_usec": 3088814,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 25.802929932018742,
+        "requests": 16000,
+        "requestsPerSecond": 620.08461993092,
+        "latencyMs": {
+          "write": {
+            "p50": 9.231150965206325,
+            "p95": 20.99951496347785,
+            "p99": 34.99588603153825,
+            "max": 41.76666808780283
+          },
+          "read": {
+            "p50": 1.1790990829467773,
+            "p95": 1.9023909699171782,
+            "p99": 2.4928859202191234,
+            "max": 25.91106400359422
+          },
+          "scheduledPair": {
+            "p50": 59.52623696066439,
+            "p95": 4741.741574020125,
+            "p99": 5545.483723981306,
+            "max": 5808.511187089607
+          },
+          "lag": {
+            "p50": 49.439009046182036,
+            "p95": 4726.8474730663,
+            "p99": 5513.340321020223,
+            "max": 5797.799630090594
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 312827904,
+          "logicalBytes": 308480100,
+          "mainBytes": 9682944,
+          "walBytes": 297656000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 290377728,
+          "logicalBytes": 273542060,
+          "mainBytes": 272400384,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 910716928
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 23049064,
+            "user_usec": 19818471,
+            "system_usec": 3230593,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 243,
+            "nr_throttled": 188,
+            "throttled_usec": 4636042,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 24.35587687091902,
+        "requests": 16000,
+        "requestsPerSecond": 656.9256399511545,
+        "latencyMs": {
+          "write": {
+            "p50": 8.483647019602358,
+            "p95": 22.008934058248997,
+            "p99": 36.18704399559647,
+            "max": 45.32196593936533
+          },
+          "read": {
+            "p50": 1.2518770527094603,
+            "p95": 2.096279989928007,
+            "p99": 3.1227030558511615,
+            "max": 32.28578995913267
+          },
+          "scheduledPair": {
+            "p50": 402.174165006727,
+            "p95": 3499.6552269440144,
+            "p99": 4213.190326001495,
+            "max": 4364.193524001166
+          },
+          "lag": {
+            "p50": 389.41535900812596,
+            "p95": 3473.0294110486284,
+            "p99": 4199.7462139697745,
+            "max": 4350.9669319028035
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 312827904,
+          "logicalBytes": 308607709,
+          "mainBytes": 9682944,
+          "walBytes": 297783614
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 127459328,
+          "logicalBytes": 110668709,
+          "mainBytes": 109527040,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 635088896
+      },
+      {
+        "enabled": true,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 23264960,
+            "user_usec": 19663373,
+            "system_usec": 3601587,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 253,
+            "nr_throttled": 177,
+            "throttled_usec": 5974083,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 25.28524179395754,
+        "requests": 16000,
+        "requestsPerSecond": 632.7801857850357,
+        "latencyMs": {
+          "write": {
+            "p50": 8.077487931586802,
+            "p95": 23.450893932022154,
+            "p99": 45.78354407567531,
+            "max": 54.25510893110186
+          },
+          "read": {
+            "p50": 1.2260759249329567,
+            "p95": 3.5127539886161685,
+            "p99": 10.397765086963773,
+            "max": 43.49997499957681
+          },
+          "scheduledPair": {
+            "p50": 1204.6636559534818,
+            "p95": 5113.321671029553,
+            "p99": 5260.501384967938,
+            "max": 5299.497897969559
+          },
+          "lag": {
+            "p50": 1194.395658094436,
+            "p95": 5102.885987958871,
+            "p99": 5250.1283650053665,
+            "max": 5289.550579036586
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 312827904,
+          "logicalBytes": 308629436,
+          "mainBytes": 9682944,
+          "walBytes": 297805340
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 109584384,
+          "logicalBytes": 92793768,
+          "mainBytes": 91652096,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 594759680
+      },
+      {
+        "enabled": false,
+        "passed": true,
+        "cgroupDelta": {
+          "cpu": {
+            "usage_usec": 30124312,
+            "user_usec": 26252111,
+            "system_usec": 3872200,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 312,
+            "nr_throttled": 273,
+            "throttled_usec": 7579714,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "io": null
+        },
+        "seconds": 31.202224756008945,
+        "requests": 16000,
+        "requestsPerSecond": 512.783948103531,
+        "latencyMs": {
+          "write": {
+            "p50": 11.260269908234477,
+            "p95": 29.273941996507347,
+            "p99": 47.516547027044,
+            "max": 58.978485059924424
+          },
+          "read": {
+            "p50": 1.3243480352684855,
+            "p95": 4.352145013399422,
+            "p99": 16.95824193302542,
+            "max": 47.15241293888539
+          },
+          "scheduledPair": {
+            "p50": 4129.548407974653,
+            "p95": 10303.667641011998,
+            "p99": 10943.308406043798,
+            "max": 11216.081868042238
+          },
+          "lag": {
+            "p50": 4115.642776014283,
+            "p95": 10283.622818998992,
+            "p99": 10918.381829978898,
+            "max": 11206.152428057976
+          }
+        },
+        "loadedStorage": {
+          "allocatedBytes": 312827904,
+          "logicalBytes": 308480088,
+          "mainBytes": 9682944,
+          "walBytes": 297656000
+        },
+        "checkpointStorage": {
+          "allocatedBytes": 290369536,
+          "logicalBytes": 273542048,
+          "mainBytes": 272400384,
+          "walBytes": 8
+        },
+        "recoveryVerified": true,
+        "peakBytes": 914485248
+      }
+    ],
+    "comparison": {
+      "off": {
+        "medianRequestsPerSecond": 566.4342840172255,
+        "medianWriteP99Ms": 41.25621652929112,
+        "medianScheduledPairP99Ms": 8244.396065012552,
+        "maxPeakBytes": 914485248
+      },
+      "on": {
+        "medianRequestsPerSecond": 644.852912868095,
+        "medianWriteP99Ms": 40.98529403563589,
+        "medianScheduledPairP99Ms": 4736.845855484717,
+        "maxPeakBytes": 635088896
+      }
+    },
+    "name": "high-load"
+  }
+]
