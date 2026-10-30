@@ -34,8 +34,11 @@ def percentile(values, fraction):
 def counters(engine):
     cpu = {key: int(value) for key, value in
            (line.split() for line in (engine.cgroup / 'cpu.stat').read_text().splitlines())}
+    io_path = engine.cgroup / 'io.stat'
+    if not io_path.exists():
+        return {'cpu': cpu, 'io': None}  # Controller may not be delegated to user services.
     io = {}
-    for line in (engine.cgroup / 'io.stat').read_text().splitlines():
+    for line in io_path.read_text().splitlines():
         for field in line.split()[1:]:
             key, value = field.split('=')
             io[key] = io.get(key, 0) + int(value)
@@ -93,7 +96,7 @@ def run_case(args, enabled, ordinal):
         elapsed = time.monotonic() - started
         after_counters = counters(engine)
         result['cgroupDelta'] = {
-            group: {key: value - before_counters[group].get(key, 0)
+            group: None if fields is None else {key: value - before_counters[group].get(key, 0)
                     for key, value in fields.items()}
             for group, fields in after_counters.items()}
         result['seconds'] = elapsed

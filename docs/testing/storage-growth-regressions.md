@@ -277,7 +277,9 @@ payload and acknowledged revision. Each case finishes with checkpoint,
 SIGKILL and recovery verification. It records per-request p50/p95/p99/max,
 scheduled completion latency (including queue delay), achieved throughput,
 CPU/throttling and I/O counter deltas, cgroup memory peaks, and main/WAL/family
-storage. It never invokes manual VACUUM or pauses the measured workload for GC.
+storage. I/O is reported as null when that controller is not delegated to the
+user service; no host controller settings are changed. It never invokes manual
+VACUUM or pauses the measured workload for GC.
 The checkpoint and recovery stages are outside the measured load interval.
 
 Use the same private-output precautions as the memory harness. Run cases
