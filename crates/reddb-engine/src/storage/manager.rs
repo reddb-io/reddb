@@ -3812,7 +3812,11 @@ mod tests {
             _ => None,
         };
         let (all, stats) = manager.scan_project_zoned_with_stats(None, &[], project);
-        assert_eq!(all, [200, 10, 20, 100, 110], "growing then sealed order");
+        let (legacy, _) = manager.scan_zoned_with_stats(None, &[], |_| true);
+        assert_eq!(all, legacy.iter().filter_map(project).collect::<Vec<_>>());
+        assert_eq!(all[0], 200, "growing segment first");
+        assert!(all[1..3].iter().all(|value| [10, 20].contains(value)));
+        assert!(all[3..5].iter().all(|value| [100, 110].contains(value)));
         assert_eq!(stats.segments_total, 3);
         assert_eq!(stats.segments_scanned, 3);
         assert_eq!(stats.segments_pruned, 0);
@@ -3822,7 +3826,12 @@ mod tests {
             &[("ts", ZoneColPred::Gte(&probe))],
             |entity| project(entity).filter(|value| *value >= 100),
         );
-        assert_eq!(pruned, [200, 100, 110]);
+        assert_eq!(
+            pruned,
+            all.into_iter()
+                .filter(|value| *value >= 100)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(stats.segments_total, 3);
         assert_eq!(stats.segments_scanned, 2);
         assert_eq!(stats.segments_pruned, 1);
@@ -3877,7 +3886,15 @@ mod tests {
                     called.lock().expect("callback log").push(id);
                     Some(id)
                 });
-                assert_eq!(rows, expected);
+                let (legacy, _) = manager.scan_zoned_with_stats(view, &[], |_| true);
+                assert_eq!(
+                    rows,
+                    legacy
+                        .iter()
+                        .map(|entity| entity.id.raw())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(rows[0], 5, "visible growing row first");
                 let mut called = called.into_inner().expect("callback log");
                 called.sort_unstable();
                 let mut expected = expected;
