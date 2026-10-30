@@ -238,3 +238,54 @@ single uncertain reservation, but cannot lose the trunk remainder or return a
 successfully reserved ID again. Outside an ownership epoch, this path pays one
 protected page write per reused ID; journaled checkpoint/replay allocation keeps
 its batched path. No file format change is introduced.
+
+## Maintenance cost under sustained load
+
+Standalone, writable runtimes using the embedded deployment profile run table
+history reclamation after readiness. The worker waits 200 ms between iterations,
+scans at most 4,096 physical positions and reclaims at most 256 versions per tick.
+It skips a busy publication fence without advancing the cursor and respects
+active snapshots and aborted transactions. Failures back off for five seconds.
+These are work bounds, not a hard wall-clock deadline: a WAL flush or slow disk
+can still lengthen a tick. No full-file rewrite or arbitrary orphan-page repair
+is performed by this worker.
+
+The operator controls are:
+
+```sql
+SET CONFIG runtime.mvcc.autovacuum.enabled = true;
+SET CONFIG runtime.mvcc.autovacuum.scan_rows_per_tick = 4096;
+SET CONFIG runtime.mvcc.autovacuum.reclaim_rows_per_tick = 256;
+```
+
+Budgets clamp to 1–4,096 scanned positions and 1–256 reclaimed versions.
+Disabling reclamation is a diagnostic control, not a storage-growth remedy.
+Long-lived snapshots can legitimately retain history. Reusing freed pages and
+reducing the physical file size are separate operations.
+
+Measure the cost against an identical control on the exact candidate artifact:
+
+```sh
+python3 scripts/qualify-maintenance-cost.py --binary /absolute/path/to/red \
+  --output /var/tmp/reddb-maintenance-unique --memory-mib 512
+```
+
+The harness creates four independent stores in OFF/ON/ON/OFF order, each with
+256 overflow-payload rows, four concurrent writers/readers, and 1,000 updates
+per writer at a target of 160 total requests/s. Every read checks the exact
+payload and acknowledged revision. Each case finishes with checkpoint,
+SIGKILL and recovery verification. It records per-request p50/p95/p99/max,
+scheduled completion latency (including queue delay), achieved throughput,
+CPU/throttling and I/O counter deltas, cgroup memory peaks, and main/WAL/family
+storage. It never invokes manual VACUUM or pauses the measured workload for GC.
+The checkpoint and recovery stages are outside the measured load interval.
+
+Use the same private-output precautions as the memory harness. Run cases
+sequentially on an otherwise quiet host. An error, OOM, incorrect payload or
+failed recovery fails the command. Timing is reported without a universal
+pass/fail percentage: compare the full ranges, queue delay, resource limits
+and storage state against the application's latency and throughput budgets.
+At a fixed offered rate, matching throughput proves that rate was sustained,
+not equal maximum capacity. Repeat with higher offered rates and on OCI disk
+before extrapolating. This small hot-row workload does not qualify whole-file
+compaction, every index/model, long snapshots, or a large historical STG store.
