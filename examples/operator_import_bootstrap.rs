@@ -364,7 +364,7 @@ mod tests {
         ))?;
         let pager = Arc::clone(reopened.db().store().pager().ok_or("target pager")?);
         let restored = Vault::with_certificate(&pager, &certificate)?
-            .load(pager)?
+            .load(&pager)?
             .ok_or("restored Vault")?;
         assert_eq!(canonical_vault(&state)?, canonical_vault(&restored)?);
         assert_eq!(
