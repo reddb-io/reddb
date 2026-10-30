@@ -1,0 +1,53 @@
+name: Operator bootstrap import
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - examples/operator_import_bootstrap.rs
+      - .github/workflows/operator-bootstrap-import.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-bootstrap-import-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Qualify offline bootstrap importer
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-Linux-x86_64-unknown-linux-gnu
+          save-if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Check importer
+        run: cargo check --locked --example operator_import_bootstrap
+      - name: Preserve auth, audit, typed config, indexes and destination ownership
+        run: cargo test --locked --release --example operator_import_bootstrap
+      - name: Build operator binary
+        run: cargo build --locked --release --example operator_import_bootstrap
+      - name: Bind artifact to source
+        run: |
+          sha256sum target/release/examples/operator_import_bootstrap > operator_import_bootstrap.sha256
+          git rev-parse HEAD > operator_import_bootstrap.source
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: operator-bootstrap-import-linux-x86_64
+          path: |
+            target/release/examples/operator_import_bootstrap
+            operator_import_bootstrap.sha256
+            operator_import_bootstrap.source
+          if-no-files-found: error
