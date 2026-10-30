@@ -155,8 +155,8 @@ impl ResourceLimits {
 }
 
 /// Read the active cgroup memory cap, returning bytes when known.
-/// Cgroup v2 first (`/sys/fs/cgroup/memory.max`), v1 fallback
-/// (`/sys/fs/cgroup/memory/memory.limit_in_bytes`). The literal
+/// Cgroup v2 first, v1 fallback, including process membership and ancestor
+/// ceilings rather than only the controller mount root. The literal
 /// string `max` (cgroup v2 "no cap") returns `None` so the
 /// resource-limits struct stays at "no cap pinned".
 ///
@@ -164,29 +164,8 @@ impl ResourceLimits {
 /// panics; the caller treats absence as "fall through to whatever
 /// upstream layer decides".
 fn read_cgroup_memory_max() -> Option<u64> {
-    // cgroup v2
-    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
-        let trimmed = raw.trim();
-        if trimmed != "max" && !trimmed.is_empty() {
-            if let Ok(bytes) = trimmed.parse::<u64>() {
-                if bytes > 0 && bytes < u64::MAX / 2 {
-                    return Some(bytes);
-                }
-            }
-        }
-    }
-    // cgroup v1
-    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        if let Ok(bytes) = raw.trim().parse::<u64>() {
-            // Kernels report `9223372036854771712` as "unlimited" in
-            // cgroup v1; treat any value that's effectively
-            // unbounded as `None`.
-            if bytes > 0 && bytes < (u64::MAX / 2) {
-                return Some(bytes);
-            }
-        }
-    }
-    None
+    let (v2, v1) = crate::utils::cgroup_memory::limits();
+    v2.or(v1)
 }
 
 #[cfg(test)]
