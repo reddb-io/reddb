@@ -48,6 +48,15 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'test(column_policy_conformance_corpus_covers_required_surface)'
 slow-timeout = { period = "60s", terminate-after = 4 }
 
+# This allocator regression covers more than two free-list trunks, both
+# superblock fallbacks and three complete reuse cycles. Its in-memory VFS
+# snapshots the full file at each durable barrier. Keep every cycle and page
+# assertion, but run it alone with a finite budget for this deliberate workload.
+[[profile.default.overrides]]
+filter = 'test(=multi_trunk_recovery_reuses_every_page_without_growing)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
 # CI profile: same hard per-test timeout, plus a single retry to absorb
 # genuinely flaky integration tests, and a JUnit report the runner can ingest.
 [profile.ci]
@@ -61,6 +70,12 @@ retries = 1
 filter = 'test(massive_catalog_forces_meta_overflow_chain)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'test(=multi_trunk_recovery_reuses_every_page_without_growing)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [profile.ci.junit]
