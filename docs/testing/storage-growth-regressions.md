@@ -182,3 +182,48 @@ payloads through cold open and concurrent observation. A failed constrained-memo
 run remains a failed gate, even when the unit tests pass. Never run broad
 profiling diagnostics on a serving database while qualifying their memory bounds;
 use an isolated clone first.
+
+## Local artifact qualification under real memory limits
+
+On a Linux host with a working user systemd manager and cgroup v2, run one case
+at a time against the exact downloaded release or candidate binary:
+
+```sh
+python3 scripts/qualify-local-memory.py --binary /absolute/path/to/red \
+  --output /var/tmp/reddb-qualification-unique --memory-mib 512
+```
+
+The output directory must not exist. It contains synthetic credentials, private
+engine logs, samples and a machine-readable result; preserve it on failure and
+do not publish its raw contents. The harness runs only its own transient services,
+binds all listeners to loopback, enforces zero swap, at most one CPU, a 30-minute
+service lifetime and a 2-GiB external allocated-disk guard. The client and sampler
+run outside the database cgroup. It does not need or use cloud credentials.
+
+The default scenario seeds 1,024 table rows (inline, overflow and compressible)
+and 32 large documents, then checks every payload through twelve indexed
+update/delete/refill cycles, index drop/recreation, 24 concurrent reads, eight
+SIGKILLs after acknowledged writes, and a clean reopen. KV model/value recovery
+and vault certificate reuse are exercised too. It records boot time, memory
+peaks/events and main-file/WAL/whole-family storage separately. A namespaced
+container and a nested host service must both resolve their actual memory cap;
+`--probe-only` makes that boot assertion a short regression.
+
+Storage comparisons use four-cycle bursts followed by ten seconds for paced
+history reclamation and two publication checkpoints. A burst can temporarily
+outpace background MVCC reclamation; this is distinct from permanent allocation
+leaks. `--settle-seconds 0` tests sustained input without that drain and can fail
+the growth bound even while a drained workload passes. Such a failure remains
+visible and does not qualify sustained throughput. `--drain-seconds 10` between
+each cycle and `--vacuum` are diagnostic controls, recorded in the receipt;
+explicit VACUUM results must not be reported as automatic reclamation evidence.
+`--budget-mib 384` distinguishes an explicit 384-MiB budget from auto-detection
+inside a 512-MiB kernel limit. A passing explicit-budget run cannot qualify the
+automatic resolver. Use `--memory-mib 256` for an adversarial smaller slot and
+`--cpu-percent 25` for the Nano CPU constraint; neither changes the dataset.
+
+This harness fails on budget mismatch, lost/duplicate data, OOM, excessive growth
+or failed recovery. It is a local runtime qualification tool, not a substitute
+for the existing crash-boundary tests or measurements on OCI storage. It does
+not qualify a sustained production workload, authenticated application sessions,
+all possible page states, or power-loss behavior.
