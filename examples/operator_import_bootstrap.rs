@@ -316,10 +316,16 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn fixture_json(text: &str) -> Json {
+        reddb::json::from_str(text).expect("valid fixture JSON")
+    }
+
     fn input() -> Json {
-        reddb::json!({"format":"reddb.operator-bootstrap.v1","user_collections":[],"policies":[],
+        fixture_json(
+            r#"{"format":"reddb.operator-bootstrap.v1","user_collections":[],"policies":[],
             "native_catalog_complete":true,"native_collections":[{"name":"red_config","entities":"1"}],
-            "indexes":[],"config":[{"key":"fixture.integer","value":1699999999999999999i64}],"control_events":[]})
+            "indexes":[],"config":[{"key":"fixture.integer","value":1699999999999999999}],"control_events":[]}"#,
+        )
     }
 
     #[test]
@@ -355,13 +361,17 @@ mod tests {
             .insert("red.secret.fixture".into(), "private fixture value".into());
         let mut input = input();
         input["vault_blob"] = Json::String(vault.seal_logical_export(&state)?);
-        input["control_events"] = reddb::json!([{
-            "id":"retained-event-id", "ts":1699999999999999999i64, "kind":"config.write", "outcome":"ok",
+        input["control_events"] = fixture_json(
+            r#"[{
+            "id":"retained-event-id", "ts":1699999999999999999, "kind":"config.write", "outcome":"ok",
             "actor_kind":"system", "actor_user_id":null, "scope":null, "action":"fixture",
             "resource":null,"reason":null,"matched_policy_id":null,"request_id":null,"trace_id":null,"fields_json":"{}"
-        }]);
-        input["indexes"] = reddb::json!([{"collection":"red_index_registry","name":"retained_registry_index",
-            "columns":["value"],"unique":true,"method":"btree"}]);
+        }]"#,
+        );
+        input["indexes"] = fixture_json(
+            r#"[{"collection":"red_index_registry","name":"retained_registry_index",
+            "columns":["value"],"unique":true,"method":"btree"}]"#,
+        );
         let target = directory.path().join("new");
         import(&input, &target, &certificate)?;
         let before = fs::read(target.join("data.rdb"))?;
@@ -403,9 +413,9 @@ mod tests {
     #[test]
     fn refuses_hidden_nonempty_native_state_before_creating_destination() {
         let mut input = input();
-        input["native_collections"] = reddb::json!([{"name":"red_commits","entities":"1"}]);
+        input["native_collections"] = fixture_json(r#"[{"name":"red_commits","entities":"1"}]"#);
         assert!(validate(&input).is_err());
-        input["native_collections"] = reddb::json!([{"name":"unknown","entities":"0"}]);
+        input["native_collections"] = fixture_json(r#"[{"name":"unknown","entities":"0"}]"#);
         assert!(validate(&input).is_err());
     }
 }
