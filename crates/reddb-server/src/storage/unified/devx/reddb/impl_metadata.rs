@@ -914,11 +914,15 @@ impl RedDB {
         &self,
         mut indexes: Vec<PhysicalIndexState>,
     ) -> Vec<PhysicalIndexState> {
-        let native_artifacts = self
-            .native_physical_state()
-            .and_then(|state| state.registry)
-            .map(|registry| registry.vector_artifacts)
+        let native_state = self.native_physical_state();
+        let native_artifacts = native_state
+            .as_ref()
+            .and_then(|state| state.registry.as_ref())
+            .map(|registry| registry.vector_artifacts.as_slice())
             .unwrap_or_default();
+        let artifact_pages = native_state
+            .as_ref()
+            .and_then(|state| state.vector_artifact_pages.as_ref());
         for index in &mut indexes {
             let Some(collection) = index.collection.as_deref() else {
                 continue;
@@ -943,9 +947,9 @@ impl RedDB {
             index.artifact_kind = Some(artifact.artifact_kind.clone());
             index.artifact_checksum = Some(artifact.checksum);
             index.build_state = "artifact-published".to_string();
-            if let Some(pages) = self.native_vector_artifact_pages() {
+            if let Some(pages) = artifact_pages {
                 index.artifact_root_page = pages
-                    .into_iter()
+                    .iter()
                     .find(|page| {
                         page.collection == artifact.collection
                             && page.artifact_kind == artifact.artifact_kind
@@ -1526,4 +1530,109 @@ fn current_unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod catalog_observation_tests {
+    use super::*;
+
+    #[test]
+    fn index_reconciliation_reads_one_native_observation() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let runtime = crate::RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+                .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+                .expect("paged profile")
+                .with_capability(Capability::FullText),
+        )
+        .expect("runtime");
+        for number in 0..4 {
+            runtime
+                .execute_query(&format!("CREATE TABLE source_{number} (payload TEXT)"))
+                .expect("table");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO source_{number} (payload) VALUES ('searchable payload')"
+                ))
+                .expect("row");
+        }
+        runtime.checkpoint().expect("published artifacts");
+        let db = runtime.db();
+        let pager = db.store.pager().expect("paged store");
+        let reads = || {
+            let stats = pager.cache_stats();
+            stats.hits + stats.misses
+        };
+        let before = reads();
+        let native = db.native_physical_state().expect("native state");
+        let observation_reads = reads() - before;
+        let artifacts = native.registry.expect("registry").vector_artifacts;
+        let pages = native.vector_artifact_pages.expect("artifact pages");
+        let indexes: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_kind == "text.fulltext")
+            .map(|artifact| PhysicalIndexState {
+                name: format!("{}::fulltext", artifact.collection),
+                kind: IndexKind::FullText,
+                collection: Some(artifact.collection.clone()),
+                enabled: true,
+                entries: 0,
+                estimated_memory_bytes: 0,
+                last_refresh_ms: None,
+                backend: "catalog-derived".into(),
+                artifact_kind: None,
+                artifact_root_page: None,
+                artifact_checksum: None,
+                build_state: "catalog-derived".into(),
+            })
+            .collect();
+        assert!(indexes.len() >= 4, "fixture must publish all four indexes");
+        let declarations = indexes.clone();
+        let before = reads();
+        let indexes = db.reconcile_index_states_with_native_artifacts(indexes);
+        let reconciliation_reads = reads() - before;
+        for index in indexes {
+            let artifact = artifacts
+                .iter()
+                .find(|artifact| {
+                    Some(&artifact.collection) == index.collection.as_ref()
+                        && artifact.artifact_kind == "text.fulltext"
+                })
+                .expect("published artifact");
+            let page = pages
+                .iter()
+                .find(|page| {
+                    page.collection == artifact.collection
+                        && page.artifact_kind == artifact.artifact_kind
+                })
+                .expect("artifact root");
+            assert_eq!(index.artifact_root_page, Some(page.root_page));
+            assert_eq!(index.artifact_checksum, Some(artifact.checksum));
+            assert_eq!(index.entries, artifact.vector_count as usize);
+            assert_eq!(index.build_state, "artifact-published");
+        }
+        assert_eq!(
+            reconciliation_reads, observation_reads,
+            "catalog reconciliation must not reread artifact pages per index"
+        );
+
+        // An undecodable artifact directory must retain the existing fallback,
+        // not reuse the successful observation from the preceding call.
+        let page_id = native.header.vector_artifact_page;
+        let mut page = pager.read_page(page_id).expect("artifact directory");
+        page.as_bytes_mut()[crate::storage::engine::HEADER_SIZE..].fill(0);
+        pager
+            .write_page(page_id, page)
+            .expect("corrupt artifact directory");
+        assert!(db.native_vector_artifact_pages().is_none());
+        let indexes = db.reconcile_index_states_with_native_artifacts(declarations);
+        for index in indexes {
+            assert_eq!(index.artifact_root_page, None);
+            assert!(
+                index.artifact_checksum.is_some(),
+                "registry remains available"
+            );
+            assert_eq!(index.build_state, "artifact-published");
+        }
+    }
 }
