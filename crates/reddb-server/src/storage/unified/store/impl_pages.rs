@@ -2085,6 +2085,18 @@ mod checkpoint_work_tests {
         );
     }
 
+    fn replay_test_payload(bytes: usize) -> String {
+        let mut state = 0x1234_5678_u32;
+        (0..bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                char::from(b'!' + (state % 90) as u8)
+            })
+            .collect()
+    }
+
     #[test]
     fn wal_replay_with_exhausted_row_proof_keeps_full_validation() {
         let directory = tempfile::tempdir().unwrap();
@@ -2096,15 +2108,7 @@ mod checkpoint_work_tests {
         }
         store.persist().unwrap();
         // Larger than the retained-image allowance, so replay must fall back.
-        let mut state = 0x1234_5678_u32;
-        let payload: String = (0..64 * 1024)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                char::from(b'!' + (state % 90) as u8)
-            })
-            .collect();
+        let payload = replay_test_payload(64 * 1024);
         let changed =
             UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::text(payload)]);
         let action = StoreWalAction::upsert_entity("rows", &changed, None, store.format_version());
@@ -2168,7 +2172,7 @@ mod checkpoint_work_tests {
                         EntityId::new(1),
                         "rows",
                         1,
-                        vec![Value::text("payload".repeat(2048))],
+                        vec![Value::text(replay_test_payload(16 * 1024))],
                     )
                 } else {
                     row(1, 42)
