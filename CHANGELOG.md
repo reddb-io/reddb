@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.4
+
+### Patch Changes
+
+- [#2561](https://github.com/reddb-io/reddb/pull/2561) [`014da01`](https://github.com/reddb-io/reddb/commit/014da01ea9a30213bb22ffcd7cb409a1860ec06a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore stable publication on supported macOS runners. The macOS 14 retirement brownout cancelled the 1.27.3 release before binary, container and npm publication; the next patch includes its query allocation and worker panic fixes.
+
 ## 1.27.3
 
 ### Patch Changes
