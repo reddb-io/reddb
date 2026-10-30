@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use reddb::auth::vault::{Vault, VaultState};
+use reddb::auth::vault::{KeyPair, Vault, VaultState};
 use reddb::json::Value as Json;
 use reddb::runtime::query_request::ParamValue;
 use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
@@ -238,6 +238,17 @@ fn import(input: &Json, destination: &Path, certificate: &str) -> Result<()> {
     let state = Vault::unseal_logical_export_with_certificate(blob, certificate)?;
     if !state.bootstrapped || state.master_secret.is_none() || state.users.is_empty() {
         return Err("complete bootstrapped Vault required".into());
+    }
+    let master = state
+        .master_secret
+        .clone()
+        .ok_or("master secret required")?;
+    if master.len() != 32
+        || !KeyPair::from_master_secret(master)
+            .certificate_hex()
+            .eq_ignore_ascii_case(certificate.trim())
+    {
+        return Err("source Vault master secret does not match its certificate".into());
     }
     // create_dir is exclusive. A failure retains the partial candidate for
     // inspection; an existing directory, source file or acknowledged write is
