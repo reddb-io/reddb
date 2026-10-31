@@ -82,15 +82,21 @@ where
         if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
             continue;
         }
-        let replace = by_key
-            .get(key)
-            .map(|existing| version.version() > existing.version())
-            .unwrap_or(true);
-        if replace {
-            by_key.insert(key.to_string(), version);
-        }
+        retain_latest_version(&mut by_key, version);
     }
     by_key.into_values().collect()
+}
+
+/// Lists preserve the first entry among equal highest versions. Point reads
+/// use their existing last-equal selection rule independently.
+pub(super) fn retain_latest_version<T: KeyedVersion>(by_key: &mut BTreeMap<String, T>, version: T) {
+    let key = version.key();
+    if by_key
+        .get(key)
+        .is_none_or(|existing| version.version() > existing.version())
+    {
+        by_key.insert(key.to_string(), version);
+    }
 }
 
 pub(super) fn history_versions<T>(mut versions: Vec<T>) -> Vec<T>
@@ -209,6 +215,11 @@ mod tests {
                     key: "app.a",
                     version: 2,
                     value: "new-a",
+                },
+                TestVersion {
+                    key: "app.a",
+                    version: 2,
+                    value: "equal-version-must-keep-the-first",
                 },
                 TestVersion {
                     key: "app.b",

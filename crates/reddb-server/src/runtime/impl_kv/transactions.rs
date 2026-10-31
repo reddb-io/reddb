@@ -15,16 +15,6 @@ impl KvAtomicOps<'_> {
         }
     }
 
-    pub(super) fn pending_vault_entries(
-        &self,
-        collection: &str,
-        key: Option<&str>,
-    ) -> Vec<VaultEntry> {
-        let mut entries = Vec::new();
-        self.visit_pending_vault_entries(collection, key, |entry| entries.push(entry));
-        entries
-    }
-
     /// Callbacks run under the pending-write read guard and must not re-enter
     /// transaction writes. Selectors retain one payload instead of cloning a Vec.
     pub(super) fn visit_pending_vault_entries(

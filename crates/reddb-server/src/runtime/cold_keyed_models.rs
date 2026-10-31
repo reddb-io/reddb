@@ -384,6 +384,7 @@ fn cold_vault_reads_preserve_encrypted_history_and_export() {
         "VAULT GET cold_secrets.api_key",
         "VAULT HISTORY cold_secrets.api_key",
         "LIST VAULT cold_secrets",
+        "LIST VAULT cold_secrets PREFIX 'api'",
         "VAULT REVEAL cold_secrets.api_key",
     ];
     let expected: Vec<_> = queries.iter().map(|sql| observe(&runtime, sql)).collect();
@@ -601,5 +602,69 @@ fn cold_unreadable_signature_policy_blocks_an_unsigned_insert() {
             .expect("events")
             .count(),
         0
+    );
+}
+
+#[test]
+fn cold_vault_listing_keeps_own_pending_version_over_newer_committed_versions() {
+    use super::execution_context::{clear_current_connection_id, set_current_connection_id};
+    struct Scope;
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            clear_current_connection_id();
+        }
+    }
+    let _scope = Scope;
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    runtime.set_auth_store(Arc::new(
+        crate::auth::AuthStore::with_vault_certificate(
+            crate::auth::AuthConfig::default(),
+            Arc::clone(store.pager().expect("pager")),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("vault certificate"),
+    ));
+    runtime
+        .execute_query("CREATE VAULT shadow WITH OWN MASTER KEY")
+        .expect("vault");
+    runtime
+        .execute_query("VAULT PUT shadow.token = 'initial'")
+        .expect("initial version");
+    store.persist().expect("publish initial version");
+    install_indexed_cold(&runtime, "shadow", 128 * 1024);
+    set_current_connection_id(6001);
+    runtime
+        .execute_query("BEGIN ISOLATION LEVEL READ COMMITTED")
+        .expect("transaction");
+    runtime
+        .execute_query("ROTATE VAULT shadow.token = 'pending'")
+        .expect("own pending version");
+    set_current_connection_id(6002);
+    runtime
+        .execute_query("ROTATE VAULT shadow.token = 'committed'")
+        .expect("concurrent version");
+    runtime
+        .execute_query("ROTATE VAULT shadow.token = 'committed-newer'")
+        .expect("higher committed version");
+    set_current_connection_id(6001);
+    assert_eq!(
+        observe(&runtime, "VAULT REVEAL shadow.token VERSION 3")[0].get("value"),
+        Some(&Value::text("committed-newer"))
+    );
+    assert_eq!(
+        observe(&runtime, "LIST VAULT shadow PREFIX 'tok'")[0].get("version"),
+        Some(&Value::Integer(2))
+    );
+    assert_eq!(
+        observe(&runtime, "VAULT REVEAL shadow.token")[0].get("value"),
+        Some(&Value::text("pending"))
+    );
+    runtime
+        .execute_query("ROLLBACK")
+        .expect("discard pending version");
+    assert_eq!(
+        observe(&runtime, "LIST VAULT shadow")[0].get("version"),
+        Some(&Value::Integer(3))
     );
 }

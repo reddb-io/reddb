@@ -1115,13 +1115,14 @@ impl<'a> KvAtomicOps<'a> {
                     entity
                         .data
                         .as_row()
-                        .is_some_and(|row| self.vault_row_in_scope(row))
+                        .is_some_and(|row| self.vault_row_in_scope(row)
+                            && prefix.is_none_or(|prefix| matches!(row.get_field("key"), Some(Value::Text(key)) if key.starts_with(prefix))))
                 })
             })
             .transpose()?
             .into_iter()
             .flatten();
-        let mut versions = Vec::new();
+        let mut latest = std::collections::BTreeMap::new();
         for record in records {
             let (entity, metadata) = record?;
             let crate::storage::EntityData::Row(ref row) = entity.data else {
@@ -1144,27 +1145,38 @@ impl<'a> KvAtomicOps<'a> {
                 entity.sequence_id,
                 self.tenant.clone(),
             );
-            versions.push(entry);
+            super::keyed_spine::retain_latest_version(&mut latest, entry);
         }
         if collection == "red.vault" && self.tenant.is_none() {
             if let Some(auth) = self.runtime.inner.auth_store.read().clone() {
-                let known: std::collections::HashSet<String> =
-                    versions.iter().map(|entry| entry.key.clone()).collect();
                 for key in auth.vault_kv_keys() {
-                    if !known.contains(&key) {
+                    if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                        continue;
+                    }
+                    if !latest.contains_key(&key) {
                         if let Some(entry) = self.legacy_vault_entry(collection, &key)? {
-                            versions.push(entry);
+                            super::keyed_spine::retain_latest_version(&mut latest, entry);
                         }
                     }
                 }
             }
         }
-        let pending = self.pending_vault_entries(collection, None);
-        let pending_keys: std::collections::HashSet<&str> =
-            pending.iter().map(|entry| entry.key.as_str()).collect();
-        versions.retain(|entry| !pending_keys.contains(entry.key.as_str()));
-        versions.extend(pending);
-        Ok(super::keyed_spine::latest_versions(versions, prefix))
+        let mut pending_keys = std::collections::HashSet::new();
+        self.visit_pending_vault_entries(collection, None, |entry| {
+            if prefix.is_some_and(|prefix| !entry.key.starts_with(prefix)) {
+                return;
+            }
+            // Any pending version shadows the base for this tenant/key, even
+            // when an imported base carried a higher version number.
+            if pending_keys.insert(entry.key.clone()) {
+                latest.remove(&entry.key);
+            }
+            super::keyed_spine::retain_latest_version(&mut latest, entry);
+        });
+        Ok(latest
+            .into_values()
+            .filter(|entry| prefix.is_none_or(|prefix| entry.key.starts_with(prefix)))
+            .collect())
     }
 
     fn legacy_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {

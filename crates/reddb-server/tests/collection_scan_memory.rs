@@ -180,7 +180,7 @@ fn collection_pages_bound_payload_memory_and_preserve_cursor_and_row_schema() {
 }
 
 #[test]
-fn cold_vault_point_reads_do_not_retain_all_version_payloads() {
+fn cold_vault_reads_do_not_retain_all_version_payloads() {
     use reddb_engine::storage::collection_read::PagedCollection;
     use reddb_engine::storage::metadata_codec::serialize_entity_record;
     use reddb_server::auth::{AuthConfig, AuthStore};
@@ -292,20 +292,21 @@ fn cold_vault_point_reads_do_not_retain_all_version_payloads() {
         "VAULT GET secrets.seed",
         "VAULT REVEAL secrets.seed",
         "VAULT REVEAL secrets.seed VERSION 1",
+        "LIST VAULT secrets",
     ] {
         runtime.invalidate_result_cache();
         let baseline = LIVE_BYTES.load(Ordering::Relaxed);
         PEAK_BYTES.store(baseline, Ordering::Relaxed);
-        let result = runtime.execute_query(query).expect("point read");
+        let result = runtime.execute_query(query).expect("Vault read");
         let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
         eprintln!("cold_vault_versions={VERSIONS} query={query} extra_peak_bytes={extra}");
         assert!(
             extra < 8 * 1024 * 1024,
-            "a point read retained unrelated history payloads: {extra} bytes"
+            "a keyed read retained unselected history payloads: {extra} bytes"
         );
         assert_eq!(result.result.records.len(), 1);
         match query {
-            "VAULT GET secrets.seed" => assert_eq!(
+            "VAULT GET secrets.seed" | "LIST VAULT secrets" => assert_eq!(
                 result.result.records[0].get("version"),
                 Some(&Value::Integer(VERSIONS as i64))
             ),
@@ -322,6 +323,6 @@ fn cold_vault_point_reads_do_not_retain_all_version_payloads() {
     assert_eq!(
         manager.count(),
         VERSIONS as usize,
-        "point reads preserve every physical version"
+        "reads preserve every physical version"
     );
 }
