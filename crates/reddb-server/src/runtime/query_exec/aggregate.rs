@@ -908,7 +908,9 @@ mod agg_spill_codec {
     use std::collections::HashSet;
     use std::io::{Read, Write};
 
-    use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
+    use crate::storage::query::executors::agg_spill::{
+        read_spill_header, Mergeable, SpillCodec, SpillError,
+    };
     use reddb_types::{CanonicalKey, CanonicalKeyFamily, Value};
 
     use super::{AggregateGroup, AggregateGroupKey, GroupKeyPart, SlottedAggState};
@@ -1541,12 +1543,9 @@ mod agg_spill_codec {
         }
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-            let mut nb = [0u8; 4];
-            match r.read_exact(&mut nb) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(SpillError::Io(e)),
-            }
+            let Some(nb) = read_spill_header(r)? else {
+                return Ok(None);
+            };
             let n = u32::from_le_bytes(nb) as usize;
             let mut parts = Vec::with_capacity(n);
             for _ in 0..n {
@@ -1581,12 +1580,9 @@ mod agg_spill_codec {
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
             // Detect clean EOF on the first field's length prefix.
-            let mut nb = [0u8; 4];
-            match r.read_exact(&mut nb) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(SpillError::Io(e)),
-            }
+            let Some(nb) = read_spill_header(r)? else {
+                return Ok(None);
+            };
             let gv_n = u32::from_le_bytes(nb) as usize;
             let mut group_values = Vec::with_capacity(gv_n);
             for _ in 0..gv_n {
@@ -2848,6 +2844,26 @@ mod materialization_limit_tests {
 mod shared_kernel_spill_tests {
     use super::*;
     use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec};
+
+    #[test]
+    fn native_spill_prefixes_do_not_treat_truncation_as_clean_eof() {
+        assert!(AggregateGroupKey::decode(&mut &[][..])
+            .expect("clean EOF")
+            .is_none());
+        assert!(AggregateGroup::decode(&mut &[][..])
+            .expect("clean EOF")
+            .is_none());
+        for length in 1..4 {
+            assert!(
+                AggregateGroupKey::decode(&mut &vec![0_u8; length][..]).is_err(),
+                "truncated native group key {length}"
+            );
+            assert!(
+                AggregateGroup::decode(&mut &vec![0_u8; length][..]).is_err(),
+                "truncated native state {length}"
+            );
+        }
+    }
 
     #[test]
     fn shared_state_round_trips_the_native_spill_codec_and_merges() {

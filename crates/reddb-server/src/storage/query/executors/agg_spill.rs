@@ -93,6 +93,40 @@ impl std::fmt::Display for SpillError {
 
 impl std::error::Error for SpillError {}
 
+/// A file becomes owned only after create_new succeeds. Ownership stays with
+/// the aggregator through every read/error path; readers close before cleanup.
+struct SpillBatch {
+    path: PathBuf,
+    bytes: u64,
+    entries: usize,
+}
+
+impl Drop for SpillBatch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Only zero bytes at the start of a record mean clean EOF. A partially read
+/// length/key must remain an error, including with readers that return short reads.
+pub(crate) fn read_spill_header<R: Read, const N: usize>(
+    reader: &mut R,
+) -> std::io::Result<Option<[u8; N]>> {
+    assert!(N > 0, "invariant: spill headers have a positive size");
+    let mut bytes = [0; N];
+    let read = loop {
+        match reader.read(&mut bytes) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => break result?,
+        }
+    };
+    if read == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut bytes[read..])?;
+    Ok(Some(bytes))
+}
+
 /// Trait for serialising a key or state into a flat byte
 /// representation. Implementations should be deterministic so the
 /// spill file is byte-equal across runs (helpful for debugging).
@@ -120,12 +154,7 @@ impl SpillCodec for u64 {
         Ok(8)
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-        let mut buf = [0u8; 8];
-        match r.read_exact(&mut buf) {
-            Ok(()) => Ok(Some(u64::from_le_bytes(buf))),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(SpillError::Io(e)),
-        }
+        Ok(read_spill_header(r)?.map(u64::from_le_bytes))
     }
 }
 
@@ -135,12 +164,7 @@ impl SpillCodec for i64 {
         Ok(8)
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-        let mut buf = [0u8; 8];
-        match r.read_exact(&mut buf) {
-            Ok(()) => Ok(Some(i64::from_le_bytes(buf))),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(SpillError::Io(e)),
-        }
+        Ok(read_spill_header(r)?.map(i64::from_le_bytes))
     }
 }
 
@@ -150,12 +174,7 @@ impl SpillCodec for f64 {
         Ok(8)
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-        let mut buf = [0u8; 8];
-        match r.read_exact(&mut buf) {
-            Ok(()) => Ok(Some(f64::from_le_bytes(buf))),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(SpillError::Io(e)),
-        }
+        Ok(read_spill_header(r)?.map(f64::from_le_bytes))
     }
 }
 
@@ -168,12 +187,9 @@ impl SpillCodec for String {
         Ok(4 + bytes.len())
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-        let mut lenbuf = [0u8; 4];
-        match r.read_exact(&mut lenbuf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(SpillError::Io(e)),
-        }
+        let Some(lenbuf) = read_spill_header(r)? else {
+            return Ok(None);
+        };
         let len = u32::from_le_bytes(lenbuf) as usize;
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf)?;
@@ -206,8 +222,8 @@ where
     /// Directory where spill batches land. Each batch is a single
     /// file named `spill_{seq}.bin`.
     spill_dir: PathBuf,
-    /// List of spilled batch paths in order of creation.
-    spilled_batches: Vec<PathBuf>,
+    /// Owned batches in order of creation, including their committed framing.
+    spilled_batches: Vec<SpillBatch>,
     /// Monotonic batch counter for unique filenames.
     next_seq: u64,
     /// Total bytes spilled across all batches — diagnostic.
@@ -285,18 +301,34 @@ where
             .write(true)
             .create_new(true)
             .open(&path)?;
+        let mut batch = SpillBatch {
+            path,
+            bytes: 0,
+            entries: self.table.len(),
+        };
         let mut writer = BufWriter::new(file);
         let mut bytes_written = 0usize;
-        // Drain so we don't hold both copies in memory while
-        // writing — the file is the canonical store after this.
-        for (k, s) in self.table.drain() {
-            bytes_written += k.encode(&mut writer)?;
-            bytes_written += s.encode(&mut writer)?;
+        // Borrow rather than clone or drain: a failed encoder/flush leaves the
+        // original groups available for retry, and the partial file is removed.
+        for (k, s) in &self.table {
+            bytes_written = bytes_written
+                .checked_add(k.encode(&mut writer)?)
+                .ok_or_else(|| SpillError::Codec("spill byte count overflow".into()))?;
+            bytes_written = bytes_written
+                .checked_add(s.encode(&mut writer)?)
+                .ok_or_else(|| SpillError::Codec("spill byte count overflow".into()))?;
         }
         writer.flush()?;
-        self.total_spilled_bytes += bytes_written as u64;
+        batch.bytes = u64::try_from(bytes_written)
+            .map_err(|_| SpillError::Codec("spill byte count overflow".into()))?;
+        let total_bytes = self
+            .total_spilled_bytes
+            .checked_add(batch.bytes)
+            .ok_or_else(|| SpillError::Codec("spill byte count overflow".into()))?;
+        self.table.clear();
+        self.total_spilled_bytes = total_bytes;
         self.spill_count += 1;
-        self.spilled_batches.push(path);
+        self.spilled_batches.push(batch);
         Ok(())
     }
 
@@ -313,21 +345,26 @@ where
         // The current `table` is the most recent in-memory chunk
         // that hasn't been spilled — start the merge from it.
         let mut merged = std::mem::take(&mut self.table);
-        for path in self.spilled_batches.drain(..) {
-            let file = File::open(&path)?;
+        for batch in self.spilled_batches {
+            let file = File::open(&batch.path)?;
             let metadata = file.metadata()?;
-            if self.mem_limit_bytes > 0 && (metadata.len() as usize) > self.mem_limit_bytes {
+            let file_bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+            if self.mem_limit_bytes > 0 && file_bytes > self.mem_limit_bytes {
                 return Err(SpillError::BatchTooLarge {
-                    size: metadata.len() as usize,
+                    size: file_bytes,
                     limit: self.mem_limit_bytes,
                 });
             }
+            if metadata.len() != batch.bytes {
+                return Err(SpillError::Codec(
+                    "spill batch length changed after publication".into(),
+                ));
+            }
             let mut reader = BufReader::new(file);
-            loop {
-                let key = match K::decode(&mut reader)? {
-                    Some(k) => k,
-                    None => break,
-                };
+            for _ in 0..batch.entries {
+                let key = K::decode(&mut reader)?.ok_or_else(|| {
+                    SpillError::Codec("spill batch ended before its published entry count".into())
+                })?;
                 let state = match S::decode(&mut reader)? {
                     Some(s) => s,
                     None => {
@@ -343,9 +380,9 @@ where
                     }
                 }
             }
-            // Best-effort cleanup — ignore errors so a missing
-            // file doesn't hide a successful merge.
-            let _ = std::fs::remove_file(&path);
+            if read_spill_header::<_, 1>(&mut reader)?.is_some() {
+                return Err(SpillError::Codec("spill batch has trailing entries".into()));
+            }
         }
         Ok(merged)
     }
@@ -359,21 +396,6 @@ where
     /// Number of groups currently held in memory.
     pub fn in_memory_groups(&self) -> usize {
         self.table.len()
-    }
-}
-
-impl<K, S> Drop for SpilledHashAgg<K, S>
-where
-    K: Hash + Eq + Clone + SpillCodec,
-    S: Clone + Mergeable + SpillCodec,
-{
-    fn drop(&mut self) {
-        // Clean up any spill files left behind if the caller
-        // never called drain. Best-effort — failures are silent
-        // so Drop doesn't panic.
-        for path in self.spilled_batches.drain(..) {
-            let _ = std::fs::remove_file(&path);
-        }
     }
 }
 
