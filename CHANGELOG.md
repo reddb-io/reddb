@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.27.5
+
+### Patch Changes
+
+- [#2565](https://github.com/reddb-io/reddb/pull/2565) [`4327451`](https://github.com/reddb-io/reddb/commit/43274516be98a164f0245b8b457bde6b1b046e05) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix concurrent page-cache slot publication so repeated inserts cannot retain unindexed page images beyond cache capacity. Revalidate slot identity for reads, pins and dirty-state updates, and recheck pins and dirty images when an eviction takes ownership of its writeback page.
+
+  Publish pager writes and their dirty state atomically. Completing a concurrent disk read now retains any newer cached image instead of overwriting it, including encrypted-page reads and writes, allocations and free-list trunk publication.
+
 ## 1.27.4
 
 ### Patch Changes
