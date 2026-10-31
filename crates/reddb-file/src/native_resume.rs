@@ -7,7 +7,7 @@ use crate::{RdbFileError, RdbFileResult, METADATA_HEADER_BYTES};
 use std::collections::BTreeMap;
 
 const MAGIC: &[u8; 4] = b"RDRS";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionResume {
@@ -16,6 +16,7 @@ pub struct CollectionResume {
     pub entity_id_next: u64,
     pub row_id_next: u64,
     pub sequence_id_next: u64,
+    pub key_index_root: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,7 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
     {
         return Err(invalid("invalid catalog resume counters"));
     }
+    validate_key_roots(&resume.collections)?;
     let count = u32::try_from(resume.collections.len())
         .map_err(|_| invalid("too many resume collections"))?;
     out.extend_from_slice(MAGIC);
@@ -77,6 +79,8 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
         out.extend_from_slice(&state.entity_id_next.to_le_bytes());
         out.extend_from_slice(&state.row_id_next.to_le_bytes());
         out.extend_from_slice(&state.sequence_id_next.to_le_bytes());
+        out.push(u8::from(state.key_index_root.is_some()));
+        out.extend_from_slice(&state.key_index_root.unwrap_or(0).to_le_bytes());
     }
     Ok(())
 }
@@ -132,6 +136,15 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
             entity_id_next: read_u64(data, &mut position)?,
             row_id_next: read_u64(data, &mut position)?,
             sequence_id_next: read_u64(data, &mut position)?,
+            key_index_root: {
+                let present = take(data, &mut position, 1)?[0];
+                let root = read_u32(data, &mut position)?;
+                match (present, root) {
+                    (0, 0) => None,
+                    (1, root) => Some(root),
+                    _ => return Err(invalid("invalid key index resume root")),
+                }
+            },
         };
         if roots.get(&root.collection) != Some(&state.root_page)
             || state.entity_id_next == 0
@@ -144,10 +157,27 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
             ));
         }
     }
+    validate_key_roots(&collections)?;
     Ok(Some(CatalogResume {
         entity_id_next,
         collections,
     }))
+}
+
+fn validate_key_roots(collections: &BTreeMap<String, CollectionResume>) -> RdbFileResult<()> {
+    let data_roots: std::collections::BTreeSet<_> =
+        collections.values().map(|state| state.root_page).collect();
+    let mut key_roots = std::collections::BTreeSet::new();
+    for root in collections
+        .values()
+        .filter_map(|state| state.key_index_root)
+        .filter(|root| *root != 0)
+    {
+        if data_roots.contains(&root) || !key_roots.insert(root) {
+            return Err(invalid("key index root aliases another published tree"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -182,6 +212,7 @@ mod tests {
                     entity_id_next: 999,
                     row_id_next: 3000,
                     sequence_id_next: 5000,
+                    key_index_root: Some(81),
                 },
             )]),
         }
@@ -216,5 +247,35 @@ mod tests {
         let mut data = catalog();
         encode_catalog_resume(&mut data, &mismatched).expect("encode mismatch");
         assert!(decode_catalog_resume(&data).is_err());
+    }
+    #[test]
+    fn resume_preserves_missing_key_preparation_and_rejects_aliased_indexes() {
+        let mut state = resume();
+        state
+            .collections
+            .get_mut("rows")
+            .expect("rows")
+            .key_index_root = None;
+        let mut bytes = catalog();
+        encode_catalog_resume(&mut bytes, &state).expect("unprepared index marker");
+        assert_eq!(
+            decode_catalog_resume(&bytes).expect("missing key index"),
+            Some(state)
+        );
+        let mut state = resume();
+        state
+            .collections
+            .get_mut("rows")
+            .expect("rows")
+            .key_index_root = Some(70);
+        assert!(encode_catalog_resume(&mut catalog(), &state).is_err());
+        let mut bytes = catalog();
+        encode_catalog_resume(&mut bytes, &resume()).expect("paired roots");
+        let end = bytes.len();
+        bytes[end - 4..].copy_from_slice(&70_u32.to_le_bytes());
+        assert!(
+            decode_catalog_resume(&bytes).is_err(),
+            "a key tree cannot alias a physical data tree"
+        );
     }
 }

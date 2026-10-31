@@ -318,6 +318,7 @@ pub struct UnifiedStore {
     /// btree mutation, serialising every concurrent insert across every
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
+    key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
@@ -357,6 +358,13 @@ pub struct UnifiedStore {
     embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
 }
 
+#[derive(Clone)]
+struct PublishedKeyIndex {
+    indexed: bool,
+    source: std::sync::Weak<BTree>,
+    tree: Arc<BTree>,
+}
+
 struct RetiredBTree {
     tree: Arc<BTree>,
     published: bool,
@@ -373,6 +381,7 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
+mod key_index;
 mod keyed_write;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;

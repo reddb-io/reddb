@@ -490,6 +490,9 @@ impl UnifiedStore {
         if let Some(tree) = self.btree_indices.write().remove(name) {
             self.retire_btree(tree);
         }
+        if let Some(index) = self.key_indices.write().remove(name) {
+            self.retire_btree(index.tree);
+        }
 
         self.resident
             .entity_cache

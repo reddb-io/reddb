@@ -213,10 +213,9 @@ impl SegmentManager {
     }
 
     /// Fallible keyed projection. Resident mode keeps the segment key indexes.
-    /// Cold bases currently require a streaming probe: O(base rows), one decoded
-    /// row at a time. Hosts must fence publication, and callbacks must not
-    /// mutate or re-enter this collection. A durable key index is still needed
-    /// before enabling this mode for managed hot-key workloads.
+    /// Prepared bases seek physical candidates through their paired key index;
+    /// unindexed legacy sources retain a one-row streaming fallback. Hosts must
+    /// fence publication, and callbacks must not mutate or re-enter this collection.
     pub fn try_project_key_entity<T>(
         &self,
         key: &str,
@@ -252,7 +251,10 @@ impl SegmentManager {
         if !versioned && best.is_some() {
             return Ok(best.map(|(_, projected)| projected));
         }
-        let mut cursor = backing.source.cursor()?;
+        let mut cursor = match backing.source.key_cursor(key)? {
+            Some(cursor) => cursor,
+            None => backing.source.cursor()?,
+        };
         while let Some(id) = cursor.peek_id()? {
             // A physical replacement or deletion masks the old base value,
             // even when it no longer matches this logical key.

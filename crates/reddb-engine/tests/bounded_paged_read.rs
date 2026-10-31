@@ -17,10 +17,12 @@ struct Pages {
     next: AtomicU32,
     pages: Mutex<HashMap<u32, Page>>,
     overflow_reads: AtomicUsize,
+    reads: AtomicUsize,
 }
 
 impl PageStore for Pages {
     fn read_page(&self, id: u32) -> Result<Page, PagerError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let page = self.pages.lock().expect("fixture lock")[&id].clone();
         if page.page_type().expect("fixture page type") == PageType::Overflow {
             self.overflow_reads.fetch_add(1, Ordering::Relaxed);
@@ -567,4 +569,107 @@ fn cold_physical_cursor_keeps_hidden_versions_and_their_metadata() {
         })
         .collect();
     assert_eq!(physical, vec![1, 2]);
+}
+
+#[test]
+fn indexed_cold_keys_bound_reads_preserve_versions_and_verify_candidates() {
+    use reddb_engine::storage::entity::{EntityData, RowData};
+    use reddb_engine::storage::manager::SegmentManager;
+    use reddb_engine::transaction::read::SnapshotContext;
+    use reddb_engine::transaction::snapshot::{Snapshot, SnapshotManager};
+    use reddb_types::Value;
+    use std::collections::HashSet;
+    let pages = Arc::new(Pages::default());
+    let data = Arc::new(BTree::new(Arc::clone(&pages)));
+    let keys = Arc::new(BTree::new(Arc::clone(&pages)));
+    let wanted = reddb_file::native_key_index::fingerprint("wanted");
+    for id in 1_u64..=2048 {
+        let key = if (2..=4).contains(&id) {
+            "wanted".to_string()
+        } else {
+            format!("other-{id}")
+        };
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(key.as_str()),
+                if id == 1 {
+                    Value::text("x".repeat(32 * 1024))
+                } else {
+                    Value::Integer(id as i64)
+                },
+            ],
+            vec!["key".into(), "value".into()],
+        ));
+        entity.set_xmin(match id {
+            3 => 3,
+            4 => 12,
+            5 => 99,
+            _ => 1,
+        });
+        if id == 3 {
+            entity.set_xmax(12);
+        }
+        data.insert(
+            &id.to_be_bytes(),
+            &serialize_entity_record(&entity, None, 11),
+        )
+        .expect("record");
+        // ID 5 simulates a fingerprint collision: it must not become a key match.
+        let fingerprint = if id == 5 {
+            wanted
+        } else {
+            reddb_file::native_key_index::fingerprint(&key)
+        };
+        keys.insert(
+            &reddb_file::native_key_index::encode_candidate(&fingerprint, id),
+            &[],
+        )
+        .expect("candidate");
+    }
+    let manager = SegmentManager::new("keys");
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(
+            Arc::clone(&data),
+            Arc::clone(&keys),
+        )),
+        0,
+        11,
+        128 * 1024,
+        2048,
+    );
+    pages.reads.store(0, Ordering::Relaxed);
+    assert_eq!(
+        manager
+            .try_project_key_entity("wanted", None, true, 4096, |entity| entity.id)
+            .expect("indexed key"),
+        Some(EntityId::new(4))
+    );
+    assert!(
+        pages.reads.load(Ordering::Relaxed) < 100,
+        "an indexed probe must not walk unrelated collection pages"
+    );
+    let snapshot = SnapshotContext {
+        snapshot: Snapshot {
+            xid: 10,
+            in_progress: HashSet::new(),
+        },
+        manager: Arc::new(SnapshotManager::new()),
+        own_xids: HashSet::new(),
+        requires_index_fallback: false,
+        serializable_reader: None,
+    };
+    assert_eq!(
+        manager
+            .try_project_key_entity("wanted", Some(&snapshot), true, 4096, |entity| entity.id)
+            .expect("historical candidate"),
+        Some(EntityId::new(3))
+    );
+    // A candidate referencing a missing physical row is corruption, not absence.
+    data.delete(&4_u64.to_be_bytes())
+        .expect("injected broken index reference");
+    assert!(matches!(
+        manager.try_project_key_entity("wanted", None, true, 4096, |_| ()),
+        Err(StoreError::StorageIntegrity(_))
+    ));
 }

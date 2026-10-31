@@ -668,3 +668,124 @@ fn cold_insert_preserves_sequence_order_after_reopen() {
         }
     }
 }
+
+#[test]
+fn prepared_key_lookup_does_not_decode_unrelated_large_values() {
+    use reddb_server::storage::{EntityData, RowData};
+    let directory = tempfile::tempdir().expect("indexed key fixture");
+    let path = directory.path().join("key-index.rdb");
+    {
+        let store = UnifiedStore::open(&path).expect("legacy fixture");
+        store.create_collection("keys").expect("keys");
+        for (id, key, value) in [
+            (1, "unrelated", Value::text("x".repeat(32 * 1024))),
+            (2, "wanted", Value::Integer(7)),
+        ] {
+            let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::text(key), value],
+                vec!["key".into(), "value".into()],
+            ));
+            store.insert("keys", entity).expect("keyed row");
+        }
+        store.persist().expect("publish fixture");
+    }
+    let store = UnifiedStore::open_with_config(&path, cold_config()).expect("prepare disk base");
+    let manager = store.get_collection("keys").expect("keys");
+    assert_eq!(
+        manager
+            .try_project_key_entity("wanted", None, false, 4096, |entity| entity.id)
+            .expect("small key lookup must not decode a large unrelated value"),
+        Some(EntityId::new(2))
+    );
+    assert!(manager
+        .try_project_key_entity("unrelated", None, false, 4096, |_| ())
+        .is_err());
+    assert_eq!(
+        manager
+            .try_project_key_entity("missing", None, false, 4096, |_| ())
+            .expect("indexed absence"),
+        None
+    );
+    let (source, _) = manager.current_backing_overlay().expect("published source");
+    let mut cursor = source
+        .owned_key_cursor("wanted")
+        .expect("key cursor")
+        .expect("prepared index");
+    drop(source);
+    assert!(store
+        .delete("keys", EntityId::new(2))
+        .expect("delete wanted key"));
+    store.persist().expect("publish replacement");
+    store.persist().expect("retirement with retained cursor");
+    let record = cursor
+        .next_record(4096)
+        .expect("old indexed generation")
+        .expect("old wanted row");
+    let (entity, _) = record
+        .decode_with_budget(store.format_version(), 4096)
+        .expect("old value");
+    assert_eq!(
+        entity.data.as_row().expect("row").get_field("value"),
+        Some(&Value::Integer(7))
+    );
+    assert!(cursor
+        .next_record(4096)
+        .expect("end of old index")
+        .is_none());
+    drop(cursor);
+    store.persist().expect("retire released data and key roots");
+    assert_eq!(
+        manager
+            .try_project_key_entity("wanted", None, false, 4096, |_| ())
+            .expect("current absence"),
+        None
+    );
+}
+
+#[test]
+fn prepared_legacy_positional_keys_keep_a_fallible_scan_fallback() {
+    use reddb_server::storage::{EntityData, RowData};
+    let directory = tempfile::tempdir().expect("legacy key fixture");
+    let path = directory.path().join("positional-keys.rdb");
+    {
+        let store = UnifiedStore::open(&path).expect("legacy fixture");
+        store.create_collection("keys").expect("keys");
+        let mut named = UnifiedEntity::table_row(EntityId::new(1), "keys", 1, vec![]);
+        named.data = EntityData::Row(RowData::with_names(
+            vec![Value::text("named"), Value::Integer(1)],
+            vec!["key".into(), "value".into()],
+        ));
+        store.insert("keys", named).expect("named row");
+        store
+            .insert(
+                "keys",
+                UnifiedEntity::table_row(
+                    EntityId::new(2),
+                    "keys",
+                    2,
+                    vec![Value::text("positional"), Value::Integer(2)],
+                ),
+            )
+            .expect("positional row");
+        store.persist().expect("publish legacy rows");
+    }
+    for _ in 0..3 {
+        let store =
+            UnifiedStore::open_with_config(&path, cold_config()).expect("prepared legacy base");
+        let manager = store.get_collection("keys").expect("keys");
+        // The runtime catalog restores the authoritative names after opening
+        // the storage layer. An incomplete key index must never claim absence.
+        manager.set_column_schema_if_empty(vec!["key".into(), "value".into()]);
+        assert_eq!(
+            manager
+                .try_project_key_entity("positional", None, false, 4096, |entity| entity.id)
+                .expect("legacy keyed read"),
+            Some(EntityId::new(2))
+        );
+        assert_eq!(manager.count(), 2);
+        store
+            .persist()
+            .expect("repeat publication with positional fallback");
+    }
+}

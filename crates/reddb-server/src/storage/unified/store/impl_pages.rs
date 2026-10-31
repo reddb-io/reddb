@@ -457,13 +457,18 @@ impl UnifiedStore {
         pager: &Pager,
         metadata: &mut Vec<u8>,
         live: &HashMap<String, Arc<BTree>>,
+        keys: &HashMap<String, PublishedKeyIndex>,
     ) -> Result<(), StoreError> {
         let mut retired = self.retired_btrees.lock();
         let mut roots = Vec::new();
         let mut reclaim = Vec::new();
         let mut remove = std::collections::HashSet::new();
         for (index, entry) in retired.iter().enumerate() {
-            if live.values().any(|tree| Arc::ptr_eq(tree, &entry.tree)) {
+            if live
+                .values()
+                .chain(keys.values().map(|index| &index.tree))
+                .any(|tree| Arc::ptr_eq(tree, &entry.tree))
+            {
                 remove.insert(index);
                 continue;
             }
@@ -496,7 +501,10 @@ impl UnifiedStore {
         let (pending_pages, published_pages) = pager
             .deferred_reclamation_pages()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        let readers = live.values().any(|tree| tree.has_retirement_readers())
+        let readers = live
+            .values()
+            .chain(keys.values().map(|index| &index.tree))
+            .any(|tree| tree.has_retirement_readers())
             || retired
                 .iter()
                 .any(|entry| entry.tree.has_retirement_readers());
@@ -560,6 +568,13 @@ impl UnifiedStore {
                         entity_id_next: entity_next,
                         row_id_next,
                         sequence_id_next: manager.sequence_id_next(),
+                        key_index_root: tree.and_then(|tree| {
+                            keys.get(name)
+                                .filter(|index| {
+                                    index.indexed && index.source.ptr_eq(&Arc::downgrade(tree))
+                                })
+                                .map(|index| index.tree.root_page_id())
+                        }),
                     },
                 );
             }
@@ -867,7 +882,12 @@ impl UnifiedStore {
             }
         }
 
-        self.publish_reclaimable_trees(pager, &mut meta_data, &self.btree_indices.read())?;
+        self.publish_reclaimable_trees(
+            pager,
+            &mut meta_data,
+            &self.btree_indices.read(),
+            &self.key_indices.read(),
+        )?;
 
         Ok(())
     }
@@ -927,6 +947,7 @@ impl UnifiedStore {
             pager: None,
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
+            key_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -1022,6 +1043,7 @@ impl UnifiedStore {
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
+            key_indices: RwLock::new(HashMap::new()),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -1050,6 +1072,20 @@ impl UnifiedStore {
             commit.replay_into(&store).map_err(StoreError::Io)?;
         }
         store.recover_operational_manifest()?;
+        if store.config.resident_memory_bytes_max.is_some() {
+            let missing_key_index = {
+                let trees = store.btree_indices.read();
+                let keys = store.key_indices.read();
+                trees.iter().any(|(name, tree)| {
+                    !keys
+                        .get(name)
+                        .is_some_and(|index| index.source.ptr_eq(&Arc::downgrade(tree)))
+                })
+            };
+            if missing_key_index {
+                store.persist()?;
+            }
+        }
 
         Ok(store)
     }
@@ -1406,14 +1442,30 @@ impl UnifiedStore {
 
                         // Store the B-tree for future lookups
                         let btree = Arc::new(btree);
+                        let key_tree = counters
+                            .and_then(|state| state.key_index_root)
+                            .map(|root| Arc::new(BTree::with_root(Arc::clone(pager), root)));
+                        if counters.is_some() {
+                            self.key_indices.write().insert(
+                                name.clone(),
+                                PublishedKeyIndex {
+                                    indexed: key_tree.is_some(),
+                                    source: Arc::downgrade(&btree),
+                                    tree: key_tree.clone().unwrap_or_else(|| {
+                                        Arc::new(BTree::with_root(Arc::clone(pager), 0))
+                                    }),
+                                },
+                            );
+                        }
                         if let (Some(manager), Some(limit)) =
                             (&manager, self.config.resident_memory_bytes_max)
                         {
                             manager.install_backing(
                                 Arc::new(
-                                    reddb_engine::storage::collection_read::PagedCollection::new(
-                                        Arc::clone(&btree),
-                                    ),
+                                    match key_tree {
+                                        Some(keys) => reddb_engine::storage::collection_read::PagedCollection::with_key_index(Arc::clone(&btree), keys),
+                                        None => reddb_engine::storage::collection_read::PagedCollection::new(Arc::clone(&btree)),
+                                    },
                                 ),
                                 btree.root_page_id(),
                                 format_version,
@@ -1801,7 +1853,8 @@ impl UnifiedStore {
             eprintln!("experimental checkpoint exit before manifest");
             std::process::exit(183);
         }
-        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
+        let rebuilt_keys = self.checkpoint_key_indices(pager, &rebuilt_indices)?;
+        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
 
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
@@ -1811,6 +1864,7 @@ impl UnifiedStore {
         // Only the now-durable catalog may replace the live tree handles. The
         // previous generation is retained in the manifest retirement ledger.
         *btree_indices = rebuilt_indices;
+        *self.key_indices.write() = rebuilt_keys;
         drop(previous_versions);
         *self.checkpoint_versions.write() = checkpoint_versions;
 
@@ -1833,9 +1887,15 @@ impl UnifiedStore {
                     if let Some(tree) = btree_indices.get(name) {
                         manager.install_backing(
                             Arc::new(
-                                reddb_engine::storage::collection_read::PagedCollection::new(
-                                    Arc::clone(tree),
-                                ),
+                                {
+                                    let keys = self.key_indices.read();
+                                    let index = keys.get(name).expect("invariant: prepared checkpoint classifies its key index");
+                                    if index.indexed {
+                                        reddb_engine::storage::collection_read::PagedCollection::with_key_index(Arc::clone(tree), Arc::clone(&index.tree))
+                                    } else {
+                                        reddb_engine::storage::collection_read::PagedCollection::new(Arc::clone(tree))
+                                    }
+                                },
                             ),
                             tree.root_page_id(),
                             self.format_version(),

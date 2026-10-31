@@ -76,16 +76,36 @@ pub trait CollectionRead {
     fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError>;
     /// The cursor retains its page-retirement fence independently of this handle.
     fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError>;
+    /// Candidate index for this exact immutable base, or None for an unindexed
+    /// legacy/fixture source. Callers still verify each decoded logical key.
+    fn key_cursor(&self, _key: &str) -> Result<Option<Box<dyn CollectionCursor + '_>>, StoreError> {
+        Ok(None)
+    }
+    fn owned_key_cursor(
+        &self,
+        _key: &str,
+    ) -> Result<Option<Box<dyn CollectionCursor>>, StoreError> {
+        Ok(None)
+    }
 }
 
 /// A published generation; the host retains its existing page-retirement fence.
 pub struct PagedCollection<P: PageStore> {
     tree: Arc<BTree<P>>,
+    keys: Option<Arc<BTree<P>>>,
 }
 
 impl<P: PageStore> PagedCollection<P> {
     pub fn new(tree: Arc<BTree<P>>) -> Self {
-        Self { tree }
+        Self { tree, keys: None }
+    }
+
+    /// Hosts publish both roots atomically and retain their retirement fences.
+    pub fn with_key_index(tree: Arc<BTree<P>>, keys: Arc<BTree<P>>) -> Self {
+        Self {
+            tree,
+            keys: Some(keys),
+        }
     }
 
     pub fn scan(&self) -> Result<PagedCursor<P>, StoreError> {
@@ -113,6 +133,28 @@ impl<P: PageStore + 'static> CollectionRead for PagedCollection<P> {
 
     fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
         Ok(Box::new(self.scan()?))
+    }
+
+    fn key_cursor(&self, key: &str) -> Result<Option<Box<dyn CollectionCursor + '_>>, StoreError> {
+        let Some(keys) = &self.keys else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(super::collection_key_read::KeyCursor::new(
+            Arc::clone(&self.tree),
+            keys,
+            key,
+        )?)))
+    }
+
+    fn owned_key_cursor(&self, key: &str) -> Result<Option<Box<dyn CollectionCursor>>, StoreError> {
+        let Some(keys) = &self.keys else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(super::collection_key_read::KeyCursor::new(
+            Arc::clone(&self.tree),
+            keys,
+            key,
+        )?)))
     }
 }
 
@@ -198,6 +240,20 @@ impl CollectionRead for MergedCollection<'_> {
             overlay: Arc::clone(&self.overlay),
             next,
         }))
+    }
+    fn owned_key_cursor(&self, key: &str) -> Result<Option<Box<dyn CollectionCursor>>, StoreError> {
+        let Some(base) = self.base.owned_key_cursor(key)? else {
+            return Ok(None);
+        };
+        let next = self
+            .overlay
+            .first_key_value()
+            .map(|(id, bytes)| (*id, bytes.clone()));
+        Ok(Some(Box::new(OwnedMergedCursor {
+            base,
+            overlay: Arc::clone(&self.overlay),
+            next,
+        })))
     }
 }
 
@@ -356,7 +412,7 @@ fn physical_id(key: &[u8]) -> Result<EntityId, StoreError> {
     Ok(EntityId::new(u64::from_be_bytes(bytes)))
 }
 
-fn read_error(error: BTreeError) -> StoreError {
+pub(super) fn read_error(error: BTreeError) -> StoreError {
     match error {
         BTreeError::ReadLimitExceeded {
             required_bytes,

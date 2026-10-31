@@ -34,13 +34,23 @@ previous generation. Pending transaction/Vault rows prevent overlay eviction.
 The runtime's fallible scan adapter propagates storage errors alongside CALL/query
 work-budget errors, including when no CALL budget is installed.
 
-The keyed runtime resolver also propagates disk/decode failures, including REST
-and mutation pre-reads. Resident collections retain their segment key indexes;
-a cold base currently uses an O(N) streaming key probe with one decoded row.
-Physical replacements and deletions mask old base candidates, and versioned
-reads select the snapshot-visible maximum xmin. VCS versioning settings are read
-fallibly so failure cannot silently disable history during a write. A durable,
-budgeted key index is required before managed activation or performance claims.
+The keyed runtime resolver propagates disk/decode failures, including REST and
+mutation pre-reads. Resident collections retain their segment key indexes.
+Prepared cold bases seek a paired, immutable SHA-256 candidate index and verify
+the decoded logical key before accepting it. Physical replacements/deletions mask
+old candidates, and versioned reads select the snapshot-visible maximum xmin.
+Both data and key roots publish in the same checksummed resume record and share
+ownership/retirement fences. Index records cost a 40-byte key plus B-tree slot
+space; seeks cost O(tree height + physical versions/collisions of this key).
+These are cost sketches, not measured hot-query performance evidence.
+
+A legacy positional row without durable column names prevents a trusted key
+index. Its prepared state explicitly retains the fallible streaming fallback,
+rather than claiming that unclassified keys are absent or rebuilding every boot.
+Legacy preparation streams payloads for counters and a second index-building
+pass; prepared reopen reads metadata, not the payloads. Current Config/Vault
+history/list readers still stream their relevant collections; indexed candidate
+access remains to be connected to those iterators before performance qualification.
 
 Config history/latest/list reads stream the physical base and propagate faults;
 Vault snapshot reads retain frozen metadata, tenant checks and encrypted history.
@@ -67,8 +77,8 @@ read-only inspection remains possible. Default new files retain version 1.0.3.
 The capability flag is a host storage contract, not runtime activation. Preserve a
 preparation copy for downgrade; no downgrade writer may reinterpret these counters.
 
-Cost sketch: legacy preparation decodes N records once with O(1) record payload
-memory; prepared boot reads O(metadata + tree height + short WAL). Scans retain
+Cost sketch: legacy preparation makes bounded-memory record passes for counters
+and key candidates; prepared boot reads O(metadata + tree height + short WAL). Scans retain
 O(dirty IDs + one decoded row), and a changed collection's checkpoint currently
 copies O(N + dirty rows) bytes. These intermediate algorithms do not establish the
 required measured boot latency or paced maintenance implementation.
