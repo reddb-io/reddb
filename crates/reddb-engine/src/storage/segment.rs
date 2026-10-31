@@ -140,6 +140,8 @@ pub enum SegmentError {
     InvalidState(SegmentState),
     /// Internal error
     Internal(String),
+    /// A persisted row could not be read before its mutation was admitted.
+    BackingRead(String),
 }
 
 impl std::fmt::Display for SegmentError {
@@ -151,6 +153,7 @@ impl std::fmt::Display for SegmentError {
             Self::Full => write!(f, "segment is full"),
             Self::InvalidState(state) => write!(f, "invalid operation for state: {:?}", state),
             Self::Internal(msg) => write!(f, "internal error: {}", msg),
+            Self::BackingRead(msg) => write!(f, "backing read failed: {msg}"),
         }
     }
 }
@@ -744,6 +747,14 @@ impl GrowingSegment {
             dead_resident_count: 0,
             published_flat_len: AtomicUsize::new(0),
         }
+    }
+
+    pub(super) fn sequence_id_next(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn restore_sequence_id_next(&self, next: u64) {
+        self.sequence.fetch_max(next, Ordering::SeqCst);
     }
 
     /// Get next sequence number

@@ -566,7 +566,18 @@ pub(crate) fn evaluate_entity_filter_with_db(
     table_name: &str,
     table_alias: &str,
 ) -> bool {
-    match filter {
+    evaluate_entity_filter_result_with_db(db, entity, filter, table_name, table_alias)
+        .unwrap_or(false)
+}
+
+pub(crate) fn evaluate_entity_filter_result_with_db(
+    db: Option<&RedDB>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+    filter: &Filter,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<bool> {
+    Ok(match filter {
         Filter::Compare { field, op, value } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
@@ -596,33 +607,45 @@ pub(crate) fn evaluate_entity_filter_with_db(
             // the `any` record builder so policy predicates can reach
             // their native fields (node.properties, edge props,
             // message.payload, vector.metadata, timeseries.tags).
-            let Some(db) = db else { return true };
+            let Some(db) = db else { return Ok(true) };
             let table_record = runtime_table_record_from_entity(entity.clone());
             let record = match table_record {
                 Some(r) => Some(r),
                 None => super::super::record_search_helpers::any_record_from_entity(entity.clone()),
             };
             let Some(record) = record else {
-                return false;
+                return Ok(false);
             };
-            super::super::join_filter::evaluate_runtime_filter_with_db(
+            return super::super::join_filter::evaluate_runtime_filter_result_with_db(
                 Some(db),
                 &record,
                 filter,
                 Some(table_name),
                 Some(table_alias),
-            )
+            );
         }
         Filter::And(left, right) => {
-            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
-                && evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
+            evaluate_entity_filter_result_with_db(db, entity, left, table_name, table_alias)?
+                && evaluate_entity_filter_result_with_db(
+                    db,
+                    entity,
+                    right,
+                    table_name,
+                    table_alias,
+                )?
         }
         Filter::Or(left, right) => {
-            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
-                || evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
+            evaluate_entity_filter_result_with_db(db, entity, left, table_name, table_alias)?
+                || evaluate_entity_filter_result_with_db(
+                    db,
+                    entity,
+                    right,
+                    table_name,
+                    table_alias,
+                )?
         }
         Filter::Not(inner) => {
-            !evaluate_entity_filter_with_db(db, entity, inner, table_name, table_alias)
+            !evaluate_entity_filter_result_with_db(db, entity, inner, table_name, table_alias)?
         }
         Filter::IsNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
             .map(|value| value.as_ref() == &Value::Null)
@@ -670,7 +693,7 @@ pub(crate) fn evaluate_entity_filter_with_db(
                 .as_ref()
                 .is_some_and(|value| runtime_value_contains(value.as_ref(), substring))
         }
-    }
+    })
 }
 
 fn runtime_value_contains(value: &Value, needle: &str) -> bool {

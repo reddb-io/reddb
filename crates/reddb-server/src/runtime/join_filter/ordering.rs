@@ -141,6 +141,52 @@ pub(crate) fn compare_runtime_optional_values(
     )
 }
 
+pub(crate) fn try_sort_records_by_order_by_with_db(
+    db: Option<&RedDB>,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> crate::RedDBResult<()> {
+    let host = RuntimeOrderingHost {
+        db,
+        table_name,
+        table_alias,
+    };
+    reddb_engine::query::runtime::ordering::try_sort_records_by_order_by_with_host(
+        &host,
+        records,
+        order_by,
+        table_name,
+        table_alias,
+    )
+}
+
+pub(crate) fn try_sort_or_top_k_records_with_db(
+    db: Option<&RedDB>,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    offset: Option<u64>,
+    limit: Option<u64>,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> crate::RedDBResult<()> {
+    let host = RuntimeOrderingHost {
+        db,
+        table_name,
+        table_alias,
+    };
+    reddb_engine::query::runtime::ordering::try_sort_or_top_k_records_with_host(
+        &host,
+        records,
+        order_by,
+        offset,
+        limit,
+        table_name,
+        table_alias,
+    )
+}
+
 struct RuntimeOrderingHost<'a> {
     db: Option<&'a RedDB>,
     table_name: Option<&'a str>,
@@ -169,5 +215,22 @@ impl reddb_engine::query::runtime::ordering::OrderingHost for RuntimeOrderingHos
     }
     fn topk_disabled(&self) -> bool {
         topk_disabled()
+    }
+}
+
+impl reddb_engine::query::runtime::ordering::FallibleOrderingHost for RuntimeOrderingHost<'_> {
+    type Error = crate::RedDBError;
+    fn try_evaluate_expression(
+        &self,
+        expression: &reddb_rql::ast::Expr,
+        record: &UnifiedRecord,
+    ) -> crate::RedDBResult<Option<Value>> {
+        super::expr_eval::try_evaluate_runtime_expr_with_db(
+            self.db,
+            expression,
+            record,
+            self.table_name,
+            self.table_alias,
+        )
     }
 }

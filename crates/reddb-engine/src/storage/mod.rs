@@ -38,6 +38,9 @@ pub mod context_index;
 pub mod entity_cache;
 pub mod tokenization;
 
+mod collection_key_read;
+#[doc(hidden)]
+pub mod collection_read;
 #[doc(hidden)]
 pub mod resident_store;
 

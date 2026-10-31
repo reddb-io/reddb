@@ -58,6 +58,11 @@ impl<P: PageStore> BTree<P> {
 
     /// Get value for a key
     pub fn get(&self, key: &[u8]) -> BTreeResult<Option<Vec<u8>>> {
+        self.get_with_budget(key, usize::MAX)
+    }
+
+    /// Bound value materialization before allocating overflow or decode buffers.
+    pub fn get_with_budget(&self, key: &[u8], limit_bytes: usize) -> BTreeResult<Option<Vec<u8>>> {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(None);
@@ -82,7 +87,11 @@ impl<P: PageStore> BTree<P> {
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
                     let (_, stored) = read_leaf_cell(&page, pos)?;
-                    let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                    let value = value_layout::decode_with_budget(
+                        self.pager.as_ref(),
+                        &stored,
+                        limit_bytes,
+                    )?;
                     return Ok(Some(value));
                 }
                 SearchResult::NotFound(_) => {

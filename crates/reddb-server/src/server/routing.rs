@@ -187,7 +187,19 @@ impl RedDBServer {
                 } else if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            writer.write_all(
+                                &json_error_code(status, "stream_config_unavailable", message)
+                                    .to_http_bytes(),
+                            )?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,
@@ -215,7 +227,19 @@ impl RedDBServer {
                     // handler call so success / mid-stream error /
                     // snapshot expiry / panic unwind all release the
                     // slot through Drop.
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            writer.write_all(
+                                &json_error_code(status, "stream_config_unavailable", message)
+                                    .to_http_bytes(),
+                            )?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,
@@ -986,7 +1010,14 @@ pub(crate) fn handle_chain_tip(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
+    let value = match runtime.try_chain_tip_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(tip) = value else {
         return json_error(
             404,
             format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
@@ -1033,7 +1064,14 @@ pub(crate) fn handle_verify_chain(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
+    let value = match runtime.try_verify_chain_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(outcome) = value else {
         return json_error(
             404,
             format!(
@@ -1062,7 +1100,14 @@ pub(crate) fn handle_clear_integrity_flag(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    if !runtime.clear_chain_integrity_flag(collection) {
+    let cleared = match runtime.try_clear_chain_integrity_flag(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    if !cleared {
         return json_error(
             404,
             format!(

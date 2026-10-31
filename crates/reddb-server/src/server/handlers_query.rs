@@ -521,7 +521,16 @@ impl RedDBServer {
         }
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
         let resumable = output_stream::assess_resumability(&query);
 
         // For a resume request, the snapshot_lsn comes from the client
@@ -864,21 +873,34 @@ impl RedDBServer {
         };
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
         // Issue #765 / S6 — opt-in end-to-end SHA-256. The open frame may
         // request `verify` ("sha256" / "none"); absent that, the
         // `stream.integrity.default_verify` config applies. When disabled
         // (the default) no rolling hash is computed and the row path is
         // byte-identical to the S4 baseline.
         let verify_mode = parse_open_verify(open_line, config.default_verify);
-        // Capture the table's highest RID before any chunk commits so a
-        // later digest mismatch can tombstone exactly the rows this stream
-        // appended. Only paid when verification is enabled.
-        let pre_max_rid = if verify_mode.is_enabled() {
-            table_max_rid(&self.runtime, &target)
-        } else {
-            0
-        };
+        // Resolve quarantine state before accepting any verified write. An
+        // unavailable authority cannot be treated as an empty table/list.
+        if verify_mode.is_enabled() {
+            if let Err(error) = self.runtime.ensure_integrity_tombstones_loaded() {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "integrity_state_unavailable", message)
+                        .to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        }
         let snapshot_lsn = self.runtime.cdc_current_lsn();
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
@@ -911,6 +933,8 @@ impl RedDBServer {
             .is_enabled()
             .then(crate::server::output_stream::PrefixHasher::new);
         let mut expected_digest: Option<String> = None;
+        let mut committed_ranges =
+            Vec::<crate::runtime::integrity_tombstone::TombstoneRange>::new();
 
         let mut producer = ChunkProducer::new(&config, &clock);
         {
@@ -922,20 +946,46 @@ impl RedDBServer {
                                 rows: &mut Vec<Vec<crate::json::Value>>,
                                 committed_rid: &mut u64,
                                 row_count: &mut u64,
-                                chunk_seq: &mut u64|
+                                chunk_seq: &mut u64,
+                                committed_ranges: &mut Vec<
+                crate::runtime::integrity_tombstone::TombstoneRange,
+            >|
              -> Result<(), (String, String)> {
                 if rows.is_empty() {
                     return Ok(());
                 }
-                let sql = match build_insert_sql(&target, &columns, rows) {
+                let mut sql = match build_insert_sql(&target, &columns, rows) {
                     Ok(sql) => sql,
                     Err(message) => return Err(("invalid_row".to_string(), message)),
                 };
+                if verify_mode.is_enabled() {
+                    sql.push_str(" RETURNING rid");
+                }
                 match runtime.execute_query(&sql) {
-                    Ok(_) => {
+                    Ok(result) => {
                         *row_count += rows.len() as u64;
                         *committed_rid = runtime.cdc_current_lsn();
                         *chunk_seq += 1;
+                        if verify_mode.is_enabled() {
+                            if result.result.records.len() != rows.len()
+                                || result
+                                    .result
+                                    .records
+                                    .iter()
+                                    .any(|record| record_rid(record).is_none())
+                            {
+                                return Err((
+                                    "integrity_identity_unavailable".to_string(),
+                                    "verified INSERT did not return every committed row identity"
+                                        .to_string(),
+                                ));
+                            }
+                            for record in &result.result.records {
+                                let rid = record_rid(record)
+                                    .expect("invariant: returned identities validated above");
+                                retain_integrity_rid(committed_ranges, &target, rid);
+                            }
+                        }
                         rows.clear();
                         Ok(())
                     }
@@ -991,6 +1041,7 @@ impl RedDBServer {
                         &mut committed_rid,
                         &mut row_count,
                         &mut chunk_seq,
+                        &mut committed_ranges,
                     ) {
                         stream_error = Some(err);
                         close_reason = crate::server::output_stream::CloseReason::Error;
@@ -1006,6 +1057,7 @@ impl RedDBServer {
                     &mut committed_rid,
                     &mut row_count,
                     &mut chunk_seq,
+                    &mut committed_ranges,
                 ) {
                     stream_error = Some(err);
                     close_reason = crate::server::output_stream::CloseReason::Error;
@@ -1015,10 +1067,10 @@ impl RedDBServer {
             // Issue #765 / S6 — integrity verification outcome. Only when
             // verification was requested and the ingest itself did not fail.
             // `integrity_ok` flips the terminal `end` envelope's `integrity`
-            // field to "ok"; `integrity_failure` carries (expected, actual,
-            // tombstoned RID range) for the dedicated error envelope.
+            // field to "ok"; `integrity_failure` carries the expected and
+            // actual digests for the dedicated quarantine error envelope.
             let mut integrity_ok = false;
-            let mut integrity_failure: Option<(String, String, Option<(u64, u64)>)> = None;
+            let mut integrity_failure: Option<(String, String)> = None;
             if stream_error.is_none() && verify_mode.is_enabled() {
                 match (expected_digest.take(), hasher.take()) {
                     (Some(expected), Some(h)) => {
@@ -1026,23 +1078,22 @@ impl RedDBServer {
                         if constant_time_str_eq(&expected, &actual) {
                             integrity_ok = true;
                         } else {
-                            // PRD #759: rows already committed per chunk, so
-                            // rollback is impossible — tombstone the RID
-                            // range this stream appended instead. RIDs are
-                            // monotonic, so (pre_max, post_max] is exactly the
-                            // committed set absent a concurrent writer.
-                            let post_max = table_max_rid(&self.runtime, &target);
-                            let range = if post_max > pre_max_rid {
-                                let lo = pre_max_rid + 1;
-                                self.runtime
-                                    .record_integrity_tombstone(&target, lo, post_max);
-                                Some((lo, post_max))
-                            } else {
-                                None
-                            };
-                            close_reason =
-                                crate::server::output_stream::CloseReason::IntegrityFailed;
-                            integrity_failure = Some((expected, actual, range));
+                            // Quarantine only identities returned by this stream's
+                            // INSERTs. Global RID intervals can include other writers.
+                            match self.runtime.record_integrity_tombstones(&committed_ranges) {
+                                Ok(()) => {
+                                    close_reason =
+                                        crate::server::output_stream::CloseReason::IntegrityFailed;
+                                    integrity_failure = Some((expected, actual));
+                                }
+                                Err(error) => {
+                                    stream_error = Some((
+                                        "integrity_tombstone_persistence_failed".to_string(),
+                                        error.to_string(),
+                                    ));
+                                    close_reason = crate::server::output_stream::CloseReason::Error;
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -1081,7 +1132,7 @@ impl RedDBServer {
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
                 producer.push_line(line.as_bytes(), &mut flush)?;
-            } else if let Some((expected, actual, range)) = integrity_failure.as_ref() {
+            } else if let Some((expected, actual)) = integrity_failure.as_ref() {
                 // Issue #765 / S6 — integrity mismatch envelope. Rows are
                 // already durable (auto-commit); the RID range was tombstoned
                 // above and is reported so the client can correlate.
@@ -1099,14 +1150,27 @@ impl RedDBServer {
                     "actual".to_string(),
                     crate::json::Value::String(actual.clone()),
                 );
-                let range_value = match range {
-                    Some((lo, hi)) => crate::json::Value::Array(vec![
-                        crate::json::Value::Number(*lo as f64),
-                        crate::json::Value::Number(*hi as f64),
-                    ]),
-                    None => crate::json::Value::Null,
+                let ranges: Vec<_> = committed_ranges
+                    .iter()
+                    .map(|range| {
+                        crate::json::Value::Array(vec![
+                            crate::json::Value::Decimal(range.lo.to_string()),
+                            crate::json::Value::Decimal(range.hi.to_string()),
+                        ])
+                    })
+                    .collect();
+                // Keep the existing optional single-range field for contiguous
+                // streams; report every exact range in an additive field.
+                let range_value = if ranges.len() == 1 {
+                    ranges[0].clone()
+                } else {
+                    crate::json::Value::Null
                 };
                 payload.insert("tombstoned_rid_range".to_string(), range_value);
+                payload.insert(
+                    "tombstoned_rid_ranges".to_string(),
+                    crate::json::Value::Array(ranges),
+                );
                 envelope.insert("error".to_string(), crate::json::Value::Object(payload));
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
@@ -1327,7 +1391,16 @@ impl RedDBServer {
         use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
 
         // Issue #807 / 750c — resume vs fresh open. A body carrying
         // `{"cursor":"<token>"}` resumes a prior stream: the pinned query
@@ -1915,21 +1988,22 @@ pub(crate) fn parse_client_end_digest(line: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Issue #765 / S6 — highest RID currently present in `table`, or `0` when
-/// the table is empty / unreadable. Used to bracket the RID range an input
-/// stream appends so a digest mismatch can tombstone exactly those rows.
-fn table_max_rid(runtime: &crate::runtime::RedDBRuntime, table: &str) -> u64 {
-    let sql = format!("SELECT rid FROM {table}");
-    match runtime.execute_query(&sql) {
-        Ok(result) => result
-            .result
-            .records
-            .iter()
-            .filter_map(record_rid)
-            .max()
-            .unwrap_or(0),
-        Err(_) => 0,
+/// Coalesce only adjacent identities actually returned by this stream. Gaps
+/// can belong to concurrent writers or other collections and stay visible.
+fn retain_integrity_rid(
+    ranges: &mut Vec<crate::runtime::integrity_tombstone::TombstoneRange>,
+    table: &str,
+    rid: u64,
+) {
+    if let Some(last) = ranges.last_mut() {
+        if last.table == table && last.hi.checked_add(1) == Some(rid) {
+            last.hi = rid;
+            return;
+        }
     }
+    ranges.push(crate::runtime::integrity_tombstone::TombstoneRange::new(
+        table, rid, rid,
+    ));
 }
 
 /// Issue #763 — parse a row frame `{"row":{"c1":v1,...}}` into the
@@ -2421,6 +2495,264 @@ mod tests {
     use std::time::Duration;
 
     static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const VERIFIED_INGEST: &[u8] = b"{\"open\":{\"target\":\"cold_ingest\",\"columns\":[\"value\"],\"verify\":\"sha256\"}}\n{\"row\":{\"value\":1}}\n{\"end\":{\"sha256\":\"incorrect\"}}\n";
+
+    fn cold_integrity_ingest_runtime(read_bytes_max: usize) -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("cold integrity fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("ingest.rdb"))
+                .with_memory_budget(128 * 1024 * 1024)
+                .with_storage_profile(
+                    crate::storage::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                )
+                .expect("profile"),
+        )
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE cold_ingest (value INT)")
+            .expect("table");
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree(
+                crate::runtime::integrity_tombstone::TOMBSTONE_KEY,
+                &crate::serde_json::Value::String("[]".to_string()),
+            )
+            .expect("tombstones");
+        store
+            .try_set_config_tree(
+                "stream.integrity.default_verify",
+                &crate::serde_json::Value::String("sha256".into()),
+            )
+            .expect("persisted verification default");
+        store.persist().expect("publish tombstones");
+        let manager = store.get_collection("red_config").expect("config");
+        let pager = Arc::clone(store.pager().expect("pager"));
+        let data = Arc::new(crate::storage::engine::BTree::new(pager));
+        manager
+            .try_for_each_entity(usize::MAX, |entity| {
+                let bytes = reddb_engine::storage::metadata_codec::serialize_entity_record(
+                    entity,
+                    None,
+                    store.format_version(),
+                );
+                data.insert(&entity.id.raw().to_be_bytes(), &bytes)
+                    .expect("private native config");
+                true
+            })
+            .expect("copy native config");
+        let root = data.root_page_id();
+        manager.install_backing(
+            Arc::new(reddb_engine::storage::collection_read::PagedCollection::new(data)),
+            root,
+            store.format_version(),
+            read_bytes_max,
+            manager.count() as u64,
+        );
+        (directory, runtime)
+    }
+
+    #[test]
+    fn cold_integrity_unavailable_refuses_verified_ingest_before_commit() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(1);
+        let store = runtime.db().store();
+        let server = crate::RedDBServer::new(runtime.clone());
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(response.contains("stream_config_unavailable"), "{response}");
+        assert!(
+            !response.starts_with("HTTP/1.1 200"),
+            "unavailable integrity state must reject ingress"
+        );
+        assert_eq!(
+            store.get_collection("cold_ingest").expect("table").count(),
+            0,
+            "no rows can commit after failed pre-ingest integrity read"
+        );
+    }
+
+    #[test]
+    fn cold_integrity_failed_digest_quarantines_committed_rows_and_persists_ranges() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let store = runtime.db().store();
+        let server = RedDBServer::new(runtime.clone());
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("integrity_failed"), "{response}");
+        assert!(
+            !response.contains("integrity_tombstone_persistence_failed"),
+            "{response}"
+        );
+        assert_eq!(
+            store.get_collection("cold_ingest").expect("table").count(),
+            1,
+            "quarantine must preserve the physical row"
+        );
+        assert!(runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("quarantined read")
+            .result
+            .records
+            .is_empty());
+        let persisted =
+            crate::runtime::integrity_tombstone::load_ranges(&store).expect("durable ranges");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].table, "cold_ingest");
+        assert_eq!(persisted[0].lo, persisted[0].hi);
+    }
+
+    #[test]
+    fn cold_integrity_quarantine_does_not_hide_interleaved_rows() {
+        struct InterleavedWriter {
+            runtime: RedDBRuntime,
+            response: Vec<u8>,
+            inserted: bool,
+        }
+        impl Write for InterleavedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.inserted {
+                    self.inserted = true;
+                    self.runtime
+                        .execute_query("INSERT INTO cold_ingest (value) VALUES (99)")
+                        .expect("other writer commits after integrity admission");
+                }
+                self.response.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let server = RedDBServer::new(runtime.clone());
+        let mut writer = InterleavedWriter {
+            runtime: runtime.clone(),
+            response: Vec::new(),
+            inserted: false,
+        };
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut writer,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(writer.response).expect("HTTP text");
+        assert!(response.contains("integrity_failed"), "{response}");
+        runtime.invalidate_result_cache();
+        let visible = runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("unrelated row remains readable");
+        assert_eq!(
+            visible.result.records.len(),
+            1,
+            "quarantine must exclude the other writer's committed row"
+        );
+        assert_eq!(
+            visible.result.records[0].get("value"),
+            Some(&reddb_types::Value::Integer(99))
+        );
+    }
+
+    #[test]
+    fn cold_integrity_exact_large_ids_survive_the_terminal_envelope() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let store = runtime.db().store();
+        let high_water = 1_u64 << 60;
+        store.register_entity_id(crate::storage::EntityId::new(high_water));
+        let server = RedDBServer::new(runtime);
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut response,
+            )
+            .expect("HTTP response");
+        let ranges =
+            crate::runtime::integrity_tombstone::load_ranges(&store).expect("durable exact range");
+        assert_eq!(ranges.len(), 1);
+        let range = &ranges[0];
+        assert!(
+            range.lo > high_water && range.lo < high_water + 128,
+            "insert identity near seeded high water: {}",
+            range.lo
+        );
+        let response = String::from_utf8(response).expect("HTTP text");
+        let expected = format!("\"tombstoned_rid_range\":[{},{}]", range.lo, range.hi);
+        assert!(
+            response.contains(&expected),
+            "large quarantine IDs must not round through f64: {response}"
+        );
+    }
+
+    #[test]
+    fn cold_stream_config_http_ingest_honors_persisted_verification_default() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let server = RedDBServer::new(runtime.clone());
+        let body = String::from_utf8(VERIFIED_INGEST.to_vec())
+            .expect("fixture text")
+            .replace(",\"verify\":\"sha256\"", "");
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                body.into_bytes(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(
+            response.contains("integrity_failed"),
+            "cold persisted default must enable digest verification: {response}"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("cold_ingest")
+                .expect("table")
+                .count(),
+            1,
+            "quarantine preserves the committed physical row"
+        );
+        assert!(runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("filtered read")
+            .result
+            .records
+            .is_empty());
+    }
 
     fn make_server() -> RedDBServer {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");

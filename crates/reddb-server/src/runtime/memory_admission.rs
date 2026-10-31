@@ -25,6 +25,33 @@ pub(crate) struct MemoryReservation<'runtime> {
     bytes: u64,
 }
 
+/// Ownership may cross the DML callback until its captured WAL is published.
+pub(super) struct OwnedMemoryReservation {
+    runtime: crate::RedDBRuntime,
+    bytes: u64,
+}
+
+impl MemoryReservation<'_> {
+    pub(super) fn into_owned(mut self, runtime: &crate::RedDBRuntime) -> OwnedMemoryReservation {
+        assert!(std::ptr::eq(
+            self.reservations,
+            &runtime.inner.memory_reservations
+        ));
+        OwnedMemoryReservation {
+            runtime: runtime.clone(),
+            bytes: std::mem::take(&mut self.bytes),
+        }
+    }
+}
+
+impl Drop for OwnedMemoryReservation {
+    fn drop(&mut self) {
+        let mut reservations = self.runtime.inner.memory_reservations.lock();
+        reservations.completed_bytes += self.bytes;
+        assert!(reservations.completed_bytes <= reservations.reserved_bytes);
+    }
+}
+
 impl Drop for MemoryReservation<'_> {
     fn drop(&mut self) {
         let mut reservations = self.reservations.lock();
@@ -57,8 +84,12 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
         &mut self,
         applied: &crate::application::entity::AppliedEntityMutation,
     ) -> RedDBResult<()> {
-        const RESERVATION_QUANTUM_BYTES: u64 = 64 * 1024;
         let growth = self.runtime.estimate_entity_mutation_growth(applied);
+        self.admit_growth(growth, "update")
+    }
+
+    pub(super) fn admit_growth(&mut self, growth: u64, operation: &str) -> RedDBResult<()> {
+        const RESERVATION_QUANTUM_BYTES: u64 = 64 * 1024;
         if growth > self.available_bytes {
             let needed = growth - self.available_bytes;
             // Extra slack is optional. If it does not fit, apply the ordinary
@@ -70,7 +101,7 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
                 Some(guard) => guard,
                 None => self.runtime.admit_non_evictable_growth(
                     MemoryPool::SegmentArena,
-                    "update",
+                    operation,
                     needed,
                 )?,
             };
@@ -79,6 +110,13 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
         }
         self.available_bytes -= growth;
         Ok(())
+    }
+
+    pub(super) fn into_owned(self) -> Vec<std::rc::Rc<OwnedMemoryReservation>> {
+        self.guards
+            .into_iter()
+            .map(|guard| std::rc::Rc::new(guard.into_owned(self.runtime)))
+            .collect()
     }
 }
 

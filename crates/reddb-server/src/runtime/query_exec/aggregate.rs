@@ -88,6 +88,19 @@ impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
         sort_records_by_order_by_with_db(Some(self.db), records, clauses, None, None)
     }
+    fn try_sort_records(
+        &self,
+        records: &mut Vec<UnifiedRecord>,
+        clauses: &[OrderByClause],
+    ) -> RedDBResult<()> {
+        crate::runtime::join_filter::try_sort_records_by_order_by_with_db(
+            Some(self.db),
+            records,
+            clauses,
+            None,
+            None,
+        )
+    }
     fn secret_query_output(&self, value: Value) -> RedDBResult<Value> {
         crate::runtime::execution_context::secret_query_output(value)
     }
@@ -402,8 +415,8 @@ pub(crate) fn execute_aggregate_query(
     let mut spill_err: Option<String> = None;
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             // ── Lazy record materialisation ──────────────────────────────────
             // We defer `runtime_table_record_from_entity` until we actually
@@ -908,7 +921,10 @@ mod agg_spill_codec {
     use std::collections::HashSet;
     use std::io::{Read, Write};
 
-    use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
+    use crate::storage::query::executors::agg_spill::{
+        read_spill_header, Mergeable, SpillCodec, SpillDecodeBudget, SpillError,
+        DEFAULT_SPILL_DECODE_BYTES,
+    };
     use reddb_types::{CanonicalKey, CanonicalKeyFamily, Value};
 
     use super::{AggregateGroup, AggregateGroupKey, GroupKeyPart, SlottedAggState};
@@ -948,10 +964,11 @@ mod agg_spill_codec {
         w.write_all(b)?;
         Ok(4 + b.len())
     }
-    fn r_str<R: Read>(r: &mut R) -> std::io::Result<String> {
+    fn r_str<R: Read>(r: &mut R, budget: &mut SpillDecodeBudget) -> std::io::Result<String> {
         let mut nb = [0u8; 4];
         r.read_exact(&mut nb)?;
         let n = u32::from_le_bytes(nb) as usize;
+        budget.charge_bytes(n)?;
         let mut buf = vec![0u8; n];
         r.read_exact(&mut buf)?;
         String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -999,7 +1016,7 @@ mod agg_spill_codec {
             }
         }
     }
-    fn r_val<R: Read>(r: &mut R) -> std::io::Result<Value> {
+    fn r_val<R: Read>(r: &mut R, budget: &mut SpillDecodeBudget) -> std::io::Result<Value> {
         let mut tag = [0u8];
         r.read_exact(&mut tag)?;
         match tag[0] {
@@ -1024,18 +1041,45 @@ mod agg_spill_codec {
                 r.read_exact(&mut b)?;
                 Ok(Value::Float(f64::from_le_bytes(b)))
             }
-            5 => Ok(Value::text(r_str(r)?)),
+            5 => {
+                let text = r_str(r, budget)?;
+                budget.charge_bytes(text.len())?;
+                budget.charge_elements::<usize>(2)?;
+                Ok(Value::text(text))
+            }
             255 => {
                 let mut nb = [0u8; 4];
                 r.read_exact(&mut nb)?;
                 let n = u32::from_le_bytes(nb) as usize;
+                budget.charge_bytes(n)?;
                 let mut buf = vec![0u8; n];
                 r.read_exact(&mut buf)?;
-                Value::from_bytes(&buf).map(|(v, _)| v).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })
+                let before = budget.remaining_bytes();
+                let mut remaining = before;
+                let (value, consumed) = Value::from_bytes_with_budget(&buf, &mut remaining)
+                    .map_err(|error| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("spill decode: {error}"),
+                        )
+                    })?;
+                if consumed != buf.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "spill canonical value has trailing bytes",
+                    ));
+                }
+                budget.charge_bytes(
+                    before
+                        .checked_sub(remaining)
+                        .expect("invariant: value decoding consumes its allowance"),
+                )?;
+                Ok(value)
             }
-            _ => Ok(Value::Null),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown spill value tag",
+            )),
         }
     }
 
@@ -1223,7 +1267,10 @@ mod agg_spill_codec {
         Ok(t)
     }
 
-    fn r_canonical_key<R: Read>(r: &mut R) -> Result<CanonicalKey, SpillError> {
+    fn r_canonical_key<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> Result<CanonicalKey, SpillError> {
         let tag = r_u8(r).map_err(SpillError::Io)?;
         match tag {
             0 => Ok(CanonicalKey::Null),
@@ -1247,7 +1294,9 @@ mod agg_spill_codec {
             }
             5 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
-                let s = r_str(r).map_err(SpillError::Io)?;
+                let s = r_str(r, budget).map_err(SpillError::Io)?;
+                budget.charge_bytes(s.len()).map_err(SpillError::Io)?;
+                budget.charge_elements::<usize>(2).map_err(SpillError::Io)?;
                 Ok(CanonicalKey::Text(family, std::sync::Arc::from(s.as_str())))
             }
             6 => {
@@ -1255,20 +1304,21 @@ mod agg_spill_codec {
                 let mut len = [0u8; 4];
                 r.read_exact(&mut len).map_err(SpillError::Io)?;
                 let len = u32::from_le_bytes(len) as usize;
+                budget.charge_bytes(len).map_err(SpillError::Io)?;
                 let mut bytes = vec![0u8; len];
                 r.read_exact(&mut bytes).map_err(SpillError::Io)?;
                 Ok(CanonicalKey::Bytes(family, bytes))
             }
             7 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
-                let left = r_str(r).map_err(SpillError::Io)?;
+                let left = r_str(r, budget).map_err(SpillError::Io)?;
                 let right = r_u64(r).map_err(SpillError::Io)?;
                 Ok(CanonicalKey::PairTextU64(family, left, right))
             }
             8 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
-                let left = r_str(r).map_err(SpillError::Io)?;
-                let right = r_str(r).map_err(SpillError::Io)?;
+                let left = r_str(r, budget).map_err(SpillError::Io)?;
+                let right = r_str(r, budget).map_err(SpillError::Io)?;
                 Ok(CanonicalKey::PairTextText(family, left, right))
             }
             9 => {
@@ -1322,8 +1372,9 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<f64>> {
+    fn r_vec_f64<R: Read>(r: &mut R, budget: &mut SpillDecodeBudget) -> std::io::Result<Vec<f64>> {
         let n = r_len(r)?;
+        budget.charge_elements::<f64>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             v.push(r_f64(r)?);
@@ -1338,8 +1389,9 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_u64<R: Read>(r: &mut R) -> std::io::Result<Vec<u64>> {
+    fn r_vec_u64<R: Read>(r: &mut R, budget: &mut SpillDecodeBudget) -> std::io::Result<Vec<u64>> {
         let n = r_len(r)?;
+        budget.charge_elements::<u64>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             v.push(r_u64(r)?);
@@ -1363,12 +1415,20 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_option_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Option<Value>>> {
+    fn r_vec_option_val<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Option<Value>>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Option<Value>>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             let tag = r_u8(r)?;
-            v.push(if tag == 0 { None } else { Some(r_val(r)?) });
+            v.push(if tag == 0 {
+                None
+            } else {
+                Some(r_val(r, budget)?)
+            });
         }
         Ok(v)
     }
@@ -1380,11 +1440,15 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Value>> {
+    fn r_vec_val<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Value>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Value>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            v.push(r_val(r)?);
+            v.push(r_val(r, budget)?);
         }
         Ok(v)
     }
@@ -1396,11 +1460,15 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<f64>>> {
+    fn r_vec_vec_f64<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Vec<f64>>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Vec<f64>>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            v.push(r_vec_f64(r)?);
+            v.push(r_vec_f64(r, budget)?);
         }
         Ok(v)
     }
@@ -1416,14 +1484,19 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_vec_str<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<String>>> {
+    fn r_vec_vec_str<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Vec<String>>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Vec<String>>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             let m = r_len(r)?;
+            budget.charge_elements::<String>(m)?;
             let mut inner = Vec::with_capacity(m);
             for _ in 0..m {
-                inner.push(r_str(r)?);
+                inner.push(r_str(r, budget)?);
             }
             v.push(inner);
         }
@@ -1437,11 +1510,15 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<Value>>> {
+    fn r_vec_vec_val<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Vec<Value>>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Vec<Value>>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            v.push(r_vec_val(r)?);
+            v.push(r_vec_val(r, budget)?);
         }
         Ok(v)
     }
@@ -1469,8 +1546,12 @@ mod agg_spill_codec {
         }
         Ok(t)
     }
-    fn r_vec_option_set_str<R: Read>(r: &mut R) -> std::io::Result<Vec<Option<HashSet<String>>>> {
+    fn r_vec_option_set_str<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> std::io::Result<Vec<Option<HashSet<String>>>> {
         let n = r_len(r)?;
+        budget.charge_elements::<Option<HashSet<String>>>(n)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
             let tag = r_u8(r)?;
@@ -1478,9 +1559,22 @@ mod agg_spill_codec {
                 v.push(None);
             } else {
                 let m = r_len(r)?;
+                // Hash-table buckets/control bytes, conservatively including rounding.
+                let slots = m
+                    .checked_mul(4)
+                    .and_then(|n| n.checked_add(8))
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::OutOfMemory,
+                            "spill decode allocation limit: hash capacity overflow",
+                        )
+                    })?;
+                if m > 0 {
+                    budget.charge_elements::<(String, u64)>(slots)?;
+                }
                 let mut set = HashSet::with_capacity(m);
                 for _ in 0..m {
-                    set.insert(r_str(r)?);
+                    set.insert(r_str(r, budget)?);
                 }
                 v.push(Some(set));
             }
@@ -1512,15 +1606,21 @@ mod agg_spill_codec {
         }
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+            Self::decode_with_budget(r, &mut SpillDecodeBudget::new(DEFAULT_SPILL_DECODE_BYTES))
+        }
+        fn decode_with_budget<R: Read>(
+            r: &mut R,
+            budget: &mut SpillDecodeBudget,
+        ) -> Result<Option<Self>, SpillError> {
             let tag = match r_u8(r) {
                 Ok(tag) => tag,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(SpillError::Io(e)),
             };
             match tag {
-                0 => Ok(Some(GroupKeyPart::Canonical(r_canonical_key(r)?))),
+                0 => Ok(Some(GroupKeyPart::Canonical(r_canonical_key(r, budget)?))),
                 1 => Ok(Some(GroupKeyPart::Rendered(
-                    r_str(r).map_err(SpillError::Io)?,
+                    r_str(r, budget).map_err(SpillError::Io)?,
                 ))),
                 other => Err(SpillError::Codec(format!(
                     "unknown group key part tag {other}"
@@ -1541,16 +1641,20 @@ mod agg_spill_codec {
         }
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-            let mut nb = [0u8; 4];
-            match r.read_exact(&mut nb) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(SpillError::Io(e)),
-            }
+            Self::decode_with_budget(r, &mut SpillDecodeBudget::new(DEFAULT_SPILL_DECODE_BYTES))
+        }
+        fn decode_with_budget<R: Read>(
+            r: &mut R,
+            budget: &mut SpillDecodeBudget,
+        ) -> Result<Option<Self>, SpillError> {
+            let Some(nb) = read_spill_header(r)? else {
+                return Ok(None);
+            };
             let n = u32::from_le_bytes(nb) as usize;
+            budget.charge_elements::<GroupKeyPart>(n)?;
             let mut parts = Vec::with_capacity(n);
             for _ in 0..n {
-                let part = GroupKeyPart::decode(r)?
+                let part = GroupKeyPart::decode_with_budget(r, budget)?
                     .ok_or_else(|| SpillError::Codec("truncated group key".to_string()))?;
                 parts.push(part);
             }
@@ -1580,34 +1684,38 @@ mod agg_spill_codec {
         }
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+            Self::decode_with_budget(r, &mut SpillDecodeBudget::new(DEFAULT_SPILL_DECODE_BYTES))
+        }
+        fn decode_with_budget<R: Read>(
+            r: &mut R,
+            budget: &mut SpillDecodeBudget,
+        ) -> Result<Option<Self>, SpillError> {
             // Detect clean EOF on the first field's length prefix.
-            let mut nb = [0u8; 4];
-            match r.read_exact(&mut nb) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(SpillError::Io(e)),
-            }
+            let Some(nb) = read_spill_header(r)? else {
+                return Ok(None);
+            };
             let gv_n = u32::from_le_bytes(nb) as usize;
+            budget.charge_elements::<Value>(gv_n)?;
             let mut group_values = Vec::with_capacity(gv_n);
             for _ in 0..gv_n {
-                group_values.push(r_val(r).map_err(SpillError::Io)?);
+                group_values.push(r_val(r, budget).map_err(SpillError::Io)?);
             }
             Ok(Some(AggregateGroup {
                 group_values,
                 state: SlottedAggState {
                     count: r_u64(r).map_err(SpillError::Io)?,
-                    sums: r_vec_f64(r).map_err(SpillError::Io)?,
-                    sum_agg_counts: r_vec_u64(r).map_err(SpillError::Io)?,
-                    sum_squares: r_vec_f64(r).map_err(SpillError::Io)?,
-                    count_only: r_vec_u64(r).map_err(SpillError::Io)?,
-                    mins: r_vec_option_val(r).map_err(SpillError::Io)?,
-                    maxs: r_vec_option_val(r).map_err(SpillError::Io)?,
-                    all_values: r_vec_vec_f64(r).map_err(SpillError::Io)?,
-                    concat_values: r_vec_vec_str(r).map_err(SpillError::Io)?,
-                    first_values: r_vec_option_val(r).map_err(SpillError::Io)?,
-                    last_values: r_vec_option_val(r).map_err(SpillError::Io)?,
-                    array_values: r_vec_vec_val(r).map_err(SpillError::Io)?,
-                    distinct_sets: r_vec_option_set_str(r).map_err(SpillError::Io)?,
+                    sums: r_vec_f64(r, budget).map_err(SpillError::Io)?,
+                    sum_agg_counts: r_vec_u64(r, budget).map_err(SpillError::Io)?,
+                    sum_squares: r_vec_f64(r, budget).map_err(SpillError::Io)?,
+                    count_only: r_vec_u64(r, budget).map_err(SpillError::Io)?,
+                    mins: r_vec_option_val(r, budget).map_err(SpillError::Io)?,
+                    maxs: r_vec_option_val(r, budget).map_err(SpillError::Io)?,
+                    all_values: r_vec_vec_f64(r, budget).map_err(SpillError::Io)?,
+                    concat_values: r_vec_vec_str(r, budget).map_err(SpillError::Io)?,
+                    first_values: r_vec_option_val(r, budget).map_err(SpillError::Io)?,
+                    last_values: r_vec_option_val(r, budget).map_err(SpillError::Io)?,
+                    array_values: r_vec_vec_val(r, budget).map_err(SpillError::Io)?,
+                    distinct_sets: r_vec_option_set_str(r, budget).map_err(SpillError::Io)?,
                 },
             }))
         }
@@ -2850,6 +2958,26 @@ mod shared_kernel_spill_tests {
     use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec};
 
     #[test]
+    fn native_spill_prefixes_do_not_treat_truncation_as_clean_eof() {
+        assert!(AggregateGroupKey::decode(&mut &[][..])
+            .expect("clean EOF")
+            .is_none());
+        assert!(AggregateGroup::decode(&mut &[][..])
+            .expect("clean EOF")
+            .is_none());
+        for length in 1..4 {
+            assert!(
+                AggregateGroupKey::decode(&mut &vec![0_u8; length][..]).is_err(),
+                "truncated native group key {length}"
+            );
+            assert!(
+                AggregateGroup::decode(&mut &vec![0_u8; length][..]).is_err(),
+                "truncated native state {length}"
+            );
+        }
+    }
+
+    #[test]
     fn shared_state_round_trips_the_native_spill_codec_and_merges() {
         let projections = [
             "SUM",
@@ -2908,6 +3036,232 @@ mod shared_kernel_spill_tests {
                     &expected.state,
                     &plan
                 )
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_spill_decode_tests {
+    use super::*;
+    use crate::storage::query::executors::agg_spill::{
+        SpillCodec, SpillDecodeBudget, SpilledHashAgg,
+    };
+
+    fn drain_values(values: Vec<Value>, limit: usize) -> Result<Vec<Value>, String> {
+        let directory = tempfile::tempdir().expect("private compressed spill");
+        let plan = CompiledAggPlan::compile(&[]).expect("empty aggregate slots");
+        let group = AggregateGroup {
+            group_values: values,
+            state: SlottedAggState::new(&plan),
+        };
+        let mut aggregation =
+            SpilledHashAgg::<AggregateGroupKey, AggregateGroup>::new(directory.path(), limit, 1);
+        aggregation
+            .accumulate(Vec::new(), group)
+            .map_err(|error| error.to_string())?;
+        aggregation
+            .spill_partition()
+            .map_err(|error| error.to_string())?;
+        assert!(
+            aggregation.total_spilled_bytes < 1024,
+            "the allocation test must fit encoded file admission"
+        );
+        let mut result = aggregation.drain().map_err(|error| error.to_string())?;
+        assert_eq!(result.len(), 1);
+        Ok(result
+            .remove(&Vec::new())
+            .expect("original empty group key")
+            .group_values)
+    }
+
+    #[test]
+    fn spill_decode_respects_expanded_state_allocation_limit() {
+        let values = vec![Value::Array(vec![Value::text("x".repeat(32 * 1024))])];
+        let result = drain_values(values.clone(), 4096);
+        assert!(
+            result.is_err(),
+            "a sub-1-KiB spill expanded to 32 KiB inside a 4-KiB allowance"
+        );
+        assert!(result.expect_err("allocation denial").contains("limit"));
+        assert_eq!(
+            drain_values(values.clone(), 128 * 1024).expect("admitted larger state"),
+            values
+        );
+    }
+
+    #[test]
+    fn spill_decode_shares_the_allocation_allowance_across_state_values() {
+        let value = Value::Array(vec![Value::Blob(vec![b'x'; 2400])]);
+        assert_eq!(
+            drain_values(vec![value.clone()], 4096).expect("one value fits"),
+            vec![value.clone()]
+        );
+        let values = vec![value.clone(), value.clone(), value];
+        assert!(
+            drain_values(values.clone(), 4096).is_err(),
+            "individually small values must share one allowance"
+        );
+        assert_eq!(
+            drain_values(values.clone(), 128 * 1024).expect("all values admitted"),
+            values
+        );
+    }
+
+    #[test]
+    fn spill_decode_shares_the_allowance_between_key_and_state() {
+        let key = vec![GroupKeyPart::Rendered("k".repeat(1400))];
+        let values = vec![Value::Array(vec![Value::Blob(vec![b'x'; 2400])])];
+        let plan = CompiledAggPlan::compile(&[]).expect("empty aggregate slots");
+        let group = AggregateGroup {
+            group_values: values.clone(),
+            state: SlottedAggState::new(&plan),
+        };
+        let mut key_bytes = Vec::new();
+        key.encode(&mut key_bytes).expect("encoded key");
+        AggregateGroupKey::decode_with_budget(
+            &mut key_bytes.as_slice(),
+            &mut SpillDecodeBudget::new(4096),
+        )
+        .expect("key fits individually");
+        assert_eq!(
+            drain_values(values.clone(), 4096).expect("state fits individually"),
+            values
+        );
+        for limit in [4096, 128 * 1024] {
+            let directory = tempfile::tempdir().expect("private key/state spill");
+            let mut aggregation = SpilledHashAgg::new(directory.path(), limit, 1);
+            aggregation
+                .accumulate(key.clone(), group.clone())
+                .expect("accumulate");
+            aggregation.spill_partition().expect("spill");
+            assert!(aggregation.total_spilled_bytes < limit as u64);
+            match aggregation.drain() {
+                Err(error) if limit == 4096 => {
+                    assert!(error.to_string().contains("limit"), "{error}");
+                }
+                Ok(mut groups) if limit > 4096 => {
+                    assert_eq!(
+                        groups.remove(&key).expect("original key").group_values,
+                        values
+                    );
+                }
+                _ => panic!("key and state must share the configured decode allowance"),
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_vector_lengths_fail_admission_before_allocation_or_body_reads() {
+        let prefix = 100_000_u32.to_le_bytes();
+        let mut budget = SpillDecodeBudget::new(4096);
+        let error = AggregateGroupKey::decode_with_budget(&mut &prefix[..], &mut budget)
+            .map(|_| ())
+            .expect_err("key slots must be admitted before reading their bodies");
+        assert!(error.to_string().contains("allocation limit"), "{error}");
+        let error = AggregateGroup::decode_with_budget(&mut &prefix[..], &mut budget)
+            .map(|_| ())
+            .expect_err("group slots must be admitted before reading their bodies");
+        assert!(error.to_string().contains("allocation limit"), "{error}");
+
+        // Empty group values, scalar count, then the first nested state vector.
+        let mut state = Vec::from(0_u32.to_le_bytes());
+        state.extend_from_slice(&0_u64.to_le_bytes());
+        state.extend_from_slice(&prefix);
+        let error = AggregateGroup::decode_with_budget(&mut state.as_slice(), &mut budget)
+            .map(|_| ())
+            .expect_err("nested state slots must be admitted before reading their bodies");
+        assert!(error.to_string().contains("allocation limit"), "{error}");
+        assert_eq!(budget.remaining_bytes(), 4096);
+    }
+
+    #[test]
+    fn canonical_spill_values_reject_trailing_bytes_and_unknown_tags() {
+        let mut canonical = Value::Integer(7).to_bytes();
+        canonical.push(0);
+        let mut bytes = Vec::from(1_u32.to_le_bytes());
+        bytes.push(255);
+        bytes.extend_from_slice(&(canonical.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&canonical);
+        let error = AggregateGroup::decode(&mut bytes.as_slice())
+            .map(|_| ())
+            .expect_err("canonical frame with trailing bytes must not be accepted");
+        assert!(error.to_string().contains("trailing bytes"), "{error}");
+
+        let mut unknown = Vec::from(1_u32.to_le_bytes());
+        unknown.push(254);
+        let error = AggregateGroup::decode(&mut unknown.as_slice())
+            .map(|_| ())
+            .expect_err("unknown scalar tags must not turn into NULL");
+        assert!(
+            error.to_string().contains("unknown spill value tag"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn spill_decode_shares_the_allowance_across_every_group_in_a_batch() {
+        let projection =
+            Projection::Function("ARRAY_AGG".into(), vec![Projection::Column("value".into())]);
+        let plan = CompiledAggPlan::compile(std::slice::from_ref(&projection))
+            .expect("array aggregation plan");
+        let value = Value::Array(vec![Value::Blob(vec![b'x'; 2400])]);
+        for limit in [4096, 128 * 1024] {
+            let directory = tempfile::tempdir().expect("private multi-group spill");
+            let mut aggregation = SpilledHashAgg::new(directory.path(), limit, 1);
+            for index in 0..3 {
+                let mut state = SlottedAggState::new(&plan);
+                state.count = 1;
+                for slot in &plan.proj_slots {
+                    state.accumulate(&NativeAggregateHost, slot, value.clone());
+                }
+                let group = AggregateGroup {
+                    group_values: vec![Value::Integer(index)],
+                    state,
+                };
+                let mut encoded = Vec::new();
+                group
+                    .encode(&mut encoded)
+                    .expect("encoded individual group");
+                AggregateGroup::decode_with_budget(
+                    &mut encoded.as_slice(),
+                    &mut SpillDecodeBudget::new(4096),
+                )
+                .map(|_| ())
+                .expect("each group's state fits individually");
+                aggregation
+                    .accumulate(build_aggregate_group_key(&group.group_values), group)
+                    .expect("accumulate distinct group");
+            }
+            aggregation
+                .spill_partition()
+                .expect("spill all three groups in one batch");
+            assert_eq!(aggregation.spilled_batch_count(), 1);
+            assert!(aggregation.total_spilled_bytes < 1024);
+            match aggregation.drain() {
+                Err(error) if limit == 4096 => {
+                    assert!(error.to_string().contains("limit"), "{error}");
+                }
+                Ok(groups) if limit > 4096 => {
+                    assert_eq!(groups.len(), 3);
+                    for index in 0..3 {
+                        let key = build_aggregate_group_key(&[Value::Integer(index)]);
+                        let group = &groups[&key];
+                        let (_, result) = reddb_engine::query::runtime::aggregation::aggregate_projection_result_with_host(
+                            &NativeAggregateHost, &projection, &group.state, &plan,
+                        ).expect("original array aggregation result");
+                        assert_eq!(result, Value::Array(vec![value.clone()]));
+                        assert_eq!(group.group_values, vec![Value::Integer(index)]);
+                    }
+                }
+                _ => panic!(
+                    "individually admissible groups must share the batch allocation allowance"
+                ),
+            }
+            assert_eq!(
+                std::fs::read_dir(directory.path())
+                    .expect("private spill files")
+                    .count(),
+                0
             );
         }
     }

@@ -130,7 +130,8 @@ fn map_error(err: reddb_file::RdbFileError) -> RedDBError {
         reddb_file::RdbFileError::Io(err) => RedDBError::Io(err),
         // The zone message names the zone and points at scrub/salvage
         // (ADR 0074 §2/§4); keep it verbatim rather than flattening it.
-        err @ reddb_file::RdbFileError::ZoneUnrecoverable { .. } => {
+        err @ (reddb_file::RdbFileError::ZoneUnrecoverable { .. }
+        | reddb_file::RdbFileError::ReadLimitExceeded { .. }) => {
             RedDBError::InvalidOperation(err.to_string())
         }
     }

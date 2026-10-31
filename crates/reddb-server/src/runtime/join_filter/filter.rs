@@ -100,13 +100,13 @@ impl reddb_engine::query::runtime::filter::FilterHost for RuntimeFilterHost<'_> 
         match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(expr, &row) {
             Ok(value) => Ok(Some(value)),
             Err(crate::storage::query::evaluator::EvalError::UnknownFunction { .. }) => {
-                Ok(super::expr_eval::evaluate_runtime_expr_with_db(
+                super::expr_eval::try_evaluate_runtime_expr_with_db(
                     self.db,
                     expr,
                     self.record,
                     self.table_name,
                     self.table_alias,
-                ))
+                )
             }
             Err(error) => Err(crate::RedDBError::Query(
                 if expression_uses_secret(expr, self.record, self.table_name, self.table_alias) {

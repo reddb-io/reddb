@@ -91,3 +91,71 @@ fn constant_update_preserves_reopened_positional_fields_and_indexes() {
 fn expression_update_preserves_reopened_positional_fields_and_indexes() {
     exercise("UPDATE updated_rows SET n = n + 1");
 }
+
+#[test]
+fn ordered_update_uses_reopened_positional_keys_and_preserves_other_fields() {
+    let directory = tempfile::tempdir().expect("ordered fixture");
+    let path = directory.path().join("ordered.rdb");
+    seed(&path);
+    let check = |runtime: &RedDBRuntime| {
+        let rows = runtime
+            .execute_query("SELECT id,n,payload FROM updated_rows ORDER BY id")
+            .expect("ordered result");
+        assert_eq!(rows.result.records.len(), 3);
+        for (row, (id, n, payload)) in
+            rows.result
+                .records
+                .iter()
+                .zip([(0, 2, "zero"), (1, 1, "one"), (2, 1, "two")])
+        {
+            assert_eq!(row.get("id").expect("id").to_string(), id.to_string());
+            assert_eq!(row.get("n").expect("n").to_string(), n.to_string());
+            assert_eq!(
+                row.get("payload").expect("payload").as_text(),
+                Some(payload)
+            );
+        }
+    };
+    {
+        let runtime = open(&path, false);
+        verify(&runtime, 1);
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("updated_rows")
+            .expect("rows");
+        let mut positional = 0;
+        manager.for_each_entity(|entity| {
+            if entity.data.as_row().is_some_and(|row| row.named.is_none()) {
+                positional += 1;
+            }
+            true
+        });
+        assert!(positional > 0, "fixture must exercise positional rows");
+        // Reinserted id=0 has a newer logical identity than id=2. Missing
+        // ordering keys would choose id=2 through the identity tie-break.
+        let updated = runtime
+            .execute_query(
+                "UPDATE updated_rows SET n = 2 ORDER BY id ASC LIMIT 1 RETURNING id,payload",
+            )
+            .expect("ordered positional update");
+        assert_eq!(updated.affected_rows, 1);
+        assert_eq!(
+            updated.result.records[0]
+                .get("id")
+                .expect("selected id")
+                .to_string(),
+            "0"
+        );
+        assert_eq!(
+            updated.result.records[0]
+                .get("payload")
+                .expect("selected payload")
+                .as_text(),
+            Some("zero")
+        );
+        check(&runtime);
+        runtime.checkpoint().expect("publish ordered update");
+    }
+    check(&open(&path, false));
+}

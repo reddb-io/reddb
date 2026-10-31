@@ -40,6 +40,15 @@ impl WindowHost for NativeWindowHost<'_> {
         Ok(())
     }
     fn evaluate_expression(&self, expression: &Expr, record: &UnifiedRecord) -> Option<Value> {
+        self.try_evaluate_expression(expression, record)
+            .ok()
+            .flatten()
+    }
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Option<Value>, RedDBError> {
         let row = |field: &reddb_rql::ast::FieldRef| {
             super::join_filter::resolve_runtime_field(
                 record,
@@ -49,16 +58,20 @@ impl WindowHost for NativeWindowHost<'_> {
             )
             .and_then(super::execution_context::secret_query_input)
         };
-        super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row)
-            .ok()
-            .or_else(|| {
-                super::expr_eval::evaluate_runtime_expr(
-                    expression,
-                    record,
-                    self.table_name,
-                    self.table_alias,
-                )
-            })
+        // The pure typed evaluator rejects visited context functions. Keep its
+        // existing fast path and propagate operating failures from the fallback.
+        if let Ok(value) =
+            super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row)
+        {
+            return Ok(Some(value));
+        }
+        super::expr_eval::try_evaluate_runtime_expr_with_db(
+            self.db,
+            expression,
+            record,
+            self.table_name,
+            self.table_alias,
+        )
     }
     fn secret_query_output(&self, value: Value) -> Result<Value, RedDBError> {
         super::execution_context::secret_query_output(value)

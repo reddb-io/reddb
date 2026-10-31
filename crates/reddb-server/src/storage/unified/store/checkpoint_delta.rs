@@ -160,7 +160,7 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
-        if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
+        if manager.has_backing() || Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
@@ -196,16 +196,20 @@ impl UnifiedStore {
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
-                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && current.excluded_xids.contains(&entity.xmin))
+                    || (matches!(
+                        entity.data,
+                        EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                    ) && current.excluded_xids.contains(&entity.xmin))
                 {
                     defer = true;
                     return None;
                 }
                 let raw =
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
-                let projected = if matches!(entity.data, EntityData::Row(_))
-                    && current.excluded_xids.contains(&entity.xmax)
+                let projected = if matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                ) && current.excluded_xids.contains(&entity.xmax)
                 {
                     defer = true;
                     let mut normalized = entity.clone();

@@ -635,8 +635,8 @@ impl RedDBRuntime {
             // concurrent submitters can't both bind to the same prev_hash —
             // the loser observes the advanced tip and gets 409 with the new
             // tip so it can retry.
-            let chain_mode = crate::runtime::blockchain_kind::is_chain(&store, &query.table);
-            let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
+            let chain_mode = crate::runtime::blockchain_kind::try_is_chain(&store, &query.table)?;
+            let _chain_lock_arc: Option<Arc<super::RmwRowLock>> = if chain_mode {
                 Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
             } else {
                 None
@@ -645,7 +645,7 @@ impl RedDBRuntime {
 
             // Issue #525 — refuse new blocks if the chain has been marked
             // `integrity = broken` until an admin clears the flag.
-            if chain_mode && self.is_chain_integrity_broken(&query.table) {
+            if chain_mode && self.is_chain_integrity_broken(&query.table)? {
                 return Err(RedDBError::InvalidOperation(format!(
                     "ChainIntegrityBroken: collection '{}' is locked until \
                      POST /collections/{}/clear-integrity-flag is called by an admin",
@@ -662,7 +662,7 @@ impl RedDBRuntime {
                     if let Some(existing) = cache.get(&query.table) {
                         Some(existing.clone())
                     } else if let Some(scanned) =
-                        crate::runtime::blockchain_kind::chain_tip_full(&store, &query.table)
+                        crate::runtime::blockchain_kind::try_chain_tip_full(&store, &query.table)?
                     {
                         cache.insert(query.table.clone(), scanned.clone());
                         Some(scanned)
@@ -963,11 +963,12 @@ impl RedDBRuntime {
                 // composition is owned by issue #526; we keep #522 to the
                 // non-chain path and let chain_mode collections punt to that
                 // slice rather than half-wire it here.
-                if crate::runtime::signed_writes_kind::is_signed(&store, &query.table) {
+                if crate::runtime::signed_writes_kind::try_is_signed(&store, &query.table)? {
                     let (pk_col, sig_col, residual) =
                         crate::runtime::signed_writes_kind::split_signature_fields(fields);
                     let payload = crate::runtime::blockchain_kind::canonical_payload(&residual);
-                    let reg = crate::runtime::signed_writes_kind::registry(&store, &query.table);
+                    let reg =
+                        crate::runtime::signed_writes_kind::try_registry(&store, &query.table)?;
                     crate::runtime::signed_writes_kind::verify_row(
                         &reg,
                         pk_col.as_ref().map(|c| c.bytes.as_slice()),
@@ -1925,7 +1926,10 @@ impl RedDBRuntime {
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: UPDATE not allowed on '{}'",
                 query.table
@@ -2044,7 +2048,7 @@ impl RedDBRuntime {
                 graph_update_returning_snapshots(self, &effective_query.table, &touched_ids)
             } else {
                 super::dml_target_scan::DmlTargetScan::new(self, &effective_query.table, None, None)
-                    .row_snapshots(&touched_ids)
+                    .row_snapshots(&touched_ids)?
             };
             if matches!(effective_query.target, UpdateTarget::Kv) {
                 restore_kv_returning_keys(
@@ -2224,10 +2228,10 @@ impl RedDBRuntime {
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
-            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
+            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)?
         };
         let mut ids_to_update = if query.claim_limit.is_some() || autocommit_table_update {
-            self.filter_claim_locked_target_ids(&query.table, ids_to_update)
+            self.filter_claim_locked_target_ids(&query.table, ids_to_update)?
         } else {
             ids_to_update
         };
@@ -2274,7 +2278,10 @@ impl RedDBRuntime {
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            for entity in manager.get_many(chunk).into_iter().flatten() {
+            for id in chunk {
+                let Some(entity) = manager.try_get(*id, usize::MAX)? else {
+                    continue;
+                };
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
@@ -2351,23 +2358,26 @@ impl RedDBRuntime {
         ))
     }
 
-    fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
+    fn filter_claim_locked_target_ids(
+        &self,
+        table: &str,
+        ids: Vec<EntityId>,
+    ) -> RedDBResult<Vec<EntityId>> {
         let conn_id = current_connection_id();
         let locks = self.inner.pending_claim_locks.read();
         if locks.is_empty() {
-            return ids;
+            return Ok(ids);
         }
-        ids.into_iter()
-            .filter(|id| {
-                let Some(entity) = self.inner.db.store().get(table, *id) else {
-                    return false;
-                };
+        let mut admitted = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(entity) = self.inner.db.store().try_get(table, id, usize::MAX)? {
                 let key = (table.to_string(), entity.logical_id());
-                locks
-                    .get(&key)
-                    .is_none_or(|owner_conn_id| *owner_conn_id == conn_id)
-            })
-            .collect()
+                if locks.get(&key).is_none_or(|owner| *owner == conn_id) {
+                    admitted.push(id);
+                }
+            }
+        }
+        Ok(admitted)
     }
 
     fn record_pending_claim_locks_for_touched_ids(&self, table: &str, ids: &[EntityId]) {
@@ -2405,11 +2415,11 @@ impl RedDBRuntime {
         let mut lock_entries = Vec::new();
 
         for id in ids_to_update {
-            let Some(candidate) = store.get(&query.table, *id) else {
+            let Some(candidate) = store.try_get(&query.table, *id, usize::MAX)? else {
                 continue;
             };
             let logical_id = candidate.logical_id();
-            let lock_key = format!("row:{}", logical_id.raw());
+            let lock_key = super::RmwLockTable::row_key(logical_id);
             let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
             lock_entries.push((lock_key, logical_id, rmw_lock));
         }
@@ -2421,18 +2431,19 @@ impl RedDBRuntime {
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
+            let Some(entity) =
+                try_resolve_update_entity_by_logical_id(self, &query.table, *logical_id)?
             else {
                 continue;
             };
             if let Some(filter) = effective_filter {
-                if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                if !crate::runtime::query_exec::evaluate_entity_filter_result_with_db(
                     Some(self.inner.db.as_ref()),
                     &entity,
                     filter,
                     &query.table,
                     &query.table,
-                ) {
+                )? {
                     continue;
                 }
             }
@@ -2684,13 +2695,13 @@ impl RedDBRuntime {
                     query.table
                 )));
             };
-            let rhs = super::expr_eval::evaluate_runtime_expr_with_db(
+            let rhs = super::expr_eval::try_evaluate_runtime_expr_with_db(
                 Some(self.inner.db.as_ref()),
                 &assignment.expr,
                 record,
                 Some(query.table.as_str()),
                 Some(query.table.as_str()),
-            )
+            )?
             .ok_or_else(|| {
                 RedDBError::Query(format!(
                     "failed to evaluate UPDATE expression for column '{}'",
@@ -2818,7 +2829,10 @@ impl RedDBRuntime {
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: DELETE not allowed on '{}'",
                 query.table
@@ -2928,43 +2942,45 @@ impl RedDBRuntime {
         );
         let ids_to_delete = {
             let _topology_guard = topology_lock.read();
-            scan.find_target_ids()?
+            let ids = scan.find_target_ids()?;
+            if ids.len() > UPDATE_APPLY_CHUNK_SIZE
+                && self.current_xid().is_none()
+                && UnifiedStore::deferred_store_wal_capture_active()
+            {
+                super::delete_publication::order_target_ids(self, &query.table, ids)?
+            } else {
+                ids
+            }
         };
 
-        // For event-enabled collections, snapshot the pre-delete state
-        // before rows are physically removed.
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
-        let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
-            scan.row_json_pre_images(&ids_to_delete)
-        } else {
-            HashMap::new()
-        };
-
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let (count, lsns) =
-                self.delete_entities_batch(&query.table, chunk, topology_lock.read())?;
+            let deleted = self.delete_entities_batch(
+                &query.table,
+                chunk,
+                topology_lock.read(),
+                effective_filter.as_ref(),
+                needs_delete_events,
+            )?;
             #[cfg(test)]
             self.index_store_ref().mutation_test_hook(
                 &query.table,
                 super::index_store::MutationTestPhase::BeforeEvents,
             );
-            affected += count;
-            if needs_delete_events && !lsns.is_empty() {
-                // lsns.len() == actually-deleted entities; align with chunk ids.
-                // `delete_batch` may skip missing entities, so we correlate by
-                // the number returned (they're emitted in chunk order).
-                let deleted_chunk = &chunk[..lsns.len().min(chunk.len())];
+            affected += deleted.affected;
+            if needs_delete_events && !deleted.changes.is_empty() {
+                let ids: Vec<_> = deleted.changes.iter().map(|(id, _)| *id).collect();
+                let lsns: Vec<_> = deleted.changes.iter().map(|(_, lsn)| *lsn).collect();
                 self.emit_delete_events_for_collection(
                     &query.table,
-                    deleted_chunk,
+                    &ids,
                     &lsns,
-                    &pre_images,
+                    &deleted.pre_images,
                 )?;
             }
         }
-        pre_images.clear();
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2986,6 +3002,188 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::path::Path;
+
+    #[test]
+    fn captured_bulk_delete_keeps_global_row_lock_order_across_chunks() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let runtime = Arc::new(
+            RedDBRuntime::with_options(
+                RedDBOptions::in_memory().with_memory_budget(128 * 1024 * 1024),
+            )
+            .expect("bulk lock fixture"),
+        );
+        runtime
+            .execute_query("CREATE TABLE bulk_lock_order (id INTEGER)")
+            .expect("table");
+        let count = super::UPDATE_APPLY_CHUNK_SIZE + 16;
+        for batch in (0..count).collect::<Vec<_>>().chunks(512) {
+            let values = batch
+                .iter()
+                .map(|id| format!("({id})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!("INSERT INTO bulk_lock_order (id) VALUES {values}"))
+                .expect("seed chunk boundary");
+        }
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("bulk_lock_order")
+            .expect("rows");
+        // Imported/versioned rows can have logical identities independent
+        // of their physical positions. Cross decimal-width boundaries too;
+        // fresh time-based physical IDs alone keep the same string order.
+        let mut rows = manager.query_all(|_| true);
+        rows.sort_unstable_by_key(|entity| entity.id);
+        for (position, mut entity) in rows.into_iter().enumerate() {
+            entity.set_logical_id(crate::storage::EntityId::new(
+                u64::try_from(position + 1).expect("small identity"),
+            ));
+            manager
+                .update(entity)
+                .expect("independent logical identity");
+        }
+        let mut expected: Vec<_> = manager
+            .query_all(|_| true)
+            .iter()
+            .map(|entity| format!("row:{}", entity.logical_id().raw()))
+            .collect();
+        expected.sort_unstable();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let weak_runtime = Arc::downgrade(&runtime);
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "bulk_lock_order"
+                    && phase == super::super::index_store::MutationTestPhase::BeforeEvents
+                {
+                    let runtime = weak_runtime.upgrade().expect("writer still alive");
+                    let held =
+                        super::super::delete_publication::pending_lock_keys(&runtime, collection);
+                    assert!(!held.is_empty());
+                    assert!(held.len() <= expected.len());
+                    let mismatch = held
+                        .iter()
+                        .zip(&expected)
+                        .position(|(actual, expected)| actual != expected);
+                    assert!(
+                        mismatch.is_none(),
+                        "captured DELETE violated global lock order at position {mismatch:?}"
+                    );
+                    hook_calls.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        let result = runtime
+            .with_deferred_store_wal_for_dml(true, || {
+                runtime.execute_query("DELETE FROM bulk_lock_order")
+            })
+            .expect("captured bulk delete");
+        assert_eq!(
+            result.affected_rows,
+            u64::try_from(count).expect("small fixture")
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "fixture must cross an apply chunk"
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM bulk_lock_order")
+            .expect("deleted rows")
+            .result
+            .records
+            .is_empty());
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    }
+
+    #[test]
+    fn locked_update_recheck_read_failure_preserves_preimages_and_retry() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::PagedCollection;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().expect("locked update fixture");
+        let options = RedDBOptions::persistent(directory.path().join("locked-update.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("locked update profile");
+        let runtime = RedDBRuntime::with_options(options).expect("locked update runtime");
+        for sql in [
+            "CREATE TABLE recheck_probe (id INTEGER)",
+            "INSERT INTO recheck_probe (id) VALUES (1), (2)",
+            "SET CONFIG fixture.flag = 'ready'",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let sql = "UPDATE recheck_probe SET id = id + 10 WHERE id = 1 OR CONFIG('fixture.flag') = 'ready'";
+        let reddb_rql::ast::QueryExpr::Update(query) =
+            reddb_rql::parse(sql).expect("parse update").query
+        else {
+            panic!("expected UPDATE");
+        };
+        let compiled = runtime.compile_update_plan(&query).expect("compile update");
+        let filter = reddb_rql::sql_lowering::effective_update_filter(&query);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &runtime,
+            "recheck_probe",
+            filter.as_ref(),
+            None,
+        )
+        .find_target_ids()
+        .expect("discover targets before failure");
+        assert_eq!(ids.len(), 2);
+        let store = runtime.db().store();
+        store.persist().expect("publish recheck configuration");
+        let root = store
+            .collection_root_page("red_config")
+            .expect("configuration root");
+        let manager = store
+            .get_collection("red_config")
+            .expect("configuration collection");
+        let install = |limit| {
+            let tree = BTree::with_root(Arc::clone(store.pager().expect("pager")), root);
+            manager.install_backing(
+                Arc::new(PagedCollection::new(Arc::new(tree))),
+                root,
+                store.format_version(),
+                limit,
+                manager.count() as u64,
+            );
+        };
+        let assert_ids = |expected: [i64; 2]| {
+            runtime.invalidate_result_cache();
+            let rows = runtime
+                .execute_query("SELECT id FROM recheck_probe ORDER BY id")
+                .expect("read preimages");
+            let actual: Vec<_> = rows
+                .result
+                .records
+                .iter()
+                .map(|row| row.get("id").cloned().expect("row value"))
+                .collect();
+            assert_eq!(actual, expected.map(Value::Integer));
+        };
+        // Candidate discovery has succeeded. Fail only the locked recheck,
+        // after the first row's postimage can already have been prepared.
+        install(1);
+        let error = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .err()
+            .expect("locked recheck must propagate its read failure");
+        assert!(error.to_string().contains("read memory limit"), "{error}");
+        install(4096);
+        assert_ids([1, 2]);
+        let retried = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .expect("retry locked recheck");
+        assert_eq!(retried.0.affected_rows, 2);
+        assert_ids([11, 12]);
+    }
 
     #[test]
     fn concurrent_constant_updates_leave_one_visible_row_per_logical_id() {

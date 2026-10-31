@@ -941,31 +941,89 @@ pub const METRIC_RESULT_CACHE_EVICT_TOTAL: &str = "result_cache_evict_total";
 pub(crate) const ASK_ANSWER_CACHE_NAMESPACE: &str = "runtime.ask_answer_cache";
 const RMW_LOCK_SHARDS: usize = 64;
 
+type RmwLockShard = parking_lot::Mutex<HashMap<String, std::sync::Weak<RmwRowLock>>>;
+
 struct RmwLockTable {
-    shards: Vec<parking_lot::Mutex<HashMap<String, Arc<parking_lot::Mutex<()>>>>>,
+    shards: Vec<Arc<RmwLockShard>>,
+}
+
+struct RmwRowLock {
+    mutex: Arc<parking_lot::Mutex<()>>,
+    shard: std::sync::Weak<RmwLockShard>,
+    key: String,
+}
+
+struct OwnedRmwRowLockGuard {
+    // Unlock before dropping the identity owner and removing its weak entry.
+    _guard: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
+    _owner: Arc<RmwRowLock>,
+}
+
+impl RmwRowLock {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.mutex.lock()
+    }
+
+    fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        self.mutex.try_lock()
+    }
+
+    fn lock_owned(self: Arc<Self>) -> OwnedRmwRowLockGuard {
+        let guard = self.mutex.lock_arc();
+        OwnedRmwRowLockGuard {
+            _guard: guard,
+            _owner: self,
+        }
+    }
+}
+
+impl Drop for RmwRowLock {
+    fn drop(&mut self) {
+        let Some(shard) = self.shard.upgrade() else {
+            return;
+        };
+        let mut shard = shard.lock();
+        // A new owner may already have replaced an expired weak entry while
+        // this destructor was waiting for the shard. Preserve that new lock.
+        if shard
+            .get(&self.key)
+            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+        {
+            shard.remove(&self.key);
+        }
+    }
 }
 
 impl RmwLockTable {
+    fn row_key(logical_id: crate::storage::EntityId) -> String {
+        format!("row:{}", logical_id.raw())
+    }
+
     fn new() -> Self {
         let shards = (0..RMW_LOCK_SHARDS)
-            .map(|_| parking_lot::Mutex::new(HashMap::new()))
+            .map(|_| Arc::new(parking_lot::Mutex::new(HashMap::new())))
             .collect();
         Self { shards }
     }
 
-    fn lock_for(&self, collection: &str, key: &str) -> Arc<parking_lot::Mutex<()>> {
+    fn lock_for(&self, collection: &str, key: &str) -> Arc<RmwRowLock> {
         use std::hash::{Hash, Hasher};
-
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         collection.hash(&mut hasher);
         key.hash(&mut hasher);
         let shard_idx = (hasher.finish() as usize) % self.shards.len();
         let map_key = format!("{collection}\u{1f}{key}");
         let mut shard = self.shards[shard_idx].lock();
-        shard
-            .entry(map_key)
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
-            .clone()
+        if let Some(lock) = shard.get(&map_key).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(RmwRowLock {
+            mutex: Arc::new(parking_lot::Mutex::new(())),
+            shard: Arc::downgrade(&self.shards[shard_idx]),
+            key: map_key.clone(),
+        });
+        shard.insert(map_key, Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -1479,6 +1537,7 @@ pub mod config_watcher;
 pub mod continuous_materialized_view;
 pub mod control_events;
 pub(crate) mod ddl;
+mod delete_publication;
 pub mod disk_space_monitor;
 mod dml_target_scan;
 pub mod evidence_export;
@@ -1546,6 +1605,8 @@ mod impl_vcs;
 mod index_store;
 #[cfg(test)]
 pub(crate) use index_store::MutationTestPhase;
+#[cfg(test)]
+mod cold_keyed_models;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;

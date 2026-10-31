@@ -150,13 +150,13 @@ fn finish_ordered_index_records(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
 
     if let Some(offset) = query.offset {
@@ -225,8 +225,8 @@ fn execute_geo_candidate_scan(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if !candidate_ids.contains(&entity.id.raw()) {
                 return true;
@@ -279,13 +279,13 @@ fn execute_geo_candidate_scan(
 
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
     if let Some(offset) = query.offset {
         let offset = offset as usize;
@@ -582,7 +582,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     // Issue #769 — the ORDER BY buffer is materialized in
                     // full before sorting; cap it.
                     crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                    super::super::join_filter::sort_or_top_k_records_with_db(
+                    super::super::join_filter::try_sort_or_top_k_records_with_db(
                         Some(db),
                         &mut records,
                         &query.order_by,
@@ -590,7 +590,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         query.limit,
                         outer_alias,
                         outer_alias,
-                    );
+                    )?;
                 }
 
                 // Outer OFFSET / LIMIT.
@@ -800,22 +800,17 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 };
                 let mut records: Vec<UnifiedRecord> =
                     Vec::with_capacity(entity_ids.len().min(limit));
-                let mut stop = false;
                 let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
-                manager.for_each_id(&entity_ids, |_idx, entity| {
-                    if stop {
-                        return;
-                    }
+                manager.try_for_each_id(&entity_ids, usize::MAX, |_idx, entity| {
                     if records.len() >= limit {
-                        stop = true;
-                        return;
+                        return false;
                     }
                     if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                        return;
+                        return true;
                     }
                     if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return;
+                        return true;
                     }
                     if let Some(cf) = compiled_filter.as_ref() {
                         if !compiled_entity_filter_matches(
@@ -826,7 +821,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             table_name,
                             table_alias,
                         ) {
-                            return;
+                            return true;
                         }
                     }
                     if let Some(record) =
@@ -834,7 +829,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     {
                         records.push(record);
                     }
-                });
+                    true
+                })?;
                 return finish_ordered_index_records(
                     db,
                     query,
@@ -847,7 +843,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
 
             // Projection path (explicit columns): keep owned-entity flow.
-            let entities = store.get_batch(&query.table, &entity_ids);
+            let entities = store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
@@ -957,7 +953,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             let explicit_cols = extract_select_column_names(&effective_projections);
 
                             let store = db.store();
-                            let entities = store.get_batch(&query.table, &intersection_ids);
+                            let entities =
+                                store.try_get_batch(&query.table, &intersection_ids, usize::MAX)?;
                             let lean = explicit_cols.is_empty();
                             let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
                             let table_row_resolver = TableRowMvccReadResolver::current_statement();
@@ -1116,7 +1113,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             };
 
             let store = db.store();
-            let entities = store.get_batch(&query.table, &entity_ids);
+            let entities = store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             let table_row_resolver = TableRowMvccReadResolver::current_statement();
             for entity_opt in entities.into_iter().flatten() {
@@ -1240,7 +1237,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         });
                         let store = db.store();
                         // Batch fetch: single lock acquisition for the entire candidate set
-                        let entities = store.get_batch(&query.table, &entity_ids);
+                        let entities =
+                            store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
                         let explicit_cols = extract_select_column_names(&effective_projections);
                         let lean = explicit_cols.is_empty();
                         let mut records = Vec::with_capacity(entity_ids.len().min(limit));
@@ -1341,13 +1339,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             if !query.order_by.is_empty() {
                 crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                super::super::join_filter::sort_records_by_order_by_with_db(
+                super::super::join_filter::try_sort_records_by_order_by_with_db(
                     Some(db),
                     &mut records,
                     &query.order_by,
                     Some(table_name),
                     Some(table_alias),
-                );
+                )?;
             }
 
             if let Some(offset) = query.offset {
@@ -1582,7 +1580,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
             let (matching, scan_stats) =
-                manager.scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
+                manager.try_scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, usize::MAX, |entity| {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
                             return None;
@@ -1648,13 +1646,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     } else {
                         runtime_table_record_from_entity(hydrated.as_ref().clone())
                     }
-                });
+                })?;
             record_segment_scan_stats(scan_stats);
             records = matching;
         } else {
-            let scan_stats = crate::runtime::function_budget::scan(
+            let scan_stats = crate::runtime::function_budget::try_scan(
                 |visit| {
-                    manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, visit)
+                    manager.try_scan_for_each_zoned_with_stats(
+                        snapshot.as_ref(),
+                        &zone_preds,
+                        usize::MAX,
+                        visit,
+                    )
                 },
                 |entity| {
                     if records.len() >= limit {
@@ -1736,13 +1739,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         // Apply OFFSET, then LIMIT. Order matters: SQL semantics drop the
@@ -1801,7 +1804,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_or_top_k_records_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
@@ -1809,7 +1812,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 query.limit,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         if pushed_window.is_none() {
@@ -2085,8 +2088,8 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+                crate::runtime::function_budget::try_scan(
+            |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |entity| {
                     if records.len() >= limit {
                         return false;
@@ -2233,13 +2236,13 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 document_projection,
                 entity_projection,
             );
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 records,
                 &context.query.order_by,
                 Some(context.table_name),
                 Some(context.table_alias),
-            );
+            )?;
         } else if node.operator == "entity_sort" {
             records.sort_by(compare_runtime_ranked_records);
         }
@@ -2783,6 +2786,145 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn cold_published_table_reads_match_resident_sql_results() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::PagedCollection;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().expect("SQL fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cold-sql.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = RedDBRuntime::with_options(options).expect("paged runtime");
+        exec(
+            &runtime,
+            "CREATE TABLE cold_rows (id INTEGER, cohort INTEGER, payload TEXT)",
+        );
+        let fields = vec![
+            "id".to_string(),
+            "cohort".to_string(),
+            "payload".to_string(),
+        ];
+        runtime
+            .db()
+            .store()
+            .bulk_insert(
+                "cold_rows",
+                (1..=4096)
+                    .map(|id| {
+                        let values = vec![
+                            Value::Integer(id),
+                            Value::Integer(1),
+                            Value::text(if id == 4096 {
+                                "x".repeat(32 * 1024)
+                            } else {
+                                "preserved".to_string()
+                            }),
+                        ];
+                        let mut entity = crate::storage::UnifiedEntity::table_row(
+                            EntityId::new(0),
+                            "cold_rows",
+                            0,
+                            vec![],
+                        );
+                        entity.data = crate::storage::EntityData::Row(
+                            crate::storage::unified::entity::RowData::with_names(
+                                values,
+                                fields.clone(),
+                            ),
+                        );
+                        entity
+                    })
+                    .collect(),
+            )
+            .expect("bulk SQL fixture");
+        exec(
+            &runtime,
+            "CREATE INDEX cold_rows_id ON cold_rows (id) USING HASH",
+        );
+        let queries = [
+            "SELECT id FROM cold_rows ORDER BY id",
+            "SELECT id FROM cold_rows WHERE cohort >= 0 ORDER BY id",
+            "SELECT id FROM cold_rows WHERE id = 5",
+            "SELECT COUNT(*) AS n FROM cold_rows",
+        ];
+        let observe = |sql: &str| {
+            runtime.invalidate_result_cache();
+            runtime
+                .execute_query(sql)
+                .expect("SQL read")
+                .result
+                .records
+                .iter()
+                .map(|row| {
+                    row.iter_fields()
+                        .map(|(key, value)| (key.to_string(), value.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected: Vec<_> = queries.iter().map(|sql| observe(sql)).collect();
+        assert_eq!(
+            expected.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![4096, 4096, 1, 1]
+        );
+        let store = runtime.db().store();
+        store.persist().expect("durable base");
+        let manager = store.get_collection("cold_rows").expect("rows");
+        let root = store
+            .collection_root_page("cold_rows")
+            .expect("published root");
+        let tree = Arc::new(BTree::with_root(
+            Arc::clone(store.pager().expect("pager")),
+            root,
+        ));
+        // Install the real storage read seam without enabling the unfinished
+        // runtime profile or changing any managed deployment configuration.
+        manager.install_backing(
+            Arc::new(PagedCollection::new(tree)),
+            root,
+            store.format_version(),
+            128 * 1024,
+            manager.count() as u64,
+        );
+        let mut mismatches = Vec::new();
+        for (sql, expected) in queries.iter().zip(expected) {
+            let actual = observe(sql);
+            if actual != expected {
+                mismatches.push(format!(
+                    "{sql}: expected {} rows, got {}; expected prefix {:?}, actual prefix {:?}",
+                    expected.len(),
+                    actual.len(),
+                    expected.iter().take(3).collect::<Vec<_>>(),
+                    actual.iter().take(3).collect::<Vec<_>>()
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "cold SQL paths differ: {mismatches:#?}"
+        );
+        let (base, _) = manager.current_backing_overlay().expect("cold generation");
+        manager.install_backing(
+            base,
+            root,
+            store.format_version(),
+            4096,
+            manager.count() as u64,
+        );
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime
+                .execute_query("SELECT id FROM cold_rows WHERE cohort >= 0 ORDER BY id")
+                .is_err(),
+            "a late disk decode error must not publish the successful prefix"
+        );
     }
 
     #[test]

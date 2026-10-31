@@ -364,12 +364,10 @@ impl RedDBRuntime {
         // results before they reach any consumer. Fast no-op (one relaxed
         // atomic load) unless an input-stream digest mismatch has tombstoned
         // a RID range on this store.
-        if let Ok(ref mut query_result) = result {
-            if query_result.statement_type == "select" {
-                self.filter_integrity_tombstoned(&mut query_result.result);
+        result = result.and_then(|mut value| {
+            if value.statement_type == "select" {
+                self.filter_integrity_tombstoned(&mut value.result)?;
             }
-        }
-        result = result.and_then(|value| {
             super::query_budget::check_result(self.resource_limits(), &value)?;
             Ok(value)
         });

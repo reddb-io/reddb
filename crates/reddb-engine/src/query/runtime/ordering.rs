@@ -18,6 +18,49 @@ pub trait OrderingHost {
     fn topk_disabled(&self) -> bool;
 }
 
+/// Hosts with operating failures distinguish unreadable keys from missing values.
+/// Keys are extracted before the sort or top-K selection mutates the records.
+pub trait FallibleOrderingHost: OrderingHost {
+    type Error;
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Option<Value>, Self::Error>;
+}
+
+struct OptionalOrderingHost<'a, H>(&'a H);
+impl<H: OrderingHost> OrderingHost for OptionalOrderingHost<'_, H> {
+    fn evaluate_expression(&self, expression: &Expr, record: &UnifiedRecord) -> Option<Value> {
+        self.0.evaluate_expression(expression, record)
+    }
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        self.0.secret_query_input(value)
+    }
+    fn record_identity_key(&self, record: &UnifiedRecord) -> String {
+        self.0.record_identity_key(record)
+    }
+    fn topk_disabled(&self) -> bool {
+        self.0.topk_disabled()
+    }
+}
+impl<H: OrderingHost> FallibleOrderingHost for OptionalOrderingHost<'_, H> {
+    type Error = std::convert::Infallible;
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(self.0.evaluate_expression(expression, record))
+    }
+}
+fn optional_ordering_result<T>(result: Result<T, std::convert::Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
 pub fn compare_runtime_order_with_host<H: OrderingHost>(
     host: &H,
     left: &UnifiedRecord,
@@ -26,6 +69,24 @@ pub fn compare_runtime_order_with_host<H: OrderingHost>(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> Ordering {
+    optional_ordering_result(try_compare_runtime_order_with_host(
+        &OptionalOrderingHost(host),
+        left,
+        right,
+        clauses,
+        table_name,
+        table_alias,
+    ))
+}
+
+pub fn try_compare_runtime_order_with_host<H: FallibleOrderingHost>(
+    host: &H,
+    left: &UnifiedRecord,
+    right: &UnifiedRecord,
+    clauses: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Result<Ordering, H::Error> {
     for clause in clauses {
         // Fase 1.6: when the ORDER BY item is an expression (CAST,
         // arithmetic, CASE, etc.), evaluate it against each record
@@ -34,8 +95,8 @@ pub fn compare_runtime_order_with_host<H: OrderingHost>(
         // common case.
         let (left_value, right_value) = if let Some(ref expr) = clause.expr {
             (
-                host.evaluate_expression(expr, left),
-                host.evaluate_expression(expr, right),
+                host.try_evaluate_expression(expr, left)?,
+                host.try_evaluate_expression(expr, right)?,
             )
         } else {
             (
@@ -51,16 +112,17 @@ pub fn compare_runtime_order_with_host<H: OrderingHost>(
         );
 
         if ordering != Ordering::Equal {
-            return if clause.ascending {
+            return Ok(if clause.ascending {
                 ordering
             } else {
                 ordering.reverse()
-            };
+            });
         }
     }
 
-    host.record_identity_key(left)
-        .cmp(&host.record_identity_key(right))
+    Ok(host
+        .record_identity_key(left)
+        .cmp(&host.record_identity_key(right)))
 }
 
 /// Sort `records` by `order_by` using the Schwartzian transform:
@@ -94,8 +156,24 @@ pub fn sort_records_by_order_by_with_host<H: OrderingHost>(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) {
+    optional_ordering_result(try_sort_records_by_order_by_with_host(
+        &OptionalOrderingHost(host),
+        records,
+        order_by,
+        table_name,
+        table_alias,
+    ))
+}
+
+pub fn try_sort_records_by_order_by_with_host<H: FallibleOrderingHost>(
+    host: &H,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Result<(), H::Error> {
     if order_by.is_empty() || records.len() < 2 {
-        return;
+        return Ok(());
     }
 
     // Extract sort keys once per record — O(n × k) where k = ORDER BY clauses.
@@ -110,7 +188,7 @@ pub fn sort_records_by_order_by_with_host<H: OrderingHost>(
     for rec in records.iter() {
         for clause in order_by.iter() {
             let v = if let Some(ref expr) = clause.expr {
-                host.evaluate_expression(expr, rec)
+                host.try_evaluate_expression(expr, rec)?
             } else {
                 resolve_runtime_field(rec, &clause.field, table_name, table_alias)
             };
@@ -157,6 +235,7 @@ pub fn sort_records_by_order_by_with_host<H: OrderingHost>(
         out.push(orig[i].clone());
     }
     *records = out;
+    Ok(())
 }
 
 /// Chooses between full sort and quickselect-based top-k based on
@@ -173,8 +252,28 @@ pub fn sort_or_top_k_records_with_host<H: OrderingHost>(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) {
+    optional_ordering_result(try_sort_or_top_k_records_with_host(
+        &OptionalOrderingHost(host),
+        records,
+        order_by,
+        offset,
+        limit,
+        table_name,
+        table_alias,
+    ))
+}
+
+pub fn try_sort_or_top_k_records_with_host<H: FallibleOrderingHost>(
+    host: &H,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    offset: Option<u64>,
+    limit: Option<u64>,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Result<(), H::Error> {
     if order_by.is_empty() {
-        return;
+        return Ok(());
     }
     let effective_k = match (offset, limit) {
         (_, None) => None,
@@ -187,19 +286,20 @@ pub fn sort_or_top_k_records_with_host<H: OrderingHost>(
             // Only take the top-k path when it actually saves work:
             // n > 2k means quickselect + sort-of-k beats full sort.
             if k > 0 && records.len() > k.saturating_mul(2) {
-                top_k_records_by_order_by_with_host(
+                try_top_k_records_by_order_by_with_host(
                     host,
                     records,
                     order_by,
                     k,
                     table_name,
                     table_alias,
-                );
-                return;
+                )?;
+                return Ok(());
             }
         }
     }
-    sort_records_by_order_by_with_host(host, records, order_by, table_name, table_alias);
+    try_sort_records_by_order_by_with_host(host, records, order_by, table_name, table_alias)?;
+    Ok(())
 }
 
 /// Top-K variant of `sort_records_by_order_by_with_host`. For ORDER BY + LIMIT k
@@ -222,18 +322,36 @@ pub fn top_k_records_by_order_by_with_host<H: OrderingHost>(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) {
+    optional_ordering_result(try_top_k_records_by_order_by_with_host(
+        &OptionalOrderingHost(host),
+        records,
+        order_by,
+        k,
+        table_name,
+        table_alias,
+    ))
+}
+
+pub fn try_top_k_records_by_order_by_with_host<H: FallibleOrderingHost>(
+    host: &H,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    k: usize,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Result<(), H::Error> {
     if k == 0 {
         records.clear();
-        return;
+        return Ok(());
     }
     if order_by.is_empty() {
         records.truncate(k);
-        return;
+        return Ok(());
     }
     let n = records.len();
     if n <= k {
-        sort_records_by_order_by_with_host(host, records, order_by, table_name, table_alias);
-        return;
+        try_sort_records_by_order_by_with_host(host, records, order_by, table_name, table_alias)?;
+        return Ok(());
     }
 
     // Flat key buffer — see `sort_records_by_order_by_with_host` for the
@@ -243,7 +361,7 @@ pub fn top_k_records_by_order_by_with_host<H: OrderingHost>(
     for rec in records.iter() {
         for clause in order_by.iter() {
             let v = if let Some(ref expr) = clause.expr {
-                host.evaluate_expression(expr, rec)
+                host.try_evaluate_expression(expr, rec)?
             } else {
                 resolve_runtime_field(rec, &clause.field, table_name, table_alias)
             };
@@ -295,6 +413,7 @@ pub fn top_k_records_by_order_by_with_host<H: OrderingHost>(
         out.push(orig[i].clone());
     }
     *records = out;
+    Ok(())
 }
 
 pub fn compare_runtime_optional_values(

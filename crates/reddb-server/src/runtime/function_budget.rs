@@ -127,6 +127,15 @@ pub(crate) fn scan<T>(
     Ok(result)
 }
 
+/// Preserve storage failures as query errors, including without a CALL budget.
+/// A failed disk scan must never become a successful truncated result.
+pub(crate) fn try_scan<T>(
+    visit: impl FnOnce(&mut dyn FnMut(&UnifiedEntity) -> bool) -> Result<T, crate::storage::StoreError>,
+    consume: impl FnMut(&UnifiedEntity) -> bool,
+) -> RedDBResult<T> {
+    scan(visit, consume)?.map_err(RedDBError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

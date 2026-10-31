@@ -14,6 +14,8 @@
 
 #![allow(clippy::too_many_arguments)] // Relocated native host entrypoints.
 
+mod backing;
+pub use backing::PagedEntityCursor;
 mod graph_index_merge;
 
 use parking_lot::RwLock;
@@ -216,6 +218,7 @@ pub struct SegmentManager {
     next_segment_id: AtomicU64,
     /// Next entity ID counter
     next_entity_id: AtomicU64,
+    next_sequence_id: AtomicU64,
     /// Per-table auto-increment row ID (1, 2, 3... per collection)
     next_row_id: AtomicU64,
     /// Hot-path entity counter — lock-free, updated by every insert/delete.
@@ -252,6 +255,7 @@ pub struct SegmentManager {
     /// Used by index-only scan decisions.
     visibility_map: VisibilityMap,
     physical_root_cache: parking_lot::Mutex<Option<PhysicalRootCacheEntry>>,
+    backing: RwLock<Option<backing::BackingRead>>,
 }
 
 impl SegmentManager {
@@ -265,10 +269,12 @@ impl SegmentManager {
         Self {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             physical_root_cache: parking_lot::Mutex::new(None),
+            backing: RwLock::new(None),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
             next_entity_id: AtomicU64::new(1),
+            next_sequence_id: AtomicU64::new(0),
             next_row_id: AtomicU64::new(1),
             total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
@@ -315,7 +321,11 @@ impl SegmentManager {
     // Positional file records omit the shared column names. Restore them on
     // owned reads before callers update fields or rebuild secondary indexes.
     // Existing per-row names remain authoritative; segment contents stay raw.
-    fn restore_owned_row_schemas<'a>(&self, entities: impl Iterator<Item = &'a mut UnifiedEntity>) {
+    #[doc(hidden)]
+    pub fn restore_owned_row_schemas<'a>(
+        &self,
+        entities: impl Iterator<Item = &'a mut UnifiedEntity>,
+    ) {
         let schema = self.column_schema();
         for entity in entities {
             if let super::entity::EntityData::Row(row) = &mut entity.data {
@@ -470,6 +480,39 @@ impl SegmentManager {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
+    /// Durable allocator state may be ahead of every surviving record.
+    pub fn identity_counters(&self) -> (u64, u64) {
+        (
+            self.next_entity_id.load(Ordering::SeqCst),
+            self.next_row_id.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn restore_identity_counters(&self, entity_id_next: u64, row_id_next: u64) {
+        assert!(
+            entity_id_next > 0 && row_id_next > 0,
+            "invariant: next identities are positive"
+        );
+        self.next_entity_id
+            .fetch_max(entity_id_next, Ordering::SeqCst);
+        self.next_row_id.fetch_max(row_id_next, Ordering::SeqCst);
+    }
+
+    pub fn sequence_id_next(&self) -> u64 {
+        let mut next = self.next_sequence_id.load(Ordering::SeqCst);
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        for segment in growing.iter().chain(sealed.iter()) {
+            next = next.max(segment.read().sequence_id_next());
+        }
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
+        next
+    }
+
+    pub fn restore_sequence_id_next(&self, next: u64) {
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
+    }
+
     /// Generate a per-table sequential row ID (1, 2, 3... per collection)
     pub fn next_row_id(&self) -> u64 {
         self.next_row_id.fetch_add(1, Ordering::SeqCst)
@@ -525,6 +568,7 @@ impl SegmentManager {
 
         let id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
         let segment = GrowingSegment::new(id, &self.collection);
+        segment.restore_sequence_id_next(self.next_sequence_id.load(Ordering::SeqCst));
         let segment_arc = Arc::new(RwLock::new(segment));
         *growing = Some(Arc::clone(&segment_arc));
 
@@ -539,16 +583,20 @@ impl SegmentManager {
 
     /// Insert a new entity
     pub fn insert(&self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+        if entity.id.raw() == 0 {
+            entity.id = self.next_entity_id();
+        }
+        self.reject_backing_duplicate(entity.id)?;
+        if self.has_backing() && self.get_with(entity.id, |_| ()).is_some() {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+        self.next_entity_id
+            .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
         // Check if we need to seal the current segment first
         self.maybe_seal_growing()?;
 
         let segment_arc = self.get_or_create_growing();
         let mut segment = segment_arc.write();
-
-        // Assign entity ID if not already set
-        if entity.id.raw() == 0 {
-            entity.id = self.next_entity_id();
-        }
 
         let entity_id = entity.id;
         let segment_id = segment.id();
@@ -648,6 +696,8 @@ impl SegmentManager {
             return Err(SegmentError::AlreadyExists(entity.id));
         }
         let entity_id = entity.id;
+        self.next_entity_id
+            .fetch_max(entity_id.raw().saturating_add(1), Ordering::SeqCst);
         self.with_restoration_segment(entity_id, |segment| {
             let segment_id = segment.id();
             // Adoption retains sequence identity and advances its allocator.
@@ -676,11 +726,25 @@ impl SegmentManager {
         &self,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, SegmentError> {
+        // Reject the complete cold batch before publishing any of it.
+        if self.has_backing() {
+            let mut identities = std::collections::HashSet::with_capacity(entities.len());
+            for entity in &entities {
+                if entity.id.raw() != 0 {
+                    self.reject_backing_duplicate(entity.id)?;
+                    if self.get_with(entity.id, |_| ()).is_some() || !identities.insert(entity.id) {
+                        return Err(SegmentError::AlreadyExists(entity.id));
+                    }
+                }
+            }
+        }
         // Assign IDs and per-table row_ids.
         for entity in &mut entities {
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
             }
+            self.next_entity_id
+                .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
             if let super::entity::EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
                 if *row_id == 0 {
                     *row_id = self.next_row_id();
@@ -1072,6 +1136,7 @@ impl SegmentManager {
 
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1108,6 +1173,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1153,6 +1219,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1194,6 +1261,7 @@ impl SegmentManager {
         modified_columns: &[String],
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1266,6 +1334,15 @@ impl SegmentManager {
 
     /// Delete an entity
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
+        self.materialize_backing_entity(id)?;
+        let deleted = self.delete_resident(id)?;
+        if deleted {
+            self.remember_backing_delete(id);
+        }
+        Ok(deleted)
+    }
+
+    fn delete_resident(&self, id: EntityId) -> Result<bool, SegmentError> {
         // Fast path: probe the growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment, and bulk-inserted entities.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1325,6 +1402,15 @@ impl SegmentManager {
     }
 
     pub fn delete_batch(&self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if self.has_backing() {
+            let mut deleted = Vec::new();
+            for id in ids {
+                if self.delete(*id)? {
+                    deleted.push(*id);
+                }
+            }
+            return Ok(deleted);
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1409,6 +1495,7 @@ impl SegmentManager {
 
     /// Set metadata for an entity
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(id)?;
         // Fast path: probe growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1459,11 +1546,16 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
+        let disk_residency = self.has_backing();
         // Keep topology publication atomic for cursors that capture growing
         // and sealed under the same lock order: growing, then sealed.
         let mut growing_slot = self.growing.write();
         if let Some(growing_arc) = growing_slot.take() {
             let mut growing = growing_arc.write();
+            if disk_residency {
+                self.next_sequence_id
+                    .fetch_max(growing.sequence_id_next(), Ordering::SeqCst);
+            }
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
 
@@ -1743,16 +1835,25 @@ impl SegmentManager {
         &self,
         mut callback: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
     ) {
+        self.for_each_entity_source(|segment, entity| {
+            callback(entity, segment.get_metadata(entity.id))
+        });
+    }
+
+    fn for_each_entity_source(
+        &self,
+        mut callback: impl FnMut(&GrowingSegment, &UnifiedEntity) -> bool,
+    ) {
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
-            if !growing.for_each_fast(|entity| callback(entity, growing.get_metadata(entity.id))) {
+            if !growing.for_each_fast(|entity| callback(&growing, entity)) {
                 return;
             }
         }
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read();
-            if !segment.for_each_fast(|entity| callback(entity, segment.get_metadata(entity.id))) {
+            if !segment.for_each_fast(|entity| callback(&segment, entity)) {
                 return;
             }
         }

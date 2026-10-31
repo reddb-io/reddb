@@ -16,6 +16,14 @@ pub trait AggregateResultHost: AggregateHost {
     fn guard_materialization(&self, groups: usize) -> Result<(), Self::Error>;
     fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool;
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]);
+    fn try_sort_records(
+        &self,
+        records: &mut Vec<UnifiedRecord>,
+        clauses: &[OrderByClause],
+    ) -> Result<(), Self::Error> {
+        self.sort_records(records, clauses);
+        Ok(())
+    }
     fn secret_query_output(&self, value: Value) -> Result<Value, Self::Error>;
 }
 
@@ -134,7 +142,7 @@ pub fn finish_aggregate_results_with_host<'a, H: AggregateResultHost>(
     }
 
     if !runtime_plan.order_by.is_empty() {
-        host.sort_records(&mut records, &runtime_plan.order_by);
+        host.try_sort_records(&mut records, &runtime_plan.order_by)?;
     }
 
     if let Some(offset) = query.offset {

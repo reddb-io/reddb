@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::storage::blockchain::{
     compute_block_hash, verify_chain, Block, VerifyReport, GENESIS_PREV_HASH,
 };
-use crate::storage::unified::UnifiedStore;
+use crate::storage::unified::{EntityData, RowData, SegmentManager, UnifiedStore};
+use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
 /// Value stored under `red.collection.{name}.kind` for blockchain collections.
@@ -57,19 +58,31 @@ fn kind_key(collection: &str) -> String {
     format!("red.collection.{collection}.kind")
 }
 
-/// Persist the `chain` kind marker. Append-only — only call once at creation.
+/// Legacy best-effort adapter. Authoritative creation uses [`try_mark_as_chain`].
 pub fn mark_as_chain(store: &UnifiedStore, collection: &str) {
-    store.set_config_tree(
-        &kind_key(collection),
-        &crate::serde_json::Value::String(CHAIN_KIND_TAG.to_string()),
-    );
+    let _ = try_mark_as_chain(store, collection);
 }
 
-/// True if `mark_as_chain` was ever called for this collection.
+pub fn try_mark_as_chain(store: &UnifiedStore, collection: &str) -> RedDBResult<()> {
+    store.try_set_config_tree(
+        &kind_key(collection),
+        &crate::serde_json::Value::String(CHAIN_KIND_TAG.to_string()),
+    )?;
+    Ok(())
+}
+
+/// Compatibility probe fails closed; authoritative callers propagate errors.
 pub fn is_chain(store: &UnifiedStore, collection: &str) -> bool {
-    match store.get_config(&kind_key(collection)) {
-        Some(Value::Text(s)) => s.as_ref() == CHAIN_KIND_TAG,
-        _ => false,
+    try_is_chain(store, collection).unwrap_or(true)
+}
+
+pub fn try_is_chain(store: &UnifiedStore, collection: &str) -> RedDBResult<bool> {
+    match store.try_get_config(&kind_key(collection))? {
+        None => Ok(false),
+        Some(Value::Text(kind)) => Ok(kind.as_ref() == CHAIN_KIND_TAG),
+        Some(_) => Err(RedDBError::Query(
+            "invalid persisted collection kind".into(),
+        )),
     }
 }
 
@@ -82,96 +95,104 @@ pub struct ChainTipFull {
     pub timestamp_ms: u64,
 }
 
-/// Scan-based tip with timestamp. `None` when the collection has no rows
-/// (pre-genesis). Used by the chain-tip endpoint and the chain-INSERT
-/// validation path (#524).
+/// Legacy optional read. Authoritative append/HTTP paths use the fallible API.
 pub fn chain_tip_full(store: &UnifiedStore, collection: &str) -> Option<ChainTipFull> {
-    let manager = store.get_collection(collection)?;
-    let mut best: Option<ChainTipFull> = None;
-    for entity in manager.query_all(|_| true) {
-        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        let height = match named.get(COL_BLOCK_HEIGHT) {
-            Some(Value::UnsignedInteger(v)) => *v,
-            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
-            _ => continue,
-        };
-        let hash = match named.get(COL_HASH) {
-            Some(Value::Blob(b)) if b.len() == 32 => {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(b);
-                out
-            }
-            _ => continue,
-        };
-        let timestamp_ms = match named.get(COL_TIMESTAMP) {
-            Some(Value::UnsignedInteger(v)) => *v,
-            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
-            _ => 0,
-        };
-        match &best {
-            None => {
-                best = Some(ChainTipFull {
-                    height,
-                    hash,
-                    timestamp_ms,
-                });
-            }
-            Some(cur) if height > cur.height => {
-                best = Some(ChainTipFull {
-                    height,
-                    hash,
-                    timestamp_ms,
-                });
-            }
-            _ => {}
-        }
-    }
-    best
+    try_chain_tip_full(store, collection).ok().flatten()
 }
 
-/// Scan the collection for the highest `block_height` and return its row's
-/// `hash`. O(n) — replaced by a cached tip in a later iteration.
-pub fn chain_tip(store: &UnifiedStore, collection: &str) -> ChainTip {
+pub fn try_chain_tip_full(
+    store: &UnifiedStore,
+    collection: &str,
+) -> RedDBResult<Option<ChainTipFull>> {
     let Some(manager) = store.get_collection(collection) else {
-        return ChainTip::empty();
+        return Ok(None);
     };
-    let mut best: Option<(u64, [u8; 32])> = None;
-    for entity in manager.query_all(|_| true) {
-        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else {
-            continue;
-        };
-        let height = match named.get(COL_BLOCK_HEIGHT) {
-            Some(Value::UnsignedInteger(v)) => *v,
-            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
-            _ => continue,
-        };
-        let hash = match named.get(COL_HASH) {
-            Some(Value::Blob(b)) if b.len() == 32 => {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(b);
-                out
-            }
-            _ => continue,
-        };
-        match best {
-            None => best = Some((height, hash)),
-            Some((h, _)) if height > h => best = Some((height, hash)),
-            _ => {}
+    let mut best: Option<ChainTipFull> = None;
+    visit_chain_rows(&manager, |row| {
+        let tip = chain_row_tip(row)?;
+        if best
+            .as_ref()
+            .is_none_or(|current| tip.height > current.height)
+        {
+            best = Some(tip);
         }
-    }
-    match best {
-        Some((height, hash)) => ChainTip {
-            height: Some(height),
-            hash,
+        Ok(())
+    })?;
+    Ok(best)
+}
+
+/// Legacy convenience adapter; creation uses [`try_chain_tip`].
+pub fn chain_tip(store: &UnifiedStore, collection: &str) -> ChainTip {
+    try_chain_tip(store, collection).unwrap_or_else(|_| ChainTip::empty())
+}
+
+pub fn try_chain_tip(store: &UnifiedStore, collection: &str) -> RedDBResult<ChainTip> {
+    Ok(match try_chain_tip_full(store, collection)? {
+        Some(tip) => ChainTip {
+            height: Some(tip.height),
+            hash: tip.hash,
         },
         None => ChainTip::empty(),
+    })
+}
+
+fn visit_chain_rows(
+    manager: &SegmentManager,
+    mut consume: impl FnMut(&RowData) -> RedDBResult<()>,
+) -> RedDBResult<()> {
+    let mut failure = None;
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_entity(usize::MAX, visit),
+        |entity| {
+            let result = match &entity.data {
+                EntityData::Row(row) => consume(row),
+                _ => Err(RedDBError::Query(
+                    "blockchain contains a non-row record".into(),
+                )),
+            };
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    failure = Some(error);
+                    false
+                }
+            }
+        },
+    )?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
+}
+
+fn chain_row_u64(row: &RowData, field: &str) -> RedDBResult<u64> {
+    match row.get_field(field) {
+        Some(Value::UnsignedInteger(value)) => Ok(*value),
+        Some(Value::Integer(value)) if *value >= 0 => Ok(*value as u64),
+        _ => Err(RedDBError::Query(format!(
+            "invalid blockchain field {field}"
+        ))),
+    }
+}
+
+fn chain_row_hash(row: &RowData, field: &str) -> RedDBResult<[u8; 32]> {
+    match row.get_field(field) {
+        Some(Value::Blob(bytes)) => bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| RedDBError::Query(format!("invalid blockchain field {field}"))),
+        _ => Err(RedDBError::Query(format!(
+            "invalid blockchain field {field}"
+        ))),
+    }
+}
+
+fn chain_row_tip(row: &RowData) -> RedDBResult<ChainTipFull> {
+    Ok(ChainTipFull {
+        height: chain_row_u64(row, COL_BLOCK_HEIGHT)?,
+        hash: chain_row_hash(row, COL_HASH)?,
+        timestamp_ms: chain_row_u64(row, COL_TIMESTAMP)?,
+    })
 }
 
 fn hex32(bytes: &[u8; 32]) -> String {
@@ -260,59 +281,40 @@ pub fn make_block_reserved_fields(
 /// what the engine writes at INSERT time — this is the alignment of the two
 /// encoders referenced in #524.
 pub fn collect_blocks(store: &UnifiedStore, collection: &str) -> Option<Vec<Block>> {
-    if !is_chain(store, collection) {
-        return None;
+    try_collect_blocks(store, collection).ok().flatten()
+}
+
+pub fn try_collect_blocks(
+    store: &UnifiedStore,
+    collection: &str,
+) -> RedDBResult<Option<Vec<Block>>> {
+    if !try_is_chain(store, collection)? {
+        return Ok(None);
     }
-    let manager = store.get_collection(collection)?;
-    let mut blocks: Vec<Block> = Vec::new();
-    for entity in manager.query_all(|_| true) {
-        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        let height = match named.get(COL_BLOCK_HEIGHT) {
-            Some(Value::UnsignedInteger(v)) => *v,
-            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
-            _ => continue,
-        };
-        let prev_hash = match named.get(COL_PREV_HASH) {
-            Some(Value::Blob(b)) if b.len() == 32 => {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(b);
-                out
-            }
-            _ => continue,
-        };
-        let timestamp_ms = match named.get(COL_TIMESTAMP) {
-            Some(Value::UnsignedInteger(v)) => *v,
-            Some(Value::Integer(v)) if *v >= 0 => *v as u64,
-            _ => continue,
-        };
-        let hash = match named.get(COL_HASH) {
-            Some(Value::Blob(b)) if b.len() == 32 => {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(b);
-                out
-            }
-            _ => continue,
-        };
-        let user_fields: Vec<(String, Value)> = named
-            .iter()
-            .filter(|(k, _)| !RESERVED_COLUMNS.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+    let Some(manager) = store.get_collection(collection) else {
+        return Ok(None);
+    };
+    let mut blocks = Vec::new();
+    visit_chain_rows(&manager, |row| {
+        let tip = chain_row_tip(row)?;
+        let prev_hash = chain_row_hash(row, COL_PREV_HASH)?;
+        let user_fields: Vec<_> = row
+            .iter_fields()
+            .filter(|(name, _)| !RESERVED_COLUMNS.contains(name))
+            .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
-        let payload = canonical_payload(&user_fields);
         blocks.push(Block {
-            block_height: height,
+            block_height: tip.height,
             prev_hash,
-            timestamp_ms,
-            payload,
+            timestamp_ms: tip.timestamp_ms,
+            payload: canonical_payload(&user_fields),
             signed: None,
-            hash,
+            hash: tip.hash,
         });
-    }
-    blocks.sort_by_key(|b| b.block_height);
-    Some(blocks)
+        Ok(())
+    })?;
+    blocks.sort_by_key(|block| block.block_height);
+    Ok(Some(blocks))
 }
 
 /// Outcome of `POST /collections/:name/verify-chain`.
@@ -326,20 +328,32 @@ pub struct VerifyChainOutcome {
 /// Walk the chain end-to-end. Returns `(outcome, _)`.  Mismatches are detected
 /// via [`verify_chain`].  Callers persist the integrity flag on `ok == false`.
 pub fn verify_chain_outcome(store: &UnifiedStore, collection: &str) -> Option<VerifyChainOutcome> {
-    let blocks = collect_blocks(store, collection)?;
+    try_verify_chain_outcome(store, collection).ok().flatten()
+}
+
+pub fn try_verify_chain_outcome(
+    store: &UnifiedStore,
+    collection: &str,
+) -> RedDBResult<Option<VerifyChainOutcome>> {
+    let Some(blocks) = try_collect_blocks(store, collection)? else {
+        return Ok(None);
+    };
+    if blocks.is_empty() {
+        return Err(RedDBError::Query("blockchain has no genesis block".into()));
+    }
     let checked = blocks.len() as u64;
-    match verify_chain(&blocks) {
-        VerifyReport::Ok => Some(VerifyChainOutcome {
+    Ok(Some(match verify_chain(&blocks) {
+        VerifyReport::Ok => VerifyChainOutcome {
             checked,
             ok: true,
             first_bad_height: None,
-        }),
-        VerifyReport::Inconsistent { block_height, .. } => Some(VerifyChainOutcome {
+        },
+        VerifyReport::Inconsistent { block_height, .. } => VerifyChainOutcome {
             checked,
             ok: false,
             first_bad_height: Some(block_height),
-        }),
-    }
+        },
+    }))
 }
 
 fn integrity_key(collection: &str) -> String {
@@ -349,45 +363,46 @@ fn integrity_key(collection: &str) -> String {
 const INTEGRITY_BROKEN: &str = "broken";
 const INTEGRITY_OK: &str = "ok";
 
-/// Persist a chain's integrity flag in `red_config`. Append-only — readers use
-/// [`is_integrity_broken_persisted`] which picks the latest matching row by id.
+/// Legacy best-effort adapter; runtime verification uses the fallible API.
 pub fn persist_integrity_flag(store: &UnifiedStore, collection: &str, broken: bool) {
+    let _ = try_persist_integrity_flag(store, collection, broken);
+}
+
+pub fn try_persist_integrity_flag(
+    store: &UnifiedStore,
+    collection: &str,
+    broken: bool,
+) -> RedDBResult<()> {
     let tag = if broken {
         INTEGRITY_BROKEN
     } else {
         INTEGRITY_OK
     };
-    store.set_config_tree(
+    store.try_set_config_tree(
         &integrity_key(collection),
         &crate::serde_json::Value::String(tag.to_string()),
-    );
+    )?;
+    Ok(())
 }
 
-/// Scan `red_config` for the latest persisted integrity flag for `collection`.
-/// `None` means no record (treated as ok).
 pub fn is_integrity_broken_persisted(store: &UnifiedStore, collection: &str) -> Option<bool> {
-    let manager = store.get_collection("red_config")?;
-    let key = integrity_key(collection);
-    let mut latest: Option<(u64, String)> = None;
-    for entity in manager.query_all(|_| true) {
-        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        let k_match =
-            matches!(named.get("key"), Some(Value::Text(s)) if s.as_ref() == key.as_str());
-        if !k_match {
-            continue;
-        }
-        let Some(Value::Text(v)) = named.get("value") else {
-            continue;
-        };
-        let id = entity.id.raw();
-        if latest.as_ref().map(|(prev, _)| id > *prev).unwrap_or(true) {
-            latest = Some((id, v.as_ref().to_string()));
-        }
+    try_is_integrity_broken_persisted(store, collection)
+        .ok()
+        .flatten()
+}
+
+pub fn try_is_integrity_broken_persisted(
+    store: &UnifiedStore,
+    collection: &str,
+) -> RedDBResult<Option<bool>> {
+    match store.try_get_config(&integrity_key(collection))? {
+        None => Ok(None),
+        Some(Value::Text(tag)) if tag.as_ref() == INTEGRITY_BROKEN => Ok(Some(true)),
+        Some(Value::Text(tag)) if tag.as_ref() == INTEGRITY_OK => Ok(Some(false)),
+        Some(_) => Err(RedDBError::Query(
+            "invalid persisted blockchain integrity flag".into(),
+        )),
     }
-    latest.map(|(_, tag)| tag == INTEGRITY_BROKEN)
 }
 
 /// Convenience: produce the genesis row's full field list. Genesis carries
