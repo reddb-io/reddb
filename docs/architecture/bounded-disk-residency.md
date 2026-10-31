@@ -34,6 +34,14 @@ previous generation. Pending transaction/Vault rows prevent overlay eviction.
 The runtime's fallible scan adapter propagates storage errors alongside CALL/query
 work-budget errors, including when no CALL budget is installed.
 
+The keyed runtime resolver also propagates disk/decode failures, including REST
+and mutation pre-reads. Resident collections retain their segment key indexes;
+a cold base currently uses an O(N) streaming key probe with one decoded row.
+Physical replacements and deletions mask old base candidates, and versioned
+reads select the snapshot-visible maximum xmin. VCS versioning settings are read
+fallibly so failure cannot silently disable history during a write. A durable,
+budgeted key index is required before managed activation or performance claims.
+
 Prepared files carry checksummed resume counters alongside their exact collection
 roots: physical counts and entity/row/sequence allocator high-water marks. A preparation scan
 is still required for legacy files. Prepared boot follows metadata and one tree

@@ -194,6 +194,74 @@ impl SegmentManager {
         Ok(Some(entity))
     }
 
+    /// Fallible keyed projection. Resident mode keeps the segment key indexes.
+    /// Cold bases currently require a streaming probe: O(base rows), one decoded
+    /// row at a time. Hosts must fence publication, and callbacks must not
+    /// mutate or re-enter this collection. A durable key index is still needed
+    /// before enabling this mode for managed hot-key workloads.
+    pub fn try_project_key_entity<T>(
+        &self,
+        key: &str,
+        snapshot: Option<&SnapshotContext>,
+        versioned: bool,
+        limit_bytes: usize,
+        mut project: impl FnMut(&UnifiedEntity) -> T,
+    ) -> Result<Option<T>, StoreError> {
+        let backing = self.backing.read();
+        let limit_bytes = backing
+            .as_ref()
+            .map_or(limit_bytes, |base| limit_bytes.min(base.read_bytes_max));
+        let mut best = self
+            .project_key_entity(key, snapshot, versioned, |entity| {
+                let required_bytes = if limit_bytes == usize::MAX {
+                    0
+                } else {
+                    crate::storage::memory_size::entity_bytes(entity)
+                };
+                if required_bytes > limit_bytes {
+                    Err(StoreError::ReadLimitExceeded {
+                        required_bytes,
+                        limit_bytes,
+                    })
+                } else {
+                    Ok((entity.xmin, project(entity)))
+                }
+            })
+            .transpose()?;
+        let Some(backing) = backing.as_ref() else {
+            return Ok(best.map(|(_, projected)| projected));
+        };
+        if !versioned && best.is_some() {
+            return Ok(best.map(|(_, projected)| projected));
+        }
+        let mut cursor = backing.source.cursor()?;
+        while let Some(id) = cursor.peek_id()? {
+            // A physical replacement or deletion masks the old base value,
+            // even when it no longer matches this logical key.
+            if backing.removed.contains(&id) || self.get_with(id, |_| ()).is_some() {
+                cursor.skip_record()?;
+                continue;
+            }
+            let record = cursor
+                .next_record(limit_bytes)?
+                .expect("invariant: peeked physical row exists");
+            let (mut entity, _) = record.decode_with_budget(backing.format_version, limit_bytes)?;
+            self.restore_owned_row_schemas(std::iter::once(&mut entity));
+            if crate::storage::segment_key_lookup::SegmentKeyLookup::key(&entity) != Some(key)
+                || (versioned && !Self::scan_entity_visible(snapshot, &entity))
+            {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(xmin, _)| entity.xmin >= *xmin) {
+                best = Some((entity.xmin, project(&entity)));
+            }
+            if !versioned {
+                break;
+            }
+        }
+        Ok(best.map(|(_, projected)| projected))
+    }
+
     /// Visit the merged physical view in ID order without hydrating the base.
     /// Only overlay identities and one decoded base record are retained. Like
     /// resident visitors, callbacks must not mutate or re-enter this collection.

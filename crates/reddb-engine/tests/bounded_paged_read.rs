@@ -413,3 +413,111 @@ fn owned_merged_cursor_survives_its_views_and_preserves_retry_position() {
     assert_eq!(ids, vec![3, 4, 6]);
     assert_eq!(pages.overflow_reads.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn cold_key_projection_keeps_snapshot_history_and_masks_replaced_base_rows() {
+    use reddb_engine::storage::entity::{EntityData, RowData};
+    use reddb_engine::storage::manager::SegmentManager;
+    use reddb_engine::transaction::read::SnapshotContext;
+    use reddb_engine::transaction::snapshot::{Snapshot, SnapshotManager};
+    use reddb_types::Value;
+    use std::collections::HashSet;
+
+    let make = |id, key: &str, xmin, xmax| {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(key)],
+            vec!["key".into()],
+        ));
+        entity.set_xmin(xmin);
+        entity.set_xmax(xmax);
+        entity
+    };
+    let tree = Arc::new(BTree::new(Arc::new(Pages::default())));
+    for entity in [
+        make(1, "history", 3, 12),
+        make(2, "history", 12, 0),
+        make(3, "deleted", 3, 7),
+        make(4, "renamed", 3, 0),
+        make(5, "removed", 3, 0),
+    ] {
+        tree.insert(
+            &entity.id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, 11),
+        )
+        .expect("base version");
+    }
+    let manager = SegmentManager::new("keys");
+    manager.install_backing(Arc::new(PagedCollection::new(tree)), 0, 11, 128 * 1024, 5);
+    let snapshot = SnapshotContext {
+        snapshot: Snapshot {
+            xid: 10,
+            in_progress: HashSet::new(),
+        },
+        manager: Arc::new(SnapshotManager::new()),
+        own_xids: HashSet::new(),
+        requires_index_fallback: false,
+        serializable_reader: None,
+    };
+    let lookup = |key, snapshot| {
+        manager
+            .try_project_key_entity(key, snapshot, true, 128 * 1024, |entity| entity.id)
+            .expect("keyed read")
+    };
+    assert_eq!(lookup("history", Some(&snapshot)), Some(EntityId::new(1)));
+    assert_eq!(lookup("history", None), Some(EntityId::new(2)));
+    assert_eq!(lookup("deleted", None), None);
+    manager
+        .update(make(4, "replacement", 3, 0))
+        .expect("rename key in overlay");
+    manager.delete(EntityId::new(5)).expect("physical delete");
+    assert_eq!(lookup("renamed", None), None);
+    assert_eq!(lookup("replacement", None), Some(EntityId::new(4)));
+    assert_eq!(lookup("removed", None), None);
+    assert_eq!(lookup("missing", None), None);
+    assert!(matches!(
+        manager.try_project_key_entity("history", None, true, 1, |_| ()),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+}
+
+#[test]
+fn cold_key_projection_propagates_failed_base_io_even_with_a_resident_version() {
+    use reddb_engine::storage::entity::{EntityData, RowData};
+    use reddb_engine::storage::manager::SegmentManager;
+    use reddb_types::Value;
+
+    struct Unreadable;
+    impl CollectionRead for Unreadable {
+        fn get_record(
+            &self,
+            _: EntityId,
+            _: usize,
+        ) -> Result<Option<reddb_engine::storage::collection_read::EncodedRecord>, StoreError>
+        {
+            Ok(None)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+            Err(std::io::Error::other("injected page read failure").into())
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+            Err(std::io::Error::other("injected page read failure").into())
+        }
+    }
+    let manager = SegmentManager::new("keys");
+    manager.install_backing(Arc::new(Unreadable), 0, 11, 128 * 1024, 1);
+    let mut entity = UnifiedEntity::table_row(EntityId::new(2), "keys", 2, vec![]);
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![Value::text("key")],
+        vec!["key".into()],
+    ));
+    manager.insert(entity).expect("resident candidate");
+    assert!(matches!(
+        manager.try_project_key_entity("key", None, true, 128 * 1024, |entity| entity.id),
+        Err(StoreError::Io(_))
+    ));
+    assert!(matches!(
+        manager.try_project_key_entity("missing", None, false, 128 * 1024, |_| ()),
+        Err(StoreError::Io(_))
+    ));
+}

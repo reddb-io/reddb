@@ -342,30 +342,29 @@ fn delete_ref(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
 /// transactional churn (sessions, caches, queues) doesn't pin
 /// extra row versions. Internal `red_*` collections are never
 /// versioned — they store VCS metadata itself.
-fn is_versioned(store: &UnifiedStore, name: &str) -> bool {
+fn is_versioned(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
     if name.starts_with("red_") {
-        return false;
+        return Ok(false);
     }
     let Some(manager) = store.get_collection(vc::SETTINGS) else {
-        return false;
+        return Ok(false);
     };
-    let target = name.to_string();
-    manager
-        .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&target))
-        })
-        .into_iter()
-        .any(|entity| {
-            entity
-                .data
-                .as_row()
-                .and_then(|row| row.get_field("versioned"))
-                .map(|v| matches!(v, Value::Boolean(true)))
-                .unwrap_or(false)
-        })
+    let _publication = manager
+        .has_backing()
+        .then(|| store.vault_publication_lock.lock());
+    let mut versioned = false;
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_entity(usize::MAX, visit),
+        |entity| {
+            versioned = entity.data.as_row().is_some_and(|row| {
+                row.get_field("id")
+                    .is_some_and(|id| matches!(id, Value::Text(id) if id.as_ref() == name))
+                    && matches!(row.get_field("versioned"), Some(Value::Boolean(true)))
+            });
+            !versioned
+        },
+    )?;
+    Ok(versioned)
 }
 
 /// Enumerate every user collection currently opted in. Order
@@ -1384,7 +1383,7 @@ impl RedDBRuntime {
             if coll.starts_with("red_") {
                 continue;
             }
-            if !is_versioned(store, &coll) {
+            if !is_versioned(store, &coll)? {
                 continue;
             }
             if let Some(filter) = &input.collection {
@@ -1646,7 +1645,7 @@ impl RedDBRuntime {
     pub fn vcs_is_versioned(&self, collection: &str) -> RedDBResult<bool> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        Ok(is_versioned(store, collection))
+        is_versioned(store, collection)
     }
 
     pub fn vcs_resolve_commitish(&self, spec: &str) -> RedDBResult<CommitHash> {
@@ -1730,7 +1729,7 @@ fn materialize_merge_conflicts(
         if coll.starts_with("red_") {
             continue;
         }
-        if !is_versioned(store, &coll) {
+        if !is_versioned(store, &coll)? {
             continue;
         }
         let Some(manager) = store.get_collection(&coll) else {

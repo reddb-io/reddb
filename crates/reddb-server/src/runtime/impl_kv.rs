@@ -282,7 +282,7 @@ impl<'a> KvAtomicOps<'a> {
         // tombstoned (set_xmax) *after* the new version is created, so both
         // coexist physically — exactly like a table-row update. Non-versioned
         // KV publishes the replacement and TTL in one durable WAL batch.
-        let versioned = self.is_versioned_collection(model, collection);
+        let versioned = self.is_versioned_collection(model, collection)?;
         // Capture the prior *visible* version (if any) before the write so we
         // can tombstone it. On a re-PUT after a delete (`was_present` false)
         // there is no visible prior, but earlier versions still exist
@@ -292,7 +292,7 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             None
         };
-        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let atomic = super::kv_write::atomic_available(self.runtime, collection)?;
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
@@ -452,7 +452,7 @@ impl<'a> KvAtomicOps<'a> {
         // Versioned KV deletes tombstone the prior visible version
         // (set_xmax) instead of reclaiming it physically, so history and
         // time-travel reads survive — VACUUM reclaims the version later.
-        if self.is_versioned_collection(model, collection) {
+        if self.is_versioned_collection(model, collection)? {
             let Some(entity) = self.get_entity(model, collection, key)? else {
                 return Ok(false);
             };
@@ -654,7 +654,7 @@ impl<'a> KvAtomicOps<'a> {
             None
         };
 
-        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let atomic = super::kv_write::atomic_available(self.runtime, collection)?;
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
@@ -759,7 +759,7 @@ impl<'a> KvAtomicOps<'a> {
             None
         };
 
-        let atomic = super::kv_write::atomic_available(self.runtime, collection);
+        let atomic = super::kv_write::atomic_available(self.runtime, collection)?;
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
@@ -907,7 +907,7 @@ impl<'a> KvAtomicOps<'a> {
         let resolver =
             super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?;
         Ok(resolver
-            .record(key)
+            .record(key)?
             .and_then(|record| record.value.map(|value| (value, record.id))))
     }
 
@@ -921,7 +921,7 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         model: crate::catalog::CollectionModel,
         collection: &str,
-    ) -> bool {
+    ) -> RedDBResult<bool> {
         // Only plain KV ever opts into versioning; the vault and config
         // tiers are non-versioned by construction.
         super::kv_read::is_versioned(self.runtime, model, collection)
@@ -935,7 +935,7 @@ impl<'a> KvAtomicOps<'a> {
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
         Ok(
             super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?
-                .owned_entity(key),
+                .owned_entity(key)?,
         )
     }
 
@@ -949,48 +949,46 @@ impl<'a> KvAtomicOps<'a> {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(Vec::new());
         };
+        let _publication = manager
+            .has_backing()
+            .then(|| store.vault_publication_lock.lock());
         // Versioned KV: per logical key, keep the snapshot-visible
         // version with the greatest xmin; keys whose every version is
         // tombstoned (no visible version) drop out entirely. Mirrors
         // the per-key version-selection used by `get_entity`.
         let versioned =
-            self.is_versioned_collection(crate::catalog::CollectionModel::Kv, collection);
+            self.is_versioned_collection(crate::catalog::CollectionModel::Kv, collection)?;
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-        let entities = if versioned {
-            manager.scan(snapshot.as_ref(), |_| true)
-        } else {
-            manager.query_all(|_| true)
-        };
-
         let mut entries: std::collections::BTreeMap<String, crate::storage::UnifiedEntity> =
             std::collections::BTreeMap::new();
-        for entity in entities {
-            let key = match &entity.data {
-                crate::storage::EntityData::Row(row) => row
-                    .named
-                    .as_ref()
-                    .and_then(|named| named.get("key"))
-                    .and_then(|value| match value {
-                        reddb_types::Value::Text(key) => Some(key.to_string()),
-                        _ => None,
-                    }),
-                _ => None,
-            };
-            let Some(key) = key else {
-                continue;
-            };
-            if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
-                continue;
-            }
-            let should_replace = match entries.get(&key) {
-                Some(existing) if versioned => entity.xmin >= existing.xmin,
-                Some(existing) => entity.id.raw() >= existing.id.raw(),
-                None => true,
-            };
-            if should_replace {
-                entries.insert(key, entity);
-            }
-        }
+        super::function_budget::try_scan(
+            |visit| {
+                if versioned {
+                    manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit)
+                } else {
+                    manager.try_for_each_entity(usize::MAX, visit)
+                }
+            },
+            |entity| {
+                let Some(reddb_types::Value::Text(key)) =
+                    entity.data.as_row().and_then(|row| row.get_field("key"))
+                else {
+                    return true;
+                };
+                if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
+                    return true;
+                }
+                let should_replace = match entries.get(key.as_ref()) {
+                    Some(existing) if versioned => entity.xmin >= existing.xmin,
+                    Some(existing) => entity.id.raw() >= existing.id.raw(),
+                    None => true,
+                };
+                if should_replace {
+                    entries.insert(key.to_string(), entity.clone());
+                }
+                true
+            },
+        )?;
         Ok(entries.into_iter().collect())
     }
 
@@ -2659,7 +2657,7 @@ impl RedDBRuntime {
 
                 let entry =
                     super::kv_read::KvReadResolver::for_keyed_model(self, *model, collection)?
-                        .record(key);
+                        .record(key)?;
                 if *model == crate::catalog::CollectionModel::Kv {
                     self.inner.kv_stats.incr_gets();
                 }
@@ -3510,7 +3508,7 @@ impl RedDBRuntime {
                     continue;
                 };
                 if resolver
-                    .record(key)
+                    .record(key)?
                     .is_none_or(|record| record.id != entity.id)
                 {
                     continue;
