@@ -1360,6 +1360,25 @@ impl UnifiedStore {
         if actions.actions.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        if self
+            .test_require_deferred_publication_fence
+            .swap(false, Ordering::AcqRel)
+            && !self.vault_publication_lock.is_owned_by_current_thread()
+        {
+            return Err(StoreError::Io(io::Error::other(
+                "deferred WAL missing checkpoint publication fence",
+            )));
+        }
+        #[cfg(test)]
+        if self
+            .test_fail_deferred_wal_append
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(io::Error::other(
+                "injected deferred WAL append failure",
+            )));
+        }
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions.actions);
         }

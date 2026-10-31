@@ -636,7 +636,7 @@ impl RedDBRuntime {
             // the loser observes the advanced tip and gets 409 with the new
             // tip so it can retry.
             let chain_mode = crate::runtime::blockchain_kind::try_is_chain(&store, &query.table)?;
-            let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
+            let _chain_lock_arc: Option<Arc<super::RmwRowLock>> = if chain_mode {
                 Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
             } else {
                 None
@@ -2419,7 +2419,7 @@ impl RedDBRuntime {
                 continue;
             };
             let logical_id = candidate.logical_id();
-            let lock_key = format!("row:{}", logical_id.raw());
+            let lock_key = super::RmwLockTable::row_key(logical_id);
             let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
             lock_entries.push((lock_key, logical_id, rmw_lock));
         }
@@ -2942,43 +2942,45 @@ impl RedDBRuntime {
         );
         let ids_to_delete = {
             let _topology_guard = topology_lock.read();
-            scan.find_target_ids()?
+            let ids = scan.find_target_ids()?;
+            if ids.len() > UPDATE_APPLY_CHUNK_SIZE
+                && self.current_xid().is_none()
+                && UnifiedStore::deferred_store_wal_capture_active()
+            {
+                super::delete_publication::order_target_ids(self, &query.table, ids)?
+            } else {
+                ids
+            }
         };
 
-        // For event-enabled collections, snapshot the pre-delete state
-        // before rows are physically removed.
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
-        let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
-            scan.row_json_pre_images(&ids_to_delete)?
-        } else {
-            HashMap::new()
-        };
-
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let (count, lsns) =
-                self.delete_entities_batch(&query.table, chunk, topology_lock.read())?;
+            let deleted = self.delete_entities_batch(
+                &query.table,
+                chunk,
+                topology_lock.read(),
+                effective_filter.as_ref(),
+                needs_delete_events,
+            )?;
             #[cfg(test)]
             self.index_store_ref().mutation_test_hook(
                 &query.table,
                 super::index_store::MutationTestPhase::BeforeEvents,
             );
-            affected += count;
-            if needs_delete_events && !lsns.is_empty() {
-                // lsns.len() == actually-deleted entities; align with chunk ids.
-                // `delete_batch` may skip missing entities, so we correlate by
-                // the number returned (they're emitted in chunk order).
-                let deleted_chunk = &chunk[..lsns.len().min(chunk.len())];
+            affected += deleted.affected;
+            if needs_delete_events && !deleted.changes.is_empty() {
+                let ids: Vec<_> = deleted.changes.iter().map(|(id, _)| *id).collect();
+                let lsns: Vec<_> = deleted.changes.iter().map(|(_, lsn)| *lsn).collect();
                 self.emit_delete_events_for_collection(
                     &query.table,
-                    deleted_chunk,
+                    &ids,
                     &lsns,
-                    &pre_images,
+                    &deleted.pre_images,
                 )?;
             }
         }
-        pre_images.clear();
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -3000,6 +3002,102 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::path::Path;
+
+    #[test]
+    fn captured_bulk_delete_keeps_global_row_lock_order_across_chunks() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let runtime = Arc::new(
+            RedDBRuntime::with_options(
+                RedDBOptions::in_memory().with_memory_budget(128 * 1024 * 1024),
+            )
+            .expect("bulk lock fixture"),
+        );
+        runtime
+            .execute_query("CREATE TABLE bulk_lock_order (id INTEGER)")
+            .expect("table");
+        let count = super::UPDATE_APPLY_CHUNK_SIZE + 16;
+        for batch in (0..count).collect::<Vec<_>>().chunks(512) {
+            let values = batch
+                .iter()
+                .map(|id| format!("({id})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!("INSERT INTO bulk_lock_order (id) VALUES {values}"))
+                .expect("seed chunk boundary");
+        }
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("bulk_lock_order")
+            .expect("rows");
+        // Imported/versioned rows can have logical identities independent
+        // of their physical positions. Cross decimal-width boundaries too;
+        // fresh time-based physical IDs alone keep the same string order.
+        let mut rows = manager.query_all(|_| true);
+        rows.sort_unstable_by_key(|entity| entity.id);
+        for (position, mut entity) in rows.into_iter().enumerate() {
+            entity.set_logical_id(crate::storage::EntityId::new(
+                u64::try_from(position + 1).expect("small identity"),
+            ));
+            manager
+                .update(entity)
+                .expect("independent logical identity");
+        }
+        let mut expected: Vec<_> = manager
+            .query_all(|_| true)
+            .iter()
+            .map(|entity| format!("row:{}", entity.logical_id().raw()))
+            .collect();
+        expected.sort_unstable();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let weak_runtime = Arc::downgrade(&runtime);
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "bulk_lock_order"
+                    && phase == super::super::index_store::MutationTestPhase::BeforeEvents
+                {
+                    let runtime = weak_runtime.upgrade().expect("writer still alive");
+                    let held =
+                        super::super::delete_publication::pending_lock_keys(&runtime, collection);
+                    assert!(!held.is_empty());
+                    assert!(held.len() <= expected.len());
+                    let mismatch = held
+                        .iter()
+                        .zip(&expected)
+                        .position(|(actual, expected)| actual != expected);
+                    assert!(
+                        mismatch.is_none(),
+                        "captured DELETE violated global lock order at position {mismatch:?}"
+                    );
+                    hook_calls.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        let result = runtime
+            .with_deferred_store_wal_for_dml(true, || {
+                runtime.execute_query("DELETE FROM bulk_lock_order")
+            })
+            .expect("captured bulk delete");
+        assert_eq!(
+            result.affected_rows,
+            u64::try_from(count).expect("small fixture")
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "fixture must cross an apply chunk"
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM bulk_lock_order")
+            .expect("deleted rows")
+            .result
+            .records
+            .is_empty());
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    }
 
     #[test]
     fn locked_update_recheck_read_failure_preserves_preimages_and_retry() {

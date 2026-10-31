@@ -196,16 +196,20 @@ impl UnifiedStore {
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
-                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && current.excluded_xids.contains(&entity.xmin))
+                    || (matches!(
+                        entity.data,
+                        EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                    ) && current.excluded_xids.contains(&entity.xmin))
                 {
                     defer = true;
                     return None;
                 }
                 let raw =
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
-                let projected = if matches!(entity.data, EntityData::Row(_))
-                    && current.excluded_xids.contains(&entity.xmax)
+                let projected = if matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                ) && current.excluded_xids.contains(&entity.xmax)
                 {
                     defer = true;
                     let mut normalized = entity.clone();

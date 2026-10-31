@@ -555,6 +555,8 @@ impl RedDBRuntime {
         queue: &str,
         payload: Value,
     ) -> RedDBResult<EntityId> {
+        let _event_snapshot = super::delete_publication::event_context(self)
+            .map(super::execution_context::CurrentSnapshotGuard::install);
         let store = self.inner.db.store();
         // Auto-create the queue if it does not exist yet.
         if store.get_collection(queue).is_none() {
@@ -650,6 +652,7 @@ impl RedDBRuntime {
         config: &QueueRuntimeConfig,
         payload: Value,
     ) -> RedDBResult<EntityId> {
+        let event_xid = super::delete_publication::event_writer(self);
         let position = next_queue_position(store, queue, QueueSide::Right)?;
         let mut entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -666,7 +669,7 @@ impl RedDBRuntime {
                 acked: false,
             }),
         );
-        if let Some(xid) = self.current_xid() {
+        if let Some(xid) = self.current_xid().or(event_xid) {
             entity.set_xmin(xid);
         }
         let id = store

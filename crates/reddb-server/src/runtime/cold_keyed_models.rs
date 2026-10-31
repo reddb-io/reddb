@@ -1776,6 +1776,358 @@ fn cold_dml_fixture(index: Option<&str>) -> (tempfile::TempDir, RedDBRuntime) {
 }
 
 #[test]
+fn cold_dml_delete_event_snapshots_follow_actual_ids_and_keep_admission() {
+    let (_directory, runtime) = cold_dml_fixture(None);
+    let store = runtime.db().store();
+    let manager = store
+        .get_collection("cold_dml_probe")
+        .expect("event source");
+    let target = manager.query_all(|entity| {
+        entity.data.as_row().and_then(|row| row.get_field("id")) == Some(&Value::Integer(2))
+    })[0]
+        .id;
+    store.persist().expect("publish event source");
+    install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+    let ids = [EntityId::new(u64::MAX - 1), target];
+    let topology = runtime
+        .index_store_ref()
+        .collection_topology_lock("cold_dml_probe");
+    let deleted = runtime
+        .delete_entities_batch("cold_dml_probe", &ids, topology.read(), None, true)
+        .expect("delete after a missing prefix");
+    assert_eq!(deleted.affected, 1);
+    assert_eq!(deleted.changes.len(), 1);
+    assert_eq!(
+        deleted.changes[0].0, target,
+        "CDC identity must not be inferred from the input prefix"
+    );
+    assert_eq!(deleted.pre_images.len(), 1);
+    let before = deleted
+        .pre_images
+        .get(&target.raw())
+        .expect("actual deleted preimage");
+    assert_eq!(
+        before.get("id").and_then(crate::json::Value::as_i64),
+        Some(2)
+    );
+    assert_eq!(
+        before.get("score").and_then(crate::json::Value::as_i64),
+        Some(20)
+    );
+    {
+        let reservations = runtime.inner.memory_reservations.lock();
+        assert!(
+            reservations.reserved_bytes > reservations.completed_bytes,
+            "event snapshots must retain admission after storage publication"
+        );
+    }
+    drop(deleted);
+    let reservations = runtime.inner.memory_reservations.lock();
+    assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
+}
+
+#[test]
+fn cold_dml_deletes_base_rows_and_preserves_transaction_rollback() {
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        let (_directory, runtime) = cold_dml_fixture(index);
+        runtime
+            .db()
+            .store()
+            .persist()
+            .expect("publish delete source");
+        install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+        assert_eq!(
+            runtime
+                .execute_query("DELETE FROM cold_dml_probe WHERE id = 2")
+                .expect("cold delete")
+                .affected_rows,
+            1,
+            "cold delete missed the published row: {index:?}"
+        );
+        let remaining = || {
+            observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id")
+                .into_iter()
+                .map(|row| row.get("id").cloned().expect("id"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(remaining(), [Value::Integer(1), Value::Integer(3)]);
+        runtime.execute_query("BEGIN").expect("begin delete");
+        assert_eq!(
+            runtime
+                .execute_query("DELETE FROM cold_dml_probe WHERE id = 1")
+                .expect("transactional cold delete")
+                .affected_rows,
+            1
+        );
+        assert_eq!(remaining(), [Value::Integer(3)]);
+        runtime.execute_query("ROLLBACK").expect("rollback delete");
+        assert_eq!(remaining(), [Value::Integer(1), Value::Integer(3)]);
+        runtime
+            .execute_query("BEGIN")
+            .expect("begin committed delete");
+        assert_eq!(
+            runtime
+                .execute_query("DELETE FROM cold_dml_probe WHERE id = 3")
+                .expect("committed cold delete")
+                .affected_rows,
+            1
+        );
+        runtime.execute_query("COMMIT").expect("commit delete");
+        assert_eq!(remaining(), [Value::Integer(1)]);
+    }
+}
+
+#[test]
+fn cold_dml_delete_late_point_failure_preserves_preimages_and_writer_horizon() {
+    use reddb_engine::storage::collection_read::{CollectionRead, EncodedRecord};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FailingPoint {
+        source: Arc<dyn CollectionRead + Send + Sync>,
+        reads: AtomicUsize,
+        fail_at: AtomicUsize,
+    }
+    impl CollectionRead for FailingPoint {
+        fn get_record(
+            &self,
+            id: EntityId,
+            limit: usize,
+        ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if read == self.fail_at.load(Ordering::SeqCst) {
+                return Err(crate::storage::StoreError::Io(std::io::Error::other(
+                    "injected delete point failure",
+                )));
+            }
+            self.source.get_record(id, limit)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
+            self.source.cursor()
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
+            self.source.owned_cursor()
+        }
+    }
+    for failure_at in 1..=9 {
+        let (_directory, runtime) = cold_dml_fixture(None);
+        let expected = observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id");
+        let ids =
+            super::dml_target_scan::DmlTargetScan::new(&runtime, "cold_dml_probe", None, None)
+                .find_target_ids()
+                .expect("delete discovery");
+        let store = runtime.db().store();
+        store.persist().expect("publish delete failure source");
+        let pager = Arc::clone(store.pager().expect("pager"));
+        let published = PagedCollection::new(Arc::new(BTree::with_root(
+            Arc::clone(&pager),
+            store.collection_root_page("cold_dml_probe").expect("root"),
+        )));
+        let data = Arc::new(BTree::new(pager));
+        let mut cursor = published.scan().expect("source cursor");
+        while let Some(record) = cursor.next_record(usize::MAX).expect("source record") {
+            data.insert(&record.id.raw().to_be_bytes(), &record.bytes)
+                .expect("private base");
+        }
+        let root = data.root_page_id();
+        let source = Arc::new(FailingPoint {
+            source: Arc::new(PagedCollection::new(data)),
+            reads: AtomicUsize::new(0),
+            fail_at: AtomicUsize::new(failure_at),
+        });
+        let manager = store
+            .get_collection("cold_dml_probe")
+            .expect("delete source");
+        manager.install_backing(
+            source.clone(),
+            root,
+            store.format_version(),
+            4096,
+            manager.count() as u64,
+        );
+        let topology = runtime
+            .index_store_ref()
+            .collection_topology_lock("cold_dml_probe");
+        let error = runtime
+            .delete_entities_batch("cold_dml_probe", &ids, topology.read(), None, false)
+            .err()
+            .expect("later delete read must fail");
+        assert!(
+            error.to_string().contains("injected delete point failure"),
+            "{error}"
+        );
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        assert_eq!(runtime.snapshot_manager().oldest_required_xid(), None);
+        source.fail_at.store(0, Ordering::SeqCst);
+        assert_eq!(
+            observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id"),
+            expected
+        );
+        assert_eq!(
+            runtime
+                .delete_entities_batch("cold_dml_probe", &ids, topology.read(), None, false)
+                .expect("retry delete")
+                .affected,
+            3
+        );
+        assert!(observe(&runtime, "SELECT id FROM cold_dml_probe").is_empty());
+    }
+}
+
+#[test]
+fn cold_dml_deferred_delete_abort_preserves_indexes_and_releases_admission() {
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        let (directory, runtime) = cold_dml_fixture(index);
+        runtime
+            .db()
+            .store()
+            .persist()
+            .expect("publish captured delete");
+        install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+        let visible = || observe(&runtime, "SELECT id FROM cold_dml_probe WHERE id = 2");
+        let expected = visible();
+        let scope = super::delete_publication::DeletePublicationScope::begin();
+        UnifiedStore::begin_deferred_store_wal_capture();
+        assert_eq!(
+            runtime
+                .execute_query("DELETE FROM cold_dml_probe WHERE id = 2")
+                .expect("prepare captured delete")
+                .affected_rows,
+            1
+        );
+        assert!(runtime.snapshot_manager().oldest_active_xid().is_some());
+        {
+            let reservations = runtime.inner.memory_reservations.lock();
+            assert!(
+                reservations.reserved_bytes > reservations.completed_bytes,
+                "the rollback owner must stay charged beyond the DML callback"
+            );
+        }
+        assert_eq!(
+            visible(),
+            expected,
+            "unpublished delete must remain visible to a new reader"
+        );
+        let captured = UnifiedStore::take_deferred_store_wal_capture();
+        assert!(!captured.is_empty());
+        // Exercise the same scope destruction as an outer WAL append error.
+        drop(captured);
+        drop(scope);
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        assert_eq!(runtime.snapshot_manager().oldest_required_xid(), None);
+        runtime.invalidate_result_cache();
+        assert_eq!(
+            visible(),
+            expected,
+            "aborted capture must preserve indexed reads"
+        );
+        {
+            let reservations = runtime.inner.memory_reservations.lock();
+            assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
+        }
+        for cycle in 0..100 {
+            runtime
+                .db()
+                .store()
+                .test_fail_deferred_wal_append
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let failed = runtime
+                .with_deferred_store_wal_for_dml(true, || {
+                    runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")
+                })
+                .err()
+                .expect("captured WAL publication must fail");
+            assert!(
+                failed
+                    .to_string()
+                    .contains("injected deferred WAL append failure"),
+                "cycle {cycle}: {failed}"
+            );
+            assert!(!UnifiedStore::deferred_store_wal_capture_active());
+            assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+            assert_eq!(runtime.snapshot_manager().oldest_required_xid(), None);
+            runtime.invalidate_result_cache();
+            assert_eq!(
+                visible(),
+                expected,
+                "WAL failure changed indexed preimages at cycle {cycle}"
+            );
+            let reservations = runtime.inner.memory_reservations.lock();
+            assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
+        }
+        let deleted = runtime
+            .with_deferred_store_wal_for_dml(true, || {
+                let result = runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?;
+                assert!(runtime.snapshot_manager().oldest_active_xid().is_some());
+                assert_eq!(
+                    visible(),
+                    expected,
+                    "retry stays invisible until its actual WAL append"
+                );
+                Ok(result)
+            })
+            .expect("durable captured retry");
+        assert_eq!(deleted.affected_rows, 1);
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        assert!(visible().is_empty());
+        runtime.checkpoint().expect("publish cold delete");
+        drop(runtime);
+        let options = RedDBOptions::persistent(directory.path().join("models.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("reopen profile");
+        let reopened = RedDBRuntime::with_options(options).expect("reopen deleted rows");
+        assert!(observe(&reopened, "SELECT id FROM cold_dml_probe WHERE id = 2").is_empty());
+        let remaining = observe(&reopened, "SELECT id FROM cold_dml_probe ORDER BY id");
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(remaining[1].get("id"), Some(&Value::Integer(3)));
+    }
+}
+
+#[test]
+fn cold_dml_deferred_delete_unwind_clears_capture_and_allows_retry() {
+    let (_directory, runtime) = cold_dml_fixture(Some("HASH"));
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish unwind source");
+    install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+    let expected = observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id");
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: RedDBResult<()> = runtime.with_deferred_store_wal_for_dml(true, || {
+            assert_eq!(
+                runtime
+                    .execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?
+                    .affected_rows,
+                1
+            );
+            panic!("injected unwind before captured delete WAL publication");
+        });
+    }));
+    assert!(failure.is_err());
+    assert!(!UnifiedStore::deferred_store_wal_capture_active());
+    assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    assert_eq!(runtime.snapshot_manager().oldest_required_xid(), None);
+    runtime.invalidate_result_cache();
+    assert_eq!(
+        observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id"),
+        expected
+    );
+    let retried = runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")
+        })
+        .expect("retry after unwinding capture");
+    assert_eq!(retried.affected_rows, 1);
+    assert_eq!(
+        observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id").len(),
+        2
+    );
+}
+
+#[test]
 fn cold_dml_candidate_reads_include_base_rows_without_hydration() {
     use reddb_rql::ast::{CompareOp, FieldRef, Filter};
     for index in [None, Some("HASH"), Some("BTREE")] {
@@ -2113,4 +2465,481 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
     for (row, expected) in rows.iter().zip([11, 21, 31]) {
         assert_eq!(row.get("score"), Some(&Value::Integer(expected)));
     }
+}
+
+#[test]
+fn cold_dml_delete_row_lock_table_releases_distinct_completed_keys() {
+    let table = super::RmwLockTable::new();
+    for id in 0..10_000 {
+        let key = format!("row:{id}");
+        let first = table.lock_for("lock_retention", &key);
+        let second = table.lock_for("lock_retention", &key);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "overlapping owners share a lock"
+        );
+        {
+            let _guard = first.lock();
+        }
+        drop(first);
+        let third = table.lock_for("lock_retention", &key);
+        assert!(
+            Arc::ptr_eq(&second, &third),
+            "one owner cannot remove another owner's lock"
+        );
+        drop(second);
+        drop(third);
+    }
+    let retained: usize = table.shards.iter().map(|shard| shard.lock().len()).sum();
+    assert_eq!(
+        retained, 0,
+        "completed row identities must not accumulate forever"
+    );
+}
+
+#[test]
+fn cold_dml_delete_row_lock_cleanup_preserves_mutual_exclusion() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let table = super::RmwLockTable::new();
+    let value = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                for _ in 0..500 {
+                    let lock = table.lock_for("lock_race", "row:7");
+                    let _guard = lock.lock();
+                    let previous = value.load(Ordering::Relaxed);
+                    std::thread::yield_now();
+                    value.store(previous + 1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    assert_eq!(
+        value.load(Ordering::Relaxed),
+        2000,
+        "live owners must never split the same logical lock"
+    );
+    assert_eq!(
+        table
+            .shards
+            .iter()
+            .map(|shard| shard.lock().len())
+            .sum::<usize>(),
+        0
+    );
+}
+
+#[test]
+fn cold_dml_delete_serializes_same_row_until_captured_wal_commits() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        for first_fails in [false, true] {
+            let (_directory, runtime) = cold_dml_fixture(index);
+            runtime
+                .db()
+                .store()
+                .persist()
+                .expect("publish concurrent delete");
+            install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+            let runtime = Arc::new(runtime);
+            let (first_ready_tx, first_ready_rx) = mpsc::channel();
+            let (release_first_tx, release_first_rx) = mpsc::channel();
+            let first_runtime = Arc::clone(&runtime);
+            let first = std::thread::spawn(move || {
+                first_runtime.with_deferred_store_wal_for_dml(true, || {
+                    let deleted =
+                        first_runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?;
+                    first_ready_tx
+                        .send(deleted.affected_rows)
+                        .expect("first ready");
+                    release_first_rx
+                        .recv_timeout(TIMEOUT)
+                        .expect("release first WAL");
+                    Ok(deleted)
+                })
+            });
+            assert_eq!(
+                first_ready_rx
+                    .recv_timeout(TIMEOUT)
+                    .expect("first prepared"),
+                1
+            );
+            let (second_attempt_tx, second_attempt_rx) = mpsc::channel();
+            let (second_ready_tx, second_ready_rx) = mpsc::channel();
+            let (release_second_tx, release_second_rx) = mpsc::channel();
+            let second_runtime = Arc::clone(&runtime);
+            let second = std::thread::spawn(move || {
+                second_runtime.with_deferred_store_wal_for_dml(true, || {
+                    second_attempt_tx.send(()).expect("second attempt");
+                    let deleted =
+                        second_runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?;
+                    second_ready_tx
+                        .send(deleted.affected_rows)
+                        .expect("second ready");
+                    release_second_rx
+                        .recv_timeout(TIMEOUT)
+                        .expect("release second WAL");
+                    Ok(deleted)
+                })
+            });
+            second_attempt_rx
+                .recv_timeout(TIMEOUT)
+                .expect("second writer started");
+            let early = second_ready_rx
+                .recv_timeout(Duration::from_millis(500))
+                .ok();
+            // Queue a DDL writer behind the second writer's topology reader.
+            // A predecessor waiting behind DDL for its final index maintenance
+            // would otherwise form a topology -> row -> topology wait cycle.
+            let topology = runtime
+                .index_store_ref()
+                .collection_topology_lock("cold_dml_probe");
+            let (ddl_started_tx, ddl_started_rx) = mpsc::channel();
+            let (ddl_done_tx, ddl_done_rx) = mpsc::channel();
+            let ddl = std::thread::spawn(move || {
+                ddl_started_tx.send(()).expect("DDL attempt");
+                let guard = topology.try_write_for(Duration::from_secs(2));
+                let acquired = guard.is_some();
+                drop(guard);
+                ddl_done_tx.send(acquired).expect("DDL completion");
+            });
+            ddl_started_rx.recv_timeout(TIMEOUT).expect("DDL started");
+            let early_ddl = ddl_done_rx.recv_timeout(Duration::from_millis(100)).ok();
+            if first_fails {
+                runtime
+                    .db()
+                    .store()
+                    .test_fail_deferred_wal_append
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            release_first_tx
+                .send(())
+                .expect("allow first WAL publication");
+            let first_result = first.join().expect("first worker");
+            let second_prepared = early.unwrap_or_else(|| {
+                second_ready_rx
+                    .recv_timeout(TIMEOUT)
+                    .expect("second proceeds after first completion")
+            });
+            let visible_after_first =
+                observe(&runtime, "SELECT id FROM cold_dml_probe WHERE id = 2");
+            release_second_tx.send(()).expect("allow second completion");
+            let second_result = second
+                .join()
+                .expect("second worker")
+                .expect("second completion");
+            let ddl_acquired = early_ddl.unwrap_or_else(|| {
+                ddl_done_rx
+                    .recv_timeout(TIMEOUT)
+                    .expect("queued DDL completes")
+            });
+            ddl.join().expect("DDL worker");
+            assert!(
+                early.is_none(),
+                "second writer replaced a tombstone before the first WAL commit: {index:?}"
+            );
+            assert!(ddl_acquired, "queued DDL caused a topology/row wait cycle");
+            let expected_second = if first_fails { 1 } else { 0 };
+            if first_fails {
+                assert!(first_result
+                    .err()
+                    .expect("first WAL failure")
+                    .to_string()
+                    .contains("injected deferred WAL append failure"));
+                assert_eq!(
+                    visible_after_first.len(),
+                    1,
+                    "failed predecessor must leave its preimage readable while retry is pending"
+                );
+            } else {
+                assert_eq!(first_result.expect("first durable commit").affected_rows, 1);
+                assert!(
+                    visible_after_first.is_empty(),
+                    "acknowledged deletion reappeared while another writer was pending"
+                );
+            }
+            assert_eq!(
+                second_prepared, expected_second,
+                "waited delete must recheck the latest committed row"
+            );
+            assert_eq!(second_result.affected_rows, expected_second);
+            assert!(observe(&runtime, "SELECT id FROM cold_dml_probe WHERE id = 2").is_empty());
+            assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        }
+    }
+}
+
+#[test]
+fn cold_dml_delete_captured_wal_holds_checkpoint_publication_fence() {
+    let (_directory, runtime) = cold_dml_fixture(None);
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish fence fixture");
+    install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+    runtime
+        .db()
+        .store()
+        .test_require_deferred_publication_fence
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let deleted = runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")
+        })
+        .expect("captured DELETE must hold checkpoint fence at its actual WAL append");
+    assert_eq!(deleted.affected_rows, 1);
+}
+
+#[test]
+fn cold_dml_delete_events_abort_with_the_source() {
+    for paged in [false, true] {
+        for bounded in [false, true] {
+            let directory = tempfile::tempdir().expect("event fixture directory");
+            let options = || {
+                let options = RedDBOptions::persistent(directory.path().join("models.rdb"))
+                    .with_memory_budget(128 * 1024 * 1024);
+                if paged {
+                    options
+                        .with_storage_profile(
+                            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev
+                                .selection(),
+                        )
+                        .expect("event profile")
+                } else {
+                    options
+                }
+            };
+            let runtime = RedDBRuntime::with_options(options()).expect("event runtime");
+            if bounded {
+                runtime
+                    .execute_query("CREATE QUEUE delete_events_outbox MAX_SIZE 1")
+                    .expect("bounded event outbox");
+            }
+            runtime.execute_query("CREATE TABLE delete_events_probe (id INT) WITH EVENTS (DELETE) TO delete_events_outbox").expect("event source");
+            runtime
+                .execute_query("INSERT INTO delete_events_probe (id) VALUES (1), (2), (3)")
+                .expect("event source row");
+            runtime.checkpoint().expect("publish event fixture");
+            if paged {
+                install_indexed_cold(&runtime, "delete_events_probe", 4096);
+            }
+            let original = observe(&runtime, "SELECT id FROM delete_events_probe");
+            for cycle in 0..100 {
+                runtime
+                    .db()
+                    .store()
+                    .test_fail_deferred_wal_append
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let error = runtime
+                    .execute_query("DELETE FROM delete_events_probe")
+                    .expect_err("real event WAL append must fail");
+                assert!(error
+                    .to_string()
+                    .contains("injected deferred WAL append failure"));
+                runtime.invalidate_result_cache();
+                assert_eq!(
+                    observe(&runtime, "SELECT id FROM delete_events_probe"),
+                    original
+                );
+                assert_eq!(
+                    observe(&runtime, "QUEUE LEN delete_events_outbox")[0].get("len"),
+                    Some(&Value::UnsignedInteger(0)),
+                    "failed DELETE must not emit a false queued event at cycle {cycle}"
+                );
+                if bounded {
+                    assert_eq!(
+                        observe(&runtime, "QUEUE LEN delete_events_outbox_outbox_dlq")[0]
+                            .get("len"),
+                        Some(&Value::UnsignedInteger(0)),
+                        "aborted overflow event must stay invisible at cycle {cycle}"
+                    );
+                }
+                if cycle % 25 == 24 {
+                    runtime
+                        .checkpoint()
+                        .expect("checkpoint failed event attempts");
+                }
+            }
+            assert_eq!(
+                runtime
+                    .execute_query("DELETE FROM delete_events_probe")
+                    .expect("retry real DELETE")
+                    .affected_rows,
+                3
+            );
+            assert!(observe(&runtime, "SELECT id FROM delete_events_probe").is_empty());
+            let expected_messages = if bounded { 1 } else { 3 };
+            assert_eq!(
+                observe(&runtime, "QUEUE LEN delete_events_outbox")[0].get("len"),
+                Some(&Value::UnsignedInteger(expected_messages))
+            );
+            if bounded {
+                assert_eq!(
+                    observe(&runtime, "QUEUE LEN delete_events_outbox_outbox_dlq")[0].get("len"),
+                    Some(&Value::UnsignedInteger(2))
+                );
+            }
+
+            let queue = runtime
+                .db()
+                .store()
+                .get_collection("delete_events_outbox")
+                .expect("outbox");
+            let positions: std::collections::HashSet<_> = queue
+                .query_all(|entity| !runtime.snapshot_manager().is_aborted(entity.xmin))
+                .into_iter()
+                .filter_map(|entity| match entity.kind {
+                    EntityKind::QueueMessage { position, .. } => Some(position),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                positions.len(),
+                usize::try_from(expected_messages).expect("small event count"),
+                "pending events must retain unique queue positions"
+            );
+            runtime
+                .checkpoint()
+                .expect("checkpoint committed DELETE and outbox");
+            drop(runtime);
+            let reopened =
+                RedDBRuntime::with_options(options()).expect("reopen real event rollback fixture");
+            assert!(observe(&reopened, "SELECT id FROM delete_events_probe").is_empty());
+            assert_eq!(
+                observe(&reopened, "QUEUE LEN delete_events_outbox")[0].get("len"),
+                Some(&Value::UnsignedInteger(expected_messages))
+            );
+            if bounded {
+                assert_eq!(
+                    observe(&reopened, "QUEUE LEN delete_events_outbox_outbox_dlq")[0].get("len"),
+                    Some(&Value::UnsignedInteger(2))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cold_dml_delete_conflicting_explicit_update_preserves_serializability() {
+    use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        for update_commits_first in [false, true] {
+            let (_directory, runtime) = cold_dml_fixture(index);
+            runtime
+                .db()
+                .store()
+                .persist()
+                .expect("publish explicit writer fixture");
+            install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+            let concurrent = runtime.clone();
+            let deletion = runtime.with_deferred_store_wal_for_dml(true, || {
+                let deleted = runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?;
+                assert_eq!(deleted.affected_rows, 1);
+                let updater = std::thread::spawn(move || {
+                    set_current_connection_id(873);
+                    concurrent.execute_query("BEGIN").expect("concurrent BEGIN");
+                    assert_eq!(
+                        concurrent
+                            .execute_query("UPDATE cold_dml_probe SET score = 99 WHERE id = 2")
+                            .expect("concurrent constant UPDATE")
+                            .affected_rows,
+                        1
+                    );
+                    if update_commits_first {
+                        concurrent
+                            .execute_query("COMMIT")
+                            .expect("first committed UPDATE");
+                    }
+                    clear_current_connection_id();
+                });
+                updater.join().expect("explicit UPDATE worker");
+                Ok(deleted)
+            });
+            if update_commits_first {
+                let error = deletion
+                    .expect_err("DELETE must reject an UPDATE committed before its WAL append");
+                assert!(
+                    error.to_string().contains("serialization conflict"),
+                    "{error}"
+                );
+                assert_eq!(
+                    observe(&runtime, "SELECT score FROM cold_dml_probe WHERE id = 2")[0]
+                        .get("score"),
+                    Some(&Value::Integer(99))
+                );
+            } else {
+                // A serialization failure before WAL is also a valid outcome.
+                // If DELETE succeeds, no pending writer may resurrect its row.
+                let acknowledged = match deletion {
+                    Ok(result) => {
+                        assert_eq!(result.affected_rows, 1);
+                        true
+                    }
+                    Err(error) => {
+                        assert!(
+                            error.to_string().contains("serialization conflict"),
+                            "{error}"
+                        );
+                        false
+                    }
+                };
+                let visible_after_ack =
+                    observe(&runtime, "SELECT id FROM cold_dml_probe WHERE id = 2");
+                set_current_connection_id(873);
+                let update_commit = runtime.execute_query("COMMIT");
+                clear_current_connection_id();
+                if acknowledged {
+                    assert!(update_commit
+                        .expect_err("later UPDATE must conflict")
+                        .to_string()
+                        .contains("serialization conflict"));
+                    assert!(visible_after_ack.is_empty(), "acknowledged DELETE reappeared while explicit UPDATE was pending: {index:?}");
+                    assert!(
+                        observe(&runtime, "SELECT id FROM cold_dml_probe WHERE id = 2").is_empty()
+                    );
+                } else {
+                    update_commit.expect("UPDATE survives rejected DELETE");
+                    assert_eq!(
+                        observe(&runtime, "SELECT score FROM cold_dml_probe WHERE id = 2")[0]
+                            .get("score"),
+                        Some(&Value::Integer(99))
+                    );
+                }
+            }
+            assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        }
+    }
+}
+
+#[test]
+fn cold_dml_delete_callback_error_does_not_publish_a_partial_statement() {
+    let (_directory, runtime) = cold_dml_fixture(None);
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish callback fixture");
+    install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+    let original = observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id");
+    let result: crate::api::RedDBResult<()> = runtime.with_deferred_store_wal_for_dml(true, || {
+        let deleted = runtime.execute_query("DELETE FROM cold_dml_probe WHERE id = 2")?;
+        assert_eq!(deleted.affected_rows, 1);
+        Err(RedDBError::Query(
+            "injected DELETE event callback failure".into(),
+        ))
+    });
+    assert!(result
+        .expect_err("callback fails")
+        .to_string()
+        .contains("injected DELETE event callback failure"));
+    assert_eq!(
+        observe(&runtime, "SELECT id FROM cold_dml_probe ORDER BY id"),
+        original,
+        "a failed captured statement must restore its preimages"
+    );
+    assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
 }

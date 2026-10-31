@@ -9,8 +9,6 @@
 //! visibility through the snapshot API; point/index candidates use the
 //! table-row resolver before reaching UPDATE or DELETE.
 
-use std::collections::HashMap;
-
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
@@ -252,24 +250,6 @@ impl<'a> DmlTargetScan<'a> {
             .flatten()
             .filter_map(|entity| entity_row_snapshot(&entity))
             .collect())
-    }
-
-    pub(super) fn row_json_pre_images(
-        &self,
-        entity_ids: &[EntityId],
-    ) -> RedDBResult<HashMap<u64, crate::json::Value>> {
-        if entity_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let db = self.runtime.db();
-        let store = db.store();
-        let mut snapshots = HashMap::with_capacity(entity_ids.len());
-        for &id in entity_ids {
-            if let Some(entity) = store.try_get(self.table, id, usize::MAX)? {
-                snapshots.insert(id.raw(), crate::runtime::mutation::entity_row_json(&entity));
-            }
-        }
-        Ok(snapshots)
     }
 
     fn compiled_filter(&self) -> Option<query_exec::CompiledEntityFilter> {

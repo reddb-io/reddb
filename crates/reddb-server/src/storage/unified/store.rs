@@ -356,6 +356,10 @@ pub struct UnifiedStore {
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
     embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
+    #[cfg(test)]
+    pub(crate) test_fail_deferred_wal_append: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) test_require_deferred_publication_fence: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
