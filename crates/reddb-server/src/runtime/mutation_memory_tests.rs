@@ -141,6 +141,25 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
         }
     }
 
+    runtime
+        .execute_query("CREATE INDEX secret_inputs_id ON secret_inputs (id) USING BTREE")
+        .expect("index for direct wire candidates");
+    {
+        let _scope = super::execution_context::SecretStoreGuard::install(&runtime);
+        let response = crate::wire::query_direct::try_handle_query_binary_direct(
+            &runtime,
+            "SELECT id FROM secret_inputs WHERE id BETWEEN 1 AND 3 AND payload IS NOT NULL",
+        )
+        .expect("direct indexed scan is eligible");
+        assert_eq!(
+            response.get(4),
+            Some(&reddb_wire::legacy::MSG_ERROR),
+            "direct wire scan must reject rather than publish partial rows"
+        );
+        assert!(String::from_utf8_lossy(&response[5..]).contains("read memory limit"));
+    }
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
     let larger =
         RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
             .expect("larger runtime");

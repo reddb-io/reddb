@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::runtime::mvcc::entity_visible_under_current_snapshot;
 use crate::runtime::query_exec::{
-    evaluate_entity_filter_with_db, extract_entity_id_from_filter, try_hash_eq_lookup,
+    evaluate_entity_filter_result_with_db, extract_entity_id_from_filter, try_hash_eq_lookup,
     try_sorted_index_lookup, CompiledEntityFilter,
 };
 use crate::runtime::RedDBRuntime;
@@ -27,8 +27,8 @@ use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
 use super::protocol::encode_value;
 use reddb_wire::legacy::{
-    build_legacy_result_frame, encode_result_payload_header, set_result_payload_row_count,
-    WireValue,
+    build_legacy_error_frame, build_legacy_result_frame, encode_result_payload_header,
+    set_result_payload_row_count, WireValue,
 };
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
@@ -36,7 +36,7 @@ use reddb_wire::legacy::{
 /// Returns `Some(wire_response)` when the query matches the fast-path
 /// shape and was executed; returns `None` to signal the caller should
 /// fall back to the standard `execute_query` + `encode_result` path.
-pub(super) fn try_handle_query_binary_direct(runtime: &RedDBRuntime, sql: &str) -> Option<Vec<u8>> {
+pub(crate) fn try_handle_query_binary_direct(runtime: &RedDBRuntime, sql: &str) -> Option<Vec<u8>> {
     // Cheap prefix gate. Avoid parse for anything not a plain SELECT
     // (WITHIN, EXPLAIN, SET, BEGIN, …).
     let trimmed = sql.trim_start();
@@ -233,23 +233,37 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
             }
             None => CompiledEntityFilter::compile(filter, table_name, table_alias),
         };
-        manager.for_each_id(&ids, |_, entity| {
+        let mut predicate_error = None;
+        let scan = manager.try_for_each_id(&ids, usize::MAX, |_, entity| {
             if (row_count as usize) >= hard_limit {
-                return;
+                return false;
             }
-            if !compiled_filter.evaluate(entity).resolve_with_fallback(|| {
-                evaluate_entity_filter_with_db(
-                    Some(db.as_ref()),
-                    entity,
-                    filter,
-                    table_name,
-                    table_alias,
-                )
-            }) {
-                return;
+            let matches = compiled_filter.try_evaluate(entity).and_then(|decision| {
+                decision.try_resolve_with_fallback(|| {
+                    evaluate_entity_filter_result_with_db(
+                        Some(db.as_ref()),
+                        entity,
+                        filter,
+                        table_name,
+                        table_alias,
+                    )
+                })
+            });
+            match matches {
+                Ok(true) => emit_one!(entity),
+                Ok(false) => return true,
+                Err(error) => {
+                    predicate_error = Some(error);
+                    return false;
+                }
             }
-            emit_one!(entity);
+            (row_count as usize) < hard_limit
         });
+        // A frame already contains any accepted prefix. Publish only an error
+        // on a rejected predicate/read, never that partial result or a retry.
+        if let Some(error) = predicate_error.or_else(|| scan.err().map(crate::RedDBError::from)) {
+            return Some(build_legacy_error_frame(error.to_string().as_bytes()));
+        }
     } else {
         // ── Unfiltered LIMIT path ─────────────────────────────────
         // Require explicit LIMIT — we don't want to materialise an
