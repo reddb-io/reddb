@@ -14,6 +14,7 @@ struct TrackedAllocator;
 static ALLOCATOR: TrackedAllocator = TrackedAllocator;
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+static MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn account_allocated(bytes: usize) {
     let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
@@ -77,6 +78,9 @@ fn get(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
 
 #[test]
 fn collection_pages_bound_payload_memory_and_preserve_cursor_and_row_schema() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     runtime
         .execute_query("SET CONFIG runtime.result_cache.enabled = false")
@@ -173,4 +177,151 @@ fn collection_pages_bound_payload_memory_and_preserve_cursor_and_row_schema() {
             assert_eq!(page["items"][0]["data"]["columns"][1], expected_payload);
         }
     }
+}
+
+#[test]
+fn cold_vault_point_reads_do_not_retain_all_version_payloads() {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::auth::{AuthConfig, AuthStore};
+    use reddb_server::storage::{RowData, StorageDeployPreset, UnifiedEntity};
+    use std::sync::Arc;
+
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
+    let directory = tempfile::tempdir().expect("cold Vault fixture");
+    let options = RedDBOptions::persistent(directory.path().join("vault.rdb"))
+        .with_memory_budget(128 * 1024 * 1024)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("profile");
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    let store = runtime.db().store();
+    let pager = Arc::clone(store.pager().expect("pager"));
+    runtime.set_auth_store(Arc::new(
+        AuthStore::with_vault_certificate(
+            AuthConfig::default(),
+            Arc::clone(&pager),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("test certificate"),
+    ));
+    runtime
+        .execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("vault");
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut state = 0x1234_5678_u32;
+    let plaintext: String = (0..256 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            alphabet[(state & 63) as usize] as char
+        })
+        .collect();
+    runtime
+        .execute_query(&format!("VAULT PUT secrets.seed = '{plaintext}'"))
+        .expect("large version");
+    runtime
+        .execute_query("ROTATE VAULT secrets.seed = 'latest'")
+        .expect("small latest version");
+    let manager = store.get_collection("secrets").expect("secrets");
+    let mut large = None;
+    let mut small = None;
+    manager.for_each_entity(|entity| {
+        let row = entity.data.as_row().expect("Vault row");
+        match row.get_field("version") {
+            Some(Value::Integer(1)) => large = row.get_field("value").cloned(),
+            Some(Value::Integer(2)) => small = row.get_field("value").cloned(),
+            _ => {}
+        }
+        true
+    });
+    let large = large.expect("large encrypted value");
+    let small = small.expect("small encrypted value");
+    assert!(matches!(&large, Value::Secret(bytes) if bytes.len() > 128 * 1024));
+    let data = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        &pager,
+    )));
+    let keys = Arc::new(reddb_server::storage::engine::BTree::new(pager));
+    let fingerprint = reddb_file::native_key_index::fingerprint("seed");
+    const VERSIONS: u64 = 128;
+    for version in 1..=VERSIONS {
+        let id = store.next_entity_id();
+        let mut entity = UnifiedEntity::table_row(id, "secrets", version, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text("seed"),
+                if version == VERSIONS {
+                    small.clone()
+                } else {
+                    large.clone()
+                },
+                Value::Integer(version as i64),
+                Value::Boolean(false),
+            ],
+            vec![
+                "key".into(),
+                "value".into(),
+                "version".into(),
+                "tombstone".into(),
+            ],
+        ));
+        data.insert(
+            &id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("private history row");
+        keys.insert(
+            &reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw()),
+            &[],
+        )
+        .expect("key candidate");
+    }
+    let root = data.root_page_id();
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(data, keys)),
+        root,
+        store.format_version(),
+        2 * 1024 * 1024,
+        VERSIONS,
+    );
+    drop(large);
+    drop(small);
+    for query in [
+        "VAULT GET secrets.seed",
+        "VAULT REVEAL secrets.seed",
+        "VAULT REVEAL secrets.seed VERSION 1",
+    ] {
+        runtime.invalidate_result_cache();
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let result = runtime.execute_query(query).expect("point read");
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("cold_vault_versions={VERSIONS} query={query} extra_peak_bytes={extra}");
+        assert!(
+            extra < 8 * 1024 * 1024,
+            "a point read retained unrelated history payloads: {extra} bytes"
+        );
+        assert_eq!(result.result.records.len(), 1);
+        match query {
+            "VAULT GET secrets.seed" => assert_eq!(
+                result.result.records[0].get("version"),
+                Some(&Value::Integer(VERSIONS as i64))
+            ),
+            "VAULT REVEAL secrets.seed" => assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text("latest"))
+            ),
+            _ => assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text(plaintext.as_str()))
+            ),
+        }
+    }
+    assert_eq!(
+        manager.count(),
+        VERSIONS as usize,
+        "point reads preserve every physical version"
+    );
 }

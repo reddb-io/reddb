@@ -995,11 +995,21 @@ impl<'a> KvAtomicOps<'a> {
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
         self.record_vault_read(collection, Some(key));
-        if let Some(entry) = self.pending_vault_entries(collection, Some(key)).pop() {
+        let mut pending = None;
+        self.visit_pending_vault_entries(collection, Some(key), |entry| pending = Some(entry));
+        if let Some(entry) = pending {
             return Ok(Some(entry));
         }
-        self.vault_versions(collection, key)
-            .map(super::keyed_spine::latest_version)
+        let mut latest: Option<VaultEntry> = None;
+        self.visit_vault_versions(collection, key, |entry| {
+            if latest
+                .as_ref()
+                .is_none_or(|previous| entry.version >= previous.version)
+            {
+                latest = Some(entry);
+            }
+        })?;
+        Ok(latest)
     }
 
     fn get_vault_entry_version(
@@ -1008,14 +1018,29 @@ impl<'a> KvAtomicOps<'a> {
         key: &str,
         version: i64,
     ) -> RedDBResult<Option<VaultEntry>> {
-        Ok(self
-            .vault_versions(collection, key)?
-            .into_iter()
-            .rev()
-            .find(|entry| entry.version == version))
+        let mut selected = None;
+        self.visit_vault_versions(collection, key, |entry| {
+            if entry.version == version {
+                selected = Some(entry);
+            }
+        })?;
+        Ok(selected)
     }
 
     fn vault_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<VaultEntry>> {
+        let mut versions = Vec::new();
+        self.visit_vault_versions(collection, key, |entry| versions.push(entry))?;
+        Ok(versions)
+    }
+
+    /// Point selectors retain only their chosen entry. Explicit history callers
+    /// can collect the same fallible stream; every version remains in storage.
+    fn visit_vault_versions(
+        &self,
+        collection: &str,
+        key: &str,
+        mut visit: impl FnMut(VaultEntry),
+    ) -> RedDBResult<()> {
         self.record_vault_read(collection, Some(key));
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
@@ -1031,7 +1056,7 @@ impl<'a> KvAtomicOps<'a> {
                     && matches!(row.get_field("key"), Some(Value::Text(stored)) if stored.as_ref() == key))
             })
         }).transpose()?.into_iter().flatten();
-        let mut versions = Vec::new();
+        let mut found = false;
         for record in records {
             let (entity, metadata) = record?;
             let crate::storage::EntityData::Row(ref row) = entity.data else {
@@ -1049,7 +1074,8 @@ impl<'a> KvAtomicOps<'a> {
                 continue;
             }
             let metadata = metadata.unwrap_or_default();
-            versions.push(VaultEntry::from_keyed_row(
+            found = true;
+            visit(VaultEntry::from_keyed_row(
                 version,
                 metadata,
                 entity.created_at,
@@ -1058,13 +1084,13 @@ impl<'a> KvAtomicOps<'a> {
                 self.tenant.clone(),
             ));
         }
-        if versions.is_empty() {
+        if !found {
             if let Some(entry) = self.legacy_vault_entry(collection, key)? {
-                versions.push(entry);
+                visit(entry);
             }
         }
-        versions.extend(self.pending_vault_entries(collection, Some(key)));
-        Ok(versions)
+        self.visit_pending_vault_entries(collection, Some(key), visit);
+        Ok(())
     }
 
     fn latest_vault_entries(
