@@ -2048,7 +2048,7 @@ impl RedDBRuntime {
                 graph_update_returning_snapshots(self, &effective_query.table, &touched_ids)
             } else {
                 super::dml_target_scan::DmlTargetScan::new(self, &effective_query.table, None, None)
-                    .row_snapshots(&touched_ids)
+                    .row_snapshots(&touched_ids)?
             };
             if matches!(effective_query.target, UpdateTarget::Kv) {
                 restore_kv_returning_keys(
@@ -2228,10 +2228,10 @@ impl RedDBRuntime {
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
-            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
+            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)?
         };
         let mut ids_to_update = if query.claim_limit.is_some() || autocommit_table_update {
-            self.filter_claim_locked_target_ids(&query.table, ids_to_update)
+            self.filter_claim_locked_target_ids(&query.table, ids_to_update)?
         } else {
             ids_to_update
         };
@@ -2278,7 +2278,10 @@ impl RedDBRuntime {
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            for entity in manager.get_many(chunk).into_iter().flatten() {
+            for id in chunk {
+                let Some(entity) = manager.try_get(*id, usize::MAX)? else {
+                    continue;
+                };
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
@@ -2355,23 +2358,26 @@ impl RedDBRuntime {
         ))
     }
 
-    fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
+    fn filter_claim_locked_target_ids(
+        &self,
+        table: &str,
+        ids: Vec<EntityId>,
+    ) -> RedDBResult<Vec<EntityId>> {
         let conn_id = current_connection_id();
         let locks = self.inner.pending_claim_locks.read();
         if locks.is_empty() {
-            return ids;
+            return Ok(ids);
         }
-        ids.into_iter()
-            .filter(|id| {
-                let Some(entity) = self.inner.db.store().get(table, *id) else {
-                    return false;
-                };
+        let mut admitted = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(entity) = self.inner.db.store().try_get(table, id, usize::MAX)? {
                 let key = (table.to_string(), entity.logical_id());
-                locks
-                    .get(&key)
-                    .is_none_or(|owner_conn_id| *owner_conn_id == conn_id)
-            })
-            .collect()
+                if locks.get(&key).is_none_or(|owner| *owner == conn_id) {
+                    admitted.push(id);
+                }
+            }
+        }
+        Ok(admitted)
     }
 
     fn record_pending_claim_locks_for_touched_ids(&self, table: &str, ids: &[EntityId]) {
@@ -2409,7 +2415,7 @@ impl RedDBRuntime {
         let mut lock_entries = Vec::new();
 
         for id in ids_to_update {
-            let Some(candidate) = store.get(&query.table, *id) else {
+            let Some(candidate) = store.try_get(&query.table, *id, usize::MAX)? else {
                 continue;
             };
             let logical_id = candidate.logical_id();
@@ -2425,7 +2431,8 @@ impl RedDBRuntime {
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
+            let Some(entity) =
+                try_resolve_update_entity_by_logical_id(self, &query.table, *logical_id)?
             else {
                 continue;
             };
@@ -2943,7 +2950,7 @@ impl RedDBRuntime {
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
         let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
-            scan.row_json_pre_images(&ids_to_delete)
+            scan.row_json_pre_images(&ids_to_delete)?
         } else {
             HashMap::new()
         };

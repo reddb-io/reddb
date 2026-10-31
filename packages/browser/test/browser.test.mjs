@@ -66,6 +66,7 @@ async function sharedConformance(browserPage) {
     'pager_multiframe_checkpoint_io_and_crash_recovery',
     'pager_frame_bounds_and_read_errors', 'pager_superblock_failure_boundaries',
     'pager_recovery_failure_boundaries',
+    'mvcc_fallible_version_reads_and_retry',
     'mvcc_snapshot_isolation_and_read_committed', 'mvcc_failed_prepare_aborts_all_writers',
     'mvcc_publication_guard_covers_visibility', 'mvcc_savepoints_and_connection_isolation',
     'mvcc_retention_and_checkpoint_outcomes', 'mvcc_unique_keys_follow_outcomes',

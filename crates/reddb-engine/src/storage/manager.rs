@@ -321,7 +321,11 @@ impl SegmentManager {
     // Positional file records omit the shared column names. Restore them on
     // owned reads before callers update fields or rebuild secondary indexes.
     // Existing per-row names remain authoritative; segment contents stay raw.
-    fn restore_owned_row_schemas<'a>(&self, entities: impl Iterator<Item = &'a mut UnifiedEntity>) {
+    #[doc(hidden)]
+    pub fn restore_owned_row_schemas<'a>(
+        &self,
+        entities: impl Iterator<Item = &'a mut UnifiedEntity>,
+    ) {
         let schema = self.column_schema();
         for entity in entities {
             if let super::entity::EntityData::Row(row) = &mut entity.data {

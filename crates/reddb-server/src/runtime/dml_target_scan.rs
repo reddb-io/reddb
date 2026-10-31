@@ -109,10 +109,10 @@ impl<'a> DmlTargetScan<'a> {
             if let Some(entity_id) = entity_id {
                 let logical_id = EntityId::new(entity_id);
                 let entity = if self.live_table_rows {
-                    store.get_table_row_by_logical_id(self.table, logical_id)
+                    store.try_get_table_row_by_logical_id(self.table, logical_id)?
                 } else {
                     self.table_row_resolver
-                        .resolve_logical_id(&store, self.table, logical_id)
+                        .try_resolve_logical_id(&store, self.table, logical_id)?
                 };
                 if let Some(entity) = entity {
                     return self.target_ids_from_entities([entity], compiled_filter.as_ref());
@@ -123,7 +123,7 @@ impl<'a> DmlTargetScan<'a> {
                 // direct physical-id lookup so `DELETE FROM <vector>
                 // WHERE rid = N` actually targets the vector instead of
                 // silently matching nothing.
-                if let Some(entity) = store.get(self.table, logical_id) {
+                if let Some(entity) = store.try_get(self.table, logical_id, usize::MAX)? {
                     if !matches!(entity.kind, EntityKind::TableRow { .. }) {
                         return self.target_ids_from_entities([entity], compiled_filter.as_ref());
                     }
@@ -189,7 +189,7 @@ impl<'a> DmlTargetScan<'a> {
                 })
                 .collect();
 
-            manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
+            let mut visit = |entity: &crate::storage::UnifiedEntity| {
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
                 {
@@ -208,9 +208,14 @@ impl<'a> DmlTargetScan<'a> {
                     }
                 }
                 true
-            });
+            };
+            if manager.has_backing() {
+                manager.try_for_each_entity(usize::MAX, &mut visit)?;
+            } else {
+                manager.for_each_entity_zoned_with_stats(&zone_preds, visit);
+            }
         } else {
-            manager.for_each_entity(|entity| {
+            manager.try_for_each_entity(usize::MAX, |entity| {
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
                 {
@@ -220,7 +225,7 @@ impl<'a> DmlTargetScan<'a> {
                     }
                 }
                 true
-            });
+            })?;
         }
 
         match predicate_failure {
@@ -229,40 +234,42 @@ impl<'a> DmlTargetScan<'a> {
         }
     }
 
-    pub(super) fn row_snapshots(&self, entity_ids: &[EntityId]) -> Vec<Vec<(String, Value)>> {
+    pub(super) fn row_snapshots(
+        &self,
+        entity_ids: &[EntityId],
+    ) -> RedDBResult<Vec<Vec<(String, Value)>>> {
         if entity_ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let db = self.runtime.db();
         let store = db.store();
         let Some(manager) = store.get_collection(self.table) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        manager
-            .get_many(entity_ids)
+        Ok(manager
+            .try_get_many(entity_ids, usize::MAX)?
             .into_iter()
             .flatten()
             .filter_map(|entity| entity_row_snapshot(&entity))
-            .collect()
+            .collect())
     }
 
     pub(super) fn row_json_pre_images(
         &self,
         entity_ids: &[EntityId],
-    ) -> HashMap<u64, crate::json::Value> {
+    ) -> RedDBResult<HashMap<u64, crate::json::Value>> {
         if entity_ids.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
         let db = self.runtime.db();
         let store = db.store();
-        entity_ids
-            .iter()
-            .filter_map(|&id| {
-                store
-                    .get(self.table, id)
-                    .map(|entity| (id.raw(), crate::runtime::mutation::entity_row_json(&entity)))
-            })
-            .collect()
+        let mut snapshots = HashMap::with_capacity(entity_ids.len());
+        for &id in entity_ids {
+            if let Some(entity) = store.try_get(self.table, id, usize::MAX)? {
+                snapshots.insert(id.raw(), crate::runtime::mutation::entity_row_json(&entity));
+            }
+        }
+        Ok(snapshots)
     }
 
     fn compiled_filter(&self) -> Option<query_exec::CompiledEntityFilter> {
@@ -289,15 +296,33 @@ impl<'a> DmlTargetScan<'a> {
         let Some(manager) = store.get_collection(self.table) else {
             return Ok(Vec::new());
         };
-
         let mut ids = Vec::with_capacity(entity_ids.len());
-        for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+        let mut visit = |entity: crate::storage::UnifiedEntity| -> RedDBResult<bool> {
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
                 && self.matches_filter(&entity, compiled_filter)?
             {
                 ids.push(entity.id);
-                if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                if self.limit.is_some_and(|limit| ids.len() >= limit) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        if manager.has_backing() {
+            // Decode only the current candidate, including when LIMIT stops
+            // before a later unreadable row. The callback owns no manager lock.
+            for id in entity_ids {
+                if let Some(entity) = manager.try_get(id, usize::MAX)? {
+                    if !visit(entity)? {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Retain the resident batched-fetch fast path.
+            for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+                if !visit(entity)? {
                     break;
                 }
             }

@@ -1061,6 +1061,49 @@ impl UnifiedStore {
             .table_row_versions_by_logical_id(collection, logical_id)
     }
 
+    pub(crate) fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(());
+        };
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            !matches!(entity.kind, EntityKind::TableRow { .. })
+                || entity.logical_id() != logical_id
+                || visit(entity)
+        })
+    }
+
+    pub(crate) fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        if let Some(entity) = manager.try_get(logical_id, usize::MAX)? {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+                && entity.xmax == 0
+            {
+                return Ok(Some(entity));
+            }
+        }
+        // Preserve the current-row policy: first live version, otherwise the
+        // last matching physical version. Retain only one owned candidate.
+        let mut selected = None;
+        self.try_for_each_table_row_version(collection, logical_id, |entity| {
+            selected = Some(entity.clone());
+            entity.xmax != 0
+        })?;
+        manager.restore_owned_row_schemas(selected.iter_mut());
+        Ok(selected)
+    }
+
     pub fn vacuum_mvcc_history(
         &self,
         collection: &str,

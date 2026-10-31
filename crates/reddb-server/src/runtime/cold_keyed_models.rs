@@ -1756,3 +1756,361 @@ fn unreadable_config_dml_predicates_preserve_lazy_branches_and_limit() {
     expected.push(Value::Integer(11));
     assert_eq!(ids, expected);
 }
+
+fn cold_dml_fixture(index: Option<&str>) -> (tempfile::TempDir, RedDBRuntime) {
+    let (directory, runtime) = runtime();
+    for sql in [
+        "CREATE TABLE cold_dml_probe (id INTEGER, score INTEGER)",
+        "INSERT INTO cold_dml_probe (id, score) VALUES (1, 10), (2, 20), (3, 30)",
+    ] {
+        runtime.execute_query(sql).expect(sql);
+    }
+    if let Some(kind) = index {
+        runtime
+            .execute_query(&format!(
+                "CREATE INDEX cold_dml_id ON cold_dml_probe (id) USING {kind}"
+            ))
+            .expect("DML source index");
+    }
+    (directory, runtime)
+}
+
+#[test]
+fn cold_dml_candidate_reads_include_base_rows_without_hydration() {
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        let (_directory, runtime) = cold_dml_fixture(index);
+        let first = observe(&runtime, "SELECT rid FROM cold_dml_probe WHERE id = 1")[0]
+            .get("rid")
+            .cloned()
+            .expect("logical identity");
+        let filters = [
+            None,
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: "id".into(),
+                },
+                op: CompareOp::Eq,
+                value: Value::Integer(2),
+            }),
+            Some(Filter::Compare {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: "rid".into(),
+                },
+                op: CompareOp::Eq,
+                value: first,
+            }),
+        ];
+        let targets = |filter: Option<&Filter>| {
+            super::dml_target_scan::DmlTargetScan::new(&runtime, "cold_dml_probe", filter, None)
+                .find_target_ids()
+                .expect("physical DML targets")
+                .into_iter()
+                .map(|id| id.raw())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let expected: Vec<_> = filters
+            .iter()
+            .map(|filter| targets(filter.as_ref()))
+            .collect();
+        assert_eq!(expected[0].len(), 3);
+        assert_eq!(expected[1].len(), 1);
+        assert_eq!(expected[2].len(), 1);
+        runtime.db().store().persist().expect("publish DML source");
+        install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+        for (filter, expected) in filters.iter().zip(expected) {
+            assert_eq!(
+                targets(filter.as_ref()),
+                expected,
+                "cold target scan: {index:?}"
+            );
+        }
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("cold_dml_probe")
+            .expect("source");
+        let mut resident = 0;
+        manager.for_each_entity(|_| {
+            resident += 1;
+            true
+        });
+        assert_eq!(resident, 0, "target reads must not hydrate the base");
+    }
+}
+
+#[test]
+fn unreadable_cold_dml_source_returns_an_error_and_preserves_rows() {
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        for query in [
+            "UPDATE cold_dml_probe SET score = score + 1",
+            "UPDATE cold_dml_probe SET score = score + 1 WHERE id = 2",
+            "DELETE FROM cold_dml_probe",
+            "DELETE FROM cold_dml_probe WHERE id = 2",
+        ] {
+            let (_directory, runtime) = cold_dml_fixture(index);
+            let expected = observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id");
+            runtime
+                .db()
+                .store()
+                .persist()
+                .expect("publish unreadable source");
+            install_indexed_cold(&runtime, "cold_dml_probe", 1);
+            runtime.invalidate_result_cache();
+            assert!(
+                runtime.execute_query(query).is_err(),
+                "unreadable source returned success: {index:?} {query}"
+            );
+            install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+            assert_eq!(
+                observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id"),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_dml_updates_read_base_preimages_and_return_exact_postimages() {
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        let (_directory, runtime) = cold_dml_fixture(index);
+        runtime
+            .db()
+            .store()
+            .persist()
+            .expect("publish update source");
+        install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+        let result = runtime
+            .execute_query(
+                "UPDATE cold_dml_probe SET score = score + 2 WHERE id = 2 RETURNING id, score",
+            )
+            .expect("cold UPDATE");
+        assert_eq!(
+            result.affected_rows, 1,
+            "cold preimage was missed: {index:?}"
+        );
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(2)));
+        assert_eq!(
+            result.result.records[0].get("score"),
+            Some(&Value::Integer(22))
+        );
+        let rows = observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].get("score"), Some(&Value::Integer(10)));
+        assert_eq!(rows[1].get("score"), Some(&Value::Integer(22)));
+        assert_eq!(rows[2].get("score"), Some(&Value::Integer(30)));
+        let ordered = runtime.execute_query("UPDATE cold_dml_probe SET score = score + 3 ORDER BY id DESC LIMIT 1 RETURNING id, score").expect("ordered cold UPDATE");
+        assert_eq!(ordered.affected_rows, 1);
+        assert_eq!(
+            ordered.result.records[0].get("id"),
+            Some(&Value::Integer(3))
+        );
+        assert_eq!(
+            ordered.result.records[0].get("score"),
+            Some(&Value::Integer(33))
+        );
+        let repeated = runtime
+            .execute_query(
+                "UPDATE cold_dml_probe SET score = score + 1 WHERE id = 2 RETURNING score",
+            )
+            .expect("read the latest dirty version over a cold base");
+        assert_eq!(repeated.affected_rows, 1);
+        assert_eq!(
+            repeated.result.records[0].get("score"),
+            Some(&Value::Integer(23))
+        );
+    }
+}
+
+#[test]
+fn cold_dml_updates_preserve_transaction_and_savepoint_visibility() {
+    let (_directory, runtime) = cold_dml_fixture(None);
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish transactional source");
+    install_indexed_cold(&runtime, "cold_dml_probe", 4096);
+    let score = || {
+        observe(&runtime, "SELECT score FROM cold_dml_probe WHERE id = 2")[0]
+            .get("score")
+            .cloned()
+            .expect("visible score")
+    };
+    runtime.execute_query("BEGIN").expect("begin cold writer");
+    assert_eq!(
+        runtime
+            .execute_query("UPDATE cold_dml_probe SET score = score + 1 WHERE id = 2")
+            .expect("parent write")
+            .affected_rows,
+        1
+    );
+    assert_eq!(score(), Value::Integer(21));
+    runtime
+        .execute_query("SAVEPOINT cold_child")
+        .expect("savepoint");
+    assert_eq!(
+        runtime
+            .execute_query("UPDATE cold_dml_probe SET score = score + 2 WHERE id = 2")
+            .expect("child write")
+            .affected_rows,
+        1
+    );
+    assert_eq!(score(), Value::Integer(23));
+    runtime
+        .execute_query("ROLLBACK TO SAVEPOINT cold_child")
+        .expect("rollback child");
+    assert_eq!(score(), Value::Integer(21));
+    runtime.execute_query("ROLLBACK").expect("rollback parent");
+    assert_eq!(score(), Value::Integer(20));
+    runtime
+        .execute_query("BEGIN")
+        .expect("begin constant update");
+    assert_eq!(
+        runtime
+            .execute_query("UPDATE cold_dml_probe SET score = 25 WHERE id = 2")
+            .expect("constant cold preimage")
+            .affected_rows,
+        1
+    );
+    assert_eq!(score(), Value::Integer(25));
+    runtime
+        .execute_query("ROLLBACK")
+        .expect("rollback constant update");
+    assert_eq!(score(), Value::Integer(20));
+    assert_eq!(
+        runtime
+            .execute_query("UPDATE cold_dml_probe SET score = score + 2 WHERE id = 2")
+            .expect("retry outside transaction")
+            .affected_rows,
+        1
+    );
+    assert_eq!(score(), Value::Integer(22));
+}
+
+#[test]
+fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
+    use reddb_engine::storage::collection_read::{CollectionRead, EncodedRecord};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FailingCursor {
+        source: Arc<dyn CollectionRead + Send + Sync>,
+        opened: AtomicUsize,
+        fail_at: AtomicUsize,
+    }
+    impl CollectionRead for FailingCursor {
+        fn get_record(
+            &self,
+            id: EntityId,
+            limit: usize,
+        ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
+            self.source.get_record(id, limit)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
+            let opened = self.opened.fetch_add(1, Ordering::SeqCst) + 1;
+            if opened == self.fail_at.load(Ordering::SeqCst) {
+                return Err(crate::storage::StoreError::Io(std::io::Error::other(
+                    "injected late DML cursor failure",
+                )));
+            }
+            self.source.cursor()
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
+            self.source.owned_cursor()
+        }
+    }
+    let (_directory, runtime) = cold_dml_fixture(None);
+    let expected = observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id");
+    let store = runtime.db().store();
+    store.persist().expect("publish I/O failure source");
+    let pager = Arc::clone(store.pager().expect("pager"));
+    let published = PagedCollection::new(Arc::new(BTree::with_root(
+        Arc::clone(&pager),
+        store
+            .collection_root_page("cold_dml_probe")
+            .expect("published root"),
+    )));
+    let data = Arc::new(BTree::new(pager));
+    let mut cursor = published.scan().expect("source cursor");
+    while let Some(record) = cursor.next_record(usize::MAX).expect("published row") {
+        data.insert(&record.id.raw().to_be_bytes(), &record.bytes)
+            .expect("immutable private base");
+    }
+    let root = data.root_page_id();
+    let source = Arc::new(FailingCursor {
+        source: Arc::new(PagedCollection::new(data)),
+        opened: AtomicUsize::new(0),
+        fail_at: AtomicUsize::new(3),
+    });
+    let manager = store
+        .get_collection("cold_dml_probe")
+        .expect("source collection");
+    manager.install_backing(
+        source.clone(),
+        root,
+        store.format_version(),
+        4096,
+        manager.count() as u64,
+    );
+    let query = "UPDATE cold_dml_probe SET score = score + 1";
+    let snapshots = runtime.snapshot_manager();
+    assert_eq!(
+        snapshots.oldest_required_xid(),
+        None,
+        "fixture has no retained reader"
+    );
+    for cycle in 0..100 {
+        runtime.invalidate_result_cache();
+        let opened = source.opened.load(Ordering::SeqCst);
+        source.fail_at.store(opened + 3, Ordering::SeqCst);
+        let error = runtime
+            .execute_query(query)
+            .err()
+            .expect("a later preimage read must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected late DML cursor failure"),
+            "cycle {cycle}: {error}"
+        );
+        assert_eq!(source.opened.load(Ordering::SeqCst), opened + 3);
+        assert_eq!(
+            snapshots.oldest_active_xid(),
+            None,
+            "failed planning retained a writer at cycle {cycle}"
+        );
+        assert_eq!(
+            snapshots.oldest_required_xid(),
+            None,
+            "failed planning pinned history at cycle {cycle}"
+        );
+        let mut resident = 0;
+        manager.for_each_entity(|_| {
+            resident += 1;
+            true
+        });
+        assert_eq!(
+            resident, 0,
+            "failed planning retained decoded rows at cycle {cycle}"
+        );
+    }
+    source.fail_at.store(0, Ordering::SeqCst);
+    assert_eq!(
+        observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id"),
+        expected,
+        "failed planning published an earlier prepared update"
+    );
+    assert_eq!(
+        runtime
+            .execute_query(query)
+            .expect("retry after I/O recovery")
+            .affected_rows,
+        3
+    );
+    let rows = observe(&runtime, "SELECT score FROM cold_dml_probe ORDER BY id");
+    for (row, expected) in rows.iter().zip([11, 21, 31]) {
+        assert_eq!(row.get("score"), Some(&Value::Integer(expected)));
+    }
+}

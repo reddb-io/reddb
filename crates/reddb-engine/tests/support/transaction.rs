@@ -8,6 +8,111 @@ use reddb_engine::transaction::{
     is_visible, state::TransactionState, IsolationLevel, SnapshotManager, Xid,
 };
 
+fn fallible_version_reads_and_retry() {
+    use reddb_engine::storage::entity::UnifiedEntity;
+    use reddb_engine::transaction::read::{try_resolve_logical_id, FallibleTableRowVersionStore};
+    use std::cell::Cell;
+
+    struct VersionStore {
+        rows: Vec<UnifiedEntity>,
+        failure_at: Cell<Option<usize>>,
+        reads: Cell<usize>,
+        point_failure: Cell<bool>,
+        points: Cell<usize>,
+    }
+    impl FallibleTableRowVersionStore for VersionStore {
+        type Error = &'static str;
+        fn try_get_table_row_by_logical_id(
+            &self,
+            collection: &str,
+            logical_id: EntityId,
+        ) -> Result<Option<UnifiedEntity>, Self::Error> {
+            assert_eq!(collection, "versions");
+            assert_eq!(logical_id, EntityId::new(7));
+            self.points.set(self.points.get() + 1);
+            if self.point_failure.get() {
+                return Err("point read failed");
+            }
+            Ok(self.rows.iter().find(|row| row.xmax == 0).cloned())
+        }
+        fn try_for_each_table_row_version(
+            &self,
+            collection: &str,
+            logical_id: EntityId,
+            mut visit: impl FnMut(&UnifiedEntity) -> bool,
+        ) -> Result<(), Self::Error> {
+            assert_eq!(collection, "versions");
+            for row in &self.rows {
+                assert_eq!(row.logical_id(), logical_id);
+                self.reads.set(self.reads.get() + 1);
+                if self.failure_at.get() == Some(self.reads.get()) {
+                    return Err("version read failed");
+                }
+                if !visit(row) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+    let rows = [(1, 1, 2), (2, 2, 0), (3, 1, 2)]
+        .into_iter()
+        .map(|(id, xmin, xmax)| {
+            let mut row = UnifiedEntity::table_row(EntityId::new(id), "versions", 7, vec![]);
+            row.set_logical_id(EntityId::new(7));
+            row.set_xmin(xmin);
+            row.set_xmax(xmax);
+            row
+        })
+        .collect();
+    let store = VersionStore {
+        rows,
+        failure_at: Cell::new(None),
+        reads: Cell::new(0),
+        point_failure: Cell::new(false),
+        points: Cell::new(0),
+    };
+    for failure_at in 1..=3 {
+        store.failure_at.set(Some(failure_at));
+        store.reads.set(0);
+        assert_eq!(
+            try_resolve_logical_id(&store, "versions", EntityId::new(7), true, |_| true).err(),
+            Some("version read failed")
+        );
+        assert_eq!(store.reads.get(), failure_at);
+        store.failure_at.set(None);
+        store.reads.set(0);
+        let selected = try_resolve_logical_id(&store, "versions", EntityId::new(7), true, |_| true)
+            .expect("version retry")
+            .expect("visible version");
+        assert_eq!(selected.id, EntityId::new(2));
+        assert_eq!(store.reads.get(), 3);
+    }
+    let old = try_resolve_logical_id(&store, "versions", EntityId::new(7), true, |row| {
+        row.xmin < 2
+    })
+    .expect("older snapshot")
+    .expect("older visible version");
+    assert_eq!(
+        old.id,
+        EntityId::new(3),
+        "equal xmin keeps the last visible candidate"
+    );
+    store.point_failure.set(true);
+    store.reads.set(0);
+    assert_eq!(
+        try_resolve_logical_id(&store, "versions", EntityId::new(7), false, |_| true).err(),
+        Some("point read failed")
+    );
+    store.point_failure.set(false);
+    let current = try_resolve_logical_id(&store, "versions", EntityId::new(7), false, |_| true)
+        .expect("point retry")
+        .expect("current version");
+    assert_eq!(current.id, EntityId::new(2));
+    assert_eq!(store.reads.get(), 0);
+    assert_eq!(store.points.get(), 2);
+}
+
 fn snapshot_isolation_and_read_committed() {
     let state = TransactionState::new();
     let manager = state.snapshot_manager();
@@ -324,6 +429,10 @@ fn autocommit_reservations_and_replay() {
 }
 
 pub const CASES: &[(&str, fn())] = &[
+    (
+        "mvcc_fallible_version_reads_and_retry",
+        fallible_version_reads_and_retry,
+    ),
     (
         "mvcc_snapshot_isolation_and_read_committed",
         snapshot_isolation_and_read_committed,

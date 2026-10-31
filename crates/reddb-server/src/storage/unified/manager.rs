@@ -231,9 +231,9 @@ mod tests {
             (
                 "runtime/dml_target_scan.rs",
                 include_str!("../../runtime/dml_target_scan.rs"),
-                2,
+                3,
                 "documented exception: kind-conditional visibility the uniform scan \
-                 API cannot express; both iterations gate on candidate_visible",
+                 API cannot express; resident and cold iterations share candidate_visible",
             ),
             (
                 "runtime/impl_events.rs",
