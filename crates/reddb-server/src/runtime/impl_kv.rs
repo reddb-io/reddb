@@ -1597,7 +1597,9 @@ impl RedDBRuntime {
                 None,
                 Vec::new(),
             )?;
-            return Err(RedDBError::Query(reason));
+            // SQL references hide denied values as NULL. Audit persistence and
+            // physical read failures still propagate through their fallible paths.
+            return Ok(None);
         }
         let entry = ops.get_vault_entry(collection, key)?;
         let value = match entry.as_ref() {

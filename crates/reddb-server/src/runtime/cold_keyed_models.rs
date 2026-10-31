@@ -1386,3 +1386,52 @@ fn denied_config_expressions_do_not_load_an_unreadable_snapshot() {
         assert_eq!(result[0].get("v"), Some(&Value::Null));
     }
 }
+
+#[test]
+fn unreadable_vault_expressions_propagate_errors_and_remain_retryable() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    let auth = Arc::new(
+        crate::auth::AuthStore::with_vault_certificate(
+            crate::auth::AuthConfig::default(),
+            Arc::clone(store.pager().expect("pager")),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("test vault"),
+    );
+    auth.ensure_vault_secret_key();
+    runtime.set_auth_store(auth);
+    for query in [
+        "CREATE VAULT expression_secrets",
+        "VAULT PUT expression_secrets.token = 'synthetic-value'",
+        "CREATE TABLE expression_probe (id INTEGER)",
+        "INSERT INTO expression_probe (id) VALUES (1)",
+    ] {
+        runtime.execute_query(query).expect(query);
+    }
+    let queries = [
+        "SELECT $secrets.expression_secrets.token AS v FROM expression_probe",
+        "SELECT LENGTH($secrets.expression_secrets.token) AS v FROM expression_probe",
+        "SELECT id FROM expression_probe WHERE $secrets.expression_secrets.token = 'synthetic-value'",
+    ];
+    store.persist().expect("publish vault");
+    install_indexed_cold(&runtime, "expression_secrets", 1);
+    for query in queries {
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime.execute_query(query).is_err(),
+            "an unreadable authorized secret must not become NULL: {query}"
+        );
+    }
+    install_indexed_cold(&runtime, "expression_secrets", 8192);
+    for query in queries {
+        let rows = observe(&runtime, query);
+        assert_eq!(rows.len(), 1, "failed reads must remain retryable: {query}");
+        if let Some(value) = rows[0].get("v") {
+            assert!(matches!(value, Value::Secret(_)), "{query}: {value:?}");
+            assert_eq!(value.display_string(), "***");
+        } else {
+            assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+        }
+    }
+}
