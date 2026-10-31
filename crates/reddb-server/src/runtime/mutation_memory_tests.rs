@@ -1200,3 +1200,59 @@ fn mutation_memory_event_outbox_rejects_growth_before_publishing_a_message() {
         "admission failure leaked a credit"
     );
 }
+
+#[test]
+fn mutation_memory_queue_push_rejects_growth_before_message_or_metadata_publication() {
+    // KEY and DELAY are mutually exclusive in the public grammar.
+    for metadata_suffix in ["", " KEY 'ordering'", " DELAY 5s"] {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024),
+        )
+        .expect("bounded queue runtime");
+        runtime
+            .execute_query("CREATE QUEUE admitted_push")
+            .expect("queue");
+        let queue = runtime
+            .db()
+            .store()
+            .get_collection("admitted_push")
+            .expect("queue collection");
+        let payload = varied_payload(256 * 1024);
+        let mut admitted = 0;
+        let mut denied = None;
+        for attempt in 0..64 {
+            let metadata = runtime
+                .db()
+                .store()
+                .get_collection(super::impl_queue::QUEUE_META_COLLECTION)
+                .expect("queue metadata");
+            let metadata_before = metadata.count();
+            let suffix = if !metadata_suffix.is_empty() {
+                format!("{metadata_suffix} DEDUP 'attempt_{attempt}'")
+            } else {
+                String::new()
+            };
+            match runtime.execute_query(&format!("QUEUE PUSH admitted_push '{payload}'{suffix}")) {
+                Ok(_) => admitted += 1,
+                Err(error) => {
+                    assert_eq!(queue.count(), admitted, "denied push inserted a message");
+                    assert_eq!(
+                        metadata.count(),
+                        metadata_before,
+                        "denied push inserted metadata"
+                    );
+                    denied = Some(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            admitted > 0,
+            "exercise incremental growth for {metadata_suffix}: {denied:?}"
+        );
+        let error = denied.expect("QUEUE PUSH must enforce the shared memory budget");
+        assert!(error.to_string().contains("over budget"), "{error}");
+        let reservations = runtime.inner.memory_reservations.lock();
+        assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
+    }
+}

@@ -1050,6 +1050,14 @@ impl RedDBRuntime {
                 if let Some(xid) = self.current_xid() {
                     entity.set_xmin(xid);
                 }
+                // As for event inserts, reserve resident/WAL payload overlap
+                // before publishing either the message or its metadata.
+                let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
+                let _admission = self.admit_non_evictable_growth(
+                    crate::storage::memory_pools::MemoryPool::SegmentArena,
+                    "queue push",
+                    bytes.saturating_mul(3),
+                )?;
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
