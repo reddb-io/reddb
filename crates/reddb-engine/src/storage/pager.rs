@@ -636,10 +636,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Amortize protected eviction over one bounded DWB frame. Keeping the
     /// remaining cache dirty would otherwise pay three fsyncs per victim.
-    fn write_evicted_dirty_page(&self, page: Page) -> Result<(), PagerError> {
-        let mut ids = self
-            .cache
-            .dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME.saturating_sub(1));
+    fn write_evicted_dirty_page(
+        &self,
+        page: Page,
+        pending_page: Option<u32>,
+    ) -> Result<(), PagerError> {
+        let mut ids = self.cache.dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME);
+        // The admitting write must not join its predecessor's eviction batch.
+        // Its image is dirty for readers, but publication still belongs to the
+        // caller after the earlier writeback has succeeded.
+        ids.retain(|id| Some(*id) != pending_page);
+        // Leave room for the already evicted image without reducing a full
+        // frame merely because the pending image occupied one candidate slot.
+        ids.truncate(pager_io::DWB_MAX_PAGES_PER_FRAME.saturating_sub(1));
         ids.sort_unstable();
         let mut pages = self.cache.flush_dirty_pages(&ids);
         pages.push((page.page_id(), page));
@@ -665,13 +674,21 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Ok(page);
         }
 
+        // A miss can evict and write dirty pages. Keep disk loading and cache
+        // publication inside the same ownership epoch as writers/checkpoints.
+        // Hits retain their existing path without taking this guard.
+        let _ownership = self.lock_ownership_mutations();
+        if let Some(page) = self.cache.get(page_id) {
+            return Ok(page);
+        }
+
         // Cache miss - read from disk
         let page = self.read_page_raw(page_id)?;
 
         // Add to cache
         if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            self.write_evicted_dirty_page(dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, None)?;
         }
 
         Ok(page)
@@ -687,6 +704,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Ok(page);
         }
 
+        let _ownership = self.lock_ownership_mutations();
+        if let Some(page) = self.cache.get(page_id) {
+            return Ok(page);
+        }
+
         // Cache miss - use the same byte I/O without a page CRC check.
         let mut file = self.file_lock()?;
         let page = pager_io::read_page(&mut *file, page_id, false)?;
@@ -695,7 +717,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache (no checksum verification)
         if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            self.write_evicted_dirty_page(dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, None)?;
         }
 
         Ok(page)
@@ -719,7 +741,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // page will never be flushed otherwise (same bug fixed in
         // `allocate_page`).
         if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
-            self.write_evicted_dirty_page(dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
 
         Ok(())
@@ -741,7 +763,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
         if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
-            self.write_evicted_dirty_page(dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
 
         Ok(())
@@ -877,7 +899,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // handling: write the evicted page through immediately so
         // the on-disk image stays consistent.
         if let Some(dirty_page) = self.cache.insert_dirty(page_id, page.clone()) {
-            self.write_evicted_dirty_page(dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
 
         Ok(page)
@@ -951,7 +973,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             let mut page = Page::new(PageType::Vector, page_id);
             page.update_checksum();
             if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
-                self.write_evicted_dirty_page(dirty_page)?;
+                self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
             }
         }
 
