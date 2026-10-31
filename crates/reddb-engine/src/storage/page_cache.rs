@@ -65,12 +65,12 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new(page_id: u32, page: Page) -> Self {
+    fn new(page_id: u32, page: Page, dirty: bool) -> Self {
         Self {
             page_id,
             page,
             pin_count: 0,
-            dirty: false,
+            dirty,
         }
     }
 }
@@ -399,6 +399,16 @@ impl PageCacheShard {
     /// May trigger eviction if cache is full.
     /// Returns the evicted page (if dirty) that needs to be written back.
     pub fn insert(&self, page_id: u32, page: Page) -> Option<Page> {
+        self.insert_inner(page_id, page, false, true)
+    }
+
+    fn insert_inner(
+        &self,
+        page_id: u32,
+        page: Page,
+        dirty: bool,
+        replace_existing: bool,
+    ) -> Option<Page> {
         let _structure = cache_lock(&self.structure);
         // Check if already in cache
         {
@@ -412,7 +422,10 @@ impl PageCacheShard {
                 // behaviour of marking a re-inserted page visited).
                 let mut entries = cache_write(&self.entries);
                 if let Some(Some(entry)) = entries.get_mut(slot) {
-                    entry.page = page;
+                    if replace_existing {
+                        entry.page = page;
+                        entry.dirty |= dirty;
+                    }
                 }
                 drop(entries);
                 self.meta.mark_visited(slot);
@@ -454,7 +467,7 @@ impl PageCacheShard {
                 entries.push(None);
             }
 
-            entries[slot] = Some(CacheEntry::new(page_id, page));
+            entries[slot] = Some(CacheEntry::new(page_id, page, dirty));
         }
 
         // Update index
@@ -475,6 +488,19 @@ impl PageCacheShard {
         }
 
         evicted
+    }
+
+    /// Publish a changed image and its dirty state for pager writes.
+    pub fn insert_dirty(&self, page_id: u32, page: Page) -> Option<Page> {
+        let evicted = self.insert_inner(page_id, page, true, true);
+        #[cfg(test)]
+        tests::after_insert_publish();
+        evicted
+    }
+
+    /// Complete a disk read without replacing an image installed meanwhile.
+    pub fn insert_if_absent(&self, page_id: u32, page: Page) -> Option<Page> {
+        self.insert_inner(page_id, page, false, false)
     }
 
     /// Evict a page using SIEVE algorithm
@@ -957,6 +983,14 @@ impl PageCache {
         self.shard_for(page_id).insert(page_id, page)
     }
 
+    pub fn insert_dirty(&self, page_id: u32, page: Page) -> Option<Page> {
+        self.shard_for(page_id).insert_dirty(page_id, page)
+    }
+
+    pub fn insert_if_absent(&self, page_id: u32, page: Page) -> Option<Page> {
+        self.shard_for(page_id).insert_if_absent(page_id, page)
+    }
+
     pub fn mark_dirty(&self, page_id: u32) {
         self.shard_for(page_id).mark_dirty(page_id)
     }
@@ -1063,6 +1097,8 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static EVICT_TAKE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
+        static INSERT_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     pub(super) fn after_slot_lookup() {
@@ -1077,6 +1113,66 @@ mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    pub(super) fn after_insert_publish() {
+        let hook = INSERT_PUBLISH_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn cache_publish_read_miss_does_not_replace_a_newer_dirty_image() {
+        let cache = PageCacheShard::new(2);
+        let mut delayed_read = make_page(0);
+        delayed_read.as_bytes_mut()[100] = 0x11;
+        let mut current = make_page(0);
+        current.as_bytes_mut()[100] = 0x22;
+        cache.insert_dirty(0, current);
+        cache.insert_if_absent(0, delayed_read);
+        assert_eq!(cache.get(0).expect("current image").as_bytes()[100], 0x22);
+        assert_eq!(cache.dirty_count(), 1, "read cleared the current writer");
+    }
+
+    #[test]
+    fn cache_publish_dirty_image_before_eviction_is_possible() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+        let cache = Arc::new(PageCacheShard::new(2));
+        cache.insert(0, make_page(0));
+        cache.insert(1, make_page(1));
+        let (published, publication_done) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let writer_cache = Arc::clone(&cache);
+        let writer = std::thread::spawn(move || {
+            INSERT_PUBLISH_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    published.send(()).expect("notify image publication");
+                    resumed
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("resume writer");
+                }));
+            });
+            let mut page = make_page(2);
+            page.as_bytes_mut()[100] = 0x42;
+            writer_cache.insert_dirty(2, page)
+        });
+        publication_done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer published page 2");
+        let evicted = [
+            cache.insert_if_absent(3, make_page(3)),
+            cache.insert_if_absent(4, make_page(4)),
+        ];
+        resume.send(()).expect("resume after read pressure");
+        assert!(writer.join().expect("writer finishes").is_none());
+        let image = evicted
+            .into_iter()
+            .flatten()
+            .find(|page| page.page_id() == 2)
+            .expect("concurrent disk reads must preserve the new dirty image for writeback");
+        assert_eq!(image.as_bytes()[100], 0x42);
     }
 
     fn make_page(id: u32) -> Page {
@@ -1248,40 +1344,47 @@ mod tests {
     fn cache_concurrent_same_page_insertions_do_not_retain_unindexed_slots() {
         use std::sync::{Arc, Barrier};
         let cache = Arc::new(PageCacheShard::new(4));
-        let start = Arc::new(Barrier::new(4));
-        let workers: Vec<_> = (0..4)
-            .map(|_| {
-                let cache = Arc::clone(&cache);
-                let start = Arc::clone(&start);
-                std::thread::spawn(move || {
-                    start.wait();
-                    for round in 0..2000 {
-                        let id = round % 8;
-                        cache.insert(id, make_page(id));
-                    }
+        for cycle in 0..100 {
+            let start = Arc::new(Barrier::new(4));
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    let cache = Arc::clone(&cache);
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        for round in 0..2000 {
+                            let id = round % 8;
+                            cache.insert(id, make_page(id));
+                        }
+                    })
                 })
-            })
-            .collect();
-        for worker in workers {
-            worker.join().expect("concurrent insertion");
+                .collect();
+            for worker in workers {
+                worker.join().expect("concurrent insertion");
+            }
+            let index = cache_read(&cache.index);
+            let entries = cache_read(&cache.entries);
+            assert!(index.len() <= cache.capacity());
+            assert!(
+                entries.len() <= cache.capacity(),
+                "retained slot metadata grew past capacity"
+            );
+            assert_eq!(
+                entries.iter().filter(|entry| entry.is_some()).count(),
+                index.len(),
+                "unindexed pages retained"
+            );
+            assert_eq!(
+                cache_lock(&cache.fifo).len(),
+                index.len(),
+                "duplicate FIFO identities retained"
+            );
+            assert_eq!(
+                cache_lock(&cache.free_slots).len(),
+                entries.len() - index.len(),
+                "unused slots lost at cycle {cycle}"
+            );
         }
-        let index = cache_read(&cache.index);
-        let entries = cache_read(&cache.entries);
-        assert!(index.len() <= cache.capacity());
-        assert!(
-            entries.len() <= cache.capacity(),
-            "retained slot metadata grew past capacity"
-        );
-        assert_eq!(
-            entries.iter().filter(|entry| entry.is_some()).count(),
-            index.len(),
-            "unindexed pages retained"
-        );
-        assert_eq!(
-            cache_lock(&cache.fifo).len(),
-            index.len(),
-            "duplicate FIFO identities retained"
-        );
     }
 
     #[test]

@@ -669,7 +669,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let page = self.read_page_raw(page_id)?;
 
         // Add to cache
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+        if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
             self.write_evicted_dirty_page(dirty_page)?;
         }
@@ -693,7 +693,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         drop(file);
 
         // Add to cache (no checksum verification)
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+        if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
             self.write_evicted_dirty_page(dirty_page)?;
         }
@@ -718,10 +718,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // dirty entry, write it through immediately — the evicted
         // page will never be flushed otherwise (same bug fixed in
         // `allocate_page`).
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
             self.write_evicted_dirty_page(dirty_page)?;
         }
-        self.cache.mark_dirty(page_id);
 
         Ok(())
     }
@@ -741,10 +740,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
             self.write_evicted_dirty_page(dirty_page)?;
         }
-        self.cache.mark_dirty(page_id);
 
         Ok(())
     }
@@ -868,7 +866,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let page = Page::new(page_type, page_id);
 
         // Write to cache. The evicted page (if any) is dirty by
-        // definition — `cache.insert` only returns `Some` when it
+        // definition — `cache.insert_dirty` only returns `Some` when it
         // had to evict a dirty entry to make room. The previous
         // version dropped that return value, which silently lost
         // writes whenever a freshly-allocated page caused an LRU
@@ -878,10 +876,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // back the never-flushed page. Mirror `read_page`'s
         // handling: write the evicted page through immediately so
         // the on-disk image stays consistent.
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page.clone()) {
             self.write_evicted_dirty_page(dirty_page)?;
         }
-        self.cache.mark_dirty(page_id);
 
         Ok(page)
     }
@@ -953,10 +950,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         for page_id in start_page..start_page + n_pages {
             let mut page = Page::new(PageType::Vector, page_id);
             page.update_checksum();
-            if let Some(dirty_page) = self.cache.insert(page_id, page) {
+            if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
                 self.write_evicted_dirty_page(dirty_page)?;
             }
-            self.cache.mark_dirty(page_id);
         }
 
         Ok(ExtentId {
@@ -1344,12 +1340,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let mut dirty_pages = Vec::new();
         for trunk in trunks {
             let page_id = trunk.page_id();
-            if let Some(evicted) = self.cache.insert(page_id, trunk) {
+            if let Some(evicted) = self.cache.insert_dirty(page_id, trunk) {
                 // Trunk publication can evict dirty data. Keep it in the same
                 // WAL-first, double-write-protected batch as resident pages.
                 dirty_pages.push((evicted.page_id(), evicted));
             }
-            self.cache.mark_dirty(page_id);
         }
 
         // IDs are compact; page images are not. At 16 KiB per page, staging
