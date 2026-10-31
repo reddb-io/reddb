@@ -115,7 +115,7 @@ impl<'a> DmlTargetScan<'a> {
                         .resolve_logical_id(&store, self.table, logical_id)
                 };
                 if let Some(entity) = entity {
-                    return Ok(self.target_ids_from_entities([entity]));
+                    return self.target_ids_from_entities([entity], compiled_filter.as_ref());
                 }
                 // Non-table-row entities (e.g. vectors) carry their
                 // physical id as their identity and are invisible to the
@@ -125,7 +125,7 @@ impl<'a> DmlTargetScan<'a> {
                 // silently matching nothing.
                 if let Some(entity) = store.get(self.table, logical_id) {
                     if !matches!(entity.kind, EntityKind::TableRow { .. }) {
-                        return Ok(self.target_ids_from_entities([entity]));
+                        return self.target_ids_from_entities([entity], compiled_filter.as_ref());
                     }
                 }
                 return Ok(Vec::new());
@@ -141,7 +141,7 @@ impl<'a> DmlTargetScan<'a> {
                     self.table,
                     self.runtime.index_store_ref(),
                 ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
                 }
 
                 if let Some(ids) = query_exec::try_sorted_index_lookup(
@@ -150,13 +150,14 @@ impl<'a> DmlTargetScan<'a> {
                     self.runtime.index_store_ref(),
                     None,
                 ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
                 }
             }
         }
 
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let mut ids = Vec::new();
+        let mut predicate_failure = None;
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
             if !matches!(self.target, Some(UpdateTarget::Documents)) {
@@ -191,11 +192,19 @@ impl<'a> DmlTargetScan<'a> {
             manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
-                    && self.matches_filter(entity, compiled_filter.as_ref())
                 {
-                    ids.push(entity.id);
-                    if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
-                        return false;
+                    match self.matches_filter(entity, compiled_filter.as_ref()) {
+                        Ok(true) => {
+                            ids.push(entity.id);
+                            if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            predicate_failure = Some(error);
+                            return false;
+                        }
                     }
                 }
                 true
@@ -214,7 +223,10 @@ impl<'a> DmlTargetScan<'a> {
             });
         }
 
-        Ok(ids)
+        match predicate_failure {
+            Some(error) => Err(error),
+            None => Ok(ids),
+        }
     }
 
     pub(super) fn row_snapshots(&self, entity_ids: &[EntityId]) -> Vec<Vec<(String, Value)>> {
@@ -271,18 +283,18 @@ impl<'a> DmlTargetScan<'a> {
         &self,
         entity_ids: Vec<EntityId>,
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
-    ) -> Vec<EntityId> {
+    ) -> RedDBResult<Vec<EntityId>> {
         let db = self.runtime.db();
         let store = db.store();
         let Some(manager) = store.get_collection(self.table) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
         let mut ids = Vec::with_capacity(entity_ids.len());
         for entity in manager.get_many(&entity_ids).into_iter().flatten() {
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
-                && self.matches_filter(&entity, compiled_filter)
+                && self.matches_filter(&entity, compiled_filter)?
             {
                 ids.push(entity.id);
                 if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
@@ -290,19 +302,27 @@ impl<'a> DmlTargetScan<'a> {
                 }
             }
         }
-        ids
+        Ok(ids)
     }
 
-    fn target_ids_from_entities<I>(&self, entities: I) -> Vec<EntityId>
+    fn target_ids_from_entities<I>(
+        &self,
+        entities: I,
+        compiled_filter: Option<&query_exec::CompiledEntityFilter>,
+    ) -> RedDBResult<Vec<EntityId>>
     where
         I: IntoIterator<Item = crate::storage::UnifiedEntity>,
     {
-        entities
-            .into_iter()
-            .filter(|entity| self.visible_candidate(entity))
-            .filter(|entity| self.matches_update_target(entity))
-            .map(|entity| entity.id)
-            .collect()
+        let mut ids = Vec::new();
+        for entity in entities {
+            if self.visible_candidate(&entity)
+                && self.matches_update_target(&entity)
+                && self.matches_filter(&entity, compiled_filter)?
+            {
+                ids.push(entity.id);
+            }
+        }
+        Ok(ids)
     }
 
     fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
@@ -387,19 +407,19 @@ impl<'a> DmlTargetScan<'a> {
         &self,
         entity: &crate::storage::UnifiedEntity,
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
-    ) -> bool {
+    ) -> RedDBResult<bool> {
         match (self.filter, compiled_filter) {
             (_, Some(compiled)) => {
-                compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match
+                Ok(compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match)
             }
-            (Some(filter), None) => query_exec::evaluate_entity_filter_with_db(
+            (Some(filter), None) => query_exec::evaluate_entity_filter_result_with_db(
                 Some(self.runtime.db().as_ref()),
                 entity,
                 filter,
                 self.table,
                 self.table,
             ),
-            (None, None) => true,
+            (None, None) => Ok(true),
         }
     }
 }

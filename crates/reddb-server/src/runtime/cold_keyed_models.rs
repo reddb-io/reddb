@@ -1550,3 +1550,209 @@ fn unreadable_config_in_unvisited_ordering_and_window_branches_is_not_loaded() {
         assert_eq!(observe(&runtime, query), expected, "lazy branch: {query}");
     }
 }
+
+#[test]
+fn unreadable_config_dml_predicates_fail_before_publication_and_retry() {
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
+
+    for index in [None, Some("HASH"), Some("BTREE")] {
+        for (statement, predicate, expected) in [
+            (
+                "UPDATE expression_probe SET id = id + 10",
+                "id = 2 AND CONFIG('fixture.flag') = 'ready'",
+                vec![1, 3, 12],
+            ),
+            (
+                "DELETE FROM expression_probe",
+                "id = 2 AND CONFIG('fixture.flag') = 'ready'",
+                vec![1, 3],
+            ),
+            (
+                "UPDATE expression_probe SET id = id + 10",
+                "id >= 1 AND (rid = {first} OR CONFIG('fixture.flag') = 'ready')",
+                vec![11, 12, 13],
+            ),
+            (
+                "DELETE FROM expression_probe",
+                "id >= 1 AND (rid = {first} OR CONFIG('fixture.flag') = 'ready')",
+                vec![],
+            ),
+        ] {
+            let (_directory, runtime) = runtime();
+            seed_expression_config(&runtime);
+            runtime
+                .execute_query("INSERT INTO expression_probe (id) VALUES (2), (3)")
+                .expect("DML candidates");
+            if let Some(kind) = index {
+                runtime
+                    .execute_query(&format!(
+                        "CREATE INDEX expression_id ON expression_probe (id) USING {kind}"
+                    ))
+                    .expect("DML candidate index");
+            }
+            let eligible = Filter::Compare {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: "id".into(),
+                },
+                op: CompareOp::Ge,
+                value: Value::Integer(1),
+            };
+            let candidates = super::dml_target_scan::DmlTargetScan::new(
+                &runtime,
+                "expression_probe",
+                Some(&eligible),
+                None,
+            )
+            .find_target_ids()
+            .expect("candidate traversal order");
+            assert_eq!(candidates.len(), 3);
+            // Unordered SQL does not promise insertion order. Choose the actual
+            // first candidate so a later failed read follows an admitted match.
+            let predicate = predicate.replace("{first}", &candidates[0].raw().to_string());
+            runtime
+                .db()
+                .store()
+                .persist()
+                .expect("publish predicate config");
+            install_indexed_cold(&runtime, "red_config", 1);
+            assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
+            let query = format!("{statement} WHERE {predicate}");
+            runtime.invalidate_result_cache();
+            assert!(
+                runtime.execute_query(&query).is_err(),
+                "unreadable DML predicate succeeded ({index:?}): {query}"
+            );
+            let ids = |runtime: &RedDBRuntime| {
+                observe(runtime, "SELECT id FROM expression_probe ORDER BY id")
+                    .into_iter()
+                    .map(|row| row.get("id").cloned().expect("candidate id"))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                ids(&runtime),
+                vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)],
+                "failed predicate published a mutation: {query}"
+            );
+            install_indexed_cold(&runtime, "red_config", 4096);
+            runtime.execute_query(&query).expect("retry DML predicate");
+            assert_eq!(
+                ids(&runtime),
+                expected.into_iter().map(Value::Integer).collect::<Vec<_>>(),
+                "predicate retry: {query}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dml_identity_candidates_recheck_the_entire_predicate() {
+    for statement in [
+        "UPDATE expression_probe SET id = 99",
+        "DELETE FROM expression_probe",
+    ] {
+        let (_directory, runtime) = runtime();
+        seed_expression_config(&runtime);
+        let row = observe(&runtime, "SELECT rid FROM expression_probe");
+        let rid = row[0]
+            .get("rid")
+            .expect("logical identity")
+            .display_string();
+        let query = format!("{statement} WHERE rid = {rid} AND id = 999");
+        let result = runtime
+            .execute_query(&query)
+            .expect("nonmatching identity predicate");
+        assert_eq!(
+            result.affected_rows, 0,
+            "identity lookup bypassed WHERE: {query}"
+        );
+        assert_eq!(
+            observe(&runtime, "SELECT id FROM expression_probe")[0].get("id"),
+            Some(&Value::Integer(1))
+        );
+        runtime
+            .db()
+            .store()
+            .persist()
+            .expect("publish identity config");
+        install_indexed_cold(&runtime, "red_config", 1);
+        let query = format!("{statement} WHERE rid = {rid} AND CONFIG('fixture.flag') = 'ready'");
+        assert!(
+            runtime.execute_query(&query).is_err(),
+            "identity predicate hid a read failure: {query}"
+        );
+        assert_eq!(
+            observe(&runtime, "SELECT id FROM expression_probe")[0].get("id"),
+            Some(&Value::Integer(1))
+        );
+        install_indexed_cold(&runtime, "red_config", 4096);
+        let retried = runtime
+            .execute_query(&query)
+            .expect("retry identity predicate");
+        assert_eq!(retried.affected_rows, 1);
+        let remaining = observe(&runtime, "SELECT id FROM expression_probe");
+        if statement.starts_with("UPDATE") {
+            assert_eq!(remaining[0].get("id"), Some(&Value::Integer(99)));
+        } else {
+            assert!(remaining.is_empty());
+        }
+    }
+}
+
+#[test]
+fn unreadable_config_dml_predicates_preserve_lazy_branches_and_limit() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    runtime
+        .execute_query("INSERT INTO expression_probe (id) VALUES (2), (3)")
+        .expect("lazy DML candidates");
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish lazy DML config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    for query in [
+        "UPDATE expression_probe SET id = 99 WHERE id < 0 AND CONFIG('fixture.flag') = 'ready'",
+        "DELETE FROM expression_probe WHERE id < 0 AND CONFIG('fixture.flag') = 'ready'",
+    ] {
+        assert_eq!(
+            runtime
+                .execute_query(query)
+                .expect("unvisited predicate")
+                .affected_rows,
+            0
+        );
+    }
+    let candidates =
+        super::dml_target_scan::DmlTargetScan::new(&runtime, "expression_probe", None, Some(1))
+            .find_target_ids()
+            .expect("first unordered candidate");
+    let first = runtime
+        .db()
+        .store()
+        .get("expression_probe", candidates[0])
+        .expect("candidate row");
+    let previous = first
+        .data
+        .as_row()
+        .expect("table row")
+        .get_field("id")
+        .cloned()
+        .expect("candidate value");
+    let query = format!("UPDATE expression_probe SET id = 11 WHERE rid = {} OR CONFIG('fixture.flag') = 'ready' LIMIT 1", first.logical_id().raw());
+    let updated = runtime
+        .execute_query(&query)
+        .expect("LIMIT stops before an unreadable later row");
+    assert_eq!(updated.affected_rows, 1);
+    let ids: Vec<_> = observe(&runtime, "SELECT id FROM expression_probe ORDER BY id")
+        .into_iter()
+        .map(|row| row.get("id").cloned().expect("remaining candidate id"))
+        .collect();
+    let mut expected: Vec<_> = (1..=3)
+        .map(Value::Integer)
+        .filter(|value| value != &previous)
+        .collect();
+    expected.push(Value::Integer(11));
+    assert_eq!(ids, expected);
+}

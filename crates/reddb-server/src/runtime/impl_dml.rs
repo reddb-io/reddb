@@ -2430,13 +2430,13 @@ impl RedDBRuntime {
                 continue;
             };
             if let Some(filter) = effective_filter {
-                if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                if !crate::runtime::query_exec::evaluate_entity_filter_result_with_db(
                     Some(self.inner.db.as_ref()),
                     &entity,
                     filter,
                     &query.table,
                     &query.table,
-                ) {
+                )? {
                     continue;
                 }
             }
@@ -2993,6 +2993,92 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::path::Path;
+
+    #[test]
+    fn locked_update_recheck_read_failure_preserves_preimages_and_retry() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::PagedCollection;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().expect("locked update fixture");
+        let options = RedDBOptions::persistent(directory.path().join("locked-update.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("locked update profile");
+        let runtime = RedDBRuntime::with_options(options).expect("locked update runtime");
+        for sql in [
+            "CREATE TABLE recheck_probe (id INTEGER)",
+            "INSERT INTO recheck_probe (id) VALUES (1), (2)",
+            "SET CONFIG fixture.flag = 'ready'",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let sql = "UPDATE recheck_probe SET id = id + 10 WHERE id = 1 OR CONFIG('fixture.flag') = 'ready'";
+        let reddb_rql::ast::QueryExpr::Update(query) =
+            reddb_rql::parse(sql).expect("parse update").query
+        else {
+            panic!("expected UPDATE");
+        };
+        let compiled = runtime.compile_update_plan(&query).expect("compile update");
+        let filter = reddb_rql::sql_lowering::effective_update_filter(&query);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &runtime,
+            "recheck_probe",
+            filter.as_ref(),
+            None,
+        )
+        .find_target_ids()
+        .expect("discover targets before failure");
+        assert_eq!(ids.len(), 2);
+        let store = runtime.db().store();
+        store.persist().expect("publish recheck configuration");
+        let root = store
+            .collection_root_page("red_config")
+            .expect("configuration root");
+        let manager = store
+            .get_collection("red_config")
+            .expect("configuration collection");
+        let install = |limit| {
+            let tree = BTree::with_root(Arc::clone(store.pager().expect("pager")), root);
+            manager.install_backing(
+                Arc::new(PagedCollection::new(Arc::new(tree))),
+                root,
+                store.format_version(),
+                limit,
+                manager.count() as u64,
+            );
+        };
+        let assert_ids = |expected: [i64; 2]| {
+            runtime.invalidate_result_cache();
+            let rows = runtime
+                .execute_query("SELECT id FROM recheck_probe ORDER BY id")
+                .expect("read preimages");
+            let actual: Vec<_> = rows
+                .result
+                .records
+                .iter()
+                .map(|row| row.get("id").cloned().expect("row value"))
+                .collect();
+            assert_eq!(actual, expected.map(Value::Integer));
+        };
+        // Candidate discovery has succeeded. Fail only the locked recheck,
+        // after the first row's postimage can already have been prepared.
+        install(1);
+        let error = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .err()
+            .expect("locked recheck must propagate its read failure");
+        assert!(error.to_string().contains("read memory limit"), "{error}");
+        install(4096);
+        assert_ids([1, 2]);
+        let retried = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .expect("retry locked recheck");
+        assert_eq!(retried.0.affected_rows, 2);
+        assert_ids([11, 12]);
+    }
 
     #[test]
     fn concurrent_constant_updates_leave_one_visible_row_per_logical_id() {
