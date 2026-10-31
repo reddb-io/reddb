@@ -74,6 +74,8 @@ pub trait CollectionRead {
         limit_bytes: usize,
     ) -> Result<Option<EncodedRecord>, StoreError>;
     fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError>;
+    /// The cursor retains its page-retirement fence independently of this handle.
+    fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError>;
 }
 
 /// A published generation; the host retains its existing page-retirement fence.
@@ -93,7 +95,7 @@ impl<P: PageStore> PagedCollection<P> {
     }
 }
 
-impl<P: PageStore> CollectionRead for PagedCollection<P> {
+impl<P: PageStore + 'static> CollectionRead for PagedCollection<P> {
     fn get_record(
         &self,
         id: EntityId,
@@ -106,6 +108,10 @@ impl<P: PageStore> CollectionRead for PagedCollection<P> {
     }
 
     fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+        Ok(Box::new(self.scan()?))
+    }
+
+    fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
         Ok(Box::new(self.scan()?))
     }
 }
@@ -181,6 +187,18 @@ impl CollectionRead for MergedCollection<'_> {
             overlay: self.overlay.iter().peekable(),
         }))
     }
+
+    fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+        let next = self
+            .overlay
+            .first_key_value()
+            .map(|(id, bytes)| (*id, bytes.clone()));
+        Ok(Box::new(OwnedMergedCursor {
+            base: self.base.owned_cursor()?,
+            overlay: Arc::clone(&self.overlay),
+            next,
+        }))
+    }
 }
 
 struct MergedCursor<'a> {
@@ -243,6 +261,83 @@ impl CollectionCursor for MergedCursor<'_> {
                 self.base.skip_record()?;
             }
             self.overlay.next();
+            return Ok(true);
+        }
+        self.base.skip_record()
+    }
+}
+
+struct OwnedMergedCursor {
+    base: Box<dyn CollectionCursor>,
+    overlay: Arc<FrozenOverlay>,
+    next: Option<(EntityId, Option<Arc<[u8]>>)>,
+}
+
+impl OwnedMergedCursor {
+    fn advance(&mut self) {
+        let Some((id, _)) = self.next.take() else {
+            return;
+        };
+        self.next = self
+            .overlay
+            .range((std::ops::Bound::Excluded(id), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(id, bytes)| (*id, bytes.clone()));
+    }
+}
+
+impl CollectionCursor for OwnedMergedCursor {
+    fn peek_id(&mut self) -> Result<Option<EntityId>, StoreError> {
+        loop {
+            let base = self.base.peek_id()?;
+            let Some((id, bytes)) = &self.next else {
+                return Ok(base);
+            };
+            if base.is_some_and(|base| base < *id) {
+                return Ok(base);
+            }
+            if bytes.is_some() {
+                return Ok(Some(*id));
+            }
+            if base == Some(*id) {
+                self.base.skip_record()?;
+            }
+            self.advance();
+        }
+    }
+    fn next_record(&mut self, limit_bytes: usize) -> Result<Option<EncodedRecord>, StoreError> {
+        let Some(id) = self.peek_id()? else {
+            return Ok(None);
+        };
+        if let Some((changed, Some(bytes))) = &self.next {
+            if *changed == id {
+                check_budget(bytes.len(), limit_bytes)?;
+                if self.base.peek_id()? == Some(id) {
+                    self.base.skip_record()?;
+                }
+                let record = EncodedRecord {
+                    id,
+                    bytes: bytes.to_vec(),
+                };
+                self.advance();
+                return Ok(Some(record));
+            }
+        }
+        self.base.next_record(limit_bytes)
+    }
+    fn skip_record(&mut self) -> Result<bool, StoreError> {
+        let Some(id) = self.peek_id()? else {
+            return Ok(false);
+        };
+        if self
+            .next
+            .as_ref()
+            .is_some_and(|(changed, _)| *changed == id)
+        {
+            if self.base.peek_id()? == Some(id) {
+                self.base.skip_record()?;
+            }
+            self.advance();
             return Ok(true);
         }
         self.base.skip_record()

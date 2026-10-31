@@ -46,6 +46,9 @@ pub(super) fn scan_runtime_table_source_records_limited(
         .store()
         .get_collection(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    if manager.has_backing() {
+        return scan_runtime_table_source_records_window(db, table, 0, usize::MAX);
+    }
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
 
     // A5 — parallel scan: for large unfiltered tables, collect entities once
@@ -62,8 +65,8 @@ pub(super) fn scan_runtime_table_source_records_limited(
         let hydrate_store = db.store();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
-        crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        crate::runtime::function_budget::try_scan(
+            |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |e| {
                 if db.replica_allows_entity_at_read(table, e) {
                     entities.push(e.clone());
@@ -141,8 +144,8 @@ pub(super) fn scan_runtime_table_source_records_window(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let schema = manager.column_schema();
     let mut remaining_offset = offset;
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if !db.replica_allows_entity_at_read(table, entity) {
                 return true;
@@ -179,8 +182,9 @@ pub(super) fn scan_runtime_universal_source_records_limited(
     // the snapshot so worker threads see the same MVCC view instead of
     // defaulting to "no snapshot" (every row visible).
     let snapshot = capture_current_snapshot();
-    let budget_collections =
-        crate::runtime::function_budget::active().then(|| db.store().list_collections());
+    let budget_collections = (crate::runtime::function_budget::active()
+        || db.store().config().resident_memory_bytes_max.is_some())
+    .then(|| db.store().list_collections());
     if let Some(collections) = candidate_collections.or(budget_collections.as_deref()) {
         let store = db.store();
         let mut records = match limit {
@@ -193,8 +197,8 @@ pub(super) fn scan_runtime_universal_source_records_limited(
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            crate::runtime::function_budget::scan(
-                |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+            crate::runtime::function_budget::try_scan(
+                |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
                 |entity| {
                     if records.len() >= limit.unwrap_or(usize::MAX) {
                         return false;
@@ -266,9 +270,66 @@ pub(crate) fn stream_runtime_table_source_scan(
     let table_name = table.to_string();
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    if manager.has_backing() && !crate::runtime::function_budget::active() {
+        let store = db.store();
+        let cursor = {
+            let _publication = store.vault_publication_lock.lock();
+            manager.try_paged_entity_cursor(snapshot.clone())?
+        };
+        if let Some(cursor) = cursor {
+            let is_replica = db.is_replica_role();
+            let schema = schema.clone();
+            let table = table_name.clone();
+            let mut source = cursor.filter_map(move |entry| {
+                let (entity, metadata) = match entry {
+                    Ok(record) => record,
+                    Err(error) => return Some(Err(RedDBError::from(error))),
+                };
+                if let Err(error) = crate::runtime::function_budget::charge(1) {
+                    return Some(Err(error));
+                }
+                if is_replica
+                    && metadata.as_ref().is_some_and(|metadata| {
+                        RedDB::entity_metadata_expired_at(
+                            &entity,
+                            metadata,
+                            crate::utils::now_unix_millis(),
+                        )
+                    })
+                {
+                    return None;
+                }
+                let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                    store.as_ref(),
+                    &entity,
+                );
+                let mut record =
+                    runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())?;
+                set_source_collection(&mut record, &table);
+                Some(Ok(record))
+            });
+            let first = source.next().transpose()?;
+            let columns = first
+                .as_ref()
+                .map(|record| {
+                    record
+                        .column_names()
+                        .into_iter()
+                        .map(|name| name.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(super::query_exec::RowStream::from_lazy(
+                columns,
+                crate::storage::query::unified::QueryStats::default(),
+                high_water_mark,
+                Box::new(first.into_iter().map(Ok).chain(source)),
+            ));
+        }
+    }
     let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if db.replica_allows_entity_at_read(table, entity) {
                 entities.push(entity.clone());

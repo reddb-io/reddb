@@ -367,3 +367,49 @@ fn typed_record_budget_is_shared_across_all_columns() {
     );
     assert!(record.decode_with_budget(11, 16 * 1024).is_ok());
 }
+
+#[test]
+fn owned_merged_cursor_survives_its_views_and_preserves_retry_position() {
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    for id in 1_u64..=4 {
+        tree.insert(&id.to_be_bytes(), b"base").expect("base");
+    }
+    tree.insert(&5_u64.to_be_bytes(), &noise(256 * 1024))
+        .expect("cold overflow");
+    let base = PagedCollection::new(tree);
+    let changes = FrozenOverlay::from([
+        (EntityId::new(1), Some(Arc::from(vec![b'x'; 16384]))),
+        (EntityId::new(2), None),
+        (EntityId::new(5), None),
+        (EntityId::new(6), Some(Arc::from(b"new".as_slice()))),
+    ]);
+    let merged = MergedCollection::new(&base, Arc::new(changes));
+    let mut cursor = merged.owned_cursor().expect("owned cursor");
+    drop(merged);
+    drop(base);
+    pages.overflow_reads.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        cursor.next_record(1024),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    assert_eq!(
+        cursor.peek_id().expect("same position"),
+        Some(EntityId::new(1))
+    );
+    assert_eq!(
+        cursor
+            .next_record(16384)
+            .expect("retry")
+            .expect("replacement")
+            .bytes
+            .len(),
+        16384
+    );
+    let mut ids = Vec::new();
+    while let Some(record) = cursor.next_record(4).expect("remaining bounded rows") {
+        ids.push(record.id.raw());
+    }
+    assert_eq!(ids, vec![3, 4, 6]);
+    assert_eq!(pages.overflow_reads.load(Ordering::Relaxed), 0);
+}

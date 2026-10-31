@@ -1,7 +1,9 @@
 //! Disk-backed collection state. Publication remains a host-owned write fence.
 
 use super::*;
-use crate::storage::collection_read::{CollectionRead, FrozenOverlay};
+use crate::storage::collection_read::{
+    CollectionCursor, CollectionRead, FrozenOverlay, MergedCollection,
+};
 use crate::storage::error::StoreError;
 use crate::storage::metadata_codec::serialize_entity_record;
 use std::collections::HashSet;
@@ -15,7 +17,85 @@ pub(super) struct BackingRead {
     pub removed: HashSet<EntityId>,
 }
 
+/// Frozen base/overlay cursor for a lazy query source. The source generation
+/// remains pinned through the owned page cursor, not a manager topology lock.
+pub struct PagedEntityCursor {
+    cursor: Box<dyn CollectionCursor>,
+    format_version: u32,
+    read_bytes_max: usize,
+    snapshot: Option<SnapshotContext>,
+    schema: Option<Arc<Vec<String>>>,
+    finished: bool,
+}
+
+impl Iterator for PagedEntityCursor {
+    type Item = Result<(UnifiedEntity, Option<Metadata>), StoreError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            let record = match self.cursor.next_record(self.read_bytes_max) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    self.finished = true;
+                    return None;
+                }
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            };
+            let (mut entity, metadata) =
+                match record.decode_with_budget(self.format_version, self.read_bytes_max) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        self.finished = true;
+                        return Some(Err(error));
+                    }
+                };
+            if !SegmentManager::scan_entity_visible(self.snapshot.as_ref(), &entity) {
+                continue;
+            }
+            if let super::super::entity::EntityData::Row(row) = &mut entity.data {
+                if row.named.is_none() && row.schema.is_none() {
+                    row.schema = self.schema.clone();
+                }
+            }
+            return Some(Ok((entity, metadata)));
+        }
+    }
+}
+
 impl SegmentManager {
+    /// The host must fence publication while capturing the base and overlay.
+    /// This retains O(dirty overlay) state and decodes at most one base row.
+    pub fn try_paged_entity_cursor(
+        &self,
+        snapshot: Option<SnapshotContext>,
+    ) -> Result<Option<PagedEntityCursor>, StoreError> {
+        let Some((format_version, read_bytes_max)) = self
+            .backing
+            .read()
+            .as_ref()
+            .map(|base| (base.format_version, base.read_bytes_max))
+        else {
+            return Ok(None);
+        };
+        let Some((base, overlay)) = self.current_backing_overlay() else {
+            return Ok(None);
+        };
+        let cursor = MergedCollection::new(base.as_ref(), overlay).owned_cursor()?;
+        Ok(Some(PagedEntityCursor {
+            cursor,
+            format_version,
+            read_bytes_max,
+            snapshot,
+            schema: self.column_schema(),
+            finished: false,
+        }))
+    }
+
     pub fn has_backing(&self) -> bool {
         self.backing.read().is_some()
     }
@@ -36,9 +116,11 @@ impl SegmentManager {
         let mut sealed = self.sealed.write();
         let mut retired = self.retired.write();
         if let Some(source) = growing.take() {
+            self.restore_sequence_id_next(source.read().sequence_id_next());
             retired.push(Arc::downgrade(&source));
         }
         for source in sealed.drain(..) {
+            self.restore_sequence_id_next(source.read().sequence_id_next());
             retired.push(Arc::downgrade(&source));
         }
         *consolidation = None;
@@ -70,8 +152,15 @@ impl SegmentManager {
         limit_bytes: usize,
     ) -> Result<Option<UnifiedEntity>, StoreError> {
         let backing = self.backing.read();
+        let limit_bytes = backing
+            .as_ref()
+            .map_or(limit_bytes, |base| limit_bytes.min(base.read_bytes_max));
         if let Some(result) = self.get_with(id, |entity| {
-            let required_bytes = crate::storage::memory_size::entity_bytes(entity);
+            let required_bytes = if limit_bytes == usize::MAX {
+                0
+            } else {
+                crate::storage::memory_size::entity_bytes(entity)
+            };
             if required_bytes > limit_bytes {
                 Err(StoreError::ReadLimitExceeded {
                     required_bytes,
@@ -201,6 +290,92 @@ impl SegmentManager {
             segments_scanned: 1,
             segments_pruned: 0,
         })
+    }
+
+    /// Preserve the resident projection fast path; cold mode streams candidates.
+    /// Hosts own admission for retained projections independently of row decoding.
+    pub fn try_scan_project_zoned_with_stats<T, F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        read_bytes_max: usize,
+        project: F,
+    ) -> Result<(Vec<T>, SegmentScanStats), StoreError>
+    where
+        T: Send,
+        F: Fn(&UnifiedEntity) -> Option<T> + Sync,
+    {
+        if !self.has_backing() {
+            return Ok(self.scan_project_zoned_with_stats(snapshot, zone_preds, project));
+        }
+        let mut projected = Vec::new();
+        let stats = self.try_scan_for_each_zoned_with_stats(
+            snapshot,
+            zone_preds,
+            read_bytes_max,
+            |entity| {
+                if let Some(value) = project(entity) {
+                    projected.push(value);
+                }
+                true
+            },
+        )?;
+        Ok((projected, stats))
+    }
+
+    /// Point-read allowance applies to each row. Hosts separately admit the
+    /// retained output vector; this method is not a global result quota.
+    pub fn try_get_many(
+        &self,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        if !self.has_backing() && read_bytes_max == usize::MAX {
+            return Ok(self.get_many(ids));
+        }
+        ids.iter()
+            .map(|id| self.try_get(*id, read_bytes_max))
+            .collect()
+    }
+
+    pub fn try_for_each_id(
+        &self,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+        mut visit: impl FnMut(usize, &UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        if self.has_backing() {
+            for (position, id) in ids.iter().enumerate() {
+                if let Some(entity) = self.try_get(*id, read_bytes_max)? {
+                    if !visit(position, &entity) {
+                        break;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let mut stopped = false;
+        let mut failure = None;
+        self.for_each_id(ids, |position, entity| {
+            if stopped {
+                return;
+            }
+            let required_bytes = if read_bytes_max == usize::MAX {
+                0
+            } else {
+                crate::storage::memory_size::entity_bytes(entity)
+            };
+            if required_bytes > read_bytes_max {
+                failure = Some(StoreError::ReadLimitExceeded {
+                    required_bytes,
+                    limit_bytes: read_bytes_max,
+                });
+                stopped = true;
+            } else {
+                stopped = !visit(position, entity);
+            }
+        });
+        failure.map_or(Ok(()), Err)
     }
 
     /// Inserts must not overwrite a physical identity in the published base.

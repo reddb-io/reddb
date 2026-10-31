@@ -559,6 +559,7 @@ impl UnifiedStore {
                         entities,
                         entity_id_next: entity_next,
                         row_id_next,
+                        sequence_id_next: manager.sequence_id_next(),
                     },
                 );
             }
@@ -1324,6 +1325,7 @@ impl UnifiedStore {
                             counters.entity_id_next,
                             counters.row_id_next,
                         );
+                        manager.restore_sequence_id_next(counters.sequence_id_next);
                     }
                     // Load B-tree with root page if it exists
                     if root_page > 0 {
@@ -1381,6 +1383,9 @@ impl UnifiedStore {
                                 }
                                 if self.config.resident_memory_bytes_max.is_some() {
                                     self.register_entity_id(id);
+                                    m.restore_sequence_id_next(
+                                        entity.sequence_id.saturating_add(1),
+                                    );
                                     m.restore_identity_counters(
                                         id.raw().saturating_add(1),
                                         m.identity_counters().1,

@@ -7,7 +7,7 @@ use crate::{RdbFileError, RdbFileResult, METADATA_HEADER_BYTES};
 use std::collections::BTreeMap;
 
 const MAGIC: &[u8; 4] = b"RDRS";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionResume {
@@ -15,6 +15,7 @@ pub struct CollectionResume {
     pub entities: u64,
     pub entity_id_next: u64,
     pub row_id_next: u64,
+    pub sequence_id_next: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +76,7 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
         out.extend_from_slice(&state.entities.to_le_bytes());
         out.extend_from_slice(&state.entity_id_next.to_le_bytes());
         out.extend_from_slice(&state.row_id_next.to_le_bytes());
+        out.extend_from_slice(&state.sequence_id_next.to_le_bytes());
     }
     Ok(())
 }
@@ -129,6 +131,7 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
             entities: read_u64(data, &mut position)?,
             entity_id_next: read_u64(data, &mut position)?,
             row_id_next: read_u64(data, &mut position)?,
+            sequence_id_next: read_u64(data, &mut position)?,
         };
         if roots.get(&root.collection) != Some(&state.root_page)
             || state.entity_id_next == 0
@@ -178,6 +181,7 @@ mod tests {
                     entities: 12,
                     entity_id_next: 999,
                     row_id_next: 3000,
+                    sequence_id_next: 5000,
                 },
             )]),
         }

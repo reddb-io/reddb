@@ -1177,6 +1177,19 @@ impl UnifiedStore {
         }
     }
 
+    /// Preserve I/O failures when fetching indexed query candidates.
+    pub fn try_get_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match self.get_collection(collection) {
+            Some(manager) => manager.try_get_many(ids, read_bytes_max),
+            None => Ok(vec![None; ids.len()]),
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
         self.resident.get_any(id)

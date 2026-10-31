@@ -749,6 +749,14 @@ impl GrowingSegment {
         }
     }
 
+    pub(super) fn sequence_id_next(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn restore_sequence_id_next(&self, next: u64) {
+        self.sequence.fetch_max(next, Ordering::SeqCst);
+    }
+
     /// Get next sequence number
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::SeqCst)

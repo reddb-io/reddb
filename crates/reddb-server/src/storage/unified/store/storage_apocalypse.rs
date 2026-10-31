@@ -34,6 +34,14 @@ fn config(grouped: bool) -> UnifiedStoreConfig {
         .with_page_cache_slots(4)
 }
 
+fn config_for_profile(grouped: bool, disk_residency: bool) -> UnifiedStoreConfig {
+    let mut config = config(grouped);
+    if disk_residency {
+        config.resident_memory_bytes_max = Some(128 * 1024);
+    }
+    config
+}
+
 // Independent deterministic payload oracle; do not derive expected values from storage.
 fn payload(collection: &str, id: u64, generation: u64) -> String {
     let len = match collection {
@@ -65,8 +73,8 @@ fn entity(collection: &str, id: u64, generation: u64) -> UnifiedEntity {
     )
 }
 
-fn seed(path: &Path, grouped: bool) {
-    let store = UnifiedStore::open_with_config(path, config(grouped)).unwrap();
+fn seed_with_config(path: &Path, config: UnifiedStoreConfig) {
+    let store = UnifiedStore::open_with_config(path, config).expect("seed configured profile");
     for collection in COLLECTIONS {
         store.create_collection(collection).unwrap();
         for id in 1..=ROWS {
@@ -172,10 +180,21 @@ fn assert_plateau(baseline: Space, now: Space, context: &str) {
     );
 }
 
-fn crash(path: &Path, grouped: bool, generation: u64, recovery: bool, hook: (&str, i32)) {
+fn crash(
+    path: &Path,
+    grouped: bool,
+    generation: u64,
+    recovery: bool,
+    disk_residency: bool,
+    hook: (&str, i32),
+) {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", TEST, "--nocapture"])
         .env(CHILD, path)
+        .env(
+            "REDDB_STORAGE_APOCALYPSE_DISK_RESIDENCY",
+            if disk_residency { "1" } else { "0" },
+        )
         .env(
             "REDDB_STORAGE_APOCALYPSE_GROUPED",
             if grouped { "1" } else { "0" },
@@ -205,7 +224,11 @@ fn crash(path: &Path, grouped: bool, generation: u64, recovery: bool, hook: (&st
 fn checkpoint_and_recovery_crash_matrix() {
     if let Some(path) = std::env::var_os(CHILD) {
         let grouped = std::env::var("REDDB_STORAGE_APOCALYPSE_GROUPED").unwrap() == "1";
-        let store = UnifiedStore::open_with_config(path, config(grouped)).unwrap();
+        let disk_residency =
+            std::env::var("REDDB_STORAGE_APOCALYPSE_DISK_RESIDENCY").as_deref() == Ok("1");
+        let store =
+            UnifiedStore::open_with_config(path, config_for_profile(grouped, disk_residency))
+                .expect("recover configured profile");
         assert_ne!(
             std::env::var("REDDB_STORAGE_APOCALYPSE_RECOVERY").unwrap(),
             "1",
@@ -219,33 +242,60 @@ fn checkpoint_and_recovery_crash_matrix() {
         store.persist().unwrap();
         panic!("checkpoint failpoint was not reached");
     }
+    run_checkpoint_crash_matrix(false);
+}
+
+#[test]
+fn cold_checkpoint_and_recovery_crash_matrix() {
+    run_checkpoint_crash_matrix(true);
+}
+
+fn run_checkpoint_crash_matrix(disk_residency: bool) {
     for grouped in [false, true] {
         for checkpoint in CHECKPOINT_FAULTS {
             for recovery in RECOVERY_FAULTS {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("data.rdb");
-                seed(&path, grouped);
+                seed_with_config(&path, config_for_profile(grouped, disk_residency));
                 let mut baseline = None;
                 for round in 1..=8 {
                     let generation = round * 2;
                     // Recovery can already drain the retirement ledger. Publish
                     // a distinct generation before EVERY attempt so all three
                     // retirement hooks have actual old pages to reclaim.
-                    let preparation =
-                        UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+                    let preparation = UnifiedStore::open_with_config(
+                        &path,
+                        config_for_profile(grouped, disk_residency),
+                    )
+                    .unwrap();
                     replace_with_durable_wal(&preparation, generation - 1);
                     preparation.persist().unwrap();
                     drop(preparation);
-                    crash(&path, grouped, generation, false, checkpoint);
+                    crash(
+                        &path,
+                        grouped,
+                        generation,
+                        false,
+                        disk_residency,
+                        checkpoint,
+                    );
                     // Fail recovery twice at the same boundary, except Finish (already durable).
                     for _ in 0..if recovery.1 == 189 { 1 } else { 2 } {
-                        crash(&path, grouped, generation, true, recovery);
+                        crash(&path, grouped, generation, true, disk_residency, recovery);
                     }
-                    let store = UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+                    let store = UnifiedStore::open_with_config(
+                        &path,
+                        config_for_profile(grouped, disk_residency),
+                    )
+                    .unwrap();
                     verify(&store, generation);
                     store.persist().unwrap();
                     drop(store);
-                    let store = UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+                    let store = UnifiedStore::open_with_config(
+                        &path,
+                        config_for_profile(grouped, disk_residency),
+                    )
+                    .unwrap();
                     verify(&store, generation);
                     drop(store);
                     let sample = space(&path);
@@ -268,13 +318,24 @@ fn checkpoint_and_recovery_crash_matrix() {
 
 #[test]
 fn delete_refill_and_overflow_resize_plateau() {
+    run_delete_refill_plateau(false, 16);
+}
+
+#[test]
+fn cold_delete_refill_and_overflow_resize_plateau_100_cycles() {
+    run_delete_refill_plateau(true, 100);
+}
+
+fn run_delete_refill_plateau(disk_residency: bool, cycles: u64) {
     for grouped in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("data.rdb");
-        seed(&path, grouped);
+        seed_with_config(&path, config_for_profile(grouped, disk_residency));
         let mut baselines = BTreeMap::new();
-        for cycle in 0..16 {
-            let store = UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+        for cycle in 0..cycles {
+            let store =
+                UnifiedStore::open_with_config(&path, config_for_profile(grouped, disk_residency))
+                    .unwrap();
             for collection in COLLECTIONS {
                 let ids: Vec<_> = (1..=ROWS).map(EntityId::new).collect();
                 assert_eq!(
@@ -284,7 +345,9 @@ fn delete_refill_and_overflow_resize_plateau() {
             }
             store.persist().unwrap();
             drop(store);
-            let store = UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+            let store =
+                UnifiedStore::open_with_config(&path, config_for_profile(grouped, disk_residency))
+                    .unwrap();
             for collection in COLLECTIONS {
                 assert_eq!(store.get_collection(collection).unwrap().count(), 0);
                 for id in 1..=ROWS {
@@ -305,7 +368,9 @@ fn delete_refill_and_overflow_resize_plateau() {
             }
             store.persist().unwrap();
             drop(store);
-            let store = UnifiedStore::open_with_config(&path, config(grouped)).unwrap();
+            let store =
+                UnifiedStore::open_with_config(&path, config_for_profile(grouped, disk_residency))
+                    .unwrap();
             if cycle % 2 == 1 {
                 verify(&store, cycle);
             } else {

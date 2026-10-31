@@ -100,6 +100,14 @@ impl RedDB {
             return false;
         };
 
+        Self::entity_metadata_expired_at(entity, &metadata, now_ms)
+    }
+
+    pub(crate) fn entity_metadata_expired_at(
+        entity: &crate::storage::UnifiedEntity,
+        metadata: &crate::storage::unified::metadata::Metadata,
+        now_ms: u64,
+    ) -> bool {
         if metadata
             .get("_expires_at")
             .and_then(Self::metadata_u64)

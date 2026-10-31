@@ -535,3 +535,136 @@ fn cold_base_rejects_duplicate_ids_in_sealed_mutation_overlay() {
     );
     assert_eq!(manager.count(), 9);
 }
+
+#[test]
+fn owned_cold_cursor_keeps_its_overlay_and_metadata_across_publication() {
+    use reddb_server::storage::{EntityData, Metadata, MetadataValue};
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("owned-cursor.rdb");
+    cold_fixture(&path);
+    let store = UnifiedStore::open_with_config(&path, cold_config()).expect("cold reopen");
+    let manager = store.get_collection("rows").expect("rows");
+    let mut row = store
+        .try_get("rows", EntityId::new(4), 128 * 1024)
+        .expect("read")
+        .expect("row");
+    let EntityData::Row(data) = &mut row.data else {
+        panic!("row")
+    };
+    data.columns[0] = Value::Integer(99);
+    manager.update(row).expect("overlay update");
+    let mut metadata = Metadata::new();
+    metadata.set("generation", MetadataValue::String("before".into()));
+    store
+        .set_metadata("rows", EntityId::new(7), metadata)
+        .expect("metadata before cursor");
+    let cursor = manager
+        .try_paged_entity_cursor(None)
+        .expect("capture")
+        .expect("cold cursor");
+    store
+        .delete("rows", EntityId::new(2))
+        .expect("delete after capture");
+    let mut metadata = Metadata::new();
+    metadata.set("generation", MetadataValue::String("after".into()));
+    store
+        .set_metadata("rows", EntityId::new(7), metadata)
+        .expect("new metadata");
+    store.persist().expect("publish successor");
+    store.persist().expect("retirement remains pinned");
+    let rows = cursor
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read captured generation");
+    assert_eq!(
+        rows.iter()
+            .map(|(entity, _)| entity.id.raw())
+            .collect::<Vec<_>>(),
+        (1..=8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows[3].0.data.as_row().expect("row").columns[0],
+        Value::Integer(99)
+    );
+    assert_eq!(
+        rows[6]
+            .1
+            .as_ref()
+            .expect("captured metadata")
+            .get("generation"),
+        Some(&MetadataValue::String("before".into()))
+    );
+    assert!(store
+        .try_get("rows", EntityId::new(2), 128 * 1024)
+        .expect("current generation")
+        .is_none());
+    assert_eq!(
+        manager
+            .try_get_metadata(EntityId::new(7), 128 * 1024)
+            .expect("new metadata")
+            .expect("metadata")
+            .get("generation"),
+        Some(&MetadataValue::String("after".into()))
+    );
+}
+
+#[test]
+fn cold_insert_preserves_sequence_order_after_reopen() {
+    for cold in [false, true] {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("sequence.rdb");
+        cold_fixture(&path);
+        let config = if cold {
+            cold_config()
+        } else {
+            UnifiedStoreConfig::default()
+        };
+        let store = UnifiedStore::open_with_config(&path, config).expect("reopen");
+        let previous = store
+            .try_get("rows", EntityId::new(8), 128 * 1024)
+            .expect("read")
+            .expect("last row")
+            .sequence_id;
+        let id = store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(0), "rows", 0, vec![Value::Integer(99)]),
+            )
+            .expect("successor");
+        let next = store
+            .try_get("rows", id, 128 * 1024)
+            .expect("read")
+            .expect("successor row")
+            .sequence_id;
+        assert!(
+            next > previous,
+            "cold={cold}: reopening must preserve sequence order: {previous} -> {next}"
+        );
+        if cold {
+            store.delete("rows", id).expect("delete highest sequence");
+            store.persist().expect("persist sequence high-water mark");
+            drop(store);
+            let store =
+                UnifiedStore::open_with_config(&path, cold_config()).expect("prepared reopen");
+            let successor = store
+                .insert_auto(
+                    "rows",
+                    UnifiedEntity::table_row(
+                        EntityId::new(0),
+                        "rows",
+                        0,
+                        vec![Value::Integer(100)],
+                    ),
+                )
+                .expect("next successor");
+            let sequence = store
+                .try_get("rows", successor, 128 * 1024)
+                .expect("read")
+                .expect("successor row")
+                .sequence_id;
+            assert!(
+                sequence > next,
+                "deleted sequence high-water must survive publication: {next} -> {sequence}"
+            );
+        }
+    }
+}

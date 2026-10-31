@@ -15,6 +15,7 @@
 #![allow(clippy::too_many_arguments)] // Relocated native host entrypoints.
 
 mod backing;
+pub use backing::PagedEntityCursor;
 mod graph_index_merge;
 
 use parking_lot::RwLock;
@@ -217,6 +218,7 @@ pub struct SegmentManager {
     next_segment_id: AtomicU64,
     /// Next entity ID counter
     next_entity_id: AtomicU64,
+    next_sequence_id: AtomicU64,
     /// Per-table auto-increment row ID (1, 2, 3... per collection)
     next_row_id: AtomicU64,
     /// Hot-path entity counter — lock-free, updated by every insert/delete.
@@ -272,6 +274,7 @@ impl SegmentManager {
             config,
             next_segment_id: AtomicU64::new(1),
             next_entity_id: AtomicU64::new(1),
+            next_sequence_id: AtomicU64::new(0),
             next_row_id: AtomicU64::new(1),
             total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
@@ -491,6 +494,21 @@ impl SegmentManager {
         self.next_row_id.fetch_max(row_id_next, Ordering::SeqCst);
     }
 
+    pub fn sequence_id_next(&self) -> u64 {
+        let mut next = self.next_sequence_id.load(Ordering::SeqCst);
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        for segment in growing.iter().chain(sealed.iter()) {
+            next = next.max(segment.read().sequence_id_next());
+        }
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
+        next
+    }
+
+    pub fn restore_sequence_id_next(&self, next: u64) {
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
+    }
+
     /// Generate a per-table sequential row ID (1, 2, 3... per collection)
     pub fn next_row_id(&self) -> u64 {
         self.next_row_id.fetch_add(1, Ordering::SeqCst)
@@ -546,6 +564,7 @@ impl SegmentManager {
 
         let id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
         let segment = GrowingSegment::new(id, &self.collection);
+        segment.restore_sequence_id_next(self.next_sequence_id.load(Ordering::SeqCst));
         let segment_arc = Arc::new(RwLock::new(segment));
         *growing = Some(Arc::clone(&segment_arc));
 
@@ -1523,11 +1542,16 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
+        let disk_residency = self.has_backing();
         // Keep topology publication atomic for cursors that capture growing
         // and sealed under the same lock order: growing, then sealed.
         let mut growing_slot = self.growing.write();
         if let Some(growing_arc) = growing_slot.take() {
             let mut growing = growing_arc.write();
+            if disk_residency {
+                self.next_sequence_id
+                    .fetch_max(growing.sequence_id_next(), Ordering::SeqCst);
+            }
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
 

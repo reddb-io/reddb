@@ -35,7 +35,7 @@ The runtime's fallible scan adapter propagates storage errors alongside CALL/que
 work-budget errors, including when no CALL budget is installed.
 
 Prepared files carry checksummed resume counters alongside their exact collection
-roots: physical counts and entity/row identity high-water marks. A preparation scan
+roots: physical counts and entity/row/sequence allocator high-water marks. A preparation scan
 is still required for legacy files. Prepared boot follows metadata and one tree
 path, without decoding collection payloads; a short committed WAL remains as a
 resident overlay until checkpoint publication. Repeated opens retain that WAL.
