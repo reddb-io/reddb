@@ -72,15 +72,17 @@ jobs:
         run: cargo build --locked --bin red
       - name: Recover acknowledged RedWire KV writes after forced termination
         if: ${{ !cancelled() }}
-        run: REDDB_TEST_BINARY=target/debug/red python scripts/test-native-kv-crash-recovery.py --output target/storage-recovery/redwire
+        # The Rust target cache may contain retained fixtures from an older run.
+        # Keep strict fresh-directory admission and put new fixtures outside it.
+        run: REDDB_TEST_BINARY=target/debug/red python scripts/test-native-kv-crash-recovery.py --output "$RUNNER_TEMP/reddb-redwire-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Preserve reproduction and space measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: storage-recovery-${{ github.run_id }}
+          name: storage-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/storage-recovery/*.log
-            target/storage-recovery/redwire/
+            ${{ runner.temp }}/reddb-redwire-recovery-${{ github.run_id }}-${{ github.run_attempt }}/
 
   windows-kv-recovery:
     name: Windows KV acknowledged-write recovery
@@ -109,11 +111,11 @@ jobs:
         run: cargo build --locked --bin red
       - name: Recover acknowledged RedWire KV writes after TerminateProcess
         shell: bash
-        run: REDDB_TEST_BINARY=target/debug/red.exe python scripts/test-native-kv-crash-recovery.py --output target/storage-recovery/redwire
+        run: REDDB_TEST_BINARY=target/debug/red.exe python scripts/test-native-kv-crash-recovery.py --output "$RUNNER_TEMP/reddb-redwire-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: storage-recovery-windows-${{ github.run_id }}
+          name: storage-recovery-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/storage-recovery/*.log
-            target/storage-recovery/redwire/
+            ${{ runner.temp }}/reddb-redwire-recovery-${{ github.run_id }}-${{ github.run_attempt }}/
