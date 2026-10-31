@@ -14,7 +14,17 @@ The motivating Platform measurement retained 2,366,465,376 bytes in segments for
 A published B-tree generation supplies fallible point reads and ordered cursors.
 Encoded overflow/compression allocations are rejected before expansion when they
 exceed the caller's byte allowance. Physical keys must match decoded entity IDs.
-Budget failures do not advance the cursor; I/O/corruption must fail the operation.
+Encoded cursor budget failures do not advance the cursor; I/O/corruption must fail
+the operation. Typed decoding additionally admits encoded input, expanded native
+text/blob values, vectors, arrays, maps, metadata and auxiliary entity containers
+before their allocation. All fields share one local decode allowance; bounded
+native-value denial preserves its source position for retry. Native record/value
+bytes remain unchanged. Hosts must still reserve these local allowances against
+the global scratch budget, including transient codec contexts and transport data.
+
+Decoder cost sketch: one O(encoded entity) parse with O(1) admission per allocation,
+plus an O(encoded metadata) preflight using a fixed depth-bounded explicit stack;
+metadata is usually absent. This is not measured hot-query performance evidence.
 
 A cold collection retains its immutable base and a resident mutation overlay.
 Cold updates materialize their target row; physical deletion masks its base row.

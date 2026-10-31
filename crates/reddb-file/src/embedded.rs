@@ -29,6 +29,10 @@ pub const DEFAULT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum RdbFileError {
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     InvalidOperation(String),
     Io(std::io::Error),
     /// A named zone of the `.rdb` cannot be trusted, so the store does not
@@ -43,6 +47,13 @@ pub enum RdbFileError {
 impl std::fmt::Display for RdbFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "native decode needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::ZoneUnrecoverable { zone, path } => write!(

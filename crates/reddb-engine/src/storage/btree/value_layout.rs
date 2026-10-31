@@ -229,11 +229,7 @@ pub fn decode_with_budget<P: PageStore>(
 }
 
 fn compressed_output_bytes(bytes: &[u8]) -> Result<usize, ValueLayoutError> {
-    let header = bytes.get(..4).ok_or(ValueLayoutError::Codec(
-        value_codec::ValueCodecError::TruncatedHeader,
-    ))?;
-    let decoded_bytes = u32::from_le_bytes(header.try_into().expect("four-byte length header"));
-    usize::try_from(decoded_bytes).map_err(|_| ValueLayoutError::ValueTooLarge(usize::MAX))
+    value_codec::decoded_length(value_codec::ValueFlag::Lz4, bytes).map_err(ValueLayoutError::Codec)
 }
 
 fn check_read_budget(required_bytes: usize, limit_bytes: usize) -> Result<(), ValueLayoutError> {

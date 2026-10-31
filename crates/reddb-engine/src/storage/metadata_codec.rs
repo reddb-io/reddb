@@ -1,4 +1,6 @@
 //! Canonical native metadata bytes and entity-record adapter, shared with WASM.
+#[path = "metadata_codec/budget.rs"]
+mod budget;
 use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataValue};
 
@@ -323,5 +325,40 @@ fn read_metadata_value(data: &[u8], pos: &mut usize, depth: u32) -> Result<Metad
             Ok(MetadataValue::References(targets))
         }
         tag => Err(invalid(format!("unknown metadata value tag {tag}"))),
+    }
+}
+
+/// Admit native value expansion and metadata containers before allocation.
+pub fn deserialize_entity_record_with_budget(
+    data: &[u8],
+    version: u32,
+    budget: &mut reddb_file::native_value::DecodeBudget,
+) -> Result<(UnifiedEntity, Option<Metadata>), super::error::StoreError> {
+    use super::error::StoreError;
+    let frame = reddb_file::decode_native_entity_record_frame(data).map_err(decode_error)?;
+    let (entity_bytes, metadata_bytes) =
+        frame.map_or((data, &[][..]), |frame| (frame.entity, frame.metadata));
+    let entity =
+        super::entity_codec::read_entity_binary_with_budget(entity_bytes, &mut 0, version, budget)
+            .map_err(decode_error)?;
+    let metadata = if metadata_bytes.is_empty() {
+        None
+    } else {
+        self::budget::admit(metadata_bytes, budget).map_err(decode_error)?;
+        Some(deserialize_metadata(metadata_bytes).map_err(StoreError::Serialization)?)
+    };
+    Ok((entity, metadata))
+}
+
+pub(super) fn decode_error(error: reddb_file::RdbFileError) -> super::error::StoreError {
+    match error {
+        reddb_file::RdbFileError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        } => super::error::StoreError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        },
+        other => super::error::StoreError::Serialization(other.to_string()),
     }
 }

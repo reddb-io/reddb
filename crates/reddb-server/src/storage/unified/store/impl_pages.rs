@@ -1362,10 +1362,18 @@ impl UnifiedStore {
                                 id: EntityId::new(u64::from_be_bytes(key_bytes)),
                                 bytes: value,
                             };
-                            let (entity, metadata) =
-                                record.decode(self.format_version()).map_err(|err| {
-                                    page_integrity(root_page, Some(name.clone()), err.to_string())
-                                })?;
+                            let decoded = if let Some(limit) = self.config.resident_memory_bytes_max
+                            {
+                                record.decode_with_budget(
+                                    self.format_version(),
+                                    usize::try_from(limit).unwrap_or(usize::MAX),
+                                )
+                            } else {
+                                record.decode(self.format_version())
+                            };
+                            let (entity, metadata) = decoded.map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?;
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {

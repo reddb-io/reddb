@@ -97,7 +97,10 @@ impl SegmentManager {
         else {
             return Ok(None);
         };
-        let (mut entity, _) = record.decode(backing.format_version)?;
+        let (mut entity, _) = record.decode_with_budget(
+            backing.format_version,
+            limit_bytes.min(backing.read_bytes_max),
+        )?;
         self.restore_owned_row_schemas(std::iter::once(&mut entity));
         Ok(Some(entity))
     }
@@ -158,7 +161,10 @@ impl SegmentManager {
             let record = cursor
                 .next_record(limit_bytes)?
                 .expect("invariant: peeked physical row exists");
-            let (mut entity, _) = record.decode(backing.format_version)?;
+            let (mut entity, _) = record.decode_with_budget(
+                backing.format_version,
+                limit_bytes.min(backing.read_bytes_max),
+            )?;
             self.restore_owned_row_schemas(std::iter::once(&mut entity));
             if !callback(&entity) {
                 return Ok(());
@@ -236,7 +242,10 @@ impl SegmentManager {
             .get_record(id, limit_bytes.min(backing.read_bytes_max))?
             .map(|record| {
                 record
-                    .decode(backing.format_version)
+                    .decode_with_budget(
+                        backing.format_version,
+                        limit_bytes.min(backing.read_bytes_max),
+                    )
                     .map(|(_, metadata)| metadata)
             })
             .transpose()
@@ -260,7 +269,10 @@ impl SegmentManager {
                 .get_record(id, backing.read_bytes_max)
                 .and_then(|record| {
                     record
-                        .map(|record| record.decode(backing.format_version))
+                        .map(|record| {
+                            record
+                                .decode_with_budget(backing.format_version, backing.read_bytes_max)
+                        })
                         .transpose()
                 })
                 .map_err(|error| SegmentError::BackingRead(error.to_string()))?

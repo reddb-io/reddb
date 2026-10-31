@@ -518,3 +518,20 @@ fn prepared_short_wal_boot_does_not_rebuild_unrelated_cold_payloads() {
         // hook may erase replay evidence before publishing its row images.
     }
 }
+
+#[test]
+fn cold_base_rejects_duplicate_ids_in_sealed_mutation_overlay() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("sealed-overlay.rdb");
+    cold_fixture(&path);
+    let store = UnifiedStore::open_with_config(&path, cold_config()).expect("cold reopen");
+    let manager = store.get_collection("rows").expect("rows");
+    let row = UnifiedEntity::table_row(EntityId::new(9), "rows", 27, vec![Value::Integer(9)]);
+    manager.insert(row.clone()).expect("new overlay identity");
+    manager.force_seal().expect("seal mutation overlay");
+    assert!(
+        manager.insert(row).is_err(),
+        "sealing must not make an occupied physical identity available"
+    );
+    assert_eq!(manager.count(), 9);
+}

@@ -291,3 +291,79 @@ fn paged_cursor_outlives_the_read_handle_without_hydrating_the_collection() {
     }
     assert!(cursor.next_record(0).expect("end").is_none());
 }
+
+#[test]
+fn typed_record_budget_includes_native_expansion_and_metadata_containers() {
+    use reddb_engine::storage::collection_read::EncodedRecord;
+    use reddb_engine::storage::metadata::{Metadata, MetadataValue};
+    use reddb_types::Value;
+    let id = EntityId::new(7);
+    let entity = UnifiedEntity::table_row(id, "rows", 7, vec![Value::text("x".repeat(32 * 1024))]);
+    let record = EncodedRecord {
+        id,
+        bytes: serialize_entity_record(&entity, None, 11),
+    };
+    assert!(record.bytes.len() < 4096);
+    assert!(matches!(
+        record.decode_with_budget(11, 4096),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    let (decoded, _) = record
+        .decode_with_budget(11, 128 * 1024)
+        .expect("admitted expanded value");
+    assert_eq!(
+        decoded.data.as_row().expect("decoded row").columns,
+        entity.data.as_row().expect("original row").columns
+    );
+
+    let entity = UnifiedEntity::table_row(id, "rows", 7, vec![Value::Null]);
+    let mut metadata = Metadata::new();
+    metadata.set(
+        "items",
+        MetadataValue::Array(vec![MetadataValue::Null; 1024]),
+    );
+    let record = EncodedRecord {
+        id,
+        bytes: serialize_entity_record(&entity, Some(&metadata), 11),
+    };
+    assert!(record.bytes.len() < 4096);
+    assert!(matches!(
+        record.decode_with_budget(11, 4096),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    assert_eq!(
+        record
+            .decode_with_budget(11, 256 * 1024)
+            .expect("admitted metadata")
+            .1
+            .expect("metadata")
+            .fields,
+        metadata.fields
+    );
+}
+
+#[test]
+fn typed_record_budget_is_shared_across_all_columns() {
+    use reddb_engine::storage::collection_read::EncodedRecord;
+    use reddb_types::Value;
+    let id = EntityId::new(1);
+    let entity = UnifiedEntity::table_row(
+        id,
+        "rows",
+        1,
+        vec![Value::text("a".repeat(2048)), Value::text("b".repeat(2048))],
+    );
+    let record = EncodedRecord {
+        id,
+        bytes: serialize_entity_record(&entity, None, 11),
+    };
+    assert!(record.bytes.len() < 1024);
+    assert!(
+        matches!(
+            record.decode_with_budget(11, 6000),
+            Err(StoreError::ReadLimitExceeded { .. })
+        ),
+        "columns cannot each spend the complete decoder allowance"
+    );
+    assert!(record.decode_with_budget(11, 16 * 1024).is_ok());
+}

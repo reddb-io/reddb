@@ -18,11 +18,37 @@ pub struct EncodedRecord {
 }
 
 impl EncodedRecord {
+    /// The allowance covers encoded input plus retained decoded allocations.
+    /// A host must reserve the same allowance in its global scratch pool.
+    pub fn decode_with_budget(
+        &self,
+        version: u32,
+        limit_bytes: usize,
+    ) -> Result<(UnifiedEntity, Option<Metadata>), StoreError> {
+        let mut budget = reddb_file::native_value::DecodeBudget::new(limit_bytes);
+        budget
+            .charge(self.bytes.len())
+            .map_err(super::metadata_codec::decode_error)?;
+        let record = super::metadata_codec::deserialize_entity_record_with_budget(
+            &self.bytes,
+            version,
+            &mut budget,
+        )?;
+        self.validate_identity(record)
+    }
+
     /// Typed decoding is separate from byte admission; hosts must also reserve
     /// space for decoded values in their shared query memory account.
     pub fn decode(&self, version: u32) -> Result<(UnifiedEntity, Option<Metadata>), StoreError> {
         let record =
             deserialize_entity_record(&self.bytes, version).map_err(StoreError::Serialization)?;
+        self.validate_identity(record)
+    }
+
+    fn validate_identity(
+        &self,
+        record: (UnifiedEntity, Option<Metadata>),
+    ) -> Result<(UnifiedEntity, Option<Metadata>), StoreError> {
         if record.0.id != self.id {
             return Err(StoreError::StorageIntegrity(StorageIntegrityError::new(
                 "collection-record",

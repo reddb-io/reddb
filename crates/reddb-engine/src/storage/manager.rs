@@ -564,6 +564,9 @@ impl SegmentManager {
             entity.id = self.next_entity_id();
         }
         self.reject_backing_duplicate(entity.id)?;
+        if self.has_backing() && self.get_with(entity.id, |_| ()).is_some() {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
         self.next_entity_id
             .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
         // Check if we need to seal the current segment first
