@@ -187,7 +187,19 @@ impl RedDBServer {
                 } else if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            writer.write_all(
+                                &json_error_code(status, "stream_config_unavailable", message)
+                                    .to_http_bytes(),
+                            )?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,
@@ -215,7 +227,19 @@ impl RedDBServer {
                     // handler call so success / mid-stream error /
                     // snapshot expiry / panic unwind all release the
                     // slot through Drop.
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            writer.write_all(
+                                &json_error_code(status, "stream_config_unavailable", message)
+                                    .to_http_bytes(),
+                            )?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,

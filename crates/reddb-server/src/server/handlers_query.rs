@@ -521,7 +521,16 @@ impl RedDBServer {
         }
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
         let resumable = output_stream::assess_resumability(&query);
 
         // For a resume request, the snapshot_lsn comes from the client
@@ -864,7 +873,16 @@ impl RedDBServer {
         };
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
         // Issue #765 / S6 — opt-in end-to-end SHA-256. The open frame may
         // request `verify` ("sha256" / "none"); absent that, the
         // `stream.integrity.default_verify` config applies. When disabled
@@ -1373,7 +1391,16 @@ impl RedDBServer {
         use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                writer.write_all(
+                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
+                )?;
+                return writer.flush();
+            }
+        };
 
         // Issue #807 / 750c — resume vs fresh open. A body carrying
         // `{"cursor":"<token>"}` resumes a prior stream: the pinned query
@@ -2492,6 +2519,12 @@ mod tests {
                 &crate::serde_json::Value::String("[]".to_string()),
             )
             .expect("tombstones");
+        store
+            .try_set_config_tree(
+                "stream.integrity.default_verify",
+                &crate::serde_json::Value::String("sha256".into()),
+            )
+            .expect("persisted verification default");
         store.persist().expect("publish tombstones");
         let manager = store.get_collection("red_config").expect("config");
         let pager = Arc::clone(store.pager().expect("pager"));
@@ -2536,10 +2569,7 @@ mod tests {
             )
             .expect("HTTP response");
         let response = String::from_utf8(response).expect("HTTP text");
-        assert!(
-            response.contains("integrity_state_unavailable"),
-            "{response}"
-        );
+        assert!(response.contains("stream_config_unavailable"), "{response}");
         assert!(
             !response.starts_with("HTTP/1.1 200"),
             "unavailable integrity state must reject ingress"
@@ -2681,6 +2711,47 @@ mod tests {
             response.contains(&expected),
             "large quarantine IDs must not round through f64: {response}"
         );
+    }
+
+    #[test]
+    fn cold_stream_config_http_ingest_honors_persisted_verification_default() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let server = RedDBServer::new(runtime.clone());
+        let body = String::from_utf8(VERIFIED_INGEST.to_vec())
+            .expect("fixture text")
+            .replace(",\"verify\":\"sha256\"", "");
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                body.into_bytes(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(
+            response.contains("integrity_failed"),
+            "cold persisted default must enable digest verification: {response}"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("cold_ingest")
+                .expect("table")
+                .count(),
+            1,
+            "quarantine preserves the committed physical row"
+        );
+        assert!(runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("filtered read")
+            .result
+            .records
+            .is_empty());
     }
 
     fn make_server() -> RedDBServer {

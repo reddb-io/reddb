@@ -569,7 +569,21 @@ where
                         }
                     };
                     let in_tx = runtime.connection_in_transaction(connection.id());
-                    let config = crate::server::output_stream::StreamConfig::load(&runtime);
+                    let config = match crate::server::output_stream::StreamConfig::load(&runtime) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let err = is::build_input_stream_error_frame(
+                                frame_id,
+                                sid,
+                                "stream_config_unavailable",
+                                &error.to_string(),
+                                0,
+                                runtime.cdc_current_lsn(),
+                            )?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            continue;
+                        }
+                    };
                     let snapshot_lsn = runtime.cdc_current_lsn();
                     let clock = crate::server::output_stream::SystemClock;
                     let lease = match is::open_input_lease(config, snapshot_lsn, in_tx, &clock) {

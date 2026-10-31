@@ -844,3 +844,155 @@ fn cold_integrity_persist_failure_is_reported_and_keeps_local_quarantine() {
         )]
     );
 }
+
+#[test]
+fn cold_stream_config_keeps_persisted_limits_and_integrity_mode() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    for (key, value) in [
+        ("stream.snapshot.ttl_ms", crate::serde_json::json!(1234)),
+        ("stream.chunk.max_rows", crate::serde_json::json!(7)),
+        ("stream.max_global", crate::serde_json::json!(3)),
+        ("stream.max_per_principal", crate::serde_json::json!(2)),
+        (
+            "stream.integrity.default_verify",
+            crate::serde_json::json!("sha256"),
+        ),
+    ] {
+        store
+            .try_set_config_tree(key, &value)
+            .expect("stream setting");
+    }
+    store.persist().expect("publish settings");
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    let config =
+        crate::server::output_stream::StreamConfig::load(&runtime).expect("cold stream config");
+    assert_eq!(
+        config.default_verify,
+        super::integrity_tombstone::VerifyMode::Sha256
+    );
+    assert_eq!(config.snapshot_ttl_ms, 1234);
+    assert_eq!(config.chunk_max_rows, 7);
+    assert_eq!(config.max_global_streams, 3);
+    assert_eq!(config.max_per_principal_streams, 2);
+    let lease = crate::server::output_stream::open_stream(
+        config,
+        0,
+        false,
+        &crate::server::output_stream::SystemClock,
+    )
+    .expect("open frozen lease");
+    store
+        .try_set_config_tree(
+            "stream.chunk.max_rows",
+            &crate::serde_json::Value::Integer(1),
+        )
+        .expect("next lease setting");
+    assert_eq!(
+        lease.config.chunk_max_rows, 7,
+        "an open lease keeps its settings"
+    );
+    assert_eq!(
+        crate::server::output_stream::StreamConfig::load(&runtime)
+            .expect("next config")
+            .chunk_max_rows,
+        1
+    );
+}
+
+#[test]
+fn cold_stream_config_read_failure_remains_retryable() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    store
+        .try_set_config_tree(
+            "stream.integrity.default_verify",
+            &crate::serde_json::Value::String("sha256".into()),
+        )
+        .expect("verification setting");
+    store.persist().expect("publish setting");
+    install_indexed_cold(&runtime, "red_config", 1);
+    assert!(crate::server::output_stream::StreamConfig::load(&runtime).is_err());
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    assert_eq!(
+        crate::server::output_stream::StreamConfig::load(&runtime)
+            .expect("recovered config")
+            .default_verify,
+        super::integrity_tombstone::VerifyMode::Sha256
+    );
+}
+
+#[test]
+fn cold_stream_config_rejects_invalid_limits_and_verification_modes() {
+    for (key, value) in [
+        ("stream.max_global", crate::serde_json::Value::Bool(true)),
+        (
+            "stream.chunk.max_rows",
+            crate::serde_json::Value::Integer(-1),
+        ),
+        (
+            "stream.snapshot.ttl_ms",
+            crate::serde_json::Value::String("not-a-number".into()),
+        ),
+        (
+            "stream.integrity.default_verify",
+            crate::serde_json::Value::String("unknown".into()),
+        ),
+        (
+            "stream.integrity.default_verify",
+            crate::serde_json::Value::Bool(false),
+        ),
+    ] {
+        let (_directory, runtime) = runtime();
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree(key, &value)
+            .expect("invalid persisted setting");
+        store.persist().expect("publish fixture");
+        install_indexed_cold(&runtime, "red_config", 128 * 1024);
+        let error = crate::server::output_stream::StreamConfig::load(&runtime)
+            .expect_err("must not silently fall back");
+        assert!(error.to_string().contains(key), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn cold_stream_config_redwire_refuses_before_open_ack() {
+    use crate::wire::redwire::output_stream::{parse_open_stream, run_output_stream, FrameTx};
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    store
+        .try_set_config_tree(
+            "stream.integrity.default_verify",
+            &crate::serde_json::Value::String("sha256".into()),
+        )
+        .expect("verification setting");
+    store.persist().expect("publish setting");
+    install_indexed_cold(&runtime, "red_config", 1);
+    let (send, mut receive) = tokio::sync::mpsc::channel(8);
+    let (_cancel, cancel) = tokio::sync::oneshot::channel();
+    run_output_stream(
+        Arc::new(runtime),
+        37,
+        11,
+        parse_open_stream(br#"{"sql":"SELECT 1"}"#).expect("open request"),
+        false,
+        cancel,
+        FrameTx::new(send),
+        crate::application::OperationContext::read_only("fixture"),
+        crate::auth::Role::Read,
+    )
+    .await;
+    let bytes = receive.recv().await.expect("configuration error frame");
+    let (frame, consumed) =
+        reddb_wire::redwire::decode_frame(&bytes).expect("encoded RedWire response");
+    assert_eq!(consumed, bytes.len());
+    assert_eq!(frame.kind, reddb_wire::redwire::MessageKind::StreamError);
+    assert_eq!(frame.correlation_id, 37);
+    assert_eq!(frame.stream_id, 11);
+    assert!(String::from_utf8_lossy(&frame.payload).contains("stream_config_unavailable"));
+    assert!(
+        receive.recv().await.is_none(),
+        "unavailable config must not accept a lease or execute a query"
+    );
+}
