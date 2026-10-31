@@ -991,8 +991,13 @@ impl StoreCommitCoordinator {
             .pager
             .as_ref()
             .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        let format_version = if store.config.resident_memory_bytes_max.is_some() {
+            reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        } else {
+            reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION
+        };
         pager
-            .fence_file_format_version(reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION)
+            .fence_file_format_version(format_version)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let coordinator = Arc::clone(
             store
@@ -1144,6 +1149,12 @@ impl StoreCommitCoordinator {
             store.remember_checkpoint_rows(vec![action], Default::default());
         }
 
+        if applied && store.config.resident_memory_bytes_max.is_some() {
+            // The immutable base plus committed WAL overlay is authoritative.
+            // Keep the WAL until a paced checkpoint publishes the replacement;
+            // boot must not copy every cold payload for a few replayed rows.
+            return Ok(());
+        }
         if applied {
             // Opening is exclusive: no client can mutate published trees
             // while replay constructs replacement generations.

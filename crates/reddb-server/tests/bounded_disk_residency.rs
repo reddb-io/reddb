@@ -391,3 +391,130 @@ fn cold_writes_leave_captured_published_generation_unchanged() {
         .expect("current read")
         .is_none());
 }
+
+#[test]
+fn cold_checkpoint_preserves_deleted_identity_high_water_marks() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("identity-high-water.rdb");
+    cold_fixture(&path);
+    {
+        let store = UnifiedStore::open_with_config(&path, cold_config()).expect("cold reopen");
+        store
+            .delete("rows", EntityId::new(8))
+            .expect("delete highest identity");
+        store
+            .persist()
+            .expect("checkpoint without highest identity");
+    }
+    let store = UnifiedStore::open_with_config(&path, cold_config()).expect("cold reopen");
+    let id = store
+        .insert_auto(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(0), "rows", 0, vec![Value::Integer(99)]),
+        )
+        .expect("allocate successor");
+    assert!(
+        id.raw() > 8,
+        "deleted physical identities must not be reused: {id}"
+    );
+    let entity = store
+        .try_get("rows", id, 128 * 1024)
+        .expect("read")
+        .expect("row");
+    assert!(
+        matches!(entity.kind, reddb_server::storage::EntityKind::TableRow { row_id, .. } if row_id > 24),
+        "deleted row identities must not be reused"
+    );
+}
+
+#[test]
+fn prepared_boot_uses_resume_metadata_without_decoding_rows() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("prepared.rdb");
+    cold_fixture(&path);
+    {
+        let store =
+            UnifiedStore::open_with_config(&path, cold_config()).expect("legacy preparation");
+        store.create_collection("empty").expect("empty collection");
+        store.persist().expect("prepare resume counters");
+    }
+    assert!(
+        UnifiedStore::open(&path).is_err(),
+        "resident writers must refuse prepared immutable-base files"
+    );
+    let mut config = cold_config();
+    config.resident_memory_bytes_max = Some(1);
+    let store = UnifiedStore::open_with_config(&path, config)
+        .expect("prepared boot does not decode any row");
+    assert_eq!(store.get_collection("rows").expect("rows").count(), 8);
+    assert_eq!(store.get_collection("empty").expect("empty").count(), 0);
+    assert!(
+        store.try_get("rows", EntityId::new(1), 1).is_err(),
+        "the same allowance rejects an actual record read"
+    );
+}
+
+#[test]
+fn prepared_short_wal_boot_does_not_rebuild_unrelated_cold_payloads() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("short-wal.rdb");
+    cold_fixture(&path);
+    {
+        let store = UnifiedStore::open(&path).expect("seed large cold row");
+        store
+            .get_collection("rows")
+            .expect("rows")
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(9),
+                "rows",
+                27,
+                vec![Value::Blob(
+                    (0..32 * 1024)
+                        .scan(0x1234_5678_u32, |state, _| {
+                            *state ^= *state << 13;
+                            *state ^= *state >> 17;
+                            *state ^= *state << 5;
+                            Some(*state as u8)
+                        })
+                        .collect(),
+                )],
+            ))
+            .expect("large cold payload");
+        store.persist().expect("checkpoint payload");
+    }
+    {
+        let store =
+            UnifiedStore::open_with_config(&path, cold_config()).expect("legacy preparation");
+        store.persist().expect("prepare resume metadata");
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "cold_wal_crash_child", "--nocapture"])
+        .env("REDDB_BOUNDED_WAL_CRASH_PATH", &path)
+        .status()
+        .expect("crash subprocess");
+    assert_eq!(status.code(), Some(91));
+    for _ in 0..2 {
+        let mut config = cold_config();
+        config.resident_memory_bytes_max = Some(4096);
+        let store = UnifiedStore::open_with_config(&path, config)
+            .expect("short WAL boot must not decode/rebuild unrelated large cold rows");
+        assert_eq!(store.get_collection("rows").expect("rows").count(), 7);
+        assert_eq!(
+            store
+                .try_get("rows", EntityId::new(4), 4096)
+                .expect("small WAL row")
+                .expect("row")
+                .data
+                .as_row()
+                .expect("row")
+                .columns[0],
+            Value::Integer(99)
+        );
+        assert!(
+            store.try_get("rows", EntityId::new(9), 4096).is_err(),
+            "large unrelated row requires a larger read allowance"
+        );
+        // Intentionally retain the WAL across both opens; no checkpoint/drop
+        // hook may erase replay evidence before publishing its row images.
+    }
+}

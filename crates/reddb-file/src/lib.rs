@@ -38,6 +38,7 @@ pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
 pub mod native_index_artifact;
+pub mod native_resume;
 pub mod native_store;
 pub mod native_value;
 pub mod operational_manifest;

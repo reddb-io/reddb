@@ -14,7 +14,8 @@ pub const PAGE_OWNERSHIP_FILE_VERSION: u32 = 0x0001_0002;
 pub const PAGE_CHECKPOINT_UNDO_FILE_VERSION: u32 = 0x0001_0003;
 /// Current database file version. The phase-3 DWB layout itself starts at
 /// 1.0.1; older readers reject this version before using the new contract.
-pub const PAGE_FILE_VERSION: u32 = PAGE_CHECKPOINT_UNDO_FILE_VERSION;
+pub const PAGE_DISK_RESIDENCY_FILE_VERSION: u32 = 0x0001_0004;
+pub const PAGE_FILE_VERSION: u32 = PAGE_DISK_RESIDENCY_FILE_VERSION;
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;
@@ -478,7 +479,8 @@ pub struct DatabaseHeader {
 impl Default for DatabaseHeader {
     fn default() -> Self {
         Self {
-            version: PAGE_FILE_VERSION,
+            // Prepared disk residency is an explicit host opt-in.
+            version: PAGE_CHECKPOINT_UNDO_FILE_VERSION,
             page_size: PAGED_PAGE_SIZE as u32,
             page_count: 1,
             freelist_head: 0,

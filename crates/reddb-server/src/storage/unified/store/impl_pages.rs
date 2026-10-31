@@ -518,6 +518,59 @@ impl UnifiedStore {
             reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
                 .map_err(|e| StoreError::Serialization(e.to_string()))?;
         }
+        if self.config.resident_memory_bytes_max.is_some() {
+            use reddb_file::native_resume::{
+                encode_catalog_resume, CatalogResume, CollectionResume,
+            };
+            let mut states = std::collections::BTreeMap::new();
+            let mut entity_id_next = self.resident.next_entity_id.load(Ordering::SeqCst);
+            let collections = self.resident.collections.read();
+            for (name, manager) in collections.iter() {
+                let tree = live.get(name);
+                let (entity_next, row_id_next) = manager.identity_counters();
+                entity_id_next = entity_id_next.max(entity_next);
+                let root_page = tree.map_or(0, |tree| tree.root_page_id());
+                let entities = if root_page == 0 {
+                    0
+                } else if let Some(count) = manager.backing_count_at_root(root_page) {
+                    count
+                } else {
+                    // Changed projections may exclude pending/aborted rows. Count
+                    // published physical keys, not the live manager's cardinality.
+                    let mut cursor = tree
+                        .expect("invariant: nonzero root has a tree")
+                        .cursor_first()
+                        .map_err(|error| {
+                            StoreError::Io(std::io::Error::other(error.to_string()))
+                        })?;
+                    let mut count = 0_u64;
+                    while cursor
+                        .skip_next()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                    {
+                        count += 1;
+                    }
+                    count
+                };
+                states.insert(
+                    name.clone(),
+                    CollectionResume {
+                        root_page,
+                        entities,
+                        entity_id_next: entity_next,
+                        row_id_next,
+                    },
+                );
+            }
+            encode_catalog_resume(
+                metadata,
+                &CatalogResume {
+                    entity_id_next,
+                    collections: states,
+                },
+            )
+            .map_err(|error| StoreError::Serialization(error.to_string()))?;
+        }
         // Record the exact pages before the catalog can forget their owners.
         // Recovery resolves this intent against the durable catalog epoch.
         let mut retirement_intent = reclaim.clone();
@@ -919,6 +972,7 @@ impl UnifiedStore {
         // ADR 0073 §2 — the page cache is pre-sized from its budget share.
         // The pager's own `cache_size` default survives only for direct
         // library callers who never resolved a budget.
+        pager_config.disk_residency = config.resident_memory_bytes_max.is_some();
         if let Some(slots) = config.page_cache_slots {
             pager_config.cache_size = slots;
         }
@@ -940,6 +994,17 @@ impl UnifiedStore {
         pager
             .enable_deferred_reclamation()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+
+        if config.resident_memory_bytes_max.is_none()
+            && pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version
+                >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        {
+            return Err(StoreError::Io(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                "this database was prepared for disk residency; reopen with the disk-resident storage profile")));
+        }
 
         let wal_path = reddb_file::layout::unified_wal_path(path);
         // Explicit transactions and WAL-only vault versions need committed
@@ -1193,6 +1258,22 @@ impl UnifiedStore {
         // `<data>-meta` shadow when page 1 itself is corrupted.
         if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
+            let prepared = pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version
+                >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION;
+            let resume = if prepared {
+                reddb_file::native_resume::decode_catalog_resume(content)
+                    .map_err(|error| StoreError::Serialization(error.to_string()))?
+            } else {
+                None
+            };
+            if let Some(resume) = &resume {
+                self.resident
+                    .next_entity_id
+                    .fetch_max(resume.entity_id_next, Ordering::SeqCst);
+            }
             if content.len() >= 4 {
                 let mut pos = 0;
                 let mut format_version = STORE_VERSION_V1;
@@ -1234,6 +1315,16 @@ impl UnifiedStore {
                     // before the existing B-tree roots are attached.
                     let _ = self.create_collection_in_memory(&name);
 
+                    let counters = resume
+                        .as_ref()
+                        .and_then(|resume| resume.collections.get(&name));
+                    if let (Some(counters), Some(manager)) = (counters, self.get_collection(&name))
+                    {
+                        manager.restore_identity_counters(
+                            counters.entity_id_next,
+                            counters.row_id_next,
+                        );
+                    }
                     // Load B-tree with root page if it exists
                     if root_page > 0 {
                         let btree = BTree::with_root(Arc::clone(pager), root_page);
@@ -1243,25 +1334,38 @@ impl UnifiedStore {
                             page_integrity(root_page, Some(name.clone()), err.to_string())
                         })?;
                         let manager = self.get_collection(&name);
-                        let mut persisted_entities = 0_u64;
-                        loop {
-                            let next = cursor.next().map_err(|err| {
-                                page_integrity(root_page, Some(name.clone()), err.to_string())
-                            })?;
+                        let mut persisted_entities = counters.map_or(0, |state| state.entities);
+                        while counters.is_none() {
+                            let next = cursor
+                                .next_with_budget(
+                                    self.config
+                                        .resident_memory_bytes_max
+                                        .and_then(|limit| usize::try_from(limit).ok())
+                                        .unwrap_or(usize::MAX),
+                                )
+                                .map_err(|err| {
+                                    page_integrity(root_page, Some(name.clone()), err.to_string())
+                                })?;
                             let Some((key, value)) = next else {
                                 break;
                             };
                             persisted_entities += 1;
                             // Deserialize entity from value bytes
+                            let key_bytes: [u8; 8] = key.as_slice().try_into().map_err(|_| {
+                                page_integrity(
+                                    root_page,
+                                    Some(name.clone()),
+                                    "physical entity key must contain eight bytes",
+                                )
+                            })?;
+                            let record = reddb_engine::storage::collection_read::EncodedRecord {
+                                id: EntityId::new(u64::from_be_bytes(key_bytes)),
+                                bytes: value,
+                            };
                             let (entity, metadata) =
-                                Self::deserialize_entity_record(&value, self.format_version())
-                                    .map_err(|err| {
-                                        page_integrity(
-                                            root_page,
-                                            Some(name.clone()),
-                                            err.to_string(),
-                                        )
-                                    })?;
+                                record.decode(self.format_version()).map_err(|err| {
+                                    page_integrity(root_page, Some(name.clone()), err.to_string())
+                                })?;
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -1269,6 +1373,10 @@ impl UnifiedStore {
                                 }
                                 if self.config.resident_memory_bytes_max.is_some() {
                                     self.register_entity_id(id);
+                                    m.restore_identity_counters(
+                                        id.raw().saturating_add(1),
+                                        m.identity_counters().1,
+                                    );
                                     continue;
                                 }
                                 self.resident.context_index.index_entity(&name, &entity);
@@ -1294,6 +1402,7 @@ impl UnifiedStore {
                                         Arc::clone(&btree),
                                     ),
                                 ),
+                                btree.root_page_id(),
                                 format_version,
                                 usize::try_from(limit).unwrap_or(usize::MAX),
                                 persisted_entities,
@@ -1715,6 +1824,7 @@ impl UnifiedStore {
                                     Arc::clone(tree),
                                 ),
                             ),
+                            tree.root_page_id(),
                             self.format_version(),
                             usize::try_from(limit).unwrap_or(usize::MAX),
                             manager.count() as u64,

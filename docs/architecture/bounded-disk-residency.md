@@ -24,10 +24,24 @@ previous generation. Pending transaction/Vault rows prevent overlay eviction.
 The runtime's fallible scan adapter propagates storage errors alongside CALL/query
 work-budget errors, including when no CALL budget is installed.
 
-Cost sketch: cold open currently decodes N records once with O(1) record payload
-memory; scans retain O(dirty IDs + one decoded row), and a changed collection's
-checkpoint currently copies O(N + dirty rows) bytes. These are intermediate costs,
-not the required constant-time boot or paced maintenance implementation.
+Prepared files carry checksummed resume counters alongside their exact collection
+roots: physical counts and entity/row identity high-water marks. A preparation scan
+is still required for legacy files. Prepared boot follows metadata and one tree
+path, without decoding collection payloads; a short committed WAL remains as a
+resident overlay until checkpoint publication. Repeated opens retain that WAL.
+
+The preparation contract fences file version 1.0.4 in both recoverable superblocks
+before publishing trusted counters. Older engines reject it. Current pager hosts
+also reject a prepared file for writing unless they opt into disk residency;
+read-only inspection remains possible. Default new files retain version 1.0.3.
+The capability flag is a host storage contract, not runtime activation. Preserve a
+preparation copy for downgrade; no downgrade writer may reinterpret these counters.
+
+Cost sketch: legacy preparation decodes N records once with O(1) record payload
+memory; prepared boot reads O(metadata + tree height + short WAL). Scans retain
+O(dirty IDs + one decoded row), and a changed collection's checkpoint currently
+copies O(N + dirty rows) bytes. These intermediate algorithms do not establish the
+required measured boot latency or paced maintenance implementation.
 
 ## Required acceptance gates
 
@@ -43,8 +57,8 @@ not the required constant-time boot or paced maintenance implementation.
 
 ## Remaining implementation before activation
 
-- Durable generation-bound counts/identity high-water metadata, safe legacy
-  preparation, WAL recovery and older-writer handling for prepared fast boot.
+- Qualify prepared metadata publication against I/O failures and superblock
+  fallback, then measure boot on the exact OCI artifact and full historical data.
 - All authoritative reads/scans/model/index/auth paths migrated to fallible access;
   legacy resident-only and best-effort adapters are not safe for activation.
 - Global accounting/admission for decoded objects, overlay identities/deletions,

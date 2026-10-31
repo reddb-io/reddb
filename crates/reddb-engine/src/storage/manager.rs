@@ -473,6 +473,24 @@ impl SegmentManager {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
+    /// Durable allocator state may be ahead of every surviving record.
+    pub fn identity_counters(&self) -> (u64, u64) {
+        (
+            self.next_entity_id.load(Ordering::SeqCst),
+            self.next_row_id.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn restore_identity_counters(&self, entity_id_next: u64, row_id_next: u64) {
+        assert!(
+            entity_id_next > 0 && row_id_next > 0,
+            "invariant: next identities are positive"
+        );
+        self.next_entity_id
+            .fetch_max(entity_id_next, Ordering::SeqCst);
+        self.next_row_id.fetch_max(row_id_next, Ordering::SeqCst);
+    }
+
     /// Generate a per-table sequential row ID (1, 2, 3... per collection)
     pub fn next_row_id(&self) -> u64 {
         self.next_row_id.fetch_add(1, Ordering::SeqCst)
@@ -546,6 +564,8 @@ impl SegmentManager {
             entity.id = self.next_entity_id();
         }
         self.reject_backing_duplicate(entity.id)?;
+        self.next_entity_id
+            .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
         // Check if we need to seal the current segment first
         self.maybe_seal_growing()?;
 
@@ -650,6 +670,8 @@ impl SegmentManager {
             return Err(SegmentError::AlreadyExists(entity.id));
         }
         let entity_id = entity.id;
+        self.next_entity_id
+            .fetch_max(entity_id.raw().saturating_add(1), Ordering::SeqCst);
         self.with_restoration_segment(entity_id, |segment| {
             let segment_id = segment.id();
             // Adoption retains sequence identity and advances its allocator.
@@ -695,6 +717,8 @@ impl SegmentManager {
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
             }
+            self.next_entity_id
+                .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
             if let super::entity::EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
                 if *row_id == 0 {
                     *row_id = self.next_row_id();

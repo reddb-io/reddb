@@ -8,6 +8,8 @@ use std::collections::HashSet;
 
 pub(super) struct BackingRead {
     pub source: Arc<dyn CollectionRead + Send + Sync>,
+    pub root_page: u32,
+    pub total_entities: u64,
     pub format_version: u32,
     pub read_bytes_max: usize,
     pub removed: HashSet<EntityId>,
@@ -23,6 +25,7 @@ impl SegmentManager {
     pub fn install_backing(
         &self,
         source: Arc<dyn CollectionRead + Send + Sync>,
+        root_page: u32,
         format_version: u32,
         read_bytes_max: usize,
         total_entities: u64,
@@ -44,10 +47,20 @@ impl SegmentManager {
             .store(total_entities, Ordering::Relaxed);
         *backing = Some(BackingRead {
             source,
+            root_page,
+            total_entities,
             format_version,
             read_bytes_max,
             removed: HashSet::new(),
         });
+    }
+
+    pub fn backing_count_at_root(&self, root_page: u32) -> Option<u64> {
+        self.backing
+            .read()
+            .as_ref()
+            .filter(|base| base.root_page == root_page)
+            .map(|base| base.total_entities)
     }
 
     /// Preserve I/O and decode failures instead of treating them as absent rows.

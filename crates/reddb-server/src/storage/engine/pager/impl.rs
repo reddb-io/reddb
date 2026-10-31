@@ -248,6 +248,7 @@ impl Pager {
             NativePagerFile(file),
             path,
             SharedPagerConfig {
+                disk_residency: config.disk_residency,
                 cache_size: config.cache_size,
                 read_only: config.read_only,
                 verify_checksums: config.verify_checksums,

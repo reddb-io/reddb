@@ -59,6 +59,8 @@ static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and durable resume counters.
+    pub disk_residency: bool,
     /// Page cache capacity
     pub cache_size: usize,
     /// Whether to open read-only
@@ -80,6 +82,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: DEFAULT_CACHE_SIZE,
             read_only: false,
             create: true,
