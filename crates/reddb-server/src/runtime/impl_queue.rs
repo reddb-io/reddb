@@ -672,6 +672,14 @@ impl RedDBRuntime {
         if let Some(xid) = self.current_xid().or(event_xid) {
             entity.set_xmin(xid);
         }
+        // Keep the resident message and transient WAL copies inside the same
+        // engine budget as the source mutation, including outbox/DLQ writers.
+        let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
+        let _admission = self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::SegmentArena,
+            "enqueue event",
+            bytes.saturating_mul(3),
+        )?;
         let id = store
             .insert_auto(queue, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -2879,24 +2887,32 @@ pub(super) fn next_queue_position(
     queue: &str,
     side: QueueSide,
 ) -> RedDBResult<u64> {
-    let messages = load_queue_message_views(store, queue)?;
-    if messages.is_empty() {
-        return Ok(QUEUE_POSITION_CENTER);
-    }
-    match side {
-        QueueSide::Left => Ok(messages
-            .iter()
-            .map(|message| message.position)
-            .min()
-            .unwrap_or(QUEUE_POSITION_CENTER)
-            .saturating_sub(1)),
-        QueueSide::Right => Ok(messages
-            .iter()
-            .map(|message| message.position)
-            .max()
-            .unwrap_or(QUEUE_POSITION_CENTER)
-            .saturating_add(1)),
-    }
+    let manager = store
+        .get_collection(queue)
+        .ok_or_else(|| RedDBError::NotFound(format!("queue '{queue}' not found")))?;
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let mut boundary: Option<u64> = None;
+    // Positioning needs one scalar, not copies of every queued payload. The
+    // fallible merged visitor also refuses a partial/empty answer on cold I/O.
+    manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, |entity| {
+        let EntityKind::QueueMessage { position, .. } = &entity.kind else {
+            return true;
+        };
+        if !matches!(entity.data, EntityData::QueueMessage(_)) {
+            return true;
+        }
+        boundary = Some(boundary.map_or(*position, |current| match side {
+            QueueSide::Left => current.min(*position),
+            QueueSide::Right => current.max(*position),
+        }));
+        true
+    })?;
+    Ok(
+        boundary.map_or(QUEUE_POSITION_CENTER, |position| match side {
+            QueueSide::Left => position.saturating_sub(1),
+            QueueSide::Right => position.saturating_add(1),
+        }),
+    )
 }
 
 pub(super) fn increment_queue_attempts(

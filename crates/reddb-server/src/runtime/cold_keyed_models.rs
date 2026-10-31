@@ -2943,3 +2943,59 @@ fn cold_dml_delete_callback_error_does_not_publish_a_partial_statement() {
     );
     assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
 }
+
+#[test]
+fn cold_queue_position_reads_fail_before_enqueue_and_retry_preserves_order() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE QUEUE cold_position_probe")
+        .expect("queue");
+    for payload in [Value::text("first"), Value::text("x".repeat(32 * 1024))] {
+        runtime
+            .enqueue_event_payload("cold_position_probe", payload)
+            .expect("seed queue");
+    }
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("cold_position_probe")
+        .expect("queue manager");
+    let expected_max = manager
+        .query_all(|_| true)
+        .into_iter()
+        .filter_map(|entity| match entity.kind {
+            EntityKind::QueueMessage { position, .. } => Some(position),
+            _ => None,
+        })
+        .max()
+        .expect("queue tail");
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish queue positions");
+    install_indexed_cold(&runtime, "cold_position_probe", 4096);
+    assert!(
+        runtime
+            .enqueue_event_payload("cold_position_probe", Value::text("must not publish"))
+            .is_err(),
+        "unreadable queue positions must not become a successful empty queue"
+    );
+    assert_eq!(
+        manager.count(),
+        2,
+        "failed position scan inserted a message"
+    );
+    // The record envelope and decoded payload both consume the retry allowance.
+    install_indexed_cold(&runtime, "cold_position_probe", 128 * 1024);
+    let id = runtime
+        .enqueue_event_payload("cold_position_probe", Value::text("retry"))
+        .expect("retry queue position scan");
+    let inserted = manager
+        .try_get(id, 4096)
+        .expect("read appended position")
+        .expect("inserted message");
+    assert!(
+        matches!(inserted.kind, EntityKind::QueueMessage { position, .. } if position == expected_max + 1)
+    );
+}

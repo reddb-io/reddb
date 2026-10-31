@@ -1158,3 +1158,45 @@ fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
     assert_eq!(records[0].get("id"), Some(&Value::Integer(7)));
     assert_eq!(records[0].get("z_payload"), Some(&Value::Integer(42)));
 }
+
+#[test]
+fn mutation_memory_event_outbox_rejects_growth_before_publishing_a_message() {
+    use reddb_types::Value;
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("bounded event runtime");
+    runtime
+        .execute_query("CREATE QUEUE admitted_events")
+        .expect("outbox");
+    let payload = varied_payload(256 * 1024);
+    let queue = runtime
+        .db()
+        .store()
+        .get_collection("admitted_events")
+        .expect("event collection");
+    let mut admitted = 0;
+    let mut denied = None;
+    for _ in 0..64 {
+        let before = queue.count();
+        match runtime.enqueue_event_payload("admitted_events", Value::text(payload.clone())) {
+            Ok(_) => admitted += 1,
+            Err(error) => {
+                assert_eq!(queue.count(), before, "denied enqueue published a message");
+                denied = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(
+        admitted > 0,
+        "fixture must exercise incremental queue growth"
+    );
+    let error = denied.expect("event outbox must stop resident growth at the shared engine budget");
+    assert!(error.to_string().contains("over budget"), "{error}");
+    assert_eq!(queue.count(), admitted);
+    let reservations = runtime.inner.memory_reservations.lock();
+    assert_eq!(
+        reservations.reserved_bytes, reservations.completed_bytes,
+        "admission failure leaked a credit"
+    );
+}

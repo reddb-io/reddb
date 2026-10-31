@@ -1,4 +1,4 @@
-//! Bounded physical table-history reclamation; payloads stay borrowed.
+//! Bounded physical table-history and aborted-queue reclamation; payloads stay borrowed.
 use super::*;
 use crate::storage::transaction::SnapshotManager;
 use crate::storage::unified::manager::PhysicalScanCursor;
@@ -58,7 +58,10 @@ impl UnifiedStore {
             let ids = manager.physical_scan_batch(&mut cursor.scan, &mut work_left);
             scan_left -= work - work_left;
             manager.for_each_id(&ids, |_, entity| {
-                if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                if !matches!(
+                    entity.kind,
+                    EntityKind::TableRow { .. } | EntityKind::QueueMessage { .. }
+                ) {
                     return;
                 }
                 let aborted_insert = entity.xmin != 0 && snapshots.is_aborted(entity.xmin);
@@ -179,6 +182,194 @@ mod tests {
                 .expect("count exists")
                 .to_string(),
             "128"
+        );
+    }
+
+    #[test]
+    fn aborted_event_messages_are_reclaimed_in_bounded_ticks_without_touching_readers() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+        let runtime = fixture();
+        runtime.execute_query("CREATE TABLE reclaim_event_source (id INT, payload TEXT) WITH EVENTS (DELETE) TO reclaim_events").expect("event source");
+        let payload = "x".repeat(8192);
+        runtime.execute_query(&format!("INSERT INTO reclaim_event_source (id, payload) VALUES (1, '{payload}'), (2, '{payload}'), (3, '{payload}')")).expect("source rows");
+        runtime
+            .enqueue_event_payload("reclaim_events", Value::text("committed"))
+            .expect("committed message");
+        set_current_connection_id(873);
+        runtime.execute_query("BEGIN").expect("pending producer");
+        runtime
+            .enqueue_event_payload("reclaim_events", Value::text("pending"))
+            .expect("pending message");
+        clear_current_connection_id();
+        let store = runtime.db().store();
+        let queue = store.get_collection("reclaim_events").expect("outbox");
+        let drain = || {
+            let mut cursor = store
+                .mvcc_reclaim_cursor("reclaim_events".into())
+                .expect("queue cursor");
+            let mut total = 0;
+            for _ in 0..128 {
+                let reclaimed = store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        2,
+                        1,
+                    )
+                    .expect("paced reclaim");
+                assert!(reclaimed <= 1, "one tick exceeded its reclaim allowance");
+                total += reclaimed;
+                if cursor.finished() {
+                    break;
+                }
+            }
+            assert!(cursor.finished(), "bounded scan failed to finish");
+            total
+        };
+        for cycle in 0..100 {
+            store
+                .test_fail_deferred_wal_append
+                .store(true, Ordering::SeqCst);
+            let error = runtime
+                .execute_query("DELETE FROM reclaim_event_source")
+                .expect_err("injected failed DELETE");
+            assert!(error
+                .to_string()
+                .contains("injected deferred WAL append failure"));
+            assert_eq!(drain(), 3, "aborted messages retained at cycle {cycle}");
+            assert_eq!(
+                queue.count(),
+                2,
+                "GC must keep committed and active creators"
+            );
+            queue.force_seal().expect("seal maintenance fixture");
+            for _ in 0..16 {
+                if !queue.pressure_consolidation_tick() {
+                    break;
+                }
+            }
+            assert!(
+                queue.resident_bytes() < 64 * 1024,
+                "failed outbox payloads accumulated at cycle {cycle}: {} bytes",
+                queue.resident_bytes()
+            );
+            assert_eq!(
+                runtime
+                    .execute_query("QUEUE LEN reclaim_events")
+                    .expect("visible message count")
+                    .result
+                    .records[0]
+                    .get("len"),
+                Some(&Value::UnsignedInteger(1))
+            );
+        }
+        set_current_connection_id(873);
+        runtime
+            .execute_query("ROLLBACK")
+            .expect("abort pending message");
+        clear_current_connection_id();
+        assert_eq!(
+            drain(),
+            1,
+            "only the newly aborted producer becomes reclaimable"
+        );
+        assert_eq!(queue.count(), 1);
+        assert_eq!(
+            runtime
+                .execute_query("DELETE FROM reclaim_event_source")
+                .expect("successful source retry")
+                .affected_rows,
+            3
+        );
+        assert_eq!(drain(), 0, "committed event messages are not garbage");
+        assert_eq!(
+            runtime
+                .execute_query("QUEUE LEN reclaim_events")
+                .expect("committed event count")
+                .result
+                .records[0]
+                .get("len"),
+            Some(&Value::UnsignedInteger(4))
+        );
+    }
+
+    #[test]
+    fn queue_reclamation_preserves_old_readers_and_unfinished_deletions() {
+        let runtime = fixture();
+        runtime
+            .execute_query("CREATE QUEUE retained_queue")
+            .expect("queue");
+        let store = runtime.db().store();
+        let queue = store
+            .get_collection("retained_queue")
+            .expect("message store");
+        let snapshots = runtime.snapshot_manager();
+        let old_reader = snapshots.begin();
+        let committed_delete = snapshots.begin();
+        snapshots.commit(committed_delete);
+        let pending_delete = snapshots.begin();
+        let aborted_delete = snapshots.begin();
+        snapshots.rollback(aborted_delete);
+        for stamp in [0, committed_delete, pending_delete, aborted_delete] {
+            let id = runtime
+                .enqueue_event_payload("retained_queue", Value::text("retained"))
+                .expect("message");
+            let mut entity = queue.get(id).expect("message preimage");
+            entity.set_xmax(stamp);
+            queue.update(entity).expect("retirement stamp");
+        }
+        let reclaim = || {
+            let mut cursor = store
+                .mvcc_reclaim_cursor("retained_queue".into())
+                .expect("cursor");
+            let mut total = 0;
+            for _ in 0..32 {
+                let count = store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &snapshots,
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        2,
+                        1,
+                    )
+                    .expect("reclaim");
+                assert!(count <= 1);
+                total += count;
+                if cursor.finished() {
+                    break;
+                }
+            }
+            assert!(cursor.finished());
+            total
+        };
+        assert_eq!(
+            reclaim(),
+            0,
+            "the old reader still needs the committed preimage"
+        );
+        assert_eq!(queue.count(), 4);
+        snapshots.rollback(old_reader);
+        assert_eq!(
+            reclaim(),
+            1,
+            "only the committed, obsolete deletion is reclaimable"
+        );
+        assert_eq!(queue.count(), 3);
+        snapshots.rollback(pending_delete);
+        assert_eq!(
+            reclaim(),
+            0,
+            "rolled-back deletions must preserve their messages"
+        );
+        assert_eq!(
+            runtime
+                .execute_query("QUEUE LEN retained_queue")
+                .expect("retained messages")
+                .result
+                .records[0]
+                .get("len"),
+            Some(&Value::UnsignedInteger(3))
         );
     }
 }
