@@ -26,6 +26,7 @@ pub struct PagedEntityCursor {
     snapshot: Option<SnapshotContext>,
     visible_only: bool,
     schema: Option<Arc<Vec<String>>>,
+    key: Option<String>,
     finished: bool,
 }
 
@@ -65,6 +66,11 @@ impl Iterator for PagedEntityCursor {
                     row.schema = self.schema.clone();
                 }
             }
+            if self.key.as_deref().is_some_and(|key| {
+                crate::storage::segment_key_lookup::SegmentKeyLookup::key(&entity) != Some(key)
+            }) {
+                continue;
+            }
             return Some(Ok((entity, metadata)));
         }
     }
@@ -77,19 +83,38 @@ impl SegmentManager {
         &self,
         snapshot: Option<SnapshotContext>,
     ) -> Result<Option<PagedEntityCursor>, StoreError> {
-        self.try_paged_cursor(snapshot, true)
+        self.try_paged_cursor(snapshot, true, None)
     }
 
     /// Raw physical records and their frozen metadata, including superseded
     /// versions. Hosts fence publication while capturing this cursor.
     pub fn try_paged_physical_cursor(&self) -> Result<Option<PagedEntityCursor>, StoreError> {
-        self.try_paged_cursor(None, false)
+        self.try_paged_cursor(None, false, None)
+    }
+
+    /// Freeze only this key's payloads and metadata, retaining other dirty IDs
+    /// as masks. Every decoded candidate is checked against the logical key.
+    pub fn try_paged_key_entity_cursor(
+        &self,
+        key: &str,
+        snapshot: Option<SnapshotContext>,
+    ) -> Result<Option<PagedEntityCursor>, StoreError> {
+        self.try_paged_cursor(snapshot, true, Some(key))
+    }
+
+    /// Like the visible keyed cursor, but includes superseded physical history.
+    pub fn try_paged_key_physical_cursor(
+        &self,
+        key: &str,
+    ) -> Result<Option<PagedEntityCursor>, StoreError> {
+        self.try_paged_cursor(None, false, Some(key))
     }
 
     fn try_paged_cursor(
         &self,
         snapshot: Option<SnapshotContext>,
         visible_only: bool,
+        key: Option<&str>,
     ) -> Result<Option<PagedEntityCursor>, StoreError> {
         let Some((format_version, read_bytes_max)) = self
             .backing
@@ -99,10 +124,21 @@ impl SegmentManager {
         else {
             return Ok(None);
         };
-        let Some((base, overlay)) = self.current_backing_overlay() else {
+        let view = match key {
+            Some(key) => self.current_backing_key_overlay(key)?,
+            None => self.current_backing_overlay(),
+        };
+        let Some((base, overlay)) = view else {
             return Ok(None);
         };
-        let cursor = MergedCollection::new(base.as_ref(), overlay).owned_cursor()?;
+        let merged = MergedCollection::new(base.as_ref(), overlay);
+        let cursor = match key {
+            Some(key) => match merged.owned_key_cursor(key)? {
+                Some(cursor) => cursor,
+                None => merged.owned_cursor()?,
+            },
+            None => merged.owned_cursor()?,
+        };
         Ok(Some(PagedEntityCursor {
             cursor,
             format_version,
@@ -110,6 +146,7 @@ impl SegmentManager {
             snapshot,
             visible_only,
             schema: self.column_schema(),
+            key: key.map(str::to_owned),
             finished: false,
         }))
     }
@@ -349,6 +386,28 @@ impl SegmentManager {
         }
     }
 
+    /// Physical key history. Indexed bases avoid unrelated payload reads;
+    /// resident and unindexed sources still verify each logical key.
+    pub fn try_for_each_key_entity(
+        &self,
+        key: &str,
+        mut callback: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        if let Some(cursor) = self.try_paged_key_physical_cursor(key)? {
+            for record in cursor {
+                let (entity, _) = record?;
+                if !callback(&entity) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        self.try_for_each_entity(usize::MAX, |entity| {
+            crate::storage::segment_key_lookup::SegmentKeyLookup::key(entity) != Some(key)
+                || callback(entity)
+        })
+    }
+
     pub fn try_scan_for_each(
         &self,
         snapshot: Option<&SnapshotContext>,
@@ -582,5 +641,52 @@ impl SegmentManager {
         self.backing_overlay(|entity, metadata| {
             Some(serialize_entity_record(entity, metadata.as_ref(), version))
         })
+    }
+
+    fn current_backing_key_overlay(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Arc<dyn CollectionRead + Send + Sync>, Arc<FrozenOverlay>)>, StoreError>
+    {
+        let backing = self.backing.read();
+        let Some(backing) = backing.as_ref() else {
+            return Ok(None);
+        };
+        let mut overlay: FrozenOverlay = backing.removed.iter().map(|id| (*id, None)).collect();
+        let schema = self.column_schema();
+        let key_column = schema
+            .as_ref()
+            .and_then(|schema| schema.iter().position(|name| name == "key"));
+        let mut failure = None;
+        self.for_each_entity_source(|segment, entity| {
+            let key_matches = match (&entity.data, key_column) {
+                (crate::storage::entity::EntityData::Row(row), Some(index)) if row.named.is_none() && row.schema.is_none() => {
+                    matches!(row.columns.get(index), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key)
+                }
+                _ => crate::storage::segment_key_lookup::SegmentKeyLookup::key(entity) == Some(key),
+            };
+            let bytes = if key_matches {
+                let required_bytes = crate::storage::memory_size::entity_bytes(entity);
+                if required_bytes > backing.read_bytes_max {
+                    failure = Some(StoreError::ReadLimitExceeded {
+                        required_bytes,
+                        limit_bytes: backing.read_bytes_max,
+                    });
+                    return false;
+                }
+                let metadata = segment.get_metadata(entity.id);
+                Some(Arc::from(serialize_entity_record(entity, metadata.as_ref(), backing.format_version)))
+            } else {
+                // A row renamed away from the requested key must still hide
+                // the old base candidate. No unrelated payload/metadata copy.
+                None
+            };
+            overlay.insert(entity.id, bytes);
+            true
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(Some((Arc::clone(&backing.source), Arc::new(overlay))))
     }
 }

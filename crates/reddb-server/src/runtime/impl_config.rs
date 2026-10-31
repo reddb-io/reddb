@@ -1028,7 +1028,10 @@ impl RedDBRuntime {
             .then(|| store.vault_publication_lock.lock());
         let mut versions = Vec::new();
         super::function_budget::try_scan(
-            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |visit| match key {
+                Some(key) => manager.try_for_each_key_entity(key, visit),
+                None => manager.try_for_each_entity(usize::MAX, visit),
+            },
             |entity| {
                 let EntityData::Row(row) = &entity.data else {
                     return true;

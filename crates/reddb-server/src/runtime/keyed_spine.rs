@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use super::execution_context::SnapshotContext;
 use crate::storage::{EntityId, Metadata, RowData, SegmentManager, UnifiedEntity};
 use crate::{RedDBError, RedDBResult};
+use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 use reddb_types::Value;
 
 pub(super) trait KeyedVersion {
@@ -120,11 +121,14 @@ type KeyedRecordCursor<'manager> =
 pub(super) fn records_with_metadata<'manager>(
     manager: &'manager SegmentManager,
     snapshot: Option<SnapshotContext>,
+    key: Option<&'manager str>,
     filter: impl Fn(&UnifiedEntity) -> bool + Sync + 'manager,
 ) -> RedDBResult<KeyedRecordCursor<'manager>> {
-    let cold = match snapshot.as_ref() {
-        Some(_) => manager.try_paged_entity_cursor(snapshot.clone())?,
-        None => manager.try_paged_physical_cursor()?,
+    let cold = match (key, snapshot.as_ref()) {
+        (Some(key), Some(_)) => manager.try_paged_key_entity_cursor(key, snapshot.clone())?,
+        (Some(key), None) => manager.try_paged_key_physical_cursor(key)?,
+        (None, Some(_)) => manager.try_paged_entity_cursor(snapshot.clone())?,
+        (None, None) => manager.try_paged_physical_cursor()?,
     };
     if let Some(cursor) = cold {
         return Ok(Box::new(cursor.filter_map(move |record| match record {
@@ -133,6 +137,9 @@ pub(super) fn records_with_metadata<'manager>(
             Err(error) => Some(Err(RedDBError::from(error))),
         })));
     }
+    let filter = move |entity: &UnifiedEntity| {
+        key.is_none_or(|key| SegmentKeyLookup::key(entity) == Some(key)) && filter(entity)
+    };
     let entities = match snapshot.as_ref() {
         Some(snapshot) => manager.scan(Some(snapshot), filter),
         None => manager.query_all(filter),

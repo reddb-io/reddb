@@ -2,7 +2,8 @@
 //! unfinished managed profile in the runtime factory.
 use super::*;
 use crate::storage::engine::BTree;
-use reddb_engine::storage::collection_read::PagedCollection;
+use crate::storage::RowData;
+use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -31,6 +32,211 @@ fn install_cold(runtime: &RedDBRuntime, collection: &str, read_bytes_max: usize)
         store.format_version(),
         read_bytes_max,
         manager.count() as u64,
+    );
+}
+
+fn install_indexed_cold(runtime: &RedDBRuntime, collection: &str, read_bytes_max: usize) {
+    let store = runtime.db().store();
+    let manager = store.get_collection(collection).expect("collection");
+    let pager = Arc::clone(store.pager().expect("pager"));
+    let keys = Arc::new(BTree::new(Arc::clone(&pager)));
+    let data = Arc::new(BTree::new(Arc::clone(&pager)));
+    let root = store
+        .collection_root_page(collection)
+        .expect("published root");
+    // The ordinary writer remains enabled in this fixture. Copy the published
+    // bytes into a private base so later ordinary writes cannot mutate a pinned
+    // experimental generation in place.
+    let published = PagedCollection::new(Arc::new(BTree::with_root(pager, root)));
+    let mut cursor = published.scan().expect("published cursor");
+    while let Some(record) = cursor.next_record(usize::MAX).expect("published record") {
+        let (entity, _) = record
+            .decode(store.format_version())
+            .expect("native record");
+        if let Some(key) = reddb_engine::storage::segment_key_lookup::SegmentKeyLookup::key(&entity)
+        {
+            let fingerprint = reddb_file::native_key_index::fingerprint(key);
+            keys.insert(
+                &reddb_file::native_key_index::encode_candidate(&fingerprint, entity.id.raw()),
+                &[],
+            )
+            .expect("key candidate");
+        }
+        data.insert(&record.id.raw().to_be_bytes(), &record.bytes)
+            .expect("private base");
+    }
+    let root = data.root_page_id();
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(data, keys)),
+        root,
+        store.format_version(),
+        read_bytes_max,
+        manager.count() as u64,
+    );
+}
+
+fn insert_unrelated_overlay(runtime: &RedDBRuntime, collection: &str) {
+    let mut entity = UnifiedEntity::table_row(EntityId::new(0), collection, 0, vec![]);
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![
+            Value::text("unrelated-overlay"),
+            Value::text("x".repeat(32 * 1024)),
+        ],
+        vec!["key".into(), "value".into()],
+    ));
+    runtime
+        .db()
+        .store()
+        .insert_auto(collection, entity)
+        .expect("dirty unrelated row");
+}
+
+#[test]
+fn cold_indexed_config_history_skips_unrelated_base_and_dirty_payloads() {
+    let (_directory, runtime) = runtime();
+    for sql in [
+        format!(
+            "PUT CONFIG settings unrelated = '{}'",
+            "x".repeat(32 * 1024)
+        ),
+        "PUT CONFIG settings wanted = 'first'".into(),
+        "ROTATE CONFIG settings wanted = 'second'".into(),
+    ] {
+        runtime.execute_query(&sql).expect("seed config");
+    }
+    let expected = observe(&runtime, "HISTORY CONFIG settings wanted");
+    assert_eq!(expected.len(), 2);
+    runtime.db().store().persist().expect("publish config");
+    // Config's named columns/metadata require more than 4 KiB even for a
+    // small value. This remains well below either unrelated 32 KiB payload.
+    install_indexed_cold(&runtime, "settings", 8192);
+    insert_unrelated_overlay(&runtime, "settings");
+    assert_eq!(
+        observe(&runtime, "HISTORY CONFIG settings wanted"),
+        expected
+    );
+    runtime
+        .execute_query("PUT CONFIG settings wanted = 'third'")
+        .expect("append keyed version");
+    assert_eq!(observe(&runtime, "HISTORY CONFIG settings wanted").len(), 3);
+    runtime.invalidate_result_cache();
+    assert!(runtime
+        .execute_query("GET CONFIG settings unrelated")
+        .is_err());
+}
+
+#[test]
+fn cold_indexed_store_config_reads_and_replaces_only_the_target_key() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    store
+        .try_set_config_tree(
+            "fixture",
+            &crate::serde_json::json!({
+                "unrelated": "x".repeat(32 * 1024), "wanted": "first"
+            }),
+        )
+        .expect("seed store config");
+    store.persist().expect("publish store config");
+    install_indexed_cold(&runtime, "red_config", 4096);
+    insert_unrelated_overlay(&runtime, "red_config");
+    assert_eq!(
+        store
+            .try_get_config("fixture.wanted")
+            .expect("small config"),
+        Some(Value::text("first"))
+    );
+    assert_eq!(
+        store
+            .try_get_config("fixture.absent")
+            .expect("absent config"),
+        None
+    );
+    store
+        .try_set_config_tree("fixture.wanted", &crate::serde_json::json!("second"))
+        .expect("keyed replacement");
+    assert_eq!(
+        store.try_get_config("fixture.wanted").expect("new config"),
+        Some(Value::text("second"))
+    );
+    assert!(store.try_get_config("fixture.unrelated").is_err());
+}
+
+#[test]
+fn cold_indexed_vault_history_retains_metadata_and_tenant_scope() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    runtime.set_auth_store(Arc::new(
+        crate::auth::AuthStore::with_vault_certificate(
+            crate::auth::AuthConfig::default(),
+            Arc::clone(store.pager().expect("pager")),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("vault certificate"),
+    ));
+    // Values are compressed before encryption. Use deterministic noise so the
+    // encrypted base payload itself exceeds the cursor's 4 KiB allowance.
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut state = 0x1234_5678_u32;
+    let large: String = (0..32 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            alphabet[(state & 63) as usize] as char
+        })
+        .collect();
+    for sql in [
+        "CREATE VAULT secrets WITH OWN MASTER KEY".to_string(),
+        format!("VAULT PUT secrets.unrelated = '{large}'"),
+        "VAULT PUT secrets.wanted = 'first' TAGS [scope:prod]".into(),
+        "ROTATE VAULT secrets.wanted = 'second' TAGS [scope:prod]".into(),
+        "WITHIN TENANT 'another' VAULT PUT secrets.wanted = 'tenant-only'".into(),
+    ] {
+        runtime.execute_query(&sql).expect("seed vault");
+    }
+    let queries = [
+        "VAULT HISTORY secrets.wanted",
+        "VAULT GET secrets.wanted",
+        "VAULT REVEAL secrets.wanted",
+        "WITHIN TENANT 'another' VAULT HISTORY secrets.wanted",
+    ];
+    let expected: Vec<_> = queries.iter().map(|sql| observe(&runtime, sql)).collect();
+    assert_eq!(expected[0].len(), 2);
+    assert_eq!(expected[3].len(), 1);
+    store.persist().expect("publish encrypted vault");
+    install_indexed_cold(&runtime, "secrets", 4096);
+    insert_unrelated_overlay(&runtime, "secrets");
+    let manager = store.get_collection("secrets").expect("secrets");
+    let mut oversized = manager
+        .try_paged_key_physical_cursor("unrelated")
+        .expect("oversized base cursor")
+        .expect("cold secrets");
+    assert!(oversized
+        .next()
+        .expect("existing oversized secret")
+        .is_err());
+    runtime.invalidate_result_cache();
+    assert!(
+        runtime
+            .execute_query("VAULT REVEAL secrets.unrelated")
+            .is_err(),
+        "before rotation"
+    );
+    for (query, expected) in queries.into_iter().zip(expected) {
+        assert_eq!(observe(&runtime, query), expected, "{query}");
+    }
+    runtime
+        .execute_query("ROTATE VAULT secrets.wanted = 'third' TAGS [scope:prod]")
+        .expect("rotate indexed vault");
+    assert_eq!(observe(&runtime, "VAULT HISTORY secrets.wanted").len(), 3);
+    runtime.invalidate_result_cache();
+    assert!(manager.has_backing(), "rotation must retain cold backing");
+    assert!(
+        runtime
+            .execute_query("VAULT REVEAL secrets.unrelated")
+            .is_err(),
+        "after rotation"
     );
 }
 

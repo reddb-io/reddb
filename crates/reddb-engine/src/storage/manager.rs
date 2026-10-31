@@ -1831,16 +1831,25 @@ impl SegmentManager {
         &self,
         mut callback: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
     ) {
+        self.for_each_entity_source(|segment, entity| {
+            callback(entity, segment.get_metadata(entity.id))
+        });
+    }
+
+    fn for_each_entity_source(
+        &self,
+        mut callback: impl FnMut(&GrowingSegment, &UnifiedEntity) -> bool,
+    ) {
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
-            if !growing.for_each_fast(|entity| callback(entity, growing.get_metadata(entity.id))) {
+            if !growing.for_each_fast(|entity| callback(&growing, entity)) {
                 return;
             }
         }
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read();
-            if !segment.for_each_fast(|entity| callback(entity, segment.get_metadata(entity.id))) {
+            if !segment.for_each_fast(|entity| callback(&segment, entity)) {
                 return;
             }
         }

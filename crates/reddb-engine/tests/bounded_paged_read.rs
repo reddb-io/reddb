@@ -673,3 +673,157 @@ fn indexed_cold_keys_bound_reads_preserve_versions_and_verify_candidates() {
         Err(StoreError::StorageIntegrity(_))
     ));
 }
+
+#[test]
+fn owned_key_history_freezes_metadata_and_masks_renamed_or_deleted_base_rows() {
+    use reddb_engine::storage::entity::{EntityData, RowData};
+    use reddb_engine::storage::manager::SegmentManager;
+    use reddb_engine::storage::metadata::{Metadata, MetadataValue};
+    use reddb_types::Value;
+
+    let entity = |id: u64, key: &str, value: Value| {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "keys", id, vec![]);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![Value::text(key), value],
+            vec!["key".into(), "value".into()],
+        ));
+        entity
+    };
+    let pages = Arc::new(Pages::default());
+    let data = Arc::new(BTree::new(Arc::clone(&pages)));
+    let keys = Arc::new(BTree::new(pages));
+    for id in 1_u64..=5 {
+        let key = if id == 1 || id == 4 {
+            "other"
+        } else {
+            "wanted"
+        };
+        let mut row = entity(
+            id,
+            key,
+            if id == 1 {
+                Value::text("x".repeat(32 * 1024))
+            } else {
+                Value::Integer(id as i64)
+            },
+        );
+        if id == 2 {
+            row.set_xmax(7);
+        }
+        data.insert(&id.to_be_bytes(), &serialize_entity_record(&row, None, 11))
+            .expect("base");
+        // Include a deliberately colliding fingerprint for a different key.
+        let fingerprint =
+            reddb_file::native_key_index::fingerprint(if id == 4 { "wanted" } else { key });
+        keys.insert(
+            &reddb_file::native_key_index::encode_candidate(&fingerprint, id),
+            &[],
+        )
+        .expect("key");
+    }
+    let manager = SegmentManager::new("keys");
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(Arc::clone(&data), keys)),
+        0,
+        11,
+        4096,
+        5,
+    );
+    manager
+        .update(entity(3, "renamed", Value::text("x".repeat(32 * 1024))))
+        .expect("renamed base row");
+    manager.delete(EntityId::new(5)).expect("deleted base row");
+    manager
+        .insert(entity(7, "wanted", Value::Integer(7)))
+        .expect("matching overlay");
+    manager
+        .insert(entity(8, "unrelated", Value::text("x".repeat(32 * 1024))))
+        .expect("large dirty row");
+    manager.set_column_schema_if_empty(vec!["key".into(), "value".into()]);
+    manager
+        .insert(UnifiedEntity::table_row(
+            EntityId::new(10),
+            "keys",
+            10,
+            vec![Value::text("wanted"), Value::Integer(10)],
+        ))
+        .expect("positional dirty row");
+    let mut metadata = Metadata::new();
+    metadata.set("version", MetadataValue::Int(1));
+    manager
+        .set_metadata(EntityId::new(7), metadata.clone())
+        .expect("metadata");
+
+    let frozen = manager
+        .try_paged_key_physical_cursor("wanted")
+        .expect("key cursor")
+        .expect("cold");
+    let visible: Vec<_> = manager
+        .try_paged_key_entity_cursor("wanted", None)
+        .expect("visible cursor")
+        .expect("cold")
+        .map(|record| record.expect("visible row").0.id.raw())
+        .collect();
+    assert_eq!(visible, vec![7, 10]);
+    let snapshot = reddb_engine::transaction::read::SnapshotContext {
+        snapshot: reddb_engine::transaction::snapshot::Snapshot {
+            xid: 5,
+            in_progress: Default::default(),
+        },
+        manager: Arc::new(reddb_engine::transaction::snapshot::SnapshotManager::new()),
+        own_xids: Default::default(),
+        requires_index_fallback: false,
+        serializable_reader: None,
+    };
+    let historical: Vec<_> = manager
+        .try_paged_key_entity_cursor("wanted", Some(snapshot))
+        .expect("snapshot cursor")
+        .expect("cold")
+        .map(|record| record.expect("snapshot row").0.id.raw())
+        .collect();
+    assert_eq!(historical, vec![2, 7, 10]);
+    metadata.set("version", MetadataValue::Int(2));
+    manager
+        .set_metadata(EntityId::new(7), metadata)
+        .expect("new metadata");
+    manager
+        .delete(EntityId::new(7))
+        .expect("delete after capture");
+    manager
+        .insert(entity(9, "wanted", Value::Integer(9)))
+        .expect("new version");
+    let old: Vec<_> = frozen
+        .map(|record| {
+            let (entity, metadata) = record.expect("frozen physical history");
+            if entity.id.raw() == 7 {
+                assert_eq!(
+                    metadata.expect("frozen metadata").get("version"),
+                    Some(&MetadataValue::Int(1))
+                );
+            }
+            entity.id.raw()
+        })
+        .collect();
+    assert_eq!(old, vec![2, 7, 10]);
+    let current: Vec<_> = manager
+        .try_paged_key_physical_cursor("wanted")
+        .expect("new cursor")
+        .expect("cold")
+        .map(|record| record.expect("current history").0.id.raw())
+        .collect();
+    assert_eq!(current, vec![2, 9, 10]);
+    assert!(matches!(
+        manager.try_paged_key_physical_cursor("unrelated"),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+
+    let legacy = SegmentManager::new("keys");
+    legacy.install_backing(Arc::new(PagedCollection::new(data)), 0, 11, 128 * 1024, 5);
+    let fallback: Vec<_> = legacy
+        .try_paged_key_physical_cursor("wanted")
+        .expect("legacy cursor")
+        .expect("cold")
+        .map(|record| record.expect("unindexed fallback row").0.id.raw())
+        .collect();
+    assert_eq!(fallback, vec![2, 3, 5]);
+}

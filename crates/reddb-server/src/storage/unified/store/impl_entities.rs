@@ -353,7 +353,7 @@ impl UnifiedStore {
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
-        manager.try_for_each_entity(usize::MAX, |entity| {
+        let mut capture = |entity: &UnifiedEntity| {
             if let EntityData::Row(row) = &entity.data {
                 if let Some(reddb_types::Value::Text(key)) = row.get_field("key") {
                     if let Some(rows) = previous.get_mut(key.as_ref()) {
@@ -362,7 +362,14 @@ impl UnifiedStore {
                 }
             }
             true
-        })?;
+        };
+        if manager.has_backing() {
+            for (key, _) in &pairs {
+                manager.try_for_each_key_entity(key, &mut capture)?;
+            }
+        } else {
+            manager.try_for_each_entity(usize::MAX, &mut capture)?;
+        }
         let mut saved = 0;
         for (key, value) in pairs {
             let stale = previous.remove(&key).unwrap_or_default();
@@ -424,7 +431,7 @@ impl UnifiedStore {
             .has_backing()
             .then(|| self.vault_publication_lock.lock());
         let mut latest: Option<(u64, reddb_types::Value)> = None;
-        manager.try_for_each_entity(usize::MAX, |entity| {
+        manager.try_for_each_key_entity(key, |entity| {
             if let EntityData::Row(row) = &entity.data {
                 let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
                 if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {

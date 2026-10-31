@@ -1028,7 +1028,7 @@ impl<'a> KvAtomicOps<'a> {
             .filter(|manager| manager.has_backing())
             .map(|_| store.vault_publication_lock.lock());
         let records = manager.as_ref().map(|manager| {
-            super::keyed_spine::records_with_metadata(manager, Some(snapshot), |entity| {
+            super::keyed_spine::records_with_metadata(manager, Some(snapshot), Some(key), |entity| {
                 entity.data.as_row().is_some_and(|row| self.vault_row_in_scope(row)
                     && matches!(row.get_field("key"), Some(Value::Text(stored)) if stored.as_ref() == key))
             })
@@ -1087,7 +1087,7 @@ impl<'a> KvAtomicOps<'a> {
         let records = manager
             .as_ref()
             .map(|manager| {
-                super::keyed_spine::records_with_metadata(manager, Some(snapshot), |entity| {
+                super::keyed_spine::records_with_metadata(manager, Some(snapshot), None, |entity| {
                     entity
                         .data
                         .as_row()
@@ -1316,7 +1316,7 @@ impl RedDBRuntime {
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.into()))?;
         let mut records = Vec::new();
-        for record in super::keyed_spine::records_with_metadata(&manager, None, |_| true)? {
+        for record in super::keyed_spine::records_with_metadata(&manager, None, None, |_| true)? {
             let (entity, metadata) = record?;
             records.push((
                 entity.id,
