@@ -964,13 +964,13 @@ pub(super) fn red_query(
     if !query.order_by.is_empty() {
         // Issue #769 — cap the materialized sort buffer.
         crate::runtime::materialization_limit::guard(db.as_ref(), "sort", records.len())?;
-        super::join_filter::sort_records_by_order_by_with_db(
+        super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db.as_ref()),
             &mut records,
             &query.order_by,
             Some(table_name),
             table_alias,
-        );
+        )?;
     }
 
     if let Some(offset) = query.offset {

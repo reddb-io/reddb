@@ -88,6 +88,19 @@ impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
         sort_records_by_order_by_with_db(Some(self.db), records, clauses, None, None)
     }
+    fn try_sort_records(
+        &self,
+        records: &mut Vec<UnifiedRecord>,
+        clauses: &[OrderByClause],
+    ) -> RedDBResult<()> {
+        crate::runtime::join_filter::try_sort_records_by_order_by_with_db(
+            Some(self.db),
+            records,
+            clauses,
+            None,
+            None,
+        )
+    }
     fn secret_query_output(&self, value: Value) -> RedDBResult<Value> {
         crate::runtime::execution_context::secret_query_output(value)
     }

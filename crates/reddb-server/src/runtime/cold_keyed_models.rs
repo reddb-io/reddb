@@ -1477,3 +1477,76 @@ fn unreadable_config_update_expressions_do_not_publish_fallback_values() {
         assert_eq!(ids(&runtime), expected.map(Value::Integer));
     }
 }
+
+fn verify_config_expression_read_failure_and_retry(queries: &[&str]) {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    runtime
+        .execute_query("INSERT INTO expression_probe (id) VALUES (2), (3), (4), (5)")
+        .expect("ordered query inputs");
+    let expected: Vec<_> = queries
+        .iter()
+        .map(|query| observe(&runtime, query))
+        .collect();
+    runtime.db().store().persist().expect("publish config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
+    for query in queries {
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime.execute_query(query).is_err(),
+            "an operating read failure became a successful ordered result: {query}"
+        );
+    }
+    install_indexed_cold(&runtime, "red_config", 4096);
+    for (query, expected) in queries.iter().zip(expected) {
+        runtime.invalidate_result_cache();
+        assert_eq!(observe(&runtime, query), expected, "retry: {query}");
+    }
+}
+
+#[test]
+fn unreadable_config_ordering_expressions_propagate_errors_and_retry() {
+    verify_config_expression_read_failure_and_retry(&[
+        "SELECT id FROM expression_probe ORDER BY CONFIG('fixture.flag'), id",
+        "SELECT id FROM expression_probe ORDER BY LENGTH(CONFIG('fixture.flag', 'fallback')) + id LIMIT 1",
+        "SELECT id FROM expression_probe ORDER BY LENGTH(CONFIG('fixture.flag')) + id LIMIT 1 OFFSET 1",
+        "SELECT id FROM expression_probe ORDER BY CASE WHEN id > 3 THEN CONFIG('fixture.flag') ELSE '0' END, id",
+        "SELECT id, COUNT(*) AS n FROM expression_probe GROUP BY id ORDER BY CONFIG('fixture.flag'), id",
+    ]);
+}
+
+#[test]
+fn unreadable_config_window_expressions_propagate_errors_and_retry() {
+    verify_config_expression_read_failure_and_retry(&[
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY CONFIG('fixture.flag'), id) AS n FROM expression_probe ORDER BY id",
+        "SELECT id, ROW_NUMBER() OVER (PARTITION BY CONFIG('fixture.flag') ORDER BY id) AS n FROM expression_probe ORDER BY id",
+        "SELECT id, LAG(id, 1, LENGTH(CONFIG('fixture.flag', 'fallback'))) OVER (ORDER BY id) AS previous FROM expression_probe ORDER BY id",
+        "SELECT id, SUM(LENGTH(CONFIG('fixture.flag'))) OVER (ORDER BY id) AS total FROM expression_probe ORDER BY id",
+    ]);
+}
+
+#[test]
+fn unreadable_config_in_unvisited_ordering_and_window_branches_is_not_loaded() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    runtime
+        .execute_query("INSERT INTO expression_probe (id) VALUES (2), (3)")
+        .expect("lazy expression inputs");
+    let queries = [
+        "SELECT id FROM expression_probe ORDER BY CASE WHEN id > 0 THEN id ELSE LENGTH(CONFIG('fixture.flag')) END",
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY CASE WHEN id > 0 THEN id ELSE LENGTH(CONFIG('fixture.flag')) END) AS n FROM expression_probe ORDER BY id",
+        "SELECT id, SUM(CASE WHEN id > 0 THEN id ELSE LENGTH(CONFIG('fixture.flag')) END) OVER (ORDER BY id) AS total FROM expression_probe ORDER BY id",
+    ];
+    let expected: Vec<_> = queries
+        .iter()
+        .map(|query| observe(&runtime, query))
+        .collect();
+    runtime.db().store().persist().expect("publish lazy config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
+    for (query, expected) in queries.iter().zip(expected) {
+        runtime.invalidate_result_cache();
+        assert_eq!(observe(&runtime, query), expected, "lazy branch: {query}");
+    }
+}

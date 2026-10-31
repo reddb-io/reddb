@@ -150,13 +150,13 @@ fn finish_ordered_index_records(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
 
     if let Some(offset) = query.offset {
@@ -279,13 +279,13 @@ fn execute_geo_candidate_scan(
 
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
     if let Some(offset) = query.offset {
         let offset = offset as usize;
@@ -582,7 +582,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     // Issue #769 — the ORDER BY buffer is materialized in
                     // full before sorting; cap it.
                     crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                    super::super::join_filter::sort_or_top_k_records_with_db(
+                    super::super::join_filter::try_sort_or_top_k_records_with_db(
                         Some(db),
                         &mut records,
                         &query.order_by,
@@ -590,7 +590,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         query.limit,
                         outer_alias,
                         outer_alias,
-                    );
+                    )?;
                 }
 
                 // Outer OFFSET / LIMIT.
@@ -1339,13 +1339,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             if !query.order_by.is_empty() {
                 crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                super::super::join_filter::sort_records_by_order_by_with_db(
+                super::super::join_filter::try_sort_records_by_order_by_with_db(
                     Some(db),
                     &mut records,
                     &query.order_by,
                     Some(table_name),
                     Some(table_alias),
-                );
+                )?;
             }
 
             if let Some(offset) = query.offset {
@@ -1739,13 +1739,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         // Apply OFFSET, then LIMIT. Order matters: SQL semantics drop the
@@ -1804,7 +1804,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_or_top_k_records_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
@@ -1812,7 +1812,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 query.limit,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         if pushed_window.is_none() {
@@ -2236,13 +2236,13 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 document_projection,
                 entity_projection,
             );
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 records,
                 &context.query.order_by,
                 Some(context.table_name),
                 Some(context.table_alias),
-            );
+            )?;
         } else if node.operator == "entity_sort" {
             records.sort_by(compare_runtime_ranked_records);
         }
