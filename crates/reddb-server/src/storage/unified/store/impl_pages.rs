@@ -369,6 +369,20 @@ impl UnifiedStore {
         previous: Option<&Arc<BTree>>,
         mut encode: impl FnMut(&UnifiedEntity, Option<Metadata>) -> Option<Vec<u8>>,
     ) -> Result<Arc<BTree>, StoreError> {
+        if let Some((base, overlay)) = manager.backing_overlay(&mut encode) {
+            use reddb_engine::storage::collection_read::{CollectionRead, MergedCollection};
+            let merged = MergedCollection::new(base.as_ref(), overlay);
+            let mut cursor = merged.cursor()?;
+            let mut builder = CheckpointTreeBuilder::new(pager);
+            while let Some(record) = cursor.next_record(
+                usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(u64::MAX))
+                    .unwrap_or(usize::MAX),
+            )? {
+                builder.push((record.id.raw().to_be_bytes().to_vec(), record.bytes))?;
+            }
+            builder.flush()?;
+            return Ok(builder.tree);
+        }
         let mut cursor = previous
             .map(|tree| tree.cursor_first())
             .transpose()
@@ -1229,6 +1243,7 @@ impl UnifiedStore {
                             page_integrity(root_page, Some(name.clone()), err.to_string())
                         })?;
                         let manager = self.get_collection(&name);
+                        let mut persisted_entities = 0_u64;
                         loop {
                             let next = cursor.next().map_err(|err| {
                                 page_integrity(root_page, Some(name.clone()), err.to_string())
@@ -1236,6 +1251,7 @@ impl UnifiedStore {
                             let Some((key, value)) = next else {
                                 break;
                             };
+                            persisted_entities += 1;
                             // Deserialize entity from value bytes
                             let (entity, metadata) =
                                 Self::deserialize_entity_record(&value, self.format_version())
@@ -1251,6 +1267,10 @@ impl UnifiedStore {
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
                                     m.register_row_id(*row_id);
                                 }
+                                if self.config.resident_memory_bytes_max.is_some() {
+                                    self.register_entity_id(id);
+                                    continue;
+                                }
                                 self.resident.context_index.index_entity(&name, &entity);
                                 m.restore_snapshot_entity(entity.clone())?;
                                 if let Some(metadata) = metadata {
@@ -1264,9 +1284,22 @@ impl UnifiedStore {
                         }
 
                         // Store the B-tree for future lookups
-                        self.btree_indices
-                            .write()
-                            .insert(name.clone(), Arc::new(btree));
+                        let btree = Arc::new(btree);
+                        if let (Some(manager), Some(limit)) =
+                            (&manager, self.config.resident_memory_bytes_max)
+                        {
+                            manager.install_backing(
+                                Arc::new(
+                                    reddb_engine::storage::collection_read::PagedCollection::new(
+                                        Arc::clone(&btree),
+                                    ),
+                                ),
+                                format_version,
+                                usize::try_from(limit).unwrap_or(usize::MAX),
+                                persisted_entities,
+                            );
+                        }
+                        self.btree_indices.write().insert(name.clone(), btree);
                         if format_version == STORE_VERSION_V11 {
                             if let Some(manager) = &manager {
                                 self.checkpoint_versions.write().insert(
@@ -1667,6 +1700,32 @@ impl UnifiedStore {
             commit.truncate().map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
+
+        if let Some(limit) = self.config.resident_memory_bytes_max {
+            let mut versions = self.checkpoint_versions.write();
+            for (name, manager) in collections.iter() {
+                if versions
+                    .get(name)
+                    .is_some_and(|version| !version.has_unprojected_rows)
+                {
+                    if let Some(tree) = btree_indices.get(name) {
+                        manager.install_backing(
+                            Arc::new(
+                                reddb_engine::storage::collection_read::PagedCollection::new(
+                                    Arc::clone(tree),
+                                ),
+                            ),
+                            self.format_version(),
+                            usize::try_from(limit).unwrap_or(usize::MAX),
+                            manager.count() as u64,
+                        );
+                        if let Some(version) = versions.get_mut(name) {
+                            version.segments = manager.checkpoint_revisions();
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

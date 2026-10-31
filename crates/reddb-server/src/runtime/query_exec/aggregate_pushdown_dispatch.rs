@@ -146,8 +146,8 @@ pub(super) fn try_execute_pushdown_aggregate(
 
     let mut rows: Vec<ScanRow> = Vec::new();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if let Some(f) = compiled_filter.as_ref() {
                 if f.evaluate(entity) != CompiledEntityFilterDecision::Match {

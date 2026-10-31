@@ -402,8 +402,8 @@ pub(crate) fn execute_aggregate_query(
     let mut spill_err: Option<String> = None;
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             // ── Lazy record materialisation ──────────────────────────────────
             // We defer `runtime_table_record_from_entity` until we actually

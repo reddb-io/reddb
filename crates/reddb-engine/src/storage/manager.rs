@@ -14,6 +14,7 @@
 
 #![allow(clippy::too_many_arguments)] // Relocated native host entrypoints.
 
+mod backing;
 mod graph_index_merge;
 
 use parking_lot::RwLock;
@@ -252,6 +253,7 @@ pub struct SegmentManager {
     /// Used by index-only scan decisions.
     visibility_map: VisibilityMap,
     physical_root_cache: parking_lot::Mutex<Option<PhysicalRootCacheEntry>>,
+    backing: RwLock<Option<backing::BackingRead>>,
 }
 
 impl SegmentManager {
@@ -265,6 +267,7 @@ impl SegmentManager {
         Self {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             physical_root_cache: parking_lot::Mutex::new(None),
+            backing: RwLock::new(None),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -539,16 +542,15 @@ impl SegmentManager {
 
     /// Insert a new entity
     pub fn insert(&self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+        if entity.id.raw() == 0 {
+            entity.id = self.next_entity_id();
+        }
+        self.reject_backing_duplicate(entity.id)?;
         // Check if we need to seal the current segment first
         self.maybe_seal_growing()?;
 
         let segment_arc = self.get_or_create_growing();
         let mut segment = segment_arc.write();
-
-        // Assign entity ID if not already set
-        if entity.id.raw() == 0 {
-            entity.id = self.next_entity_id();
-        }
 
         let entity_id = entity.id;
         let segment_id = segment.id();
@@ -676,6 +678,18 @@ impl SegmentManager {
         &self,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, SegmentError> {
+        // Reject the complete cold batch before publishing any of it.
+        if self.has_backing() {
+            let mut identities = std::collections::HashSet::with_capacity(entities.len());
+            for entity in &entities {
+                if entity.id.raw() != 0 {
+                    self.reject_backing_duplicate(entity.id)?;
+                    if self.get_with(entity.id, |_| ()).is_some() || !identities.insert(entity.id) {
+                        return Err(SegmentError::AlreadyExists(entity.id));
+                    }
+                }
+            }
+        }
         // Assign IDs and per-table row_ids.
         for entity in &mut entities {
             if entity.id.raw() == 0 {
@@ -1072,6 +1086,7 @@ impl SegmentManager {
 
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1108,6 +1123,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1153,6 +1169,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1194,6 +1211,7 @@ impl SegmentManager {
         modified_columns: &[String],
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1266,6 +1284,15 @@ impl SegmentManager {
 
     /// Delete an entity
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
+        self.materialize_backing_entity(id)?;
+        let deleted = self.delete_resident(id)?;
+        if deleted {
+            self.remember_backing_delete(id);
+        }
+        Ok(deleted)
+    }
+
+    fn delete_resident(&self, id: EntityId) -> Result<bool, SegmentError> {
         // Fast path: probe the growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment, and bulk-inserted entities.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1325,6 +1352,15 @@ impl SegmentManager {
     }
 
     pub fn delete_batch(&self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if self.has_backing() {
+            let mut deleted = Vec::new();
+            for id in ids {
+                if self.delete(*id)? {
+                    deleted.push(*id);
+                }
+            }
+            return Ok(deleted);
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1409,6 +1445,7 @@ impl SegmentManager {
 
     /// Set metadata for an entity
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(id)?;
         // Fast path: probe growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment.
         if let Some(growing_arc) = self.growing.read().as_ref() {

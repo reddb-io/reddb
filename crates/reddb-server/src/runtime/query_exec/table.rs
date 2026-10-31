@@ -225,8 +225,8 @@ fn execute_geo_candidate_scan(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if !candidate_ids.contains(&entity.id.raw()) {
                 return true;
@@ -1652,9 +1652,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             record_segment_scan_stats(scan_stats);
             records = matching;
         } else {
-            let scan_stats = crate::runtime::function_budget::scan(
+            let scan_stats = crate::runtime::function_budget::try_scan(
                 |visit| {
-                    manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, visit)
+                    manager.try_scan_for_each_zoned_with_stats(
+                        snapshot.as_ref(),
+                        &zone_preds,
+                        usize::MAX,
+                        visit,
+                    )
                 },
                 |entity| {
                     if records.len() >= limit {
@@ -2085,8 +2090,8 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+                crate::runtime::function_budget::try_scan(
+            |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |entity| {
                     if records.len() >= limit {
                         return false;

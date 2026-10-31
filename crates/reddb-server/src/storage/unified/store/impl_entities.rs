@@ -61,6 +61,7 @@ impl UnifiedStore {
         entities: &[&UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -83,7 +84,10 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -143,6 +147,7 @@ impl UnifiedStore {
         entities: &[UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -168,7 +173,10 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -545,11 +553,10 @@ impl UnifiedStore {
         // Captured transactions stay WAL-only until commit; pager flushes must
         // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| !Self::deferred_store_wal_capture_active())
-        {
+        if let Some(pager) = self.pager.as_ref().filter(|_| {
+            !Self::deferred_store_wal_capture_active()
+                && self.config.resident_memory_bytes_max.is_none()
+        }) {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -778,7 +785,10 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -886,7 +896,10 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if persist_record && !Self::deferred_store_wal_capture_active() {
+        let paged_btree = if persist_record
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             self.get_or_create_btree(collection)
         } else {
             None
@@ -970,30 +983,21 @@ impl UnifiedStore {
     /// the current in-memory state even when the paged B-tree image has not been
     /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Prefer the live manager state to avoid stale reads after manager.update().
-        if let Some(entity) = self
-            .get_collection(collection)
-            .and_then(|manager| manager.get(id))
-        {
-            return Some(entity);
-        }
+        // Historical best-effort adapter. Authoritative host reads use try_get
+        // so a failed cold read cannot become a successful "missing" result.
+        self.try_get(collection, id, usize::MAX).ok().flatten()
+    }
 
-        // Fall back to the paged B-tree image if the manager does not currently hold the row.
-        if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let key = id.raw().to_be_bytes();
-                if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok((entity, _)) =
-                        Self::deserialize_entity_record(&value, self.format_version())
-                    {
-                        return Some(entity);
-                    }
-                }
-            }
-        }
-
-        None
+    pub fn try_get(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get(id, limit_bytes)
     }
 
     /// Resolve a table row by stable logical identity.
@@ -1208,7 +1212,7 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some() {
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1273,7 +1277,7 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         let mut updated_tree = false;
-        if self.pager.is_some() {
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 updated_tree = true;

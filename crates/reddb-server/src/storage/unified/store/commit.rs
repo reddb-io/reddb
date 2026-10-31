@@ -1411,7 +1411,10 @@ impl UnifiedStore {
         &self,
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
-        self.finish_paged_write_for_projection(actions, false)
+        self.finish_paged_write_for_projection(
+            actions,
+            self.config.resident_memory_bytes_max.is_some(),
+        )
     }
 
     pub(crate) fn finish_paged_write_for_projection(
@@ -1714,7 +1717,11 @@ impl UnifiedStore {
         self.resident
             .swap_collection_state(name, new_manager, prepared);
 
-        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
+        {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
             let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
                 .iter()
@@ -1800,7 +1807,11 @@ impl UnifiedStore {
             &self.config.manager_config,
         )?;
 
-        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
+        {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -1834,7 +1845,10 @@ impl UnifiedStore {
         update_btrees: bool,
     ) -> Result<(), StoreError> {
         self.resident.apply_replayed_delete(collection, id, || {
-            if self.pager.is_some() && update_btrees {
+            if self.pager.is_some()
+                && update_btrees
+                && self.config.resident_memory_bytes_max.is_none()
+            {
                 let btree_indices = self.btree_indices.read();
                 if let Some(btree) = btree_indices.get(collection) {
                     let root_before = btree.root_page_id();

@@ -160,7 +160,7 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
-        if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
+        if manager.has_backing() || Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {

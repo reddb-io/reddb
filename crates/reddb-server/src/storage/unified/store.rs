@@ -128,6 +128,9 @@ pub struct UnifiedStoreConfig {
     /// supplies a count derived from the page-cache budget share, so the
     /// default is reached only by direct library callers.
     pub page_cache_slots: Option<usize>,
+    /// Shared resident arena allowance for disk-backed collections. The host
+    /// supplies the segment share of its process memory budget.
+    pub resident_memory_bytes_max: Option<u64>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -145,6 +148,7 @@ impl Default for UnifiedStoreConfig {
             data_dir: None,
             embedded_wal_path: None,
             page_cache_slots: None,
+            resident_memory_bytes_max: None,
         }
     }
 }
