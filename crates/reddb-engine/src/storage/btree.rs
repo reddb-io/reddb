@@ -104,6 +104,11 @@ pub enum BTreeError {
     LockPoisoned(String),
     /// Large-value layout encode/decode failed (overflow chain or LZ4).
     ValueLayout(String),
+    /// Materializing a value would exceed the caller's read memory allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for BTreeError {
@@ -123,6 +128,13 @@ impl std::fmt::Display for BTreeError {
             Self::Pager(msg) => write!(f, "Pager error: {}", msg),
             Self::LockPoisoned(msg) => write!(f, "Lock poisoned: {}", msg),
             Self::ValueLayout(msg) => write!(f, "Value layout: {}", msg),
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "B-tree read needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
         }
     }
 }
@@ -131,6 +143,13 @@ impl From<value_layout::ValueLayoutError> for BTreeError {
     fn from(e: value_layout::ValueLayoutError) -> Self {
         match e {
             value_layout::ValueLayoutError::ValueTooLarge(n) => Self::ValueTooLarge(n),
+            value_layout::ValueLayoutError::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            },
             other => Self::ValueLayout(other.to_string()),
         }
     }
@@ -170,8 +189,77 @@ pub struct BTreeCursor<P: PageStore> {
 }
 
 impl<P: PageStore> BTreeCursor<P> {
+    /// Inspect the next key without materializing its value or advancing.
+    pub fn peek_key(&mut self) -> BTreeResult<Option<Vec<u8>>> {
+        if !self.prepare_next_leaf()? {
+            return Ok(None);
+        }
+        let page = self.pager.read_page(self.leaf_page_id)?;
+        Ok(Some(read_leaf_cell(&page, self.position)?.0))
+    }
+
+    /// Skip a shadowed or deleted base record without reading its overflow value.
+    pub fn skip_next(&mut self) -> BTreeResult<bool> {
+        if !self.prepare_next_leaf()? {
+            return Ok(false);
+        }
+        self.position += 1;
+        Ok(true)
+    }
+
+    fn prepare_next_leaf(&mut self) -> BTreeResult<bool> {
+        if self.leaf_page_id == 0 {
+            return Ok(false);
+        }
+        let page = self.pager.read_page(self.leaf_page_id)?;
+        if page.page_type()? != PageType::BTreeLeaf {
+            return Err(BTreeError::Corrupted(
+                "cursor reached a non-leaf page".into(),
+            ));
+        }
+        if self.position < usize::from(page.cell_count()) {
+            return Ok(true);
+        }
+        let next = read_next_leaf(&page);
+        if next == 0 {
+            self.leaf_page_id = 0;
+            return Ok(false);
+        }
+        let next_page = self.pager.read_page(next)?;
+        if next_page.page_type()? != PageType::BTreeLeaf || next_page.cell_count() == 0 {
+            return Err(BTreeError::Corrupted(
+                "leaf chain reached an invalid leaf".into(),
+            ));
+        }
+        let first_key = read_leaf_cell(&next_page, 0)?.0;
+        if leaf_high_key(&page)?
+            .as_ref()
+            .is_some_and(|key| first_key <= *key)
+        {
+            return Err(BTreeError::Corrupted(
+                "leaf chain does not advance its key range".into(),
+            ));
+        }
+        self.leaf_page_id = next;
+        self.position = 0;
+        self.prefetched_next = false;
+        Ok(true)
+    }
+
+    /// Read one value within the caller's materialization allowance.
+    pub fn next_with_budget(
+        &mut self,
+        limit_bytes: usize,
+    ) -> BTreeResult<Option<(Vec<u8>, Vec<u8>)>> {
+        self.next_impl(limit_bytes)
+    }
+
     /// Move to next entry
     pub fn next(&mut self) -> BTreeResult<Option<(Vec<u8>, Vec<u8>)>> {
+        self.next_impl(usize::MAX)
+    }
+
+    fn next_impl(&mut self, limit_bytes: usize) -> BTreeResult<Option<(Vec<u8>, Vec<u8>)>> {
         if self.leaf_page_id == 0 {
             return Ok(None);
         }
@@ -200,7 +288,8 @@ impl<P: PageStore> BTreeCursor<P> {
         // Check if we have more cells in current page
         if self.position < cell_count {
             let (key, stored) = read_leaf_cell(&page, self.position)?;
-            let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+            let value =
+                value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
             self.position += 1;
             return Ok(Some((key, value)));
         }
@@ -241,7 +330,7 @@ impl<P: PageStore> BTreeCursor<P> {
                 "leaf chain does not advance its key range".into(),
             ));
         }
-        let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+        let value = value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
         self.position = 1;
         Ok(Some((key, value)))
     }

@@ -39,6 +39,8 @@ pub mod entity_cache;
 pub mod tokenization;
 
 #[doc(hidden)]
+pub mod collection_read;
+#[doc(hidden)]
 pub mod resident_store;
 
 pub mod error;

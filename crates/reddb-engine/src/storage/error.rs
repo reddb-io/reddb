@@ -64,6 +64,11 @@ pub enum StoreError {
     StorageIntegrity(StorageIntegrityError),
     /// Serialization error
     Serialization(String),
+    /// A read must be rejected before allocating beyond its allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     /// Internal error (lock poisoning, invariant violation)
     Internal(String),
 }
@@ -79,6 +84,13 @@ impl std::fmt::Display for StoreError {
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::StorageIntegrity(e) => write!(f, "{e}"),
             Self::Serialization(msg) => write!(f, "Serialization error: {}", msg),
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "read needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
             Self::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }

@@ -56,6 +56,11 @@ pub enum ValueLayoutError {
     Codec(value_codec::ValueCodecError),
     /// Overflow chain operation failed.
     Overflow(OverflowError),
+    /// Decode scratch plus output would exceed the read's memory allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for ValueLayoutError {
@@ -75,6 +80,13 @@ impl std::fmt::Display for ValueLayoutError {
             }
             Self::Codec(e) => write!(f, "value codec: {}", e),
             Self::Overflow(e) => write!(f, "overflow chain: {}", e),
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "read needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
         }
     }
 }
@@ -166,15 +178,30 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
 /// Inspect leaf-cell flags, follow the pointer if any, concatenate the
 /// chain, decode if compressed, return the materialised value.
 pub fn decode<P: PageStore>(pager: &P, stored: &[u8]) -> Result<Vec<u8>, ValueLayoutError> {
+    decode_with_budget(pager, stored, usize::MAX)
+}
+
+/// Bound allocations before reading an overflow chain or expanding compressed bytes.
+/// Compressed overflow retains both the encoded chain and its decoded output.
+pub fn decode_with_budget<P: PageStore>(
+    pager: &P,
+    stored: &[u8],
+    limit_bytes: usize,
+) -> Result<Vec<u8>, ValueLayoutError> {
     match reddb_file::decode_btree_value_cell(stored)? {
         BTreeValueCell::Pointer {
             is_compressed,
             head_page_id,
             total_len,
         } => {
+            let encoded_bytes = usize::try_from(total_len)
+                .map_err(|_| ValueLayoutError::ValueTooLarge(usize::MAX))?;
+            check_read_budget(encoded_bytes, limit_bytes)?;
             let chain = OverflowChain::new(pager);
             let chain_bytes = chain.read(head_page_id, total_len)?;
             if is_compressed {
+                let decoded_bytes = compressed_output_bytes(&chain_bytes)?;
+                check_read_budget(encoded_bytes.saturating_add(decoded_bytes), limit_bytes)?;
                 Ok(value_codec::decode(
                     value_codec::ValueFlag::Lz4,
                     &chain_bytes,
@@ -186,11 +213,37 @@ pub fn decode<P: PageStore>(pager: &P, stored: &[u8]) -> Result<Vec<u8>, ValueLa
         BTreeValueCell::Inline {
             is_compressed,
             payload,
-        } => Ok(reddb_file::decode_btree_inline_payload(
-            is_compressed,
-            payload,
-        )?),
+        } => {
+            let decoded_bytes = if is_compressed {
+                compressed_output_bytes(payload)?
+            } else {
+                payload.len()
+            };
+            check_read_budget(decoded_bytes, limit_bytes)?;
+            Ok(reddb_file::decode_btree_inline_payload(
+                is_compressed,
+                payload,
+            )?)
+        }
     }
+}
+
+fn compressed_output_bytes(bytes: &[u8]) -> Result<usize, ValueLayoutError> {
+    let header = bytes.get(..4).ok_or(ValueLayoutError::Codec(
+        value_codec::ValueCodecError::TruncatedHeader,
+    ))?;
+    let decoded_bytes = u32::from_le_bytes(header.try_into().expect("four-byte length header"));
+    usize::try_from(decoded_bytes).map_err(|_| ValueLayoutError::ValueTooLarge(usize::MAX))
+}
+
+fn check_read_budget(required_bytes: usize, limit_bytes: usize) -> Result<(), ValueLayoutError> {
+    if required_bytes > limit_bytes {
+        return Err(ValueLayoutError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        });
+    }
+    Ok(())
 }
 
 /// Return the head overflow page id when `stored` represents a pointer
