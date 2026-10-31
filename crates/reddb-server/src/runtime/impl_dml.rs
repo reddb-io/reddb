@@ -2688,13 +2688,13 @@ impl RedDBRuntime {
                     query.table
                 )));
             };
-            let rhs = super::expr_eval::evaluate_runtime_expr_with_db(
+            let rhs = super::expr_eval::try_evaluate_runtime_expr_with_db(
                 Some(self.inner.db.as_ref()),
                 &assignment.expr,
                 record,
                 Some(query.table.as_str()),
                 Some(query.table.as_str()),
-            )
+            )?
             .ok_or_else(|| {
                 RedDBError::Query(format!(
                     "failed to evaluate UPDATE expression for column '{}'",

@@ -1435,3 +1435,45 @@ fn unreadable_vault_expressions_propagate_errors_and_remain_retryable() {
         }
     }
 }
+
+#[test]
+fn unreadable_config_update_expressions_do_not_publish_fallback_values() {
+    for (query, expected) in [
+        (
+            "UPDATE expression_probe SET id = id + LENGTH(CONFIG('fixture.flag', 'fallback')) ORDER BY id LIMIT 2",
+            [6, 7],
+        ),
+        (
+            "UPDATE expression_probe SET id = CASE WHEN id = 1 THEN 11 ELSE LENGTH(CONFIG('fixture.flag', 'fallback')) END ORDER BY id LIMIT 2",
+            [5, 11],
+        ),
+        (
+            "UPDATE expression_probe SET id += LENGTH(CONFIG('fixture.flag', 'fallback')) ORDER BY id LIMIT 2",
+            [6, 7],
+        ),
+    ] {
+        let (_directory, runtime) = runtime();
+        seed_expression_config(&runtime);
+        runtime
+            .execute_query("INSERT INTO expression_probe (id) VALUES (2)")
+            .expect("second update target");
+        runtime.db().store().persist().expect("publish config");
+        install_indexed_cold(&runtime, "red_config", 1);
+        runtime.invalidate_result_cache();
+        assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
+        assert!(
+            runtime.execute_query(query).is_err(),
+            "an operating read failure must not publish a fallback UPDATE: {query}"
+        );
+        let ids = |runtime: &RedDBRuntime| {
+            observe(runtime, "SELECT id FROM expression_probe ORDER BY id")
+                .into_iter()
+                .map(|row| row.get("id").cloned().expect("update target id"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&runtime), vec![Value::Integer(1), Value::Integer(2)]);
+        install_indexed_cold(&runtime, "red_config", 4096);
+        runtime.execute_query(query).expect("retry config UPDATE");
+        assert_eq!(ids(&runtime), expected.map(Value::Integer));
+    }
+}
