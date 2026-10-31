@@ -108,6 +108,13 @@ impl SpillCodec for FlakyState {
             fail: Arc::new(AtomicBool::new(false)),
         }))
     }
+    fn decode_with_budget<R: Read>(
+        reader: &mut R,
+        budget: &mut reddb_server::storage::query::executors::agg_spill::SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        budget.charge_bytes(32)?;
+        Self::decode(reader)
+    }
 }
 
 #[test]
@@ -255,4 +262,47 @@ fn decoders_accept_short_reads_and_interrupted_reads_without_losing_records() {
         Some("abc".to_string())
     );
     assert_eq!(String::decode(&mut reader).expect("string EOF"), None);
+}
+
+#[test]
+fn length_admission_precedes_string_allocation_and_rejects_count_overflow() {
+    use reddb_server::storage::query::executors::agg_spill::SpillDecodeBudget;
+    let mut budget = SpillDecodeBudget::new(4096);
+    let prefix = 100_000_u32.to_le_bytes();
+    let error = String::decode_with_budget(&mut &prefix[..], &mut budget)
+        .expect_err("oversized string length");
+    assert!(error.to_string().contains("allocation limit"), "{error}");
+    assert_eq!(budget.remaining_bytes(), 4096);
+    assert!(budget.charge_elements::<u64>(usize::MAX).is_err());
+    assert_eq!(budget.remaining_bytes(), 4096);
+}
+
+#[test]
+fn spill_drain_does_not_fall_back_to_an_unbounded_custom_decoder() {
+    #[derive(Clone)]
+    struct LegacyState;
+    impl Mergeable for LegacyState {
+        fn merge(&mut self, _other: Self) {}
+    }
+    impl SpillCodec for LegacyState {
+        fn encode<W: Write>(&self, writer: &mut W) -> Result<usize, SpillError> {
+            1_u64.encode(writer)
+        }
+        fn decode<R: Read>(_reader: &mut R) -> Result<Option<Self>, SpillError> {
+            panic!("unbounded legacy decoder must not run")
+        }
+    }
+    let directory = tempfile::tempdir().expect("private legacy spill");
+    let mut aggregation = SpilledHashAgg::new(directory.path(), 1024, 1);
+    aggregation
+        .accumulate(1_u64, LegacyState)
+        .expect("accumulate");
+    aggregation.spill_partition().expect("encode legacy state");
+    match aggregation.drain() {
+        Err(SpillError::Codec(message)) => {
+            assert!(message.contains("bounded spill decoding"), "{message}")
+        }
+        _ => panic!("unsupported bounded codec must fail before invoking the legacy decoder"),
+    }
+    assert_no_owned_files(directory.path());
 }

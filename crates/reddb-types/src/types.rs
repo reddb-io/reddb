@@ -1128,6 +1128,16 @@ impl Value {
         super::value_codec::decode_with_limit(data, limit_bytes)
     }
 
+    /// Decode against a caller-owned, conservative allocation allowance. A
+    /// successful decode subtracts its preflight usage; failures leave it intact.
+    /// This local allowance does not reserve memory in the runtime's shared pool.
+    pub fn from_bytes_with_budget(
+        data: &[u8],
+        remaining_bytes: &mut usize,
+    ) -> Result<(Self, usize), ValueError> {
+        super::value_codec::decode_with_budget(data, remaining_bytes)
+    }
+
     /// Try to convert to i64
     pub fn as_integer(&self) -> Option<i64> {
         match self {

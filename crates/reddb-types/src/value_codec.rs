@@ -389,12 +389,22 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
 /// Decode a single value from `data`, returning the value and the
 /// number of bytes consumed.
 pub fn decode_with_limit(data: &[u8], limit_bytes: usize) -> Result<(Value, usize), ValueError> {
-    let expected = limit::preflight(data, limit_bytes)?;
+    let mut remaining_bytes = limit_bytes;
+    decode_with_budget(data, &mut remaining_bytes)
+}
+
+/// Consume one conservative allocation allowance across multiple value frames.
+pub fn decode_with_budget(
+    data: &[u8],
+    remaining_bytes: &mut usize,
+) -> Result<(Value, usize), ValueError> {
+    let (expected, allocation_bytes) = limit::preflight(data, *remaining_bytes)?;
     let (value, consumed) = decode(&data[..expected])?;
     assert_eq!(
         consumed, expected,
         "invariant: value preflight and typed decoder agree"
     );
+    *remaining_bytes -= allocation_bytes;
     Ok((value, consumed))
 }
 

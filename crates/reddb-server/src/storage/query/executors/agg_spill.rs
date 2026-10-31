@@ -127,6 +127,52 @@ pub(crate) fn read_spill_header<R: Read, const N: usize>(
     Ok(Some(bytes))
 }
 
+/// Default allowance for standalone codec reads and manually spilled aggregators
+/// with automatic spilling disabled. Zero never means unlimited decode memory.
+pub const DEFAULT_SPILL_DECODE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Local decoded-allocation admission for every key/state pair in one batch,
+/// including nested vectors and codec scratch. Merged tables, transport and global
+/// ownership need their own shared reservations; this is not a process-wide limit.
+pub struct SpillDecodeBudget {
+    limit_bytes: usize,
+    remaining_bytes: usize,
+}
+
+impl SpillDecodeBudget {
+    pub fn new(limit_bytes: usize) -> Self {
+        Self {
+            limit_bytes,
+            remaining_bytes: limit_bytes,
+        }
+    }
+    pub fn remaining_bytes(&self) -> usize {
+        self.remaining_bytes
+    }
+    pub fn charge_bytes(&mut self, bytes: usize) -> std::io::Result<()> {
+        let Some(remaining) = self.remaining_bytes.checked_sub(bytes) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!(
+                    "spill decode allocation limit {} exceeded: needs {bytes}, remaining {}",
+                    self.limit_bytes, self.remaining_bytes
+                ),
+            ));
+        };
+        self.remaining_bytes = remaining;
+        Ok(())
+    }
+    pub fn charge_elements<T>(&mut self, count: usize) -> std::io::Result<()> {
+        let bytes = count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "spill decode allocation limit: element count overflow",
+            )
+        })?;
+        self.charge_bytes(bytes)
+    }
+}
+
 /// Trait for serialising a key or state into a flat byte
 /// representation. Implementations should be deterministic so the
 /// spill file is byte-equal across runs (helpful for debugging).
@@ -142,6 +188,17 @@ pub trait SpillCodec: Sized {
     /// element; returns `Ok(None)` on a clean end-of-file so
     /// drain loops can terminate naturally.
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError>;
+
+    /// Implementations must admit heap allocations before reserving them. The
+    /// drain path refuses legacy codecs without a bounded implementation.
+    fn decode_with_budget<R: Read>(
+        _r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Err(SpillError::Codec(
+            "bounded spill decoding is not implemented for this codec".into(),
+        ))
+    }
 }
 
 /// Implementation strategy for fixed-size primitive types. The
@@ -156,6 +213,12 @@ impl SpillCodec for u64 {
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(read_spill_header(r)?.map(u64::from_le_bytes))
     }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
+    }
 }
 
 impl SpillCodec for i64 {
@@ -166,6 +229,12 @@ impl SpillCodec for i64 {
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(read_spill_header(r)?.map(i64::from_le_bytes))
     }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
+    }
 }
 
 impl SpillCodec for f64 {
@@ -175,6 +244,12 @@ impl SpillCodec for f64 {
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(read_spill_header(r)?.map(f64::from_le_bytes))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
     }
 }
 
@@ -187,10 +262,17 @@ impl SpillCodec for String {
         Ok(4 + bytes.len())
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+        Self::decode_with_budget(r, &mut SpillDecodeBudget::new(DEFAULT_SPILL_DECODE_BYTES))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
         let Some(lenbuf) = read_spill_header(r)? else {
             return Ok(None);
         };
         let len = u32::from_le_bytes(lenbuf) as usize;
+        budget.charge_bytes(len)?;
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf)?;
         String::from_utf8(buf)
@@ -337,10 +419,10 @@ where
     /// new in-memory hash table, merges with whatever the
     /// accumulator left in place, and yields the unified set.
     ///
-    /// Memory profile: at peak, this holds ONE spill batch plus
-    /// the running merge table in memory simultaneously. If a
-    /// single spill batch is larger than `mem_limit_bytes`, we
-    /// return `BatchTooLarge` so the caller can switch strategies.
+    /// Both encoded size and cumulative decoded allocations of each batch must
+    /// fit `mem_limit_bytes`. Decoding shares one allowance across all entries,
+    /// not one per entry. The running merge table still needs separate shared
+    /// accounting; this local decode allowance does not bound its growth.
     pub fn drain(mut self) -> Result<HashMap<K, S>, SpillError> {
         // The current `table` is the most recent in-memory chunk
         // that hasn't been spilled — start the merge from it.
@@ -361,11 +443,16 @@ where
                 ));
             }
             let mut reader = BufReader::new(file);
+            let mut budget = SpillDecodeBudget::new(if self.mem_limit_bytes == 0 {
+                DEFAULT_SPILL_DECODE_BYTES
+            } else {
+                self.mem_limit_bytes
+            });
             for _ in 0..batch.entries {
-                let key = K::decode(&mut reader)?.ok_or_else(|| {
+                let key = K::decode_with_budget(&mut reader, &mut budget)?.ok_or_else(|| {
                     SpillError::Codec("spill batch ended before its published entry count".into())
                 })?;
-                let state = match S::decode(&mut reader)? {
+                let state = match S::decode_with_budget(&mut reader, &mut budget)? {
                     Some(s) => s,
                     None => {
                         return Err(SpillError::Codec(
@@ -423,6 +510,12 @@ impl SpillCodec for SumState<i64> {
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(i64::decode(r)?.map(SumState))
     }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
+    }
 }
 
 impl Mergeable for SumState<f64> {
@@ -436,6 +529,12 @@ impl SpillCodec for SumState<f64> {
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(f64::decode(r)?.map(SumState))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
     }
 }
 
@@ -454,6 +553,12 @@ impl SpillCodec for CountState {
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(u64::decode(r)?.map(CountState))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
     }
 }
 
@@ -478,6 +583,12 @@ impl SpillCodec for MinState<i64> {
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(i64::decode(r)?.map(MinState))
     }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
+    }
 }
 
 impl Mergeable for MaxState<i64> {
@@ -493,6 +604,12 @@ impl SpillCodec for MaxState<i64> {
     }
     fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
         Ok(i64::decode(r)?.map(MaxState))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
     }
 }
 
@@ -529,6 +646,12 @@ impl SpillCodec for AvgState {
             }
         };
         Ok(Some(AvgState { sum, count }))
+    }
+    fn decode_with_budget<R: Read>(
+        r: &mut R,
+        _budget: &mut SpillDecodeBudget,
+    ) -> Result<Option<Self>, SpillError> {
+        Self::decode(r)
     }
 }
 

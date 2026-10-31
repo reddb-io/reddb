@@ -235,3 +235,55 @@ fn frames_without_content_size_must_match_the_declared_expansion_exactly() {
         }
     }
 }
+
+#[test]
+fn successive_value_frames_consume_one_allocation_allowance() {
+    let value = Value::Array(vec![Value::Blob(vec![7; 2400])]);
+    let bytes = value.to_bytes();
+    let mut probe = 16 * 1024;
+    let (decoded, consumed) =
+        Value::from_bytes_with_budget(&bytes, &mut probe).expect("admitted value");
+    assert_eq!(decoded, value);
+    assert_eq!(consumed, bytes.len());
+    let cost = 16 * 1024 - probe;
+    assert!(
+        cost > 2400,
+        "account decoded slots and input as well as the blob"
+    );
+    let mut remaining = 2 * cost - 1;
+    Value::from_bytes_with_budget(&bytes, &mut remaining).expect("first frame fits");
+    let before_failure = remaining;
+    assert!(matches!(
+        Value::from_bytes_with_budget(&bytes, &mut remaining),
+        Err(ValueError::ReadLimitExceeded { .. })
+    ));
+    assert_eq!(
+        remaining, before_failure,
+        "failed admission leaves the allowance unchanged"
+    );
+    remaining += 1;
+    assert_eq!(
+        Value::from_bytes_with_budget(&bytes, &mut remaining)
+            .expect("exact remaining allowance")
+            .0,
+        value
+    );
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn malformed_frame_does_not_consume_the_shared_allowance() {
+    let mut remaining = 4096;
+    assert!(
+        Value::from_bytes_with_budget(&[DataType::Array.to_byte(), 2], &mut remaining).is_err()
+    );
+    assert_eq!(remaining, 4096);
+    let bytes = Value::Integer(7).to_bytes();
+    assert_eq!(
+        Value::from_bytes_with_budget(&bytes, &mut remaining)
+            .expect("retry valid frame")
+            .0,
+        Value::Integer(7)
+    );
+    assert!(remaining < 4096);
+}

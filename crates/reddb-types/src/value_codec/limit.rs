@@ -3,7 +3,7 @@
 use super::{read_varint, type_for_tag, DataType, Value, ValueError};
 use crate::utils::json::JSON_MAX_NESTING_DEPTH;
 
-pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<usize, ValueError> {
+pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<(usize, usize), ValueError> {
     if data.is_empty() {
         return Err(ValueError::EmptyData);
     }
@@ -107,7 +107,7 @@ pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<usize, ValueE
             }
         }
     }
-    Ok(cursor.position)
+    Ok((cursor.position, cursor.used_bytes))
 }
 
 struct Cursor<'a> {
