@@ -492,9 +492,9 @@ impl RedDBRuntime {
         use std::sync::Arc;
 
         let store = self.inner.db.store();
-        blockchain_kind::mark_as_chain(&store, name);
+        blockchain_kind::try_mark_as_chain(&store, name)?;
 
-        let existing_tip = blockchain_kind::chain_tip(&store, name);
+        let existing_tip = blockchain_kind::try_chain_tip(&store, name)?;
         if existing_tip.height.is_some() {
             return Ok(());
         }
@@ -519,7 +519,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         // #524: prime the in-memory tip cache so the chain-tip endpoint and
         // subsequent INSERTs don't have to scan the collection to find genesis.
-        if let Some(tip) = blockchain_kind::chain_tip_full(&store, name) {
+        if let Some(tip) = blockchain_kind::try_chain_tip_full(&store, name)? {
             self.inner
                 .chain_tip_cache
                 .lock()

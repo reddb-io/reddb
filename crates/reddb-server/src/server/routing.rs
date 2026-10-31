@@ -1010,7 +1010,14 @@ pub(crate) fn handle_chain_tip(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
+    let value = match runtime.try_chain_tip_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(tip) = value else {
         return json_error(
             404,
             format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
@@ -1057,7 +1064,14 @@ pub(crate) fn handle_verify_chain(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
+    let value = match runtime.try_verify_chain_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(outcome) = value else {
         return json_error(
             404,
             format!(
@@ -1086,7 +1100,14 @@ pub(crate) fn handle_clear_integrity_flag(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    if !runtime.clear_chain_integrity_flag(collection) {
+    let cleared = match runtime.try_clear_chain_integrity_flag(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    if !cleared {
         return json_error(
             404,
             format!(

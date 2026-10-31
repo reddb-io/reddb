@@ -19,76 +19,90 @@ impl RedDBRuntime {
         &self,
         collection: &str,
     ) -> Option<crate::runtime::blockchain_kind::ChainTipFull> {
+        self.try_chain_tip_for_collection(collection).ok().flatten()
+    }
+
+    pub fn try_chain_tip_for_collection(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<Option<crate::runtime::blockchain_kind::ChainTipFull>> {
         let store = self.inner.db.store();
-        if !crate::runtime::blockchain_kind::is_chain(&store, collection) {
-            return None;
+        if !super::blockchain_kind::try_is_chain(&store, collection)? {
+            return Ok(None);
         }
         let mut cache = self.inner.chain_tip_cache.lock();
         if let Some(existing) = cache.get(collection) {
-            return Some(existing.clone());
+            return Ok(Some(existing.clone()));
         }
-        let scanned = crate::runtime::blockchain_kind::chain_tip_full(&store, collection)?;
+        let Some(scanned) = super::blockchain_kind::try_chain_tip_full(&store, collection)? else {
+            return Ok(None);
+        };
         cache.insert(collection.to_string(), scanned.clone());
-        Some(scanned)
+        Ok(Some(scanned))
     }
 
-    /// Issue #525 — walks the chain end-to-end, recomputes each block's hash
-    /// against the stored fields, and returns the verification outcome.  On
-    /// `ok == false` the integrity flag is persisted and the in-memory cache
-    /// is updated so subsequent INSERTs surface `ChainIntegrityBroken`.
-    ///
-    /// Returns `None` when the collection is absent or not a `KIND blockchain`.
+    /// Verify every physical block, preserving storage failures as errors.
     pub fn verify_chain_for_collection(
         &self,
         collection: &str,
     ) -> Option<crate::runtime::blockchain_kind::VerifyChainOutcome> {
+        self.try_verify_chain_for_collection(collection)
+            .ok()
+            .flatten()
+    }
+
+    pub fn try_verify_chain_for_collection(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<Option<crate::runtime::blockchain_kind::VerifyChainOutcome>> {
         let store = self.inner.db.store();
-        let outcome = crate::runtime::blockchain_kind::verify_chain_outcome(&store, collection)?;
+        let Some(outcome) = super::blockchain_kind::try_verify_chain_outcome(&store, collection)?
+        else {
+            return Ok(None);
+        };
         if !outcome.ok {
-            crate::runtime::blockchain_kind::persist_integrity_flag(&store, collection, true);
+            // Refuse further local writes even if publishing the durable flag fails.
             self.inner
                 .chain_integrity_broken
                 .lock()
                 .insert(collection.to_string(), true);
+            super::blockchain_kind::try_persist_integrity_flag(&store, collection, true)?;
         }
-        Some(outcome)
+        Ok(Some(outcome))
     }
 
-    /// Issue #525 — admin clears the `ChainIntegrityBroken` flag so the chain
-    /// accepts INSERTs again.  Returns `false` when the collection is not a
-    /// chain.
     pub fn clear_chain_integrity_flag(&self, collection: &str) -> bool {
+        self.try_clear_chain_integrity_flag(collection)
+            .unwrap_or(false)
+    }
+
+    pub fn try_clear_chain_integrity_flag(&self, collection: &str) -> RedDBResult<bool> {
         let store = self.inner.db.store();
-        if !crate::runtime::blockchain_kind::is_chain(&store, collection) {
-            return false;
+        if !super::blockchain_kind::try_is_chain(&store, collection)? {
+            return Ok(false);
         }
-        crate::runtime::blockchain_kind::persist_integrity_flag(&store, collection, false);
+        super::blockchain_kind::try_persist_integrity_flag(&store, collection, false)?;
         self.inner
             .chain_integrity_broken
             .lock()
             .insert(collection.to_string(), false);
-        true
+        Ok(true)
     }
 
-    /// Issue #525 — INSERT-time check.  Combines in-memory cache (fast path)
-    /// with a one-time scan of `red_config` on cold start so the flag survives
-    /// restart.
-    pub(super) fn is_chain_integrity_broken(&self, collection: &str) -> bool {
-        {
-            let cache = self.inner.chain_integrity_broken.lock();
-            if let Some(v) = cache.get(collection) {
-                return *v;
-            }
+    pub(super) fn is_chain_integrity_broken(&self, collection: &str) -> RedDBResult<bool> {
+        if let Some(broken) = self.inner.chain_integrity_broken.lock().get(collection) {
+            return Ok(*broken);
         }
-        let store = self.inner.db.store();
-        let persisted =
-            crate::runtime::blockchain_kind::is_integrity_broken_persisted(&store, collection)
-                .unwrap_or(false);
+        let persisted = super::blockchain_kind::try_is_integrity_broken_persisted(
+            &self.inner.db.store(),
+            collection,
+        )?
+        .unwrap_or(false);
         self.inner
             .chain_integrity_broken
             .lock()
             .insert(collection.to_string(), persisted);
-        persisted
+        Ok(persisted)
     }
 
     /// Issue #765 / S6 — lazily hydrate the integrity-tombstone cache from

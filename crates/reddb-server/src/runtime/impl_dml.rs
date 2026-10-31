@@ -635,7 +635,7 @@ impl RedDBRuntime {
             // concurrent submitters can't both bind to the same prev_hash —
             // the loser observes the advanced tip and gets 409 with the new
             // tip so it can retry.
-            let chain_mode = crate::runtime::blockchain_kind::is_chain(&store, &query.table);
+            let chain_mode = crate::runtime::blockchain_kind::try_is_chain(&store, &query.table)?;
             let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
                 Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
             } else {
@@ -645,7 +645,7 @@ impl RedDBRuntime {
 
             // Issue #525 — refuse new blocks if the chain has been marked
             // `integrity = broken` until an admin clears the flag.
-            if chain_mode && self.is_chain_integrity_broken(&query.table) {
+            if chain_mode && self.is_chain_integrity_broken(&query.table)? {
                 return Err(RedDBError::InvalidOperation(format!(
                     "ChainIntegrityBroken: collection '{}' is locked until \
                      POST /collections/{}/clear-integrity-flag is called by an admin",
@@ -662,7 +662,7 @@ impl RedDBRuntime {
                     if let Some(existing) = cache.get(&query.table) {
                         Some(existing.clone())
                     } else if let Some(scanned) =
-                        crate::runtime::blockchain_kind::chain_tip_full(&store, &query.table)
+                        crate::runtime::blockchain_kind::try_chain_tip_full(&store, &query.table)?
                     {
                         cache.insert(query.table.clone(), scanned.clone());
                         Some(scanned)
@@ -1926,7 +1926,10 @@ impl RedDBRuntime {
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: UPDATE not allowed on '{}'",
                 query.table
@@ -2819,7 +2822,10 @@ impl RedDBRuntime {
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: DELETE not allowed on '{}'",
                 query.table

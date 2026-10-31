@@ -996,3 +996,256 @@ async fn cold_stream_config_redwire_refuses_before_open_ack() {
         "unavailable config must not accept a lease or execute a query"
     );
 }
+
+#[test]
+fn cold_chain_tip_does_not_disappear_with_persisted_rows() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    runtime
+        .execute_query("INSERT INTO cold_chain (actor) VALUES ('first')")
+        .expect("block");
+    let expected = runtime
+        .chain_tip_for_collection("cold_chain")
+        .expect("resident tip");
+    runtime.db().store().persist().expect("publish chain");
+    install_indexed_cold(&runtime, "cold_chain", 128 * 1024);
+    runtime.inner.chain_tip_cache.lock().clear();
+    assert_eq!(
+        runtime.chain_tip_for_collection("cold_chain"),
+        Some(expected),
+        "cold physical blocks remain authoritative"
+    );
+}
+
+#[test]
+fn cold_chain_verification_cannot_verify_an_empty_resident_subset() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    runtime
+        .execute_query("INSERT INTO cold_chain (actor) VALUES ('first')")
+        .expect("block");
+    let expected = runtime
+        .verify_chain_for_collection("cold_chain")
+        .expect("resident verification");
+    assert_eq!(expected.checked, 2);
+    runtime.db().store().persist().expect("publish chain");
+    install_indexed_cold(&runtime, "cold_chain", 128 * 1024);
+    assert_eq!(
+        runtime.verify_chain_for_collection("cold_chain"),
+        Some(expected)
+    );
+}
+
+#[test]
+fn cold_chain_broken_integrity_flag_must_keep_blocking_appends() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    let store = runtime.db().store();
+    super::blockchain_kind::persist_integrity_flag(&store, "cold_chain", true);
+    runtime.inner.chain_integrity_broken.lock().clear();
+    store.persist().expect("publish broken flag");
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    let error = runtime
+        .execute_query("INSERT INTO cold_chain (actor) VALUES ('must-remain-blocked')")
+        .expect_err("persisted broken chain must remain locked");
+    assert!(
+        error.to_string().contains("ChainIntegrityBroken"),
+        "{error}"
+    );
+}
+
+fn install_chain_native_rows(
+    runtime: &RedDBRuntime,
+    mut transform: impl FnMut(&mut UnifiedEntity),
+) {
+    let store = runtime.db().store();
+    let manager = store.get_collection("cold_chain").expect("chain");
+    let data = Arc::new(BTree::new(Arc::clone(store.pager().expect("pager"))));
+    manager
+        .try_for_each_entity(usize::MAX, |entity| {
+            let mut entity = entity.clone();
+            transform(&mut entity);
+            data.insert(
+                &entity.id.raw().to_be_bytes(),
+                &reddb_engine::storage::metadata_codec::serialize_entity_record(
+                    &entity,
+                    None,
+                    store.format_version(),
+                ),
+            )
+            .expect("private native chain");
+            true
+        })
+        .expect("copy physical chain");
+    let root = data.root_page_id();
+    manager.install_backing(
+        Arc::new(PagedCollection::new(data)),
+        root,
+        store.format_version(),
+        128 * 1024,
+        manager.count() as u64,
+    );
+    runtime.inner.chain_tip_cache.lock().clear();
+}
+
+#[test]
+fn cold_chain_positional_rows_preserve_nullable_payload_hashes() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    runtime
+        .execute_query(
+            "INSERT INTO cold_chain (actor, note) VALUES ('first', NULL), ('second', 'present')",
+        )
+        .expect("blocks");
+    let expected = runtime
+        .try_verify_chain_for_collection("cold_chain")
+        .expect("read")
+        .expect("verification");
+    assert!(expected.ok);
+    assert_eq!(expected.checked, 3);
+    let tip = runtime
+        .try_chain_tip_for_collection("cold_chain")
+        .expect("read");
+    install_chain_native_rows(&runtime, |entity| {
+        let EntityData::Row(row) = &mut entity.data else {
+            panic!("chain row");
+        };
+        let (names, values): (Vec<_>, Vec<_>) = row
+            .iter_fields()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .unzip();
+        *row = RowData {
+            columns: values,
+            named: None,
+            schema: Some(Arc::new(names)),
+        };
+    });
+    assert_eq!(
+        runtime
+            .try_chain_tip_for_collection("cold_chain")
+            .expect("cold tip read"),
+        tip
+    );
+    assert_eq!(
+        runtime
+            .try_verify_chain_for_collection("cold_chain")
+            .expect("cold verification"),
+        Some(expected)
+    );
+}
+
+#[test]
+fn cold_chain_failed_reads_leave_tip_and_integrity_caches_retryable() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    let store = runtime.db().store();
+    store.persist().expect("publish chain");
+    install_indexed_cold(&runtime, "cold_chain", 1);
+    runtime.inner.chain_tip_cache.lock().clear();
+    assert!(runtime.try_chain_tip_for_collection("cold_chain").is_err());
+    assert!(runtime
+        .try_verify_chain_for_collection("cold_chain")
+        .is_err());
+    assert!(!runtime
+        .inner
+        .chain_tip_cache
+        .lock()
+        .contains_key("cold_chain"));
+    install_indexed_cold(&runtime, "cold_chain", 128 * 1024);
+    assert!(runtime
+        .try_chain_tip_for_collection("cold_chain")
+        .expect("recovered tip")
+        .is_some());
+    super::blockchain_kind::try_persist_integrity_flag(&store, "cold_chain", true)
+        .expect("broken flag");
+    runtime
+        .inner
+        .chain_integrity_broken
+        .lock()
+        .insert("cold_chain".into(), true);
+    store.persist().expect("publish flag");
+    install_indexed_cold(&runtime, "red_config", 1);
+    assert!(runtime
+        .try_clear_chain_integrity_flag("cold_chain")
+        .is_err());
+    assert_eq!(
+        runtime
+            .inner
+            .chain_integrity_broken
+            .lock()
+            .get("cold_chain"),
+        Some(&true)
+    );
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    assert_eq!(
+        super::blockchain_kind::try_is_integrity_broken_persisted(&store, "cold_chain")
+            .expect("recover flag"),
+        Some(true)
+    );
+}
+
+#[test]
+fn cold_chain_malformed_blocks_are_errors_instead_of_skipped_rows() {
+    for field in ["hash", "prev_hash", "block_height", "timestamp"] {
+        let (_directory, runtime) = runtime();
+        runtime
+            .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+            .expect("chain");
+        install_chain_native_rows(&runtime, |entity| {
+            let EntityData::Row(row) = &mut entity.data else {
+                panic!("chain row");
+            };
+            let mut fields: std::collections::HashMap<String, Value> = row
+                .iter_fields()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect();
+            fields.remove(field);
+            *row = RowData {
+                columns: Vec::new(),
+                named: Some(fields),
+                schema: None,
+            };
+        });
+        assert!(
+            runtime
+                .try_verify_chain_for_collection("cold_chain")
+                .is_err(),
+            "missing {field} must not verify as an empty chain"
+        );
+    }
+}
+
+#[test]
+fn cold_chain_verification_obeys_work_budget_and_recovers_after_cancellation() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE COLLECTION cold_chain KIND blockchain")
+        .expect("chain");
+    runtime
+        .execute_query("INSERT INTO cold_chain (actor) VALUES ('first')")
+        .expect("block");
+    runtime.db().store().persist().expect("publish blocks");
+    install_indexed_cold(&runtime, "cold_chain", 128 * 1024);
+    let scope = super::function_budget::Scope::enter(1, 60_000).expect("bounded work");
+    let error = runtime
+        .try_verify_chain_for_collection("cold_chain")
+        .expect_err("two blocks exceed one unit of work");
+    assert!(error.to_string().contains("work_max"), "{error}");
+    drop(scope);
+    let outcome = runtime
+        .try_verify_chain_for_collection("cold_chain")
+        .expect("retry after cancellation")
+        .expect("chain outcome");
+    assert!(outcome.ok);
+    assert_eq!(outcome.checked, 2);
+}

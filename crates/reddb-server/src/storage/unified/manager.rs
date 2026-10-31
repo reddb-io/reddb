@@ -278,6 +278,13 @@ mod tests {
                  use paged entity cursors or scan with captured visibility",
             ),
             (
+                "runtime/blockchain_kind.rs",
+                include_str!("../../runtime/blockchain_kind.rs"),
+                1,
+                "immutable blockchain tip and verification inspect physical blocks; \
+                 the shared visitor propagates storage/codec errors and work budgets",
+            ),
+            (
                 "runtime/impl_queue.rs",
                 include_str!("../../runtime/impl_queue.rs"),
                 10,
