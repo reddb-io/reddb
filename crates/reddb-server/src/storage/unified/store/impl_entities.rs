@@ -1367,6 +1367,19 @@ impl UnifiedStore {
         self.get_collection(collection)?.get_metadata(id)
     }
 
+    /// Fallible metadata access for authoritative reads and mutation preimages.
+    pub fn try_get_metadata(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<Metadata>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get_metadata(id, limit_bytes)
+    }
+
     /// Add a cross-reference between entities
     pub fn add_cross_ref(
         &self,

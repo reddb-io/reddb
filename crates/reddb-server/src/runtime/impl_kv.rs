@@ -582,22 +582,25 @@ impl<'a> KvAtomicOps<'a> {
     /// Used to carry an existing expiry across the delete-then-create that
     /// non-versioned KV updates go through, so an operation that does not
     /// mention TTL does not silently clear it.
-    fn existing_ttl_ms(&self, collection: &str, key: &str) -> Option<u64> {
-        let entity = self
-            .get_entity(crate::catalog::CollectionModel::Kv, collection, key)
-            .ok()
-            .flatten()?;
-        let metadata = self
-            .runtime
-            .inner
-            .db
-            .store()
-            .get_metadata(collection, entity.id)?;
-        match metadata.get("_ttl_ms")? {
-            MetadataValue::Int(ms) if *ms >= 0 => Some(*ms as u64),
-            MetadataValue::Timestamp(ms) => Some(*ms),
+    fn existing_ttl_ms(&self, collection: &str, key: &str) -> RedDBResult<Option<u64>> {
+        let Some(entity) = self.get_entity(crate::catalog::CollectionModel::Kv, collection, key)?
+        else {
+            return Ok(None);
+        };
+        let Some(metadata) =
+            self.runtime
+                .inner
+                .db
+                .store()
+                .try_get_metadata(collection, entity.id, usize::MAX)?
+        else {
+            return Ok(None);
+        };
+        Ok(match metadata.get("_ttl_ms") {
+            Some(MetadataValue::Int(ms)) if *ms >= 0 => Some(*ms as u64),
+            Some(MetadataValue::Timestamp(ms)) => Some(*ms),
             _ => None,
-        }
+        })
     }
 
     /// Atomically increment (or decrement) a counter key. Returns the new value.
@@ -649,7 +652,7 @@ impl<'a> KvAtomicOps<'a> {
             .kv_tag_index
             .tags_for_key(collection, key);
         let carried_ttl_ms = if ttl_ms.is_none() {
-            self.existing_ttl_ms(collection, key)
+            self.existing_ttl_ms(collection, key)?
         } else {
             None
         };
@@ -754,7 +757,7 @@ impl<'a> KvAtomicOps<'a> {
             .kv_tag_index
             .tags_for_key(collection, key);
         let carried_ttl_ms = if ttl_ms.is_none() {
-            self.existing_ttl_ms(collection, key)
+            self.existing_ttl_ms(collection, key)?
         } else {
             None
         };
@@ -3736,7 +3739,10 @@ mod tests {
             ops.get(CollectionModel::Kv, "keys", "item").expect("read"),
             Some(Value::Integer(2))
         );
-        assert_eq!(ops.existing_ttl_ms("keys", "item"), Some(600_000));
+        assert_eq!(
+            ops.existing_ttl_ms("keys", "item").expect("TTL read"),
+            Some(600_000)
+        );
         assert_eq!(
             runtime.inner.kv_tag_index.tags_for_key("keys", "item"),
             vec!["daily".to_string()]

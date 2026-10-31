@@ -210,3 +210,86 @@ fn cold_store_config_reads_and_idempotent_boot_reseed() {
         "failed config scans must not mutate boot state"
     );
 }
+
+#[test]
+fn cold_vcs_settings_keep_listing_opt_out_and_idempotent_reenable() {
+    let (_directory, runtime) = runtime();
+    for collection in ["first_history", "second_history"] {
+        runtime.vcs_set_versioned(collection, true).expect("opt in");
+    }
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish VCS settings");
+    let collection = crate::application::vcs_collections::SETTINGS;
+    install_cold(&runtime, collection, 128 * 1024);
+    assert_eq!(
+        runtime
+            .vcs_list_versioned()
+            .expect("cold versioning inventory"),
+        vec!["first_history", "second_history"]
+    );
+    runtime
+        .vcs_set_versioned("first_history", false)
+        .expect("explicit opt out");
+    assert!(!runtime
+        .vcs_is_versioned("first_history")
+        .expect("cold opt out"));
+    runtime
+        .vcs_set_versioned("first_history", true)
+        .expect("reenable");
+    runtime
+        .vcs_set_versioned("first_history", true)
+        .expect("idempotent opt in");
+    let store = runtime.db().store();
+    assert_eq!(
+        store.get_collection(collection).expect("settings").count(),
+        2
+    );
+    store.persist().expect("publish changed settings");
+    install_cold(&runtime, collection, 1);
+    assert!(runtime.vcs_list_versioned().is_err());
+    assert!(runtime.vcs_set_versioned("first_history", false).is_err());
+    assert_eq!(
+        store.get_collection(collection).expect("settings").count(),
+        2
+    );
+}
+
+#[test]
+fn cold_counter_mutations_keep_ttl_and_tags() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("KV PUT cold_counters.item = 1 EXPIRE 10m TAGS [scope:prod]")
+        .expect("expiring counter");
+    runtime.db().store().persist().expect("publish counter");
+    install_cold(&runtime, "cold_counters", 128 * 1024);
+    runtime
+        .execute_query("KV INCR cold_counters.item BY 1")
+        .expect("cold increment");
+    let result = runtime
+        .execute_query("KV GET cold_counters.item")
+        .expect("incremented counter");
+    let id = match result.result.records[0].get("rid") {
+        Some(Value::UnsignedInteger(id)) => crate::storage::EntityId::new(*id),
+        other => panic!("counter identity: {other:?}"),
+    };
+    let store = runtime.db().store();
+    let manager = store.get_collection("cold_counters").expect("counter");
+    let metadata = manager
+        .try_get_metadata(id, 128 * 1024)
+        .expect("metadata read")
+        .expect("metadata");
+    assert_eq!(
+        metadata.get("_ttl_ms"),
+        Some(&crate::storage::MetadataValue::Int(600_000))
+    );
+    assert_eq!(
+        runtime
+            .inner
+            .kv_tag_index
+            .tags_for_key("cold_counters", "item"),
+        vec!["scope:prod"]
+    );
+}

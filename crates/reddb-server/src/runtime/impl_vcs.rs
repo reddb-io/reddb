@@ -370,22 +370,28 @@ fn is_versioned(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
 /// Enumerate every user collection currently opted in. Order
 /// undefined — callers that need a deterministic iteration should
 /// sort the returned list.
-fn versioned_collections(store: &UnifiedStore) -> Vec<String> {
+fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
     let Some(manager) = store.get_collection(vc::SETTINGS) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    manager
-        .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .and_then(|row| row.get_field("versioned"))
-                .map(|v| matches!(v, Value::Boolean(true)))
-                .unwrap_or(false)
-        })
-        .into_iter()
-        .filter_map(|entity| row_text(entity.data.as_row()?, "id"))
-        .collect()
+    let _publication = manager
+        .has_backing()
+        .then(|| store.vault_publication_lock.lock());
+    let mut collections = Vec::new();
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_entity(usize::MAX, visit),
+        |entity| {
+            if let Some(row) = entity.data.as_row() {
+                if matches!(row.get_field("versioned"), Some(Value::Boolean(true))) {
+                    if let Some(name) = row_text(row, "id") {
+                        collections.push(name);
+                    }
+                }
+            }
+            true
+        },
+    )?;
+    Ok(collections)
 }
 
 /// Upsert / delete the `red_vcs_settings` row for `name`. `true`
@@ -399,26 +405,33 @@ fn set_versioned_flag(store: &UnifiedStore, name: &str, enabled: bool) -> RedDBR
             "cannot version internal collection `{name}`"
         )));
     }
-    let target = name.to_string();
+    let _publication = store.vault_publication_lock.lock();
+    let mut previous = Vec::new();
     if let Some(manager) = store.get_collection(vc::SETTINGS) {
-        let rows = manager.query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&target))
-        });
-        for row in rows {
-            let _ = store.delete(vc::SETTINGS, row.id);
-        }
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                if entity.data.as_row().is_some_and(|row| {
+                    matches!(row.get_field("id"), Some(Value::Text(stored)) if stored.as_ref() == name)
+                }) {
+                    previous.push(entity.id);
+                }
+                true
+            },
+        )?;
     }
-    if !enabled {
-        return Ok(());
+    if enabled {
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("id".to_string(), Value::text(name));
+        fields.insert("versioned".to_string(), Value::Boolean(true));
+        fields.insert("ts_ms".to_string(), Value::TimestampMs(now_ms()));
+        // Publish the replacement first. A failed insert must not erase the
+        // existing history setting; a failed deletion remains an explicit error.
+        insert_meta_row(store, vc::SETTINGS, fields)?;
     }
-    let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("id".to_string(), Value::text(name));
-    fields.insert("versioned".to_string(), Value::Boolean(true));
-    fields.insert("ts_ms".to_string(), Value::TimestampMs(now_ms()));
-    insert_meta_row(store, vc::SETTINGS, fields)?;
+    for id in previous {
+        store.delete(vc::SETTINGS, id)?;
+    }
     Ok(())
 }
 
@@ -1637,7 +1650,7 @@ impl RedDBRuntime {
     pub fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        let mut list = versioned_collections(store);
+        let mut list = versioned_collections(store)?;
         list.sort();
         Ok(list)
     }

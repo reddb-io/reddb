@@ -50,6 +50,9 @@ completion and manifest-registry decisions use them so unreadable durable state
 cannot be mistaken for first boot. Legacy best-effort wrappers remain for callers
 not yet migrated and still block managed activation. Retained output objects and
 frozen overlay copies still require global admission.
+Cold counter pre-reads preserve TTL and tags, and storage faults propagate before
+mutation. Listing/setting VCS opt-in flags also scans fallibly; re-enabling writes
+the replacement before deleting prior flags so a failed insert preserves history.
 
 Prepared files carry checksummed resume counters alongside their exact collection
 roots: physical counts and entity/row/sequence allocator high-water marks. A preparation scan
