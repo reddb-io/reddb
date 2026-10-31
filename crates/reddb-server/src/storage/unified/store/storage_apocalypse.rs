@@ -11,7 +11,7 @@ const CHILD: &str = "REDDB_STORAGE_APOCALYPSE_PATH";
 const TEST: &str =
     "storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix";
 const ROWS: u64 = 48;
-const COLLECTIONS: [&str; 3] = ["inline", "overflow", "compressed"];
+const COLLECTIONS: [&str; 4] = ["inline", "overflow", "compressed", "keyed"];
 const CHECKPOINT_FAULTS: [(&str, i32); 4] = [
     ("REDDB_EXPERIMENTAL_EXIT_DURING_CHECKPOINT_REBUILD", 183),
     ("REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE", 184),
@@ -48,12 +48,14 @@ fn payload(collection: &str, id: u64, generation: u64) -> String {
         "inline" => 180,
         "overflow" => 12 * 1024,
         "compressed" => 24 * 1024,
+        "keyed" => 2 * 1024,
         _ => unreachable!(),
     };
     if collection == "compressed" {
         return format!("{id}:{generation}:") + &"z".repeat(len);
     }
-    let mut state = id.wrapping_mul(31) + generation * 17 + 1;
+    let mut state =
+        id.wrapping_mul(31) + generation * 17 + if collection == "keyed" { 1009 } else { 1 };
     (0..len)
         .map(|_| {
             state ^= state << 13;
@@ -65,12 +67,14 @@ fn payload(collection: &str, id: u64, generation: u64) -> String {
 }
 
 fn entity(collection: &str, id: u64, generation: u64) -> UnifiedEntity {
-    UnifiedEntity::table_row(
-        EntityId::new(id),
-        collection,
-        id,
-        vec![Value::text(payload(collection, id, generation))],
-    )
+    let values = vec![Value::text(payload(collection, id, generation))];
+    let mut entity = UnifiedEntity::table_row(EntityId::new(id), collection, id, vec![]);
+    entity.data = EntityData::Row(if collection == "keyed" {
+        crate::storage::RowData::with_names(values, vec!["key".into()])
+    } else {
+        crate::storage::RowData::new(values)
+    });
+    entity
 }
 
 fn seed_with_config(path: &Path, config: UnifiedStoreConfig) {
@@ -124,23 +128,60 @@ fn verify(store: &UnifiedStore, generation: u64) {
         assert_eq!(scan.len(), ROWS as usize, "leaf chain count: {collection}");
         for (offset, (key, value)) in scan.iter().enumerate() {
             let id = offset as u64 + 1;
+            if collection == "keyed" {
+                let manager = store.get_collection(collection).expect("keyed collection");
+                assert_eq!(
+                    manager
+                        .try_project_key_entity(
+                            &payload(collection, id, generation),
+                            None,
+                            false,
+                            128 * 1024,
+                            |entity| entity.id
+                        )
+                        .expect("verified key index"),
+                    Some(EntityId::new(id))
+                );
+                if generation > 0 {
+                    assert_eq!(
+                        manager
+                            .try_project_key_entity(
+                                &payload(collection, id, generation - 1),
+                                None,
+                                false,
+                                128 * 1024,
+                                |_| ()
+                            )
+                            .expect("old key absence"),
+                        None,
+                        "an old index must not expose a replaced logical key"
+                    );
+                }
+            }
             assert_eq!(*key, id.to_be_bytes(), "leaf chain order: {collection}");
             assert_eq!(
                 tree.get(key).unwrap().as_ref(),
                 Some(value),
                 "parent traversal disagrees with leaf chain: {collection} id={id}"
             );
-            assert_eq!(
-                store
-                    .get(collection, EntityId::new(id))
-                    .unwrap()
-                    .data
-                    .as_row()
-                    .unwrap()
-                    .columns,
-                [Value::text(payload(collection, id, generation))],
-                "payload: {collection} id={id} generation={generation}"
-            );
+            let actual = store
+                .get(collection, EntityId::new(id))
+                .expect("physical row");
+            let row = actual.data.as_row().expect("row payload");
+            let expected = Value::text(payload(collection, id, generation));
+            if collection == "keyed" {
+                assert_eq!(
+                    row.get_field("key"),
+                    Some(&expected),
+                    "named payload: {collection} id={id} generation={generation}"
+                );
+            } else {
+                assert_eq!(
+                    row.columns,
+                    [expected],
+                    "payload: {collection} id={id} generation={generation}"
+                );
+            }
         }
     }
 }
