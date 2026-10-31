@@ -473,12 +473,12 @@ impl RedDBRuntime {
         if !query.allowed_signers.is_empty() {
             let actor = crate::runtime::impl_core::current_user_projected()
                 .unwrap_or_else(|| "@system/create-collection".to_string());
-            crate::runtime::signed_writes_kind::install(
+            crate::runtime::signed_writes_kind::try_install(
                 &self.inner.db.store(),
                 &query.name,
                 &query.allowed_signers,
                 &actor,
-            );
+            )?;
         }
         Ok(result)
     }
@@ -1147,7 +1147,7 @@ impl RedDBRuntime {
                     // signed-writes registry installed so this isn't a
                     // covert way to retrofit one (use `CREATE COLLECTION
                     // ... SIGNED_BY (...)` for that).
-                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::try_is_signed(&store, &query.name)? {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION ADD SIGNER: '{}' has no signer registry; \
                              recreate it with CREATE COLLECTION ... SIGNED_BY (...)",
@@ -1156,12 +1156,12 @@ impl RedDBRuntime {
                     }
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
-                    let changed = crate::runtime::signed_writes_kind::add_signer(
+                    let changed = crate::runtime::signed_writes_kind::try_add_signer(
                         &store,
                         &query.name,
                         *pubkey,
                         &actor,
-                    );
+                    )?;
                     messages.push(format!(
                         "signer {} on '{}'",
                         if changed { "added" } else { "already present" },
@@ -1169,7 +1169,7 @@ impl RedDBRuntime {
                     ));
                 }
                 AlterOperation::RevokeSigner { pubkey } => {
-                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::try_is_signed(&store, &query.name)? {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION REVOKE SIGNER: '{}' has no signer registry",
                             query.name
@@ -1177,12 +1177,12 @@ impl RedDBRuntime {
                     }
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
-                    let changed = crate::runtime::signed_writes_kind::revoke_signer(
+                    let changed = crate::runtime::signed_writes_kind::try_revoke_signer(
                         &store,
                         &query.name,
                         pubkey,
                         &actor,
-                    );
+                    )?;
                     messages.push(format!(
                         "signer {} on '{}'",
                         if changed {

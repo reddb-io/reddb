@@ -293,3 +293,56 @@ fn cold_counter_mutations_keep_ttl_and_tags() {
         vec!["scope:prod"]
     );
 }
+
+#[test]
+fn cold_signed_write_registry_preserves_allowed_signers() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    runtime
+        .execute_query("CREATE TABLE signed_events (id INTEGER)")
+        .expect("table");
+    super::signed_writes_kind::install(&store, "signed_events", &[[7; 32]], "fixture");
+    assert_eq!(
+        super::signed_writes_kind::registry(&store, "signed_events").allowed_len(),
+        1
+    );
+    store.persist().expect("publish signer registry");
+    install_cold(&runtime, "red_config", 128 * 1024);
+    assert_eq!(
+        super::signed_writes_kind::registry(&store, "signed_events").allowed_len(),
+        1,
+        "paging config must not turn an existing signer registry into an empty registry"
+    );
+}
+
+#[test]
+fn cold_unreadable_signature_policy_blocks_an_unsigned_insert() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    runtime
+        .execute_query("CREATE TABLE signed_events (id INTEGER)")
+        .expect("table");
+    super::signed_writes_kind::install(&store, "signed_events", &[[7; 32]], "fixture");
+    assert!(runtime
+        .execute_query("INSERT INTO signed_events (id) VALUES (1)")
+        .is_err());
+    store.persist().expect("publish signature policy");
+    install_cold(&runtime, "red_config", 1);
+    let error = runtime
+        .execute_query("INSERT INTO signed_events (id) VALUES (2)")
+        .expect_err("unreadable policy must not become an unsigned collection");
+    assert!(error.to_string().contains("read memory limit"), "{error}");
+    assert!(super::signed_writes_kind::try_is_signed(&store, "signed_events").is_err());
+    assert!(super::signed_writes_kind::try_registry(&store, "signed_events").is_err());
+    assert!(
+        super::signed_writes_kind::is_signed(&store, "signed_events"),
+        "the legacy boolean probe must also require verification when policy reads fail"
+    );
+    assert_eq!(
+        store
+            .get_collection("signed_events")
+            .expect("events")
+            .count(),
+        0
+    );
+}

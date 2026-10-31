@@ -963,11 +963,12 @@ impl RedDBRuntime {
                 // composition is owned by issue #526; we keep #522 to the
                 // non-chain path and let chain_mode collections punt to that
                 // slice rather than half-wire it here.
-                if crate::runtime::signed_writes_kind::is_signed(&store, &query.table) {
+                if crate::runtime::signed_writes_kind::try_is_signed(&store, &query.table)? {
                     let (pk_col, sig_col, residual) =
                         crate::runtime::signed_writes_kind::split_signature_fields(fields);
                     let payload = crate::runtime::blockchain_kind::canonical_payload(&residual);
-                    let reg = crate::runtime::signed_writes_kind::registry(&store, &query.table);
+                    let reg =
+                        crate::runtime::signed_writes_kind::try_registry(&store, &query.table)?;
                     crate::runtime::signed_writes_kind::verify_row(
                         &reg,
                         pk_col.as_ref().map(|c| c.bytes.as_slice()),
