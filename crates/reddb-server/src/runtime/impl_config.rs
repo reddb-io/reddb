@@ -994,13 +994,17 @@ impl RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<ConfigVersion>> {
-        Ok(super::keyed_spine::latest_version(
-            self.config_versions(collection, key)?,
-        ))
+        let mut latest: Option<ConfigVersion> = None;
+        self.visit_config_versions(collection, Some(key), |version| {
+            super::keyed_spine::select_latest_version(&mut latest, version);
+        })?;
+        Ok(latest)
     }
 
     fn config_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<ConfigVersion>> {
-        self.config_version_rows(collection, Some(key))
+        let mut versions = Vec::new();
+        self.visit_config_versions(collection, Some(key), |version| versions.push(version))?;
+        Ok(versions)
     }
 
     fn latest_config_versions(
@@ -1008,25 +1012,28 @@ impl RedDBRuntime {
         collection: &str,
         prefix: Option<&str>,
     ) -> RedDBResult<Vec<ConfigVersion>> {
-        Ok(super::keyed_spine::latest_versions(
-            self.config_version_rows(collection, None)?,
-            prefix,
-        ))
+        let mut latest = std::collections::BTreeMap::new();
+        self.visit_config_versions(collection, None, |version| {
+            if prefix.is_none_or(|prefix| version.key.starts_with(prefix)) {
+                super::keyed_spine::retain_latest_version(&mut latest, version);
+            }
+        })?;
+        Ok(latest.into_values().collect())
     }
 
-    fn config_version_rows(
+    fn visit_config_versions(
         &self,
         collection: &str,
         key: Option<&str>,
-    ) -> RedDBResult<Vec<ConfigVersion>> {
+        mut consume: impl FnMut(ConfigVersion),
+    ) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
-            return Ok(Vec::new());
+            return Ok(());
         };
         let _publication = manager
             .has_backing()
             .then(|| store.vault_publication_lock.lock());
-        let mut versions = Vec::new();
         super::function_budget::try_scan(
             |visit| match key {
                 Some(key) => manager.try_for_each_key_entity(key, visit),
@@ -1040,25 +1047,30 @@ impl RedDBRuntime {
                     return true;
                 }
                 if let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) {
-                    versions.push(ConfigVersion::from_keyed_row(version, row));
+                    consume(ConfigVersion::from_keyed_row(version, row));
                 }
                 true
             },
         )?;
-        Ok(versions)
+        Ok(())
     }
 
     fn prune_config_history(&self, collection: &str, key: &str) -> RedDBResult<()> {
-        let mut versions = self.config_versions(collection, key)?;
+        // Keep the existing retention policy and stable version ordering; the
+        // decision needs identities, not every retained value's payload.
+        let mut versions = Vec::new();
+        self.visit_config_versions(collection, Some(key), |version| {
+            versions.push((version.version, version.id));
+        })?;
         if versions.len() <= CONFIG_HISTORY_LIMIT {
             return Ok(());
         }
-        versions = super::keyed_spine::history_versions(versions);
+        versions.sort_by_key(|(version, _)| *version);
         let drop_count = versions.len() - CONFIG_HISTORY_LIMIT;
         let store = self.inner.db.store();
-        for version in versions.into_iter().take(drop_count) {
+        for (_, id) in versions.into_iter().take(drop_count) {
             store
-                .delete(collection, version.id)
+                .delete(collection, id)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
         Ok(())

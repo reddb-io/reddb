@@ -323,6 +323,8 @@ fn cold_config_reads_preserve_history_tombstones_and_failures() {
         "GET CONFIG cold_settings theme",
         "HISTORY CONFIG cold_settings theme",
         "LIST CONFIG cold_settings",
+        "LIST CONFIG cold_settings PREFIX 'th'",
+        "LIST CONFIG cold_settings PREFIX 'absent'",
         "GET CONFIG cold_settings removed",
     ];
     let expected: Vec<_> = queries.iter().map(|sql| observe(&runtime, sql)).collect();

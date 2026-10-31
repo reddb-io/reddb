@@ -181,21 +181,13 @@ fn collection_pages_bound_payload_memory_and_preserve_cursor_and_row_schema() {
 
 #[test]
 fn cold_vault_reads_do_not_retain_all_version_payloads() {
-    use reddb_engine::storage::collection_read::PagedCollection;
-    use reddb_engine::storage::metadata_codec::serialize_entity_record;
     use reddb_server::auth::{AuthConfig, AuthStore};
-    use reddb_server::storage::{RowData, StorageDeployPreset, UnifiedEntity};
     use std::sync::Arc;
 
     let _measurement = MEASUREMENT_LOCK
         .lock()
         .expect("isolated allocation measurement");
-    let directory = tempfile::tempdir().expect("cold Vault fixture");
-    let options = RedDBOptions::persistent(directory.path().join("vault.rdb"))
-        .with_memory_budget(128 * 1024 * 1024)
-        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
-        .expect("profile");
-    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    let (_directory, runtime) = cold_runtime();
     let store = runtime.db().store();
     let pager = Arc::clone(store.pager().expect("pager"));
     runtime.set_auth_store(Arc::new(
@@ -209,16 +201,7 @@ fn cold_vault_reads_do_not_retain_all_version_payloads() {
     runtime
         .execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
         .expect("vault");
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut state = 0x1234_5678_u32;
-    let plaintext: String = (0..256 * 1024)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            alphabet[(state & 63) as usize] as char
-        })
-        .collect();
+    let plaintext = ascii_noise(256 * 1024);
     runtime
         .execute_query(&format!("VAULT PUT secrets.seed = '{plaintext}'"))
         .expect("large version");
@@ -240,51 +223,20 @@ fn cold_vault_reads_do_not_retain_all_version_payloads() {
     let large = large.expect("large encrypted value");
     let small = small.expect("small encrypted value");
     assert!(matches!(&large, Value::Secret(bytes) if bytes.len() > 128 * 1024));
-    let data = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
-        &pager,
-    )));
-    let keys = Arc::new(reddb_server::storage::engine::BTree::new(pager));
-    let fingerprint = reddb_file::native_key_index::fingerprint("seed");
     const VERSIONS: u64 = 128;
-    for version in 1..=VERSIONS {
-        let id = store.next_entity_id();
-        let mut entity = UnifiedEntity::table_row(id, "secrets", version, vec![]);
-        entity.data = EntityData::Row(RowData::with_names(
-            vec![
-                Value::text("seed"),
-                if version == VERSIONS {
-                    small.clone()
-                } else {
-                    large.clone()
-                },
-                Value::Integer(version as i64),
-                Value::Boolean(false),
-            ],
-            vec![
-                "key".into(),
-                "value".into(),
-                "version".into(),
-                "tombstone".into(),
-            ],
-        ));
-        data.insert(
-            &id.raw().to_be_bytes(),
-            &serialize_entity_record(&entity, None, store.format_version()),
-        )
-        .expect("private history row");
-        keys.insert(
-            &reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw()),
-            &[],
-        )
-        .expect("key candidate");
-    }
-    let root = data.root_page_id();
-    manager.install_backing(
-        Arc::new(PagedCollection::with_key_index(data, keys)),
-        root,
-        store.format_version(),
-        2 * 1024 * 1024,
+    install_native_history(
+        &runtime,
+        "secrets",
+        "seed",
         VERSIONS,
+        2 * 1024 * 1024,
+        |version| {
+            if version == VERSIONS {
+                small.clone()
+            } else {
+                large.clone()
+            }
+        },
     );
     drop(large);
     drop(small);
@@ -325,4 +277,176 @@ fn cold_vault_reads_do_not_retain_all_version_payloads() {
         VERSIONS as usize,
         "reads preserve every physical version"
     );
+}
+
+fn cold_runtime() -> (tempfile::TempDir, RedDBRuntime) {
+    use reddb_server::storage::StorageDeployPreset;
+    let directory = tempfile::tempdir().expect("cold memory fixture");
+    let options = RedDBOptions::persistent(directory.path().join("memory.rdb"))
+        .with_memory_budget(128 * 1024 * 1024)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("profile");
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    (directory, runtime)
+}
+
+fn ascii_noise(bytes: usize) -> String {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut state = 0x1234_5678_u32;
+    (0..bytes)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            alphabet[(state & 63) as usize] as char
+        })
+        .collect()
+}
+
+fn install_native_history(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    key: &str,
+    versions: u64,
+    read_bytes_max: usize,
+    mut value: impl FnMut(u64) -> Value,
+) {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::storage::{RowData, UnifiedEntity};
+    use std::sync::Arc;
+    let store = runtime.db().store();
+    let manager = store.get_collection(collection).expect("collection");
+    let pager = Arc::clone(store.pager().expect("pager"));
+    let data = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        &pager,
+    )));
+    let keys = Arc::new(reddb_server::storage::engine::BTree::new(pager));
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    for version in 1..=versions {
+        let id = store.next_entity_id();
+        let mut entity = UnifiedEntity::table_row(id, collection, version, vec![]);
+        entity.sequence_id = version;
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(key),
+                value(version),
+                Value::Integer(i64::try_from(version).expect("fixture version")),
+                Value::Boolean(false),
+            ],
+            vec![
+                "key".into(),
+                "value".into(),
+                "version".into(),
+                "tombstone".into(),
+            ],
+        ));
+        data.insert(
+            &id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("private history row");
+        keys.insert(
+            &reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw()),
+            &[],
+        )
+        .expect("key candidate");
+    }
+    let root = data.root_page_id();
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(data, keys)),
+        root,
+        store.format_version(),
+        read_bytes_max,
+        versions,
+    );
+    manager.register_row_id(versions);
+    manager.restore_sequence_id_next(versions.checked_add(1).expect("fixture sequence"));
+}
+
+#[test]
+fn cold_config_current_reads_and_writes_do_not_retain_old_payloads() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query("PUT CONFIG cfg_versions seed = 'initial'")
+        .expect("declare config");
+    let large = Value::text(ascii_noise(1024 * 1024));
+    const VERSIONS: u64 = 16; // Existing Config retention window, unchanged.
+    install_native_history(
+        &runtime,
+        "cfg_versions",
+        "seed",
+        VERSIONS,
+        4 * 1024 * 1024,
+        |version| {
+            if version == VERSIONS {
+                Value::text("latest")
+            } else {
+                large.clone()
+            }
+        },
+    );
+    drop(large);
+    for query in ["GET CONFIG cfg_versions seed", "LIST CONFIG cfg_versions"] {
+        runtime.invalidate_result_cache();
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let result = runtime.execute_query(query).expect("current Config read");
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("cold_config_versions={VERSIONS} query={query} extra_peak_bytes={extra}");
+        assert!(
+            extra < 8 * 1024 * 1024,
+            "current config read retained old payloads: {extra}"
+        );
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("value"),
+            Some(&Value::text("latest"))
+        );
+    }
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(baseline, Ordering::Relaxed);
+    runtime
+        .execute_query("PUT CONFIG cfg_versions seed = 'updated'")
+        .expect("next version");
+    let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+    eprintln!("cold_config_versions={VERSIONS} mutation=PUT extra_peak_bytes={extra}");
+    assert!(
+        extra < 8 * 1024 * 1024,
+        "config write retained full payloads to prune history: {extra}"
+    );
+    assert_eq!(
+        runtime
+            .db()
+            .store()
+            .get_collection("cfg_versions")
+            .expect("config")
+            .count(),
+        VERSIONS as usize
+    );
+    let history = runtime
+        .execute_query("HISTORY CONFIG cfg_versions seed")
+        .expect("full retained history");
+    let versions: Vec<_> = history
+        .result
+        .records
+        .iter()
+        .map(|row| row.get("version").cloned())
+        .collect();
+    assert_eq!(
+        versions,
+        (2..=17)
+            .map(|version| Some(Value::Integer(version)))
+            .collect::<Vec<_>>()
+    );
+    let expected = ascii_noise(1024 * 1024);
+    for row in history.result.records.iter().take(14) {
+        assert!(
+            matches!(row.get("value"), Some(Value::Text(value)) if value.as_ref() == expected.as_str()),
+            "retained history payload changed"
+        );
+    }
 }

@@ -1002,12 +1002,7 @@ impl<'a> KvAtomicOps<'a> {
         }
         let mut latest: Option<VaultEntry> = None;
         self.visit_vault_versions(collection, key, |entry| {
-            if latest
-                .as_ref()
-                .is_none_or(|previous| entry.version >= previous.version)
-            {
-                latest = Some(entry);
-            }
+            super::keyed_spine::select_latest_version(&mut latest, entry);
         })?;
         Ok(latest)
     }
