@@ -73,6 +73,12 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
             result.is_ok(),
             "unused secret branch must stay lazy: {result:?}"
         );
+        let result = result.unwrap();
+        let selected = result.result.records[0].get("selected").expect("selected");
+        assert_eq!(
+            runtime.try_secret_query_input(selected.clone()).unwrap(),
+            Some(Value::Integer(7))
+        );
     }
     let result = runtime.execute_query_with_params(
         "SELECT LENGTH($1) AS expanded_length",
@@ -81,6 +87,30 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
     let error = result.expect_err("compressed secret input must not bypass memory admission");
     assert!(error.to_string().contains("read memory limit"), "{error}");
     assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
+    runtime
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("table");
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("small authenticated ciphertext fits the resident allowance");
+    for query in [
+        "SELECT LENGTH(payload) AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs WHERE LENGTH(payload) > 0",
+        "SELECT MIN(LENGTH(payload)) OVER () AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs ORDER BY LENGTH(payload)",
+    ] {
+        let result = runtime.execute_query(query);
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+    }
 }
 
 #[test]

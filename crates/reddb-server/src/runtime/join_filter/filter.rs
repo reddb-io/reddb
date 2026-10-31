@@ -14,21 +14,50 @@ pub(in crate::runtime) fn evaluate_runtime_filter(
 /// to `crate::storage::query::evaluator::Row` so that `evaluator::evaluate`
 /// can look up columns via the same `resolve_runtime_field` path used by
 /// the rest of the runtime filter evaluation.
-pub(in crate::runtime::join_filter) struct RecordRow<'a> {
-    pub(in crate::runtime::join_filter) db: Option<&'a RedDB>,
-    pub(in crate::runtime::join_filter) record: &'a UnifiedRecord,
-    pub(in crate::runtime::join_filter) table_name: Option<&'a str>,
-    pub(in crate::runtime::join_filter) table_alias: Option<&'a str>,
+pub(in crate::runtime) struct RecordRow<'a> {
+    pub(in crate::runtime) db: Option<&'a RedDB>,
+    pub(in crate::runtime) record: &'a UnifiedRecord,
+    pub(in crate::runtime) table_name: Option<&'a str>,
+    pub(in crate::runtime) table_alias: Option<&'a str>,
 }
 
 impl crate::storage::query::evaluator::Row for RecordRow<'_> {
     fn get(&self, field: &FieldRef) -> Option<Value> {
+        self.resolve(
+            field,
+            &crate::runtime::execution_context::secret_query_input,
+        )
+    }
+
+    fn try_get(
+        &self,
+        field: &FieldRef,
+    ) -> Result<Option<Value>, crate::storage::query::evaluator::EvalError> {
+        self.resolve(field, &Some)
+            .map(crate::runtime::execution_context::try_secret_query_input)
+            .transpose()
+            .map(|value| value.flatten().or_else(|| self.resolve(field, &|_| None)))
+            .map_err(
+                |limit| crate::storage::query::evaluator::EvalError::ReadLimitExceeded {
+                    required_bytes: limit.required_bytes,
+                    limit_bytes: limit.limit_bytes,
+                },
+            )
+    }
+}
+
+impl RecordRow<'_> {
+    fn resolve(
+        &self,
+        field: &FieldRef,
+        secret_input: &impl Fn(Value) -> Option<Value>,
+    ) -> Option<Value> {
         reddb_engine::query::runtime::filter::resolve_filter_row_value(
             self.record,
             field,
             self.table_name,
             self.table_alias,
-            &crate::runtime::execution_context::secret_query_input,
+            secret_input,
             |collection, column| {
                 self.db
                     .and_then(|db| db.collection_contract_arc(collection))
@@ -109,7 +138,12 @@ impl reddb_engine::query::runtime::filter::FilterHost for RuntimeFilterHost<'_> 
                 )
             }
             Err(error) => Err(crate::RedDBError::Query(
-                if expression_uses_secret(expr, self.record, self.table_name, self.table_alias) {
+                if expression_uses_secret(expr, self.record, self.table_name, self.table_alias)
+                    && !matches!(
+                        &error,
+                        crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                    )
+                {
                     "secret comparison evaluation failed".into()
                 } else {
                     error.to_string()

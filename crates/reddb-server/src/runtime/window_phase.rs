@@ -49,21 +49,20 @@ impl WindowHost for NativeWindowHost<'_> {
         expression: &Expr,
         record: &UnifiedRecord,
     ) -> Result<Option<Value>, RedDBError> {
-        let row = |field: &reddb_rql::ast::FieldRef| {
-            super::join_filter::resolve_runtime_field(
-                record,
-                field,
-                self.table_name,
-                self.table_alias,
-            )
-            .and_then(super::execution_context::secret_query_input)
+        let row = super::join_filter::RecordRow {
+            db: self.db,
+            record,
+            table_name: self.table_name,
+            table_alias: self.table_alias,
         };
         // The pure typed evaluator rejects visited context functions. Keep its
         // existing fast path and propagate operating failures from the fallback.
-        if let Ok(value) =
-            super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row)
-        {
-            return Ok(Some(value));
+        match super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row) {
+            Ok(value) => return Ok(Some(value)),
+            Err(error @ crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }) => {
+                return Err(RedDBError::Query(error.to_string()));
+            }
+            Err(_) => {}
         }
         super::expr_eval::try_evaluate_runtime_expr_with_db(
             self.db,

@@ -13,6 +13,7 @@ use super::*;
 /// applies the actual crypto transform during INSERT execution.
 pub(crate) const PLAINTEXT_SENTINEL: &str = "@@plain@@";
 
+#[derive(Debug)]
 pub(crate) struct SecretInputReadLimit {
     pub required_bytes: usize,
     pub limit_bytes: usize,

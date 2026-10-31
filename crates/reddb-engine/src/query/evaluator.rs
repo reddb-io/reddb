@@ -81,6 +81,12 @@ pub trait Row {
     /// [`EvalError::UnknownColumn`]) or `Some(Value::Null)` when the
     /// column exists but the row's value is null.
     fn get(&self, field: &FieldRef) -> Option<Value>;
+
+    /// Hosts which decode stored values can report operating failures instead
+    /// of treating a denied read as an unknown or NULL column.
+    fn try_get(&self, field: &FieldRef) -> Result<Option<Value>, EvalError> {
+        Ok(self.get(field))
+    }
 }
 
 /// Trivial `Row` impl over a flat `(table, column) -> Value` closure
@@ -218,7 +224,7 @@ pub fn evaluate_with_literal_decoder(
     match expr {
         Expr::Literal { value, .. } => decode_literal(value),
         Expr::Column { field, .. } => row
-            .get(field)
+            .try_get(field)?
             .ok_or_else(|| EvalError::UnknownColumn(field.clone())),
         Expr::Parameter { index, .. } => Err(EvalError::UnboundParameter(*index)),
         Expr::UnaryOp { op, operand, .. } => eval_unary(*op, operand, row, decode_literal),
