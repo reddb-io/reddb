@@ -24,6 +24,7 @@ pub struct PagedEntityCursor {
     format_version: u32,
     read_bytes_max: usize,
     snapshot: Option<SnapshotContext>,
+    visible_only: bool,
     schema: Option<Arc<Vec<String>>>,
     finished: bool,
 }
@@ -54,7 +55,9 @@ impl Iterator for PagedEntityCursor {
                         return Some(Err(error));
                     }
                 };
-            if !SegmentManager::scan_entity_visible(self.snapshot.as_ref(), &entity) {
+            if self.visible_only
+                && !SegmentManager::scan_entity_visible(self.snapshot.as_ref(), &entity)
+            {
                 continue;
             }
             if let super::super::entity::EntityData::Row(row) = &mut entity.data {
@@ -74,6 +77,20 @@ impl SegmentManager {
         &self,
         snapshot: Option<SnapshotContext>,
     ) -> Result<Option<PagedEntityCursor>, StoreError> {
+        self.try_paged_cursor(snapshot, true)
+    }
+
+    /// Raw physical records and their frozen metadata, including superseded
+    /// versions. Hosts fence publication while capturing this cursor.
+    pub fn try_paged_physical_cursor(&self) -> Result<Option<PagedEntityCursor>, StoreError> {
+        self.try_paged_cursor(None, false)
+    }
+
+    fn try_paged_cursor(
+        &self,
+        snapshot: Option<SnapshotContext>,
+        visible_only: bool,
+    ) -> Result<Option<PagedEntityCursor>, StoreError> {
         let Some((format_version, read_bytes_max)) = self
             .backing
             .read()
@@ -91,6 +108,7 @@ impl SegmentManager {
             format_version,
             read_bytes_max,
             snapshot,
+            visible_only,
             schema: self.column_schema(),
             finished: false,
         }))

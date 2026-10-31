@@ -1000,24 +1000,7 @@ impl RedDBRuntime {
     }
 
     fn config_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<ConfigVersion>> {
-        let store = self.inner.db.store();
-        let Some(manager) = store.get_collection(collection) else {
-            return Ok(Vec::new());
-        };
-        let mut versions = Vec::new();
-        for entity in manager.query_all(|_| true) {
-            let EntityData::Row(row) = &entity.data else {
-                continue;
-            };
-            let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) else {
-                continue;
-            };
-            if version.key != key {
-                continue;
-            }
-            versions.push(ConfigVersion::from_keyed_row(version, row));
-        }
-        Ok(versions)
+        self.config_version_rows(collection, Some(key))
     }
 
     fn latest_config_versions(
@@ -1025,21 +1008,41 @@ impl RedDBRuntime {
         collection: &str,
         prefix: Option<&str>,
     ) -> RedDBResult<Vec<ConfigVersion>> {
+        Ok(super::keyed_spine::latest_versions(
+            self.config_version_rows(collection, None)?,
+            prefix,
+        ))
+    }
+
+    fn config_version_rows(
+        &self,
+        collection: &str,
+        key: Option<&str>,
+    ) -> RedDBResult<Vec<ConfigVersion>> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(Vec::new());
         };
+        let _publication = manager
+            .has_backing()
+            .then(|| store.vault_publication_lock.lock());
         let mut versions = Vec::new();
-        for entity in manager.query_all(|_| true) {
-            let EntityData::Row(row) = &entity.data else {
-                continue;
-            };
-            let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) else {
-                continue;
-            };
-            versions.push(ConfigVersion::from_keyed_row(version, row));
-        }
-        Ok(super::keyed_spine::latest_versions(versions, prefix))
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                let EntityData::Row(row) = &entity.data else {
+                    return true;
+                };
+                if key.is_some_and(|key| !matches!(row.get_field("key"), Some(Value::Text(stored)) if stored.as_ref() == key)) {
+                    return true;
+                }
+                if let Some(version) = super::keyed_spine::row_version(entity.id, row, 0) {
+                    versions.push(ConfigVersion::from_keyed_row(version, row));
+                }
+                true
+            },
+        )?;
+        Ok(versions)
     }
 
     fn prune_config_history(&self, collection: &str, key: &str) -> RedDBResult<()> {

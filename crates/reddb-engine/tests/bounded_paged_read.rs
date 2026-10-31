@@ -521,3 +521,50 @@ fn cold_key_projection_propagates_failed_base_io_even_with_a_resident_version() 
         Err(StoreError::Io(_))
     ));
 }
+
+#[test]
+fn cold_physical_cursor_keeps_hidden_versions_and_their_metadata() {
+    use reddb_engine::storage::manager::SegmentManager;
+    use reddb_engine::storage::metadata::Metadata;
+    let tree = Arc::new(BTree::new(Arc::new(Pages::default())));
+    for id in 1_u64..=2 {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]);
+        entity.set_xmax(if id == 1 { 7 } else { 0 });
+        let mut metadata = Metadata::new();
+        metadata.set(
+            "version",
+            reddb_engine::storage::metadata::MetadataValue::Int(id as i64),
+        );
+        tree.insert(
+            &id.to_be_bytes(),
+            &serialize_entity_record(&entity, Some(&metadata), 11),
+        )
+        .expect("version");
+    }
+    let manager = SegmentManager::new("rows");
+    manager.install_backing(Arc::new(PagedCollection::new(tree)), 0, 11, 128 * 1024, 2);
+    let visible: Vec<_> = manager
+        .try_paged_entity_cursor(None)
+        .expect("visible cursor")
+        .expect("cold")
+        .map(|record| record.expect("visible row").0.id.raw())
+        .collect();
+    assert_eq!(visible, vec![2]);
+    let physical: Vec<_> = manager
+        .try_paged_physical_cursor()
+        .expect("physical cursor")
+        .expect("cold")
+        .map(|record| {
+            let (entity, metadata) = record.expect("physical row");
+            let metadata = metadata.expect("version metadata");
+            assert_eq!(
+                metadata.get("version"),
+                Some(&reddb_engine::storage::metadata::MetadataValue::Int(
+                    entity.id.raw() as i64
+                ))
+            );
+            entity.id.raw()
+        })
+        .collect();
+    assert_eq!(physical, vec![1, 2]);
+}

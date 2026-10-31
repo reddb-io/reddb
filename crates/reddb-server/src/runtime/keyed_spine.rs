@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::storage::{EntityId, RowData};
+use super::execution_context::SnapshotContext;
+use crate::storage::{EntityId, Metadata, RowData, SegmentManager, UnifiedEntity};
+use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
 pub(super) trait KeyedVersion {
@@ -106,6 +108,39 @@ pub(super) fn value_i64(value: Option<&Value>) -> Option<i64> {
         Some(Value::Duration(value)) => Some(*value),
         _ => None,
     }
+}
+
+/// The caller fences publication for the cursor capture and iteration. A cold
+/// source yields one decoded physical record with its frozen metadata. Resident
+/// reads retain the existing segment scan; filter before cloning metadata.
+/// `None` requests physical history, not the current-visibility fallback.
+type KeyedRecordCursor<'manager> =
+    Box<dyn Iterator<Item = RedDBResult<(UnifiedEntity, Option<Metadata>)>> + 'manager>;
+
+pub(super) fn records_with_metadata<'manager>(
+    manager: &'manager SegmentManager,
+    snapshot: Option<SnapshotContext>,
+    filter: impl Fn(&UnifiedEntity) -> bool + Sync + 'manager,
+) -> RedDBResult<KeyedRecordCursor<'manager>> {
+    let cold = match snapshot.as_ref() {
+        Some(_) => manager.try_paged_entity_cursor(snapshot.clone())?,
+        None => manager.try_paged_physical_cursor()?,
+    };
+    if let Some(cursor) = cold {
+        return Ok(Box::new(cursor.filter_map(move |record| match record {
+            Ok((entity, metadata)) if filter(&entity) => Some(Ok((entity, metadata))),
+            Ok(_) => None,
+            Err(error) => Some(Err(RedDBError::from(error))),
+        })));
+    }
+    let entities = match snapshot.as_ref() {
+        Some(snapshot) => manager.scan(Some(snapshot), filter),
+        None => manager.query_all(filter),
+    };
+    Ok(Box::new(entities.into_iter().map(move |entity| {
+        let metadata = manager.get_metadata(entity.id);
+        Ok((entity, metadata))
+    })))
 }
 
 #[cfg(test)]

@@ -50,7 +50,12 @@ pub fn rehydrate_manifest_registry(
     runtime: &RedDBRuntime,
     registry: &Arc<ConfigRegistry>,
 ) -> Result<(), String> {
-    let Some(value) = runtime.db().store().get_config(REGISTRY_STATE_KEY) else {
+    let Some(value) = runtime
+        .db()
+        .store()
+        .try_get_config(REGISTRY_STATE_KEY)
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(());
     };
     let json = match value {
@@ -827,7 +832,13 @@ fn insert_config_value_if_absent(
     key: &str,
     value: Value,
 ) -> Result<(), String> {
-    if runtime.db().store().get_config(key).is_some() {
+    if runtime
+        .db()
+        .store()
+        .try_get_config(key)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
         tracing::info!(
             key,
             "bootstrap manifest config key already present; preserving operator value"

@@ -334,6 +334,17 @@ impl UnifiedStore {
     /// key's earlier rows. Appending instead grew the store on every boot,
     /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
+        // Historical best-effort adapter. Authoritative callers propagate the
+        // result of try_set_config_tree instead of ignoring failed persistence.
+        self.try_set_config_tree(prefix, json).unwrap_or_default()
+    }
+
+    pub fn try_set_config_tree(
+        &self,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection("red_config");
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
@@ -342,18 +353,16 @@ impl UnifiedStore {
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             if let EntityData::Row(row) = &entity.data {
-                let Some(named) = row.named.as_ref() else {
-                    continue;
-                };
-                if let Some(reddb_types::Value::Text(key)) = named.get("key") {
+                if let Some(reddb_types::Value::Text(key)) = row.get_field("key") {
                     if let Some(rows) = previous.get_mut(key.as_ref()) {
-                        rows.push((entity.id, named.get("value").cloned()));
+                        rows.push((entity.id, row.get_field("value").cloned()));
                     }
                 }
             }
-        }
+            true
+        })?;
         let mut saved = 0;
         for (key, value) in pairs {
             let stale = previous.remove(&key).unwrap_or_default();
@@ -389,41 +398,44 @@ impl UnifiedStore {
                     schema: None,
                 }),
             );
-            if self.insert_auto("red_config", entity).is_ok() {
-                saved += 1;
-                if !stale.is_empty() {
-                    let _ = self.delete_batch("red_config", &stale);
-                }
+            self.insert_auto("red_config", entity)?;
+            saved += 1;
+            if !stale.is_empty() {
+                self.delete_batch("red_config", &stale)?;
             }
         }
-        saved
+        Ok(saved)
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
     /// When a key has several rows the newest one wins, like every other
     /// `red_config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
-        let manager = self.get_collection("red_config")?;
+        // Historical best-effort adapter; bootstrap and authoritative runtime
+        // callers use try_get_config so a fault cannot become a default value.
+        self.try_get_config(key).ok().flatten()
+    }
+
+    pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
+        let Some(manager) = self.get_collection("red_config") else {
+            return Ok(None);
+        };
+        let _publication = manager
+            .has_backing()
+            .then(|| self.vault_publication_lock.lock());
         let mut latest: Option<(u64, reddb_types::Value)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             if let EntityData::Row(row) = &entity.data {
-                if let Some(named) = &row.named {
-                    let key_matches = named
-                        .get("key")
-                        .and_then(|v| match v {
-                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                    if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
-                        if let Some(value) = named.get("value") {
-                            latest = Some((entity.id.raw(), value.clone()));
-                        }
+                let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
+                if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
+                    if let Some(value) = row.get_field("value") {
+                        latest = Some((entity.id.raw(), value.clone()));
                     }
                 }
             }
-        }
-        latest.map(|(_, value)| value)
+            true
+        })?;
+        Ok(latest.map(|(_, value)| value))
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted

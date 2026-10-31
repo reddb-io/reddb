@@ -42,6 +42,15 @@ reads select the snapshot-visible maximum xmin. VCS versioning settings are read
 fallibly so failure cannot silently disable history during a write. A durable,
 budgeted key index is required before managed activation or performance claims.
 
+Config history/latest/list reads stream the physical base and propagate faults;
+Vault snapshot reads retain frozen metadata, tenant checks and encrypted history.
+Raw physical cursors preserve superseded versions for encrypted Vault export.
+Store config reads and idempotent boot reseeding have fallible APIs; bootstrap
+completion and manifest-registry decisions use them so unreadable durable state
+cannot be mistaken for first boot. Legacy best-effort wrappers remain for callers
+not yet migrated and still block managed activation. Retained output objects and
+frozen overlay copies still require global admission.
+
 Prepared files carry checksummed resume counters alongside their exact collection
 roots: physical counts and entity/row/sequence allocator high-water marks. A preparation scan
 is still required for legacy files. Prepared boot follows metadata and one tree

@@ -1020,12 +1020,19 @@ impl<'a> KvAtomicOps<'a> {
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
         let snapshot = self.runtime.vault_read_snapshot();
-        let entities = manager
+        let _publication = manager
             .as_ref()
-            .map(|manager| manager.scan(Some(&snapshot), |_| true))
-            .unwrap_or_default();
+            .filter(|manager| manager.has_backing())
+            .map(|_| store.vault_publication_lock.lock());
+        let records = manager.as_ref().map(|manager| {
+            super::keyed_spine::records_with_metadata(manager, Some(snapshot), |entity| {
+                entity.data.as_row().is_some_and(|row| self.vault_row_in_scope(row)
+                    && matches!(row.get_field("key"), Some(Value::Text(stored)) if stored.as_ref() == key))
+            })
+        }).transpose()?.into_iter().flatten();
         let mut versions = Vec::new();
-        for entity in entities {
+        for record in records {
+            let (entity, metadata) = record?;
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
             };
@@ -1040,10 +1047,7 @@ impl<'a> KvAtomicOps<'a> {
             if version.key != key {
                 continue;
             }
-            let metadata = manager
-                .as_ref()
-                .and_then(|manager| manager.get_metadata(entity.id))
-                .unwrap_or_default();
+            let metadata = metadata.unwrap_or_default();
             versions.push(VaultEntry::from_keyed_row(
                 version,
                 metadata,
@@ -1073,12 +1077,26 @@ impl<'a> KvAtomicOps<'a> {
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
         let snapshot = self.runtime.vault_read_snapshot();
-        let mut versions = Vec::new();
-        for entity in manager
+        let _publication = manager
             .as_ref()
-            .map(|manager| manager.scan(Some(&snapshot), |_| true))
-            .unwrap_or_default()
-        {
+            .filter(|manager| manager.has_backing())
+            .map(|_| store.vault_publication_lock.lock());
+        let records = manager
+            .as_ref()
+            .map(|manager| {
+                super::keyed_spine::records_with_metadata(manager, Some(snapshot), |entity| {
+                    entity
+                        .data
+                        .as_row()
+                        .is_some_and(|row| self.vault_row_in_scope(row))
+                })
+            })
+            .transpose()?
+            .into_iter()
+            .flatten();
+        let mut versions = Vec::new();
+        for record in records {
+            let (entity, metadata) = record?;
             let crate::storage::EntityData::Row(ref row) = entity.data else {
                 continue;
             };
@@ -1090,10 +1108,7 @@ impl<'a> KvAtomicOps<'a> {
             else {
                 continue;
             };
-            let metadata = manager
-                .as_ref()
-                .and_then(|manager| manager.get_metadata(entity.id))
-                .unwrap_or_default();
+            let metadata = metadata.unwrap_or_default();
             let entry = VaultEntry::from_keyed_row(
                 version,
                 metadata,
@@ -1297,19 +1312,20 @@ impl RedDBRuntime {
         let manager = store
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.into()))?;
-        let mut entities = manager.query_all(|_| true);
-        entities.sort_unstable_by_key(|entity| entity.id.raw());
-        Ok(entities
-            .iter()
-            .map(|entity| {
-                let metadata = manager.get_metadata(entity.id);
+        let mut records = Vec::new();
+        for record in super::keyed_spine::records_with_metadata(&manager, None, |_| true)? {
+            let (entity, metadata) = record?;
+            records.push((
+                entity.id,
                 hex::encode(crate::storage::UnifiedStore::serialize_entity_record(
-                    entity,
+                    &entity,
                     metadata.as_ref(),
                     store.format_version(),
-                ))
-            })
-            .collect())
+                )),
+            ));
+        }
+        records.sort_unstable_by_key(|(id, _)| id.raw());
+        Ok(records.into_iter().map(|(_, encoded)| encoded).collect())
     }
 
     /// Restore an offline native Vault dump into an empty collection. Validate
@@ -1336,7 +1352,7 @@ impl RedDBRuntime {
         }
         if store
             .get_collection(collection)
-            .is_some_and(|manager| !manager.query_all(|_| true).is_empty())
+            .is_some_and(|manager| manager.count() != 0)
         {
             return Err(RedDBError::Query(
                 "vault restore requires an empty collection".into(),
