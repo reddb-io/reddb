@@ -240,6 +240,57 @@ fn cold_indexed_vault_history_retains_metadata_and_tenant_scope() {
     );
 }
 
+#[test]
+fn cold_vault_compressed_plaintext_must_fit_the_read_allowance() {
+    let (_directory, runtime) = runtime();
+    let store = runtime.db().store();
+    runtime.set_auth_store(Arc::new(
+        crate::auth::AuthStore::with_vault_certificate(
+            crate::auth::AuthConfig::default(),
+            Arc::clone(store.pager().expect("pager")),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("vault certificate"),
+    ));
+    runtime
+        .execute_query("CREATE VAULT packed WITH OWN MASTER KEY")
+        .expect("vault");
+    runtime
+        .execute_query(&format!(
+            "VAULT PUT packed.large = '{}'",
+            "x".repeat(32 * 1024)
+        ))
+        .expect("compressed value");
+    let expected = observe(&runtime, "VAULT REVEAL packed.large");
+    assert_eq!(
+        expected[0].get("value"),
+        Some(&Value::text("x".repeat(32 * 1024)))
+    );
+    store.persist().expect("publish sealed value");
+    install_indexed_cold(&runtime, "packed", 4096);
+    let manager = store.get_collection("packed").expect("packed");
+    let record = manager
+        .try_paged_key_physical_cursor("large")
+        .expect("key cursor")
+        .expect("cold")
+        .next()
+        .expect("sealed record")
+        .expect("encrypted row fits 4 KiB");
+    assert!(
+        matches!(record.0.data.as_row().and_then(|row| row.get_field("value")), Some(Value::Secret(bytes)) if bytes.len() < 512)
+    );
+    runtime.invalidate_result_cache();
+    let error = match runtime.execute_query("VAULT REVEAL packed.large") {
+        Err(error) => error,
+        Ok(_) => {
+            panic!("a tiny sealed record must not expand to 32 KiB within a 4 KiB read allowance")
+        }
+    };
+    assert!(error.to_string().contains("read memory limit"), "{error}");
+    install_indexed_cold(&runtime, "packed", 128 * 1024);
+    assert_eq!(observe(&runtime, "VAULT REVEAL packed.large"), expected);
+}
+
 fn observe(runtime: &RedDBRuntime, query: &str) -> Vec<BTreeMap<String, Value>> {
     runtime.invalidate_result_cache();
     runtime

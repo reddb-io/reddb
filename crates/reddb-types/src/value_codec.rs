@@ -36,6 +36,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::types::{read_varint, write_varint, DataType, Value, ValueError};
 
+mod limit;
+
 /// Alias kept for callers that prefer the registry's own name. The
 /// on-disk tag space is owned by [`DataType`]; `ValueKind` reads
 /// better in registry contexts where the type name is the schema
@@ -386,6 +388,17 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
 
 /// Decode a single value from `data`, returning the value and the
 /// number of bytes consumed.
+pub fn decode_with_limit(data: &[u8], limit_bytes: usize) -> Result<(Value, usize), ValueError> {
+    let expected = limit::preflight(data, limit_bytes)?;
+    let (value, consumed) = decode(&data[..expected])?;
+    assert_eq!(
+        consumed, expected,
+        "invariant: value preflight and typed decoder agree"
+    );
+    Ok((value, consumed))
+}
+
+/// Decode a canonical value without a caller-supplied allocation allowance.
 pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
     if data.is_empty() {
         return Err(ValueError::EmptyData);
@@ -943,8 +956,11 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             }
             let compressed = &data[offset..offset + comp_len as usize];
             let mut decompressed = vec![0u8; orig_len as usize];
-            zstd::bulk::decompress_to_buffer(compressed, &mut decompressed)
+            let written = zstd::bulk::decompress_to_buffer(compressed, &mut decompressed)
                 .map_err(|_| ValueError::InvalidUtf8)?;
+            if written != decompressed.len() {
+                return Err(ValueError::TruncatedData);
+            }
             offset += comp_len as usize;
             let s = String::from_utf8(decompressed).map_err(|_| ValueError::InvalidUtf8)?;
             Value::text(s)
@@ -960,8 +976,11 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             }
             let compressed = &data[offset..offset + comp_len as usize];
             let mut decompressed = vec![0u8; orig_len as usize];
-            zstd::bulk::decompress_to_buffer(compressed, &mut decompressed)
+            let written = zstd::bulk::decompress_to_buffer(compressed, &mut decompressed)
                 .map_err(|_| ValueError::InvalidUtf8)?;
+            if written != decompressed.len() {
+                return Err(ValueError::TruncatedData);
+            }
             offset += comp_len as usize;
             Value::Blob(decompressed)
         }

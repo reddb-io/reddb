@@ -990,11 +990,13 @@ impl UnifiedStore {
         config: UnifiedStoreConfig,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let mut pager_config = PagerConfig::default();
+        let mut pager_config = PagerConfig {
+            disk_residency: config.resident_memory_bytes_max.is_some(),
+            ..PagerConfig::default()
+        };
         // ADR 0073 §2 — the page cache is pre-sized from its budget share.
         // The pager's own `cache_size` default survives only for direct
         // library callers who never resolved a budget.
-        pager_config.disk_residency = config.resident_memory_bytes_max.is_some();
         if let Some(slots) = config.page_cache_slots {
             pager_config.cache_size = slots;
         }

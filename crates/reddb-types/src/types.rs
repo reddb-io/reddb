@@ -1118,6 +1118,16 @@ impl Value {
         super::value_codec::decode(data)
     }
 
+    /// Admit encoded input and conservative decoded allocations before parsing.
+    /// The caller must separately reserve this allowance in its shared memory
+    /// pool and retain that reservation for the resulting value's lifetime.
+    pub fn from_bytes_with_limit(
+        data: &[u8],
+        limit_bytes: usize,
+    ) -> Result<(Self, usize), ValueError> {
+        super::value_codec::decode_with_limit(data, limit_bytes)
+    }
+
     /// Try to convert to i64
     pub fn as_integer(&self) -> Option<i64> {
         match self {
@@ -1533,6 +1543,13 @@ pub enum ValueError {
     InvalidIpVersion(u8),
     /// Varint overflow
     VarintOverflow,
+    /// Input plus decoded allocations exceed the caller's read allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
+    /// Nested arrays exceed the same depth accepted by JSON input.
+    NestingLimitExceeded { maximum: u32 },
     /// Type mismatch
     TypeMismatch { expected: DataType, found: DataType },
 }
@@ -1546,6 +1563,16 @@ impl fmt::Display for ValueError {
             ValueError::InvalidUtf8 => write!(f, "invalid UTF-8"),
             ValueError::InvalidIpVersion(v) => write!(f, "invalid IP version: {}", v),
             ValueError::VarintOverflow => write!(f, "varint overflow"),
+            ValueError::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "read needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
+            ValueError::NestingLimitExceeded { maximum } => {
+                write!(f, "value nesting depth exceeds {maximum}")
+            }
             ValueError::TypeMismatch { expected, found } => {
                 write!(f, "type mismatch: expected {}, found {}", expected, found)
             }

@@ -155,6 +155,15 @@ impl SegmentManager {
         self.backing.read().is_some()
     }
 
+    /// The host applies the same row allowance to model-specific expansion
+    /// such as decrypting a compressed Vault value after native record decode.
+    pub fn backing_read_bytes_max(&self) -> Option<usize> {
+        self.backing
+            .read()
+            .as_ref()
+            .map(|backing| backing.read_bytes_max)
+    }
+
     /// The host must fence writers and publish the new durable tree first.
     /// Captured resident readers retain their old sources through weak tracking.
     pub fn install_backing(

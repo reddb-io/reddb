@@ -936,10 +936,8 @@ impl<'a> KvAtomicOps<'a> {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
-        Ok(
-            super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?
-                .owned_entity(key)?,
-        )
+        super::kv_read::KvReadResolver::for_keyed_model(self.runtime, model, collection)?
+            .owned_entity(key)
     }
 
     fn latest_kv_entries(
@@ -1747,6 +1745,29 @@ impl RedDBRuntime {
                 "vault unseal failed: sealed payload is truncated".to_string(),
             ));
         }
+        let engine_limit =
+            usize::try_from(self.memory_accounting().budget().resolved_bytes).unwrap_or(usize::MAX);
+        let limit_bytes = self
+            .inner
+            .db
+            .store()
+            .get_collection(collection)
+            .and_then(|manager| manager.backing_read_bytes_max())
+            .map_or(engine_limit, |limit| limit.min(engine_limit));
+        let limit_error = |required_bytes| {
+            RedDBError::from(crate::storage::unified::StoreError::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            })
+        };
+        // A reveal can retain both the latest entry and its selected version.
+        // Admit those cipher copies plus the plaintext buffer before decrypting.
+        // This is a per-value allowance, not global/transport admission.
+        let cipher_bytes = payload.len().saturating_mul(2);
+        let crypto_bytes = cipher_bytes.saturating_add(payload.len());
+        if crypto_bytes > limit_bytes {
+            return Err(limit_error(crypto_bytes));
+        }
         let key = self.vault_encryption_key(collection)?;
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&payload[..12]);
@@ -1758,9 +1779,16 @@ impl RedDBRuntime {
             &payload[12..],
         )
         .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?;
-        let (value, consumed) = reddb_types::Value::from_bytes(&plaintext).map_err(|err| {
-            RedDBError::Query(format!("vault unseal failed: bad plaintext value: {err}"))
-        })?;
+        let (value, consumed) =
+            reddb_types::Value::from_bytes_with_limit(&plaintext, limit_bytes - cipher_bytes)
+                .map_err(|error| match error {
+                    reddb_types::ValueError::ReadLimitExceeded { required_bytes, .. } => {
+                        limit_error(required_bytes.saturating_add(cipher_bytes))
+                    }
+                    other => RedDBError::Query(format!(
+                        "vault unseal failed: bad plaintext value: {other}"
+                    )),
+                })?;
         if consumed != plaintext.len() {
             return Err(RedDBError::Query(
                 "vault unseal failed: trailing plaintext bytes".to_string(),
