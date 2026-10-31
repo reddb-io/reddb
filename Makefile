@@ -123,6 +123,7 @@ test-chaos-all:
 # Storage regressions are deliberately non-ignored and fail this target on any loss,
 # duplicate allocation, growth beyond the warmup plateau, or checkpoint regression.
 test-storage-apocalypse:
+	cargo test --locked -p reddb-io-engine --lib storage::page_cache::tests -- --test-threads=1
 	cargo test --locked -p reddb-io-engine --test portable -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib storage::unified::store::commit:: -- --test-threads=1 --nocapture
 	cargo test --locked -p reddb-io-server --lib inline_ -- --test-threads=1
