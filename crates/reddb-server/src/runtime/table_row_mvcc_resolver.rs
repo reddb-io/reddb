@@ -72,6 +72,13 @@ impl TableRowMvccReadResolver {
         )
     }
 
+    /// Whether visibility is decided by an MVCC snapshot. Without one every
+    /// candidate is visible, so callers that must tell a superseded version
+    /// from the head fall back to `xmax == 0`.
+    pub(crate) fn has_snapshot(&self) -> bool {
+        self.needs_version_selection()
+    }
+
     fn needs_version_selection(&self) -> bool {
         match &self.snapshot {
             TableRowReadSnapshot::CurrentThread => {

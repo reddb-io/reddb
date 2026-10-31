@@ -1,0 +1,5 @@
+---
+"@reddb-io/cli": patch
+---
+
+Concurrent UPDATEs of one row no longer fork it into several live versions that share one `rid`, and a conditional UPDATE (`UPDATE t SET v = $1 WHERE id = $2 AND v = $3`) is now a compare-and-set: exactly one of the concurrent statements reports `affected_rows = 1`. Every UPDATE now locks each target row, re-reads its latest committed version under that lock, checks WHERE against it again, and builds the new version from it. Before, only an UPDATE whose SET read its own column (`n = n + 1`) did, so other UPDATEs on tables without a PRIMARY KEY or UNIQUE constraint could each install a new version from the same old one. A write that would replace a version another writer already replaced now fails with a serialization conflict instead of forking the row. An UPDATE that runs while another writer of the same row is mid-write now waits for it and updates its result, where it used to skip the row and report 0 rows. Rows already forked by older releases are not repaired.
