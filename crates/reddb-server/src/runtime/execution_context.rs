@@ -319,16 +319,22 @@ pub(crate) fn current_role_projected() -> Option<String> {
 }
 
 pub(crate) fn current_secret_value(path: &str) -> Option<Value> {
+    try_current_secret_value(path).ok().flatten()
+}
+
+pub(crate) fn try_current_secret_value(path: &str) -> RedDBResult<Option<Value>> {
     let key = path.to_ascii_lowercase();
     CURRENT_SECRET_RESOLVER.with(|cell| {
         let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
+        let Some(resolver) = resolver.as_mut() else {
+            return Ok(None);
+        };
         if let Some(value) = resolver.values.get(&key) {
-            return value.clone();
+            return Ok(value.clone());
         }
-        let value = resolver.runtime.query_secret_value(&key).ok().flatten();
+        let value = resolver.runtime.query_secret_value(&key)?;
         resolver.values.insert(key, value.clone());
-        value
+        Ok(value)
     })
 }
 
@@ -521,12 +527,21 @@ pub(crate) fn update_current_kv_value(path: &str, value: Option<String>) {
 }
 
 pub(crate) fn current_config_value(path: &str) -> Option<Value> {
+    try_current_config_value(path).ok().flatten()
+}
+
+pub(crate) fn try_current_config_value(path: &str) -> RedDBResult<Option<Value>> {
     let key = path.to_ascii_lowercase();
     CURRENT_CONFIG_RESOLVER.with(|cell| {
         let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
+        let Some(resolver) = resolver.as_mut() else {
+            return Ok(None);
+        };
+        if !resolver.can_read(&key) {
+            return Ok(None);
+        }
         if resolver.values.is_none() {
-            resolver.values = Some(latest_config_snapshot(&resolver.db));
+            resolver.values = Some(latest_config_snapshot(&resolver.db)?);
         }
         // #1370 — `$config.<path>` desugars to `CONFIG("red.config/<path>")`,
         // but `SET CONFIG <path>` stores under the bare key. Mirror the secret
@@ -534,7 +549,10 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
         // key, then the dotted `red.config.<rest>` legacy form. Track the key
         // that matched so the `config:read` gate authorizes the real target.
         let found = {
-            let values = resolver.values.as_ref()?;
+            let values = resolver
+                .values
+                .as_ref()
+                .expect("invariant: successful snapshot is installed");
             values
                 .get(&key)
                 .map(|value| (key.clone(), value.clone()))
@@ -549,14 +567,15 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
                             })
                     })
                 })
-        }?;
+        };
+        let Some(found) = found else { return Ok(None) };
         // #1743 — hard-block the reserved `red.config.*` namespace and gate the
         // read on `config:read`, mirroring the `$secret` sibling. Denied reads
         // resolve to `None` (→ SQL NULL), never an error.
         if !resolver.can_read(&found.0) {
-            return None;
+            return Ok(None);
         }
-        Some(found.1)
+        Ok(Some(found.1))
     })
 }
 
@@ -700,54 +719,65 @@ mod tests {
     }
 }
 
-fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
+fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
     let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
 
     if let Some(manager) = db.store().get_collection("red_config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            let id = entity.id.raw();
-            let key = key.to_ascii_lowercase();
-            insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
-            if let Some(rest) = key.strip_prefix("red.config.") {
-                insert_latest_config_value(&mut latest, format!("red.config/{rest}"), id, value);
-            }
-            true
-        });
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                let Some(row) = entity.data.as_row() else {
+                    return true;
+                };
+                let Some(Value::Text(key)) = row.get_field("key") else {
+                    return true;
+                };
+                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+                let id = entity.id.raw();
+                let key = key.to_ascii_lowercase();
+                insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
+                if let Some(rest) = key.strip_prefix("red.config.") {
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{rest}"),
+                        id,
+                        value,
+                    );
+                }
+                true
+            },
+        )?;
     }
 
     if let Some(manager) = db.store().get_collection("red.config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                return true;
-            }
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            insert_latest_config_value(
-                &mut latest,
-                format!("red.config/{}", key.to_ascii_lowercase()),
-                entity.id.raw(),
-                value,
-            );
-            true
-        });
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                let Some(row) = entity.data.as_row() else {
+                    return true;
+                };
+                if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
+                    return true;
+                }
+                let Some(Value::Text(key)) = row.get_field("key") else {
+                    return true;
+                };
+                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+                insert_latest_config_value(
+                    &mut latest,
+                    format!("red.config/{}", key.to_ascii_lowercase()),
+                    entity.id.raw(),
+                    value,
+                );
+                true
+            },
+        )?;
     }
 
-    latest
+    Ok(latest
         .into_iter()
         .map(|(key, (_, value))| (key, value))
-        .collect()
+        .collect())
 }
 
 fn insert_latest_config_value(

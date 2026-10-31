@@ -83,6 +83,27 @@ impl reddb_engine::query::runtime::projection::ProjectionHost for RuntimeProject
     ) -> Option<Value> {
         evaluate_scalar_function_with_db(self.db, name, arguments, source)
     }
+    fn try_evaluate_filter(
+        &self,
+        filter: &Filter,
+        source: &UnifiedRecord,
+    ) -> crate::RedDBResult<bool> {
+        evaluate_runtime_filter_result_with_db(
+            self.db,
+            source,
+            filter,
+            self.table_name,
+            self.table_alias,
+        )
+    }
+    fn try_evaluate_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> crate::RedDBResult<Option<Value>> {
+        super::super::expr_eval::try_evaluate_projection_function(self.db, name, arguments, source)
+    }
     fn evaluate_literal(&self, column: &str, _source: &UnifiedRecord) -> Option<Value> {
         reddb_engine::query::runtime::projection_value::decode_projection_literal(column)
     }

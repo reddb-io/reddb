@@ -1,4 +1,4 @@
-//! Canonical native optional-value Expr traversal used by runtime ORDER BY.
+//! Canonical native scalar traversal with optional and fallible host adapters.
 //! This preserves legacy evaluation rules; it is distinct from the typed evaluator.
 use reddb_rql::ast::{BinOp, CompareOp, Expr, FieldRef, UnaryOp};
 use reddb_types::Value;
@@ -19,101 +19,135 @@ pub trait RuntimeExpressionHost {
     fn evaluate_function(&self, name: &str, arguments: &[Value]) -> Option<Value>;
 }
 
+/// Fallible traversal for hosts whose scalar resolution performs storage I/O.
+/// A missing value remains distinct from an operating error, including in lazy
+/// defaults, CASE, boolean branches and function arguments.
+pub trait FallibleRuntimeExpressionHost {
+    type Error;
+    fn secret_query_input(&self, value: Value) -> Result<Option<Value>, Self::Error>;
+    fn resolve_field(&self, field: &FieldRef) -> Result<Option<Value>, Self::Error>;
+    fn evaluate_special_function(
+        &self,
+        name: &str,
+        arguments: &[Expr],
+        evaluate: &dyn Fn(&Expr) -> Result<Option<Value>, Self::Error>,
+    ) -> Result<Option<Value>, Self::Error>;
+    fn evaluate_function(
+        &self,
+        name: &str,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Self::Error>;
+}
+
+struct OptionalExpressionHost<'a, H>(&'a H);
+impl<H: RuntimeExpressionHost> FallibleRuntimeExpressionHost for OptionalExpressionHost<'_, H> {
+    type Error = std::convert::Infallible;
+    fn secret_query_input(&self, value: Value) -> Result<Option<Value>, Self::Error> {
+        Ok(self.0.secret_query_input(value))
+    }
+    fn resolve_field(&self, field: &FieldRef) -> Result<Option<Value>, Self::Error> {
+        Ok(self.0.resolve_field(field))
+    }
+    fn evaluate_special_function(
+        &self,
+        name: &str,
+        arguments: &[Expr],
+        evaluate: &dyn Fn(&Expr) -> Result<Option<Value>, Self::Error>,
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(self
+            .0
+            .evaluate_special_function(name, arguments, &|expression| match evaluate(expression) {
+                Ok(value) => value,
+                Err(never) => match never {},
+            }))
+    }
+    fn evaluate_function(
+        &self,
+        name: &str,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(self.0.evaluate_function(name, arguments))
+    }
+}
+
 pub fn evaluate_runtime_expr_with_host<H: RuntimeExpressionHost>(
     host: &H,
     expression: &Expr,
 ) -> Option<Value> {
+    match try_evaluate_runtime_expr_with_host(&OptionalExpressionHost(host), expression) {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
+pub fn try_evaluate_runtime_expr_with_host<H: FallibleRuntimeExpressionHost>(
+    host: &H,
+    expression: &Expr,
+) -> Result<Option<Value>, H::Error> {
     evaluate_runtime_expr_at_depth(host, expression, 0)
 }
 
-fn evaluate_runtime_expr_at_depth<H: RuntimeExpressionHost>(
+fn evaluate_runtime_expr_at_depth<H: FallibleRuntimeExpressionHost>(
     host: &H,
     expr: &Expr,
     depth: u32,
-) -> Option<Value> {
+) -> Result<Option<Value>, H::Error> {
     if depth > reddb_rql::limits::JSON_LITERAL_MAX_DEPTH {
-        return None;
+        return Ok(None);
+    }
+    macro_rules! resolved {
+        ($value:expr) => {
+            match $value {
+                Some(value) => value,
+                None => return Ok(None),
+            }
+        };
     }
     let evaluate = |expression: &Expr| evaluate_runtime_expr_at_depth(host, expression, depth + 1);
     match expr {
         Expr::Literal { value, .. } => host.secret_query_input(value.clone()),
-
-        Expr::Column { field, .. } => host
-            .resolve_field(field)
-            .and_then(|value| host.secret_query_input(value)),
-
-        Expr::Parameter { .. } => {
-            // Parameter placeholders only appear in prepared-statement
-            // plans; they must be bound to concrete values before the
-            // runtime sees them. Hitting this arm means the bind phase
-            // skipped a slot, which is a bug further upstream.
-            None
+        Expr::Column { field, .. } => {
+            let value = resolved!(host.resolve_field(field)?);
+            host.secret_query_input(value)
         }
-
-        Expr::UnaryOp {
-            op,
-            operand,
-            span: _,
-        } => {
-            let v = evaluate(operand)?;
-            match op {
-                UnaryOp::Neg => negate_value(&v),
-                UnaryOp::Not => match v {
-                    Value::Boolean(b) => Some(Value::Boolean(!b)),
+        Expr::Parameter { .. } => Ok(None),
+        Expr::UnaryOp { op, operand, .. } => {
+            let value = resolved!(evaluate(operand)?);
+            Ok(match op {
+                UnaryOp::Neg => negate_value(&value),
+                UnaryOp::Not => match value {
+                    Value::Boolean(value) => Some(Value::Boolean(!value)),
                     _ => None,
                 },
-            }
+            })
         }
-
-        Expr::BinaryOp {
-            op,
-            lhs,
-            rhs,
-            span: _,
-        } => {
-            // Short-circuit AND/OR on boolean LHS first so expensive
-            // RHS subtrees (function calls, nested arithmetic) are
-            // skipped when the result is already determined.
+        Expr::BinaryOp { op, lhs, rhs, .. } => {
+            let left = resolved!(evaluate(lhs)?);
+            if matches!((op, &left), (BinOp::And, Value::Boolean(false))) {
+                return Ok(Some(Value::Boolean(false)));
+            }
+            if matches!((op, &left), (BinOp::Or, Value::Boolean(true))) {
+                return Ok(Some(Value::Boolean(true)));
+            }
+            let right = resolved!(evaluate(rhs)?);
             match op {
-                BinOp::And => {
-                    let l = evaluate(lhs)?;
-                    if let Value::Boolean(false) = l {
-                        return Some(Value::Boolean(false));
+                BinOp::And | BinOp::Or => Ok(match (left, right) {
+                    (Value::Boolean(left), Value::Boolean(right)) => {
+                        Some(Value::Boolean(if *op == BinOp::And {
+                            left && right
+                        } else {
+                            left || right
+                        }))
                     }
-                    let r = evaluate(rhs)?;
-                    match (l, r) {
-                        (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a && b)),
-                        _ => None,
-                    }
-                }
-                BinOp::Or => {
-                    let l = evaluate(lhs)?;
-                    if let Value::Boolean(true) = l {
-                        return Some(Value::Boolean(true));
-                    }
-                    let r = evaluate(rhs)?;
-                    match (l, r) {
-                        (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a || b)),
-                        _ => None,
-                    }
-                }
-                _ => {
-                    let l = evaluate(lhs)?;
-                    let r = evaluate(rhs)?;
-                    apply_binop(host, *op, l, r)
-                }
+                    _ => None,
+                }),
+                _ => apply_binop(host, *op, left, right),
             }
         }
-
-        Expr::Cast {
-            inner,
-            target,
-            span: _,
-        } => {
-            let v = evaluate(inner)?;
-            Some(runtime_cast(&v, *target))
+        Expr::Cast { inner, target, .. } => {
+            let value = resolved!(evaluate(inner)?);
+            Ok(Some(runtime_cast(&value, *target)))
         }
-
         Expr::FunctionCall { name, args, .. } => {
             let upper = name.to_uppercase();
             if matches!(
@@ -122,91 +156,101 @@ fn evaluate_runtime_expr_at_depth<H: RuntimeExpressionHost>(
             ) {
                 return host.evaluate_special_function(&upper, args, &evaluate);
             }
-            // Preserve native eager, left-to-right argument evaluation. A miss
-            // is passed to the host as SQL NULL rather than aborting the call.
             let mut values = Vec::with_capacity(args.len());
             for argument in args {
-                values.push(evaluate(argument).unwrap_or(Value::Null));
+                values.push(evaluate(argument)?.unwrap_or(Value::Null));
             }
             host.evaluate_function(&upper, &values)
         }
-
         Expr::Case {
-            branches,
-            else_,
-            span: _,
+            branches, else_, ..
         } => {
-            for (cond, then_val) in branches {
-                let cond_val = evaluate(cond);
-                if matches!(cond_val, Some(Value::Boolean(true))) {
-                    return evaluate(then_val);
+            for (condition, value) in branches {
+                if matches!(evaluate(condition)?, Some(Value::Boolean(true))) {
+                    return evaluate(value);
                 }
             }
-            if let Some(else_expr) = else_ {
-                evaluate(else_expr)
-            } else {
-                Some(Value::Null)
+            match else_ {
+                Some(expression) => evaluate(expression),
+                None => Ok(Some(Value::Null)),
             }
         }
-
         Expr::IsNull {
-            operand,
-            negated,
-            span: _,
+            operand, negated, ..
         } => {
-            let v = evaluate(operand);
-            let is_null = matches!(v, None | Some(Value::Null));
-            Some(Value::Boolean(if *negated { !is_null } else { is_null }))
+            let value = evaluate(operand)?;
+            let is_null = matches!(value, None | Some(Value::Null));
+            Ok(Some(Value::Boolean(if *negated {
+                !is_null
+            } else {
+                is_null
+            })))
         }
-
         Expr::InList {
             target,
             values,
             negated,
-            span: _,
+            ..
         } => {
-            let t = evaluate(target)?;
+            let target = resolved!(evaluate(target)?);
             let mut hit = false;
-            for v in values {
-                if let Some(candidate) = evaluate(v) {
-                    if compare_values(host, &t, &candidate, reddb_rql::ast::CompareOp::Eq) {
+            for value in values {
+                if let Some(candidate) = evaluate(value)? {
+                    if compare_values(host, &target, &candidate, CompareOp::Eq)? {
                         hit = true;
                         break;
                     }
                 }
             }
-            Some(Value::Boolean(if *negated { !hit } else { hit }))
+            Ok(Some(Value::Boolean(if *negated { !hit } else { hit })))
         }
-
         Expr::Between {
             target,
             low,
             high,
             negated,
-            span: _,
+            ..
         } => {
-            let t = evaluate(target)?;
-            let lo = evaluate(low)?;
-            let hi = evaluate(high)?;
-            let in_range = compare_values(host, &t, &lo, reddb_rql::ast::CompareOp::Ge)
-                && compare_values(host, &t, &hi, reddb_rql::ast::CompareOp::Le);
-            Some(Value::Boolean(if *negated { !in_range } else { in_range }))
+            let target = resolved!(evaluate(target)?);
+            let low = resolved!(evaluate(low)?);
+            let high = resolved!(evaluate(high)?);
+            let in_range = compare_values(host, &target, &low, CompareOp::Ge)?
+                && compare_values(host, &target, &high, CompareOp::Le)?;
+            Ok(Some(Value::Boolean(if *negated {
+                !in_range
+            } else {
+                in_range
+            })))
         }
-
-        Expr::Subquery { .. } => None,
-        // Window output belongs to the host window phase; a standalone
-        // window expression remains unresolvable in this scalar walk.
-        Expr::WindowFunctionCall { .. } => None,
+        Expr::Subquery { .. } | Expr::WindowFunctionCall { .. } => Ok(None),
     }
 }
 
-fn compare_values<H: RuntimeExpressionHost>(
+fn compare_values<H: FallibleRuntimeExpressionHost>(
     host: &H,
     left: &Value,
     right: &Value,
     op: CompareOp,
-) -> bool {
-    super::values::compare_runtime_values(left, right, op, &|value| host.secret_query_input(value))
+) -> Result<bool, H::Error> {
+    let mut left = std::borrow::Cow::Borrowed(left);
+    let mut right = std::borrow::Cow::Borrowed(right);
+    for _ in 0..=reddb_rql::limits::JSON_LITERAL_MAX_DEPTH {
+        if !matches!(left.as_ref(), Value::Secret(_)) && !matches!(right.as_ref(), Value::Secret(_))
+        {
+            return Ok(super::values::compare_runtime_values(
+                &left, &right, op, &Some,
+            ));
+        }
+        let Some(value) = host.secret_query_input(left.into_owned())? else {
+            return Ok(false);
+        };
+        left = std::borrow::Cow::Owned(value);
+        let Some(value) = host.secret_query_input(right.into_owned())? else {
+            return Ok(false);
+        };
+        right = std::borrow::Cow::Owned(value);
+    }
+    Ok(false)
 }
 
 fn negate_value(v: &Value) -> Option<Value> {
@@ -218,19 +262,31 @@ fn negate_value(v: &Value) -> Option<Value> {
     }
 }
 
-fn apply_binop<H: RuntimeExpressionHost>(host: &H, op: BinOp, a: Value, b: Value) -> Option<Value> {
-    use reddb_rql::ast::CompareOp;
-    match op {
+fn apply_binop<H: FallibleRuntimeExpressionHost>(
+    host: &H,
+    op: BinOp,
+    a: Value,
+    b: Value,
+) -> Result<Option<Value>, H::Error> {
+    let comparison = match op {
+        BinOp::Eq => Some(CompareOp::Eq),
+        BinOp::Ne => Some(CompareOp::Ne),
+        BinOp::Lt => Some(CompareOp::Lt),
+        BinOp::Le => Some(CompareOp::Le),
+        BinOp::Gt => Some(CompareOp::Gt),
+        BinOp::Ge => Some(CompareOp::Ge),
+        _ => None,
+    };
+    if let Some(comparison) = comparison {
+        return Ok(Some(Value::Boolean(compare_values(
+            host, &a, &b, comparison,
+        )?)));
+    }
+    Ok(match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(op, a, b),
         BinOp::Concat => Some(Value::text(format!("{}{}", a.plain_text(), b.plain_text()))),
-        BinOp::Eq => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Eq))),
-        BinOp::Ne => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Ne))),
-        BinOp::Lt => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Lt))),
-        BinOp::Le => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Le))),
-        BinOp::Gt => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Gt))),
-        BinOp::Ge => Some(Value::Boolean(compare_values(host, &a, &b, CompareOp::Ge))),
-        BinOp::And | BinOp::Or => None, // handled upstream (short-circuit)
-    }
+        _ => None,
+    })
 }
 
 fn arith(op: BinOp, a: Value, b: Value) -> Option<Value> {

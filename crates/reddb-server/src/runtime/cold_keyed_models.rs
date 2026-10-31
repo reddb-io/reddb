@@ -1249,3 +1249,140 @@ fn cold_chain_verification_obeys_work_budget_and_recovers_after_cancellation() {
     assert!(outcome.ok);
     assert_eq!(outcome.checked, 2);
 }
+
+fn seed_expression_config(runtime: &RedDBRuntime) {
+    runtime
+        .execute_query("CREATE TABLE expression_probe (id INTEGER)")
+        .expect("probe table");
+    runtime
+        .execute_query("INSERT INTO expression_probe (id) VALUES (1)")
+        .expect("probe row");
+    runtime
+        .execute_query("SET CONFIG fixture.flag = 'ready'")
+        .expect("expression config");
+}
+
+#[test]
+fn cold_config_expressions_retain_the_published_value() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    let query = "SELECT CONFIG('fixture.flag', 'fallback') AS v FROM expression_probe";
+    let expected = observe(&runtime, query);
+    assert_eq!(expected.len(), 1);
+    assert!(expected[0]
+        .get("v")
+        .is_some_and(|value| !value.is_null() && value != &Value::text("fallback")));
+    runtime.db().store().persist().expect("publish config");
+    install_indexed_cold(&runtime, "red_config", 4096);
+    runtime.invalidate_result_cache();
+    assert_eq!(
+        observe(&runtime, query),
+        expected,
+        "CONFIG expressions must not replace cold values with defaults"
+    );
+}
+
+#[test]
+fn unreadable_config_expressions_return_errors_instead_of_defaults() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    let query = "SELECT CONFIG('fixture.flag', 'fallback') AS v FROM expression_probe";
+    runtime.execute_query(query).expect("resident value");
+    runtime.db().store().persist().expect("publish config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    runtime.invalidate_result_cache();
+    assert!(
+        runtime.db().store().try_get_config("fixture.flag").is_err(),
+        "the published config is genuinely unreadable at this allowance"
+    );
+    assert!(
+        runtime.execute_query(query).is_err(),
+        "an operating read failure must not become a successful fallback value"
+    );
+}
+
+#[test]
+fn cold_config_expressions_preserve_aliases_nested_calls_and_predicates() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    let queries = [
+        "SELECT $config.fixture.flag AS v FROM expression_probe",
+        "SELECT CONFIG(fixture.flag, 'fallback') AS v FROM expression_probe",
+        "SELECT KV('red_config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
+        "SELECT LENGTH(CONFIG('fixture.flag')) AS v FROM expression_probe",
+        "SELECT CASE WHEN CONFIG('fixture.flag') = 'ready' THEN 7 ELSE 8 END AS v FROM expression_probe",
+        "SELECT id FROM expression_probe WHERE CONFIG('fixture.flag') = 'ready'",
+    ];
+    let expected: Vec<_> = queries
+        .iter()
+        .map(|query| observe(&runtime, query))
+        .collect();
+    assert!(expected.iter().all(|rows| rows.len() == 1));
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish expression config");
+    install_indexed_cold(&runtime, "red_config", 4096);
+    for (query, expected) in queries.into_iter().zip(expected) {
+        assert_eq!(observe(&runtime, query), expected, "{query}");
+    }
+}
+
+#[test]
+fn unreadable_config_expressions_propagate_nested_and_predicate_errors_and_retry() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    let queries = [
+        "SELECT KV('red_config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
+        "SELECT LENGTH(CONFIG('fixture.flag')) AS v FROM expression_probe",
+        "SELECT CONFIG('fixture.flag') IS NULL AS v FROM expression_probe",
+        "SELECT CASE WHEN CONFIG('fixture.flag') = 'ready' THEN 7 ELSE 8 END AS v FROM expression_probe",
+        "SELECT id FROM expression_probe WHERE CONFIG('fixture.flag') = 'ready'",
+    ];
+    let expected: Vec<_> = queries
+        .iter()
+        .map(|query| observe(&runtime, query))
+        .collect();
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish expression config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    for query in queries {
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime.execute_query(query).is_err(),
+            "read failure became successful NULL/default/empty result: {query}"
+        );
+    }
+    install_indexed_cold(&runtime, "red_config", 4096);
+    for (query, expected) in queries.into_iter().zip(expected) {
+        assert_eq!(
+            observe(&runtime, query),
+            expected,
+            "read errors must not poison later retries: {query}"
+        );
+    }
+}
+
+#[test]
+fn denied_config_expressions_do_not_load_an_unreadable_snapshot() {
+    let (_directory, runtime) = runtime();
+    seed_expression_config(&runtime);
+    runtime
+        .db()
+        .store()
+        .persist()
+        .expect("publish expression config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    for query in [
+        "SELECT CONFIG('red.config.private') AS v FROM expression_probe",
+        "SELECT KV('red_config', 'red.config.private') AS v FROM expression_probe",
+    ] {
+        let result = observe(&runtime, query);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].get("v"), Some(&Value::Null));
+    }
+}
