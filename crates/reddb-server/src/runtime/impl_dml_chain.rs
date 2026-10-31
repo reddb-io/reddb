@@ -95,15 +95,15 @@ impl RedDBRuntime {
     /// `red_config` on first access. Returns `true` when at least one
     /// tombstone range is present. Subsequent calls observe the cached state
     /// flag (`1` empty / `2` present) and skip the store scan.
-    fn ensure_integrity_tombstones_loaded(&self) -> bool {
+    pub(crate) fn ensure_integrity_tombstones_loaded(&self) -> RedDBResult<bool> {
         use std::sync::atomic::Ordering;
         match self
             .inner
             .integrity_tombstones_state
             .load(Ordering::Relaxed)
         {
-            1 => return false,
-            2 => return true,
+            1 => return Ok(false),
+            2 => return Ok(true),
             _ => {}
         }
         // Cold: load under the cache lock so a concurrent reader cannot
@@ -115,17 +115,18 @@ impl RedDBRuntime {
             .load(Ordering::Relaxed)
             == 0
         {
-            let ranges = crate::runtime::integrity_tombstone::load_ranges(&self.inner.db.store());
+            let ranges = crate::runtime::integrity_tombstone::load_ranges(&self.inner.db.store())?;
             let present = !ranges.is_empty();
             *guard = ranges;
             self.inner
                 .integrity_tombstones_state
                 .store(if present { 2 } else { 1 }, Ordering::Relaxed);
         }
-        self.inner
+        Ok(self
+            .inner
             .integrity_tombstones_state
             .load(Ordering::Relaxed)
-            == 2
+            == 2)
     }
 
     /// Issue #765 / S6 — durably record an integrity tombstone over the
@@ -133,19 +134,35 @@ impl RedDBRuntime {
     /// input stream whose end-to-end SHA-256 digest did not match). The range
     /// is persisted to `red_config` (survives restart) and folded into the
     /// in-memory cache so the same process filters it immediately.
-    pub fn record_integrity_tombstone(&self, table: &str, lo: u64, hi: u64) {
+    pub fn record_integrity_tombstone(&self, table: &str, lo: u64, hi: u64) -> RedDBResult<()> {
+        self.record_integrity_tombstones(&[
+            crate::runtime::integrity_tombstone::TombstoneRange::new(table, lo, hi),
+        ])
+    }
+
+    pub(crate) fn record_integrity_tombstones(
+        &self,
+        ranges: &[crate::runtime::integrity_tombstone::TombstoneRange],
+    ) -> RedDBResult<()> {
         use std::sync::atomic::Ordering;
-        self.ensure_integrity_tombstones_loaded();
+        if ranges.is_empty() {
+            return Ok(());
+        }
+        if ranges.iter().any(|range| range.lo > range.hi) {
+            return Err(RedDBError::Query(
+                "integrity tombstone range is reversed".into(),
+            ));
+        }
+        self.ensure_integrity_tombstones_loaded()?;
         let mut guard = self.inner.integrity_tombstones.lock();
-        guard.push(crate::runtime::integrity_tombstone::TombstoneRange::new(
-            table.to_string(),
-            lo,
-            hi,
-        ));
-        crate::runtime::integrity_tombstone::persist_ranges(&self.inner.db.store(), &guard);
+        guard.extend_from_slice(ranges);
+        // Quarantine in this process even when durable publication fails.
+        // The caller must report the persistence failure to the stream client.
         self.inner
             .integrity_tombstones_state
             .store(2, Ordering::Relaxed);
+        crate::runtime::integrity_tombstone::persist_ranges(&self.inner.db.store(), &guard)?;
+        Ok(())
     }
 
     /// Issue #765 / S6 — snapshot of the currently-cached tombstone ranges.
@@ -153,22 +170,22 @@ impl RedDBRuntime {
     /// [`Self::filter_integrity_tombstoned`] which avoids the clone.
     pub fn integrity_tombstone_ranges(
         &self,
-    ) -> Vec<crate::runtime::integrity_tombstone::TombstoneRange> {
-        self.ensure_integrity_tombstones_loaded();
-        self.inner.integrity_tombstones.lock().clone()
+    ) -> RedDBResult<Vec<crate::runtime::integrity_tombstone::TombstoneRange>> {
+        self.ensure_integrity_tombstones_loaded()?;
+        Ok(self.inner.integrity_tombstones.lock().clone())
     }
 
     /// Issue #765 / S6 — drop tombstoned rows from a SELECT result in place.
     /// Fast no-op (one relaxed atomic load) when no tombstone has ever been
     /// recorded. Clears `pre_serialized_json` when any row is removed so the
     /// fast-path JSON cannot leak a filtered row back onto the wire.
-    pub fn filter_integrity_tombstoned(&self, result: &mut UnifiedResult) {
-        if !self.ensure_integrity_tombstones_loaded() {
-            return;
+    pub fn filter_integrity_tombstoned(&self, result: &mut UnifiedResult) -> RedDBResult<()> {
+        if !self.ensure_integrity_tombstones_loaded()? {
+            return Ok(());
         }
         let guard = self.inner.integrity_tombstones.lock();
         if guard.is_empty() {
-            return;
+            return Ok(());
         }
         let before = result.records.len();
         result.records.retain(|record| {
@@ -177,5 +194,6 @@ impl RedDBRuntime {
         if result.records.len() != before {
             result.pre_serialized_json = None;
         }
+        Ok(())
     }
 }

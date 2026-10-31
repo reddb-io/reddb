@@ -670,3 +670,177 @@ fn cold_vault_listing_keeps_own_pending_version_over_newer_committed_versions() 
         Some(&Value::Integer(3))
     );
 }
+
+#[test]
+fn cold_integrity_tombstones_filter_persisted_rows() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE TABLE cold_ingest (value INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO cold_ingest (value) VALUES (1), (2), (3)")
+        .expect("rows");
+    let rows = runtime
+        .execute_query("SELECT * FROM cold_ingest ORDER BY value")
+        .expect("rows");
+    let hidden = super::integrity_tombstone::record_rid(&rows.result.records[1]).expect("row id");
+    let store = runtime.db().store();
+    let ranges = vec![super::integrity_tombstone::TombstoneRange::new(
+        "cold_ingest",
+        hidden,
+        hidden,
+    )];
+    store
+        .try_set_config_tree(
+            super::integrity_tombstone::TOMBSTONE_KEY,
+            &crate::serde_json::Value::String(super::integrity_tombstone::serialize_ranges(
+                &ranges,
+            )),
+        )
+        .expect("tombstones");
+    store.persist().expect("publish tombstones");
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    // The seed SELECT initialized the empty cache; simulate first load after boot.
+    runtime
+        .inner
+        .integrity_tombstones_state
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    runtime.invalidate_result_cache();
+    let visible = runtime
+        .execute_query("SELECT * FROM cold_ingest ORDER BY value")
+        .expect("filtered rows");
+    assert_eq!(
+        visible.result.records.len(),
+        2,
+        "persisted integrity tombstones must survive paging"
+    );
+    assert_eq!(
+        visible.result.records[0].get("value"),
+        Some(&Value::Integer(1))
+    );
+    assert_eq!(
+        visible.result.records[1].get("value"),
+        Some(&Value::Integer(3))
+    );
+}
+
+#[test]
+fn cold_integrity_read_failure_is_not_cached_as_an_empty_list() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE TABLE cold_ingest (value INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO cold_ingest (value) VALUES (1)")
+        .expect("rows");
+    let store = runtime.db().store();
+    store
+        .try_set_config_tree(
+            super::integrity_tombstone::TOMBSTONE_KEY,
+            &crate::serde_json::Value::String("[]".to_string()),
+        )
+        .expect("tombstones");
+    store.persist().expect("publish tombstones");
+    install_indexed_cold(&runtime, "red_config", 1);
+    runtime
+        .inner
+        .integrity_tombstones_state
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    for _ in 0..2 {
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime.execute_query("SELECT * FROM cold_ingest").is_err(),
+            "integrity state unavailable must fail the read"
+        );
+        assert_eq!(
+            runtime
+                .inner
+                .integrity_tombstones_state
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "failed hydration must remain retryable"
+        );
+    }
+    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    runtime.invalidate_result_cache();
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("read after recovery")
+            .result
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn cold_integrity_malformed_persisted_list_refuses_reads() {
+    for invalid in [
+        crate::serde_json::Value::String("not JSON".into()),
+        crate::serde_json::Value::String("[{\"table\":\"cold_ingest\",\"lo\":10}]".into()),
+        crate::serde_json::Value::Bool(false),
+    ] {
+        let (_directory, runtime) = runtime();
+        runtime
+            .execute_query("CREATE TABLE cold_ingest (value INT)")
+            .expect("table");
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree(super::integrity_tombstone::TOMBSTONE_KEY, &invalid)
+            .expect("seed corrupt list");
+        store.persist().expect("publish fixture");
+        install_indexed_cold(&runtime, "red_config", 128 * 1024);
+        runtime
+            .inner
+            .integrity_tombstones_state
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            runtime.execute_query("SELECT * FROM cold_ingest").is_err(),
+            "invalid quarantine config must not silently expose rows"
+        );
+    }
+}
+
+#[test]
+fn cold_integrity_persist_failure_is_reported_and_keeps_local_quarantine() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE TABLE cold_ingest (value INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO cold_ingest (value) VALUES (1)")
+        .expect("rows");
+    let rows = runtime
+        .execute_query("SELECT * FROM cold_ingest")
+        .expect("empty integrity cache loaded");
+    let id = super::integrity_tombstone::record_rid(&rows.result.records[0]).expect("id");
+    let store = runtime.db().store();
+    store
+        .try_set_config_tree(
+            super::integrity_tombstone::TOMBSTONE_KEY,
+            &crate::serde_json::Value::String("[]".to_string()),
+        )
+        .expect("seed config");
+    store.persist().expect("publish config");
+    install_indexed_cold(&runtime, "red_config", 1);
+    assert!(
+        runtime
+            .record_integrity_tombstone("cold_ingest", id, id)
+            .is_err(),
+        "must report failed durable quarantine"
+    );
+    runtime.invalidate_result_cache();
+    let visible = runtime
+        .execute_query("SELECT * FROM cold_ingest")
+        .expect("local quarantine remains applied");
+    assert!(visible.result.records.is_empty());
+    assert_eq!(
+        runtime.integrity_tombstone_ranges().expect("local ranges"),
+        vec![super::integrity_tombstone::TombstoneRange::new(
+            "cold_ingest",
+            id,
+            id
+        )]
+    );
+}
