@@ -95,6 +95,24 @@ impl OrderingHost for Host<'_> {
 
 impl FallibleOrderingHost for Host<'_> {
     type Error = &'static str;
+    fn try_resolve_field(
+        &self,
+        record: &UnifiedRecord,
+        field: &FieldRef,
+        table_name: Option<&str>,
+        table_alias: Option<&str>,
+    ) -> Result<Option<Value>, Self::Error> {
+        self.evaluations.set(self.evaluations.get() + 1);
+        if self.failure_at.get() == Some(self.evaluations.get()) {
+            return Err("sort key read failed");
+        }
+        Ok(resolve_runtime_field(
+            record,
+            field,
+            table_name,
+            table_alias,
+        ))
+    }
     fn try_evaluate_expression(
         &self,
         expression: &Expr,
@@ -570,14 +588,22 @@ impl ValueFunctionHost for RecordExpressionHost<'_> {
 }
 
 fn fallible_keys_and_retry() {
-    let query = query("ORDER BY o.quantity + 1 LIMIT 2 OFFSET 1");
+    for suffix in [
+        "ORDER BY o.quantity + 1 LIMIT 2 OFFSET 1",
+        "ORDER BY o.quantity LIMIT 2 OFFSET 1",
+    ] {
+        fallible_keys_and_retry_for_query(&query(suffix));
+    }
+}
+
+fn fallible_keys_and_retry_for_query(query: &TableQuery) {
     let rows: Vec<_> = (0..12)
         .rev()
         .map(|id| row(id, Value::Integer(id as i64)))
         .collect();
     for strategy in 0..3 {
         for failure_at in [1, 3, 12] {
-            let host = Host::new(&query, None);
+            let host = Host::new(query, None);
             host.failure_at.set(Some(failure_at));
             let mut selected = rows.clone();
             let run = |records: &mut Vec<UnifiedRecord>| match strategy {
@@ -625,7 +651,7 @@ fn fallible_keys_and_retry() {
             assert_eq!(host.evaluations.get(), 12, "extract keys once per row");
         }
     }
-    let host = Host::new(&query, None);
+    let host = Host::new(query, None);
     host.failure_at.set(Some(2));
     assert_eq!(
         try_compare_runtime_order_with_host(

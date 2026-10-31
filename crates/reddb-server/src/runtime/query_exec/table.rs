@@ -77,10 +77,29 @@ fn compiled_entity_filter_matches(
     filter: &Filter,
     table_name: &str,
     table_alias: &str,
-) -> bool {
-    compiled.evaluate(entity).resolve_with_fallback(|| {
-        evaluate_entity_filter_with_db(Some(db), entity, filter, table_name, table_alias)
-    })
+) -> RedDBResult<bool> {
+    compiled
+        .try_evaluate(entity)?
+        .try_resolve_with_fallback(|| {
+            evaluate_entity_filter_result_with_db(Some(db), entity, filter, table_name, table_alias)
+        })
+}
+
+fn optional_compiled_entity_filter_matches(
+    db: &RedDB,
+    compiled: Option<&super::filter_compiled::CompiledEntityFilter>,
+    entity: &UnifiedEntity,
+    filter: Option<&Filter>,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<bool> {
+    match (compiled, filter) {
+        (None, _) => Ok(true),
+        (Some(compiled), Some(filter)) => {
+            compiled_entity_filter_matches(db, compiled, entity, filter, table_name, table_alias)
+        }
+        (Some(_), None) => Ok(false),
+    }
 }
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
@@ -802,35 +821,42 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     Vec::with_capacity(entity_ids.len().min(limit));
                 let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
-                manager.try_for_each_id(&entity_ids, usize::MAX, |_idx, entity| {
-                    if records.len() >= limit {
-                        return false;
-                    }
-                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                        return true;
-                    }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return true;
-                    }
-                    if let Some(cf) = compiled_filter.as_ref() {
-                        if !compiled_entity_filter_matches(
-                            db,
-                            cf,
-                            entity,
-                            filter,
-                            table_name,
-                            table_alias,
-                        ) {
-                            return true;
+                crate::runtime::function_budget::visit_result(
+                    |visit| {
+                        manager
+                            .try_for_each_id(&entity_ids, usize::MAX, |_idx, entity| visit(entity))
+                            .map_err(RedDBError::from)
+                    },
+                    |entity| {
+                        if records.len() >= limit {
+                            return Ok(false);
                         }
-                    }
-                    if let Some(record) =
-                        super::super::record_search::runtime_table_record_lean_ref(entity)
-                    {
-                        records.push(record);
-                    }
-                    true
-                })?;
+                        if table_row_resolver.resolve_read_candidate(entity).is_none() {
+                            return Ok(true);
+                        }
+                        if !db.replica_allows_entity_at_read(&query.table, entity) {
+                            return Ok(true);
+                        }
+                        if let Some(cf) = compiled_filter.as_ref() {
+                            if !compiled_entity_filter_matches(
+                                db,
+                                cf,
+                                entity,
+                                filter,
+                                table_name,
+                                table_alias,
+                            )? {
+                                return Ok(true);
+                            }
+                        }
+                        if let Some(record) =
+                            super::super::record_search::runtime_table_record_lean_ref(entity)
+                        {
+                            records.push(record);
+                        }
+                        Ok(true)
+                    },
+                )?;
                 return finish_ordered_index_records(
                     db,
                     query,
@@ -868,7 +894,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         filter,
                         table_name,
                         table_alias,
-                    ) {
+                    )? {
                         continue;
                     }
                 }
@@ -972,16 +998,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
                                     continue;
                                 }
-                                if compiled_filter.as_ref().is_none_or(|cf| {
-                                    compiled_entity_filter_matches(
-                                        db,
-                                        cf,
-                                        &entity_opt,
-                                        filter,
-                                        table_name,
-                                        table_alias,
-                                    )
-                                }) {
+                                if optional_compiled_entity_filter_matches(
+                                    db,
+                                    compiled_filter.as_ref(),
+                                    &entity_opt,
+                                    Some(filter),
+                                    table_name,
+                                    table_alias,
+                                )? {
                                     let record_opt = if lean {
                                         super::super::record_search::runtime_table_record_lean_in_collection(
                                             entity_opt,
@@ -1137,7 +1161,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     filter,
                     table_name,
                     table_alias,
-                ) {
+                )? {
                     let record_opt = if lean {
                         super::super::record_search::runtime_table_record_lean_in_collection(
                             entity_opt,
@@ -1257,18 +1281,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
                                 continue;
                             }
-                            if compiled_filter.as_ref().is_none_or(|cf| {
-                                effective_filter.as_ref().is_some_and(|filter| {
-                                    compiled_entity_filter_matches(
-                                        db,
-                                        cf,
-                                        &entity_opt,
-                                        filter,
-                                        table_name,
-                                        table_alias,
-                                    )
-                                })
-                            }) {
+                            if optional_compiled_entity_filter_matches(
+                                db,
+                                compiled_filter.as_ref(),
+                                &entity_opt,
+                                effective_filter.as_ref(),
+                                table_name,
+                                table_alias,
+                            )? {
                                 let record_opt = if lean {
                                     super::super::record_search::runtime_table_record_lean_in_collection(
                                         entity_opt,
@@ -1579,39 +1599,32 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let hydrate_store = store;
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
+            let predicate_error = parking_lot::Mutex::new(None);
             let (matching, scan_stats) =
                 manager.try_scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, usize::MAX, |entity| {
+                    (|| -> RedDBResult<Option<UnifiedRecord>> {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
-                            return None;
+                            return Ok(None);
                         };
                         if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
-                            return None;
+                            return Ok(None);
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
                     if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return None;
+                        return Ok(None);
                     }
                     let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    if !compiled.as_ref().is_none_or(|compiled| {
-                        residual_filter.as_ref().is_some_and(|filter| {
-                            compiled_entity_filter_matches(
-                                db,
-                                compiled,
-                                &hydrated,
-                                filter,
-                                table_name,
-                                table_alias,
-                            )
-                        })
-                    }) {
-                        return None;
+                    if !optional_compiled_entity_filter_matches(
+                        db, compiled.as_ref(), &hydrated, residual_filter.as_ref(), table_name, table_alias,
+                    )? {
+                        return Ok(None);
                     }
-                    if !select_cols.is_empty() {
+                    let record = if !select_cols.is_empty() {
                         if let Some(ref idx_map) = schema_col_indices {
                             super::super::record_search::runtime_table_record_with_col_indices(
                                 &hydrated,
@@ -1645,12 +1658,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         )
                     } else {
                         runtime_table_record_from_entity(hydrated.as_ref().clone())
-                    }
+                    };
+                    Ok(record)
+                    })().unwrap_or_else(|error| {
+                        let mut failure = predicate_error.lock();
+                        if failure.is_none() {
+                            *failure = Some(error);
+                        }
+                        None
+                    })
                 })?;
+            if let Some(error) = predicate_error.into_inner() {
+                return Err(error);
+            }
             record_segment_scan_stats(scan_stats);
             records = matching;
         } else {
-            let scan_stats = crate::runtime::function_budget::try_scan(
+            let scan_stats = crate::runtime::function_budget::try_scan_result(
                 |visit| {
                     manager.try_scan_for_each_zoned_with_stats(
                         snapshot.as_ref(),
@@ -1661,17 +1685,17 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 },
                 |entity| {
                     if records.len() >= limit {
-                        return false; // stop iteration
+                        return Ok(false); // stop iteration
                     }
                     if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return true;
+                        return Ok(true);
                     }
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
-                            return true;
+                            return Ok(true);
                         };
                         if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
-                            return true;
+                            return Ok(true);
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
@@ -1679,18 +1703,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    if compiled.as_ref().is_none_or(|compiled| {
-                        residual_filter.as_ref().is_some_and(|filter| {
-                            compiled_entity_filter_matches(
-                                db,
-                                compiled,
-                                &hydrated,
-                                filter,
-                                table_name,
-                                table_alias,
-                            )
-                        })
-                    }) {
+                    if optional_compiled_entity_filter_matches(
+                        db,
+                        compiled.as_ref(),
+                        &hydrated,
+                        residual_filter.as_ref(),
+                        table_name,
+                        table_alias,
+                    )? {
                         let record = if !select_cols.is_empty() {
                             // Fast columnar path: use pre-computed schema indices when available.
                             if let Some(ref idx_map) = schema_col_indices {
@@ -1728,7 +1748,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             records.push(record);
                         }
                     }
-                    true // continue
+                    Ok(true) // continue
                 },
             )?;
             record_segment_scan_stats(scan_stats);
@@ -2088,14 +2108,14 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                crate::runtime::function_budget::try_scan(
+                crate::runtime::function_budget::try_scan_result(
             |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |entity| {
                     if records.len() >= limit {
-                        return false;
+                        return Ok(false);
                     }
                     if !db.replica_allows_entity_at_read(&context.query.table, entity) {
-                        return true;
+                        return Ok(true);
                     }
                     if compiled_entity_filter_matches(
                         db,
@@ -2104,7 +2124,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                         filter,
                         table_name,
                         table_alias,
-                    ) {
+                    )? {
                         let record = if !select_cols.is_empty() {
                             if let Some(ref idx_map) = schema_col_indices {
                                 super::super::record_search::runtime_table_record_with_col_indices(
@@ -2140,7 +2160,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                             records.push(record);
                         }
                     }
-                    true
+                    Ok(true)
                 })?;
                 return Ok(records);
             }

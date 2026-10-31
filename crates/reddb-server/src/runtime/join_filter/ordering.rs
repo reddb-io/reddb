@@ -220,6 +220,23 @@ impl reddb_engine::query::runtime::ordering::OrderingHost for RuntimeOrderingHos
 
 impl reddb_engine::query::runtime::ordering::FallibleOrderingHost for RuntimeOrderingHost<'_> {
     type Error = crate::RedDBError;
+    fn try_resolve_field(
+        &self,
+        record: &UnifiedRecord,
+        field: &FieldRef,
+        table_name: Option<&str>,
+        table_alias: Option<&str>,
+    ) -> crate::RedDBResult<Option<Value>> {
+        let value = resolve_runtime_field(record, field, table_name, table_alias);
+        if let Some(secret @ Value::Secret(_)) = value.as_ref() {
+            // Keep an unreadable ciphertext incomparable, as before. A read
+            // allowance failure is an operating error, never a missing key.
+            if let Some(decoded) = try_secret_runtime_input(secret.clone())? {
+                return Ok(Some(decoded));
+            }
+        }
+        Ok(value)
+    }
     fn try_evaluate_expression(
         &self,
         expression: &reddb_rql::ast::Expr,

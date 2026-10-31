@@ -146,17 +146,17 @@ pub(super) fn try_execute_pushdown_aggregate(
 
     let mut rows: Vec<ScanRow> = Vec::new();
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::try_scan(
+    crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if let Some(f) = compiled_filter.as_ref() {
-                if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
-                    return true;
+                if f.try_evaluate(entity)? != CompiledEntityFilterDecision::Match {
+                    return Ok(true);
                 }
             }
             let group_key = match resolve_kind(&group_kind, entity) {
                 Some(v) => v.into_owned(),
-                None => return true,
+                None => return Ok(true),
             };
             let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
             for slot in &lowered {
@@ -173,7 +173,7 @@ pub(super) fn try_execute_pushdown_aggregate(
                 group_key,
                 agg_inputs,
             });
-            true
+            Ok(true)
         },
     )?;
 

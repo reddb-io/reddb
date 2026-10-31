@@ -414,9 +414,17 @@ impl<'a> DmlTargetScan<'a> {
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
     ) -> RedDBResult<bool> {
         match (self.filter, compiled_filter) {
-            (_, Some(compiled)) => {
-                Ok(compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match)
-            }
+            (_, Some(compiled)) => compiled
+                .try_evaluate(entity)?
+                .try_resolve_with_fallback(|| {
+                    query_exec::evaluate_entity_filter_result_with_db(
+                        Some(self.runtime.db().as_ref()),
+                        entity,
+                        self.filter.expect("compiled target has a source filter"),
+                        self.table,
+                        self.table,
+                    )
+                }),
             (Some(filter), None) => query_exec::evaluate_entity_filter_result_with_db(
                 Some(self.runtime.db().as_ref()),
                 entity,

@@ -570,6 +570,21 @@ pub(crate) fn evaluate_entity_filter_with_db(
         .unwrap_or(false)
 }
 
+fn try_resolve_entity_filter_field<'a>(
+    entity: &'a crate::storage::unified::entity::UnifiedEntity,
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<Option<std::borrow::Cow<'a, Value>>> {
+    match resolve_entity_field(entity, field, table_name, table_alias) {
+        Some(value) if matches!(value.as_ref(), Value::Secret(_)) => {
+            try_secret_runtime_input(value.into_owned())
+                .map(|value| value.map(std::borrow::Cow::Owned))
+        }
+        value => Ok(value),
+    }
+}
+
 pub(crate) fn evaluate_entity_filter_result_with_db(
     db: Option<&RedDB>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
@@ -579,16 +594,18 @@ pub(crate) fn evaluate_entity_filter_result_with_db(
 ) -> RedDBResult<bool> {
     Ok(match filter {
         Filter::Compare { field, op, value } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
-                .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
+                .map(|candidate| try_compare_runtime_values(candidate.as_ref(), value, *op))
+                .transpose()?
                 .unwrap_or(false)
         }
         Filter::CompareFields { left, op, right } => {
-            let left_val = resolve_entity_field(entity, left, table_name, table_alias);
-            let right_val = resolve_entity_field(entity, right, table_name, table_alias);
+            let left_val = try_resolve_entity_filter_field(entity, left, table_name, table_alias)?;
+            let right_val =
+                try_resolve_entity_filter_field(entity, right, table_name, table_alias)?;
             match (left_val, right_val) {
-                (Some(l), Some(r)) => compare_runtime_values(l.as_ref(), r.as_ref(), *op),
+                (Some(l), Some(r)) => try_compare_runtime_values(l.as_ref(), r.as_ref(), *op)?,
                 _ => false,
             }
         }
@@ -647,49 +664,60 @@ pub(crate) fn evaluate_entity_filter_result_with_db(
         Filter::Not(inner) => {
             !evaluate_entity_filter_result_with_db(db, entity, inner, table_name, table_alias)?
         }
-        Filter::IsNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
-            .map(|value| value.as_ref() == &Value::Null)
-            .unwrap_or(true),
-        Filter::IsNotNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
-            .map(|value| value.as_ref() != &Value::Null)
-            .unwrap_or(false),
+        Filter::IsNull(field) => {
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+                .map(|value| value.as_ref() == &Value::Null)
+                .unwrap_or(true)
+        }
+        Filter::IsNotNull(field) => {
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+                .map(|value| value.as_ref() != &Value::Null)
+                .unwrap_or(false)
+        }
         Filter::In { field, values } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
-                .as_ref()
-                .is_some_and(|candidate| {
-                    values.iter().any(|value| {
-                        compare_runtime_values(candidate.as_ref(), value, CompareOp::Eq)
-                    })
-                })
+            let Some(candidate) =
+                try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+            else {
+                return Ok(false);
+            };
+            let mut matched = false;
+            for value in values {
+                if try_compare_runtime_values(candidate.as_ref(), value, CompareOp::Eq)? {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
         }
         Filter::Between { field, low, high } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
-                .as_ref()
-                .is_some_and(|candidate| {
-                    compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
-                        && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
-                })
+            let Some(candidate) =
+                try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+            else {
+                return Ok(false);
+            };
+            try_compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)?
+                && try_compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)?
         }
         Filter::Like { field, pattern } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| like_matches(value.as_ref(), pattern))
         }
         Filter::StartsWith { field, prefix } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| value.starts_with(prefix.as_str()))
         }
         Filter::EndsWith { field, suffix } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| value.ends_with(suffix.as_str()))
         }
         Filter::Contains { field, substring } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .is_some_and(|value| runtime_value_contains(value.as_ref(), substring))
         }

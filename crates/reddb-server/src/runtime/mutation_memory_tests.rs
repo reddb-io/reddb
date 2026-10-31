@@ -51,7 +51,7 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
     ));
     auth.ensure_vault_secret_key();
     let key = auth.vault_secret_key().expect("fixture key");
-    runtime.set_auth_store(auth);
+    runtime.set_auth_store(auth.clone());
 
     // This is the existing typed SECRET expression representation. Its
     // authenticated ciphertext is small, while decoding its TOAST value
@@ -93,7 +93,7 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
         .expect("table");
     runtime
         .execute_query_with_params(
-            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1)",
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
             std::slice::from_ref(&secret),
         )
         .expect("small authenticated ciphertext fits the resident allowance");
@@ -102,6 +102,10 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
         "SELECT id FROM secret_inputs WHERE LENGTH(payload) > 0",
         "SELECT MIN(LENGTH(payload)) OVER () AS size FROM secret_inputs",
         "SELECT id FROM secret_inputs ORDER BY LENGTH(payload)",
+        "SELECT id FROM secret_inputs ORDER BY payload",
+        "SELECT id FROM secret_inputs ORDER BY payload LIMIT 1",
+        "SELECT id FROM secret_inputs ORDER BY payload DESC LIMIT 1",
+        "SELECT id FROM secret_inputs WHERE payload IN ('x','y')",
     ] {
         let result = runtime.execute_query(query);
         let error = result.expect_err(query);
@@ -110,6 +114,54 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
             "{query}: {error}"
         );
         assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+    }
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT COUNT(*) FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) FROM secret_inputs WHERE payload = $1 GROUP BY id",
+        "UPDATE secret_inputs SET id = 77 WHERE payload = $1",
+        "DELETE FROM secret_inputs WHERE payload = $1",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+        if query.starts_with("UPDATE") || query.starts_with("DELETE") {
+            let rows = runtime
+                .execute_query("SELECT id FROM secret_inputs ORDER BY id")
+                .expect("denial preserves rows");
+            assert_eq!(rows.result.records.len(), 3);
+            for (row, expected) in rows.result.records.iter().zip(1..=3) {
+                assert_eq!(row.get("id"), Some(&Value::Integer(expected)));
+            }
+        }
+    }
+
+    let larger =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("larger runtime");
+    larger.set_auth_store(auth);
+    larger
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("larger table");
+    larger
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("larger seed");
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+    ] {
+        let result = larger
+            .execute_query_with_params(query, std::slice::from_ref(&secret))
+            .expect("value fits the larger allowance");
+        assert_eq!(result.result.records.len(), 3, "{query}");
     }
 }
 

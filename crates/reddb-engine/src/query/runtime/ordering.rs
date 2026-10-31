@@ -4,7 +4,7 @@ use super::{
     values::{runtime_partial_cmp, text_abbrev_key},
 };
 use crate::query::unified::UnifiedRecord;
-use reddb_rql::ast::{Expr, OrderByClause};
+use reddb_rql::ast::{Expr, FieldRef, OrderByClause};
 use reddb_types::Value;
 use std::cmp::Ordering;
 
@@ -22,6 +22,20 @@ pub trait OrderingHost {
 /// Keys are extracted before the sort or top-K selection mutates the records.
 pub trait FallibleOrderingHost: OrderingHost {
     type Error;
+    fn try_resolve_field(
+        &self,
+        record: &UnifiedRecord,
+        field: &FieldRef,
+        table_name: Option<&str>,
+        table_alias: Option<&str>,
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(resolve_runtime_field(
+            record,
+            field,
+            table_name,
+            table_alias,
+        ))
+    }
     fn try_evaluate_expression(
         &self,
         expression: &Expr,
@@ -100,8 +114,8 @@ pub fn try_compare_runtime_order_with_host<H: FallibleOrderingHost>(
             )
         } else {
             (
-                resolve_runtime_field(left, &clause.field, table_name, table_alias),
-                resolve_runtime_field(right, &clause.field, table_name, table_alias),
+                host.try_resolve_field(left, &clause.field, table_name, table_alias)?,
+                host.try_resolve_field(right, &clause.field, table_name, table_alias)?,
             )
         };
         let ordering = compare_runtime_optional_values(
@@ -190,7 +204,7 @@ pub fn try_sort_records_by_order_by_with_host<H: FallibleOrderingHost>(
             let v = if let Some(ref expr) = clause.expr {
                 host.try_evaluate_expression(expr, rec)?
             } else {
-                resolve_runtime_field(rec, &clause.field, table_name, table_alias)
+                host.try_resolve_field(rec, &clause.field, table_name, table_alias)?
             };
             keys_flat.push(SortKey::new(v));
         }
@@ -363,7 +377,7 @@ pub fn try_top_k_records_by_order_by_with_host<H: FallibleOrderingHost>(
             let v = if let Some(ref expr) = clause.expr {
                 host.try_evaluate_expression(expr, rec)?
             } else {
-                resolve_runtime_field(rec, &clause.field, table_name, table_alias)
+                host.try_resolve_field(rec, &clause.field, table_name, table_alias)?
             };
             keys_flat.push(SortKey::new(v));
         }

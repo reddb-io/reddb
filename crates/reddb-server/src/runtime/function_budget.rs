@@ -136,9 +136,148 @@ pub(crate) fn try_scan<T>(
     scan(visit, consume)?.map_err(RedDBError::from)
 }
 
+/// Preserve the first consumer failure across a storage visitor's stop flag,
+/// including outside CALL. No later row may run after a rejected read.
+pub(crate) fn try_scan_result<T>(
+    visit: impl FnOnce(&mut dyn FnMut(&UnifiedEntity) -> bool) -> Result<T, crate::storage::StoreError>,
+    consume: impl FnMut(&UnifiedEntity) -> RedDBResult<bool>,
+) -> RedDBResult<T> {
+    visit_result(|consume| try_scan(visit, consume), consume)
+}
+
+/// The indexed caller can retain its existing up-front work charge while
+/// carrying operating failures through the same visitor stop boundary.
+pub(crate) fn visit_result<T>(
+    visit: impl FnOnce(&mut dyn FnMut(&UnifiedEntity) -> bool) -> RedDBResult<T>,
+    mut consume: impl FnMut(&UnifiedEntity) -> RedDBResult<bool>,
+) -> RedDBResult<T> {
+    let mut failure = None;
+    let result = visit(&mut |entity| {
+        if failure.is_some() {
+            return false;
+        }
+        match consume(entity) {
+            Ok(keep_scanning) => keep_scanning,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        }
+    });
+    match failure {
+        Some(error) => Err(error),
+        None => result,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scan_fixture() -> UnifiedEntity {
+        UnifiedEntity::table_row(
+            crate::storage::unified::entity::EntityId::new(1),
+            "t",
+            1,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn consumer_failure_rejects_partial_scan_without_a_call_budget() {
+        assert!(!active());
+        let entity = scan_fixture();
+        let mut consumed = 0;
+        let result = try_scan_result(
+            |visit| {
+                // Even a visitor that ignores the stop flag cannot consume
+                // later rows or replace the first rejected read with success.
+                assert!(visit(&entity));
+                assert!(!visit(&entity));
+                assert!(!visit(&entity));
+                Ok(99)
+            },
+            |_| {
+                consumed += 1;
+                if consumed == 2 {
+                    Err(RedDBError::Query("read memory limit fixture".into()))
+                } else {
+                    Ok(true)
+                }
+            },
+        );
+        assert!(result
+            .expect_err("partial scan must fail")
+            .to_string()
+            .contains("read memory limit fixture"));
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn first_consumer_failure_survives_a_later_visitor_failure() {
+        let entity = scan_fixture();
+        let result: RedDBResult<()> = visit_result(
+            |visit| {
+                assert!(!visit(&entity));
+                Err(RedDBError::Query("later visitor failure".into()))
+            },
+            |_| Err(RedDBError::Query("first consumer failure".into())),
+        );
+        let error = result
+            .expect_err("consumer failure must survive")
+            .to_string();
+        assert!(error.contains("first consumer failure"), "{error}");
+    }
+
+    #[test]
+    fn fallible_scan_charges_once_per_row_and_preserves_budget_exhaustion() {
+        let _scope = Scope::enter(3, 60_000).expect("budget");
+        let entity = scan_fixture();
+        let mut consumed = 0;
+        let result = try_scan_result(
+            |visit| {
+                for _ in 0..4 {
+                    if !visit(&entity) {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+            |_| {
+                consumed += 1;
+                Ok(true)
+            },
+        );
+        let error = result.expect_err("fourth row exceeds budget").to_string();
+        assert!(error.contains("work_max"), "{error}");
+        assert_eq!(consumed, 3, "exact work boundary must remain usable");
+    }
+
+    #[test]
+    fn fallible_index_visit_preserves_prepaid_work_and_successful_stop() {
+        let _scope = Scope::enter(3, 60_000).expect("budget");
+        charge(3).expect("index candidates charged before visitation");
+        let entity = scan_fixture();
+        let mut consumed = 0;
+        let result = visit_result(
+            |visit| {
+                for _ in 0..3 {
+                    if !visit(&entity) {
+                        break;
+                    }
+                }
+                Ok(17)
+            },
+            |_| {
+                consumed += 1;
+                Ok(consumed < 2)
+            },
+        );
+        assert_eq!(result.expect("visitor must not double charge rows"), 17);
+        assert_eq!(consumed, 2, "normal stop remains successful");
+        charge(0).expect("exact prepaid boundary");
+        assert!(charge(1).is_err(), "prepaid work must not be reset");
+    }
 
     #[test]
     fn graph_pattern_expansion_consumes_the_call_budget() {

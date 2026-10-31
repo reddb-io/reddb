@@ -116,6 +116,17 @@ impl reddb_engine::query::runtime::filter::FilterHost for RuntimeFilterHost<'_> 
     fn secret_query_input(&self, value: Value) -> Option<Value> {
         crate::runtime::execution_context::secret_query_input(value)
     }
+    fn try_secret_query_input(&self, value: Value) -> crate::RedDBResult<Option<Value>> {
+        try_secret_runtime_input(value)
+    }
+    fn try_compare_values(
+        &self,
+        left: &Value,
+        right: &Value,
+        op: CompareOp,
+    ) -> crate::RedDBResult<bool> {
+        try_compare_runtime_values(left, right, op)
+    }
     fn evaluate_expression(
         &self,
         expr: &reddb_rql::ast::Expr,

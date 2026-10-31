@@ -523,6 +523,17 @@ pub enum CompiledEntityFilterDecision {
 }
 
 impl CompiledEntityFilterDecision {
+    pub fn try_resolve_with_fallback(
+        self,
+        fallback: impl FnOnce() -> RedDBResult<bool>,
+    ) -> RedDBResult<bool> {
+        match self {
+            Self::Match => Ok(true),
+            Self::Reject => Ok(false),
+            Self::NeedsFallback => fallback(),
+        }
+    }
+
     /// Convert the three-way decision to a match only after supplying the
     /// runtime evaluation required by an undecided compiled predicate.
     pub fn resolve_with_fallback(self, fallback: impl FnOnce() -> bool) -> bool {
@@ -592,9 +603,19 @@ impl CompiledEntityFilter {
         self.has_fallback
     }
 
-    /// Evaluate against an entity. Hot path — must stay allocation-free
-    /// in the common case.
+    /// Test convenience for fixtures that do not exercise operating failures.
+    #[cfg(test)]
     pub fn evaluate(&self, entity: &UnifiedEntity) -> CompiledEntityFilterDecision {
+        self.try_evaluate(entity)
+            .expect("fixture compiled filter has no operating failure")
+    }
+
+    /// Native execution must propagate decode/admission failures before a row
+    /// can be accepted, rejected, counted or published as a mutation target.
+    pub fn try_evaluate(
+        &self,
+        entity: &UnifiedEntity,
+    ) -> RedDBResult<CompiledEntityFilterDecision> {
         // Field-name bloom gate: if the entity is missing a required field,
         // it cannot satisfy any user-field predicate. Skip before any HashMap.
         // Only fires when entity.field_bloom is non-zero (named/document entities).
@@ -615,7 +636,7 @@ impl CompiledEntityFilter {
             && entity.field_bloom != 0
             && (entity.field_bloom & self.required_bloom) != self.required_bloom
         {
-            return CompiledEntityFilterDecision::Reject;
+            return Ok(CompiledEntityFilterDecision::Reject);
         }
 
         // Fixed-size three-valued stack — no heap allocation per row.
@@ -673,36 +694,52 @@ impl CompiledEntityFilter {
         for op in &self.ops {
             match op {
                 CompiledEntityOp::Compare { kind, op, value } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
+                        .map(|candidate| try_compare_runtime_values(candidate.as_ref(), value, *op))
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::Between { kind, low, high } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| {
-                            compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
-                                && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
+                        .map(|candidate| -> RedDBResult<bool> {
+                            Ok(
+                                try_compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)?
+                                    && try_compare_runtime_values(
+                                        candidate.as_ref(),
+                                        high,
+                                        CompareOp::Le,
+                                    )?,
+                            )
                         })
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::InList { kind, values } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| {
-                            values.iter().any(|v| {
-                                compare_runtime_values(candidate.as_ref(), v, CompareOp::Eq)
-                            })
+                        .map(|candidate| -> RedDBResult<bool> {
+                            for value in values {
+                                if try_compare_runtime_values(
+                                    candidate.as_ref(),
+                                    value,
+                                    CompareOp::Eq,
+                                )? {
+                                    return Ok(true);
+                                }
+                            }
+                            Ok(false)
                         })
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::InSet { kind, set } => {
                     // O(1) HashSet::contains — built once at compile time
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .map(|candidate| set.contains(candidate.as_ref()))
                         .unwrap_or(false);
@@ -710,7 +747,7 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::InBloom { kind, set, bloom } => {
                     // Two-stage: bloom pre-filter eliminates ~99% of misses before HashSet probe.
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .map(|candidate| {
                             let h = crate::storage::primitives::split_block_bloom::hash_value_u32(
@@ -723,40 +760,40 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::Like { kind, pattern } => {
                     // runtime_value_text_cow: borrow for Text/Email/Url, owned for others
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| like_matches(s.as_ref(), pattern));
                     push!(result);
                 }
                 CompiledEntityOp::StartsWith { kind, prefix } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.starts_with(prefix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::EndsWith { kind, suffix } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.ends_with(suffix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::Contains { kind, substring } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .is_some_and(|value| runtime_value_contains(value.as_ref(), substring));
                     push!(result);
                 }
                 CompiledEntityOp::IsNull { kind } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .map(|v| v.as_ref() == &Value::Null)
                         .unwrap_or(true);
                     push!(result);
                 }
                 CompiledEntityOp::IsNotNull { kind } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .map(|v| v.as_ref() != &Value::Null)
                         .unwrap_or(false);
                     push!(result);
@@ -787,11 +824,11 @@ impl CompiledEntityFilter {
                 }
             }
         }
-        match pop!(Some(true)) {
+        Ok(match pop!(Some(true)) {
             Some(true) => CompiledEntityFilterDecision::Match,
             Some(false) => CompiledEntityFilterDecision::Reject,
             None => CompiledEntityFilterDecision::NeedsFallback,
-        }
+        })
     }
 
     /// Evaluate the filter against a batch of entities. Appends the
@@ -805,6 +842,7 @@ impl CompiledEntityFilter {
     /// vectorizable `Compare` and `InSet` opcodes and widen `out` to
     /// a roaring bitmap. The signature here is forward-compatible.
     #[inline]
+    #[cfg(test)]
     pub fn evaluate_batch(
         &self,
         entities: &[&UnifiedEntity],
@@ -964,7 +1002,9 @@ fn compile_into(
             //                         ~99% of non-matching rows skip HashSet entirely
             const IN_SMALL_THRESHOLD: usize = 8;
             const IN_BLOOM_THRESHOLD: usize = 1000;
-            if values.len() <= IN_SMALL_THRESHOLD {
+            if values.len() <= IN_SMALL_THRESHOLD
+                || values.iter().any(|value| matches!(value, Value::Secret(_)))
+            {
                 ops.push(CompiledEntityOp::InList {
                     kind,
                     values: values.clone(),
@@ -1376,11 +1416,13 @@ mod tests {
 fn resolve_filter_kind<'a>(
     kind: &'a EntityFieldKind,
     entity: &'a UnifiedEntity,
-) -> Option<Cow<'a, Value>> {
-    let value = resolve_kind(kind, entity)?;
+) -> RedDBResult<Option<Cow<'a, Value>>> {
+    let Some(value) = resolve_kind(kind, entity) else {
+        return Ok(None);
+    };
     if matches!(value.as_ref(), Value::Secret(_)) {
-        crate::runtime::execution_context::secret_query_input(value.into_owned()).map(Cow::Owned)
+        try_secret_runtime_input(value.into_owned()).map(|value| value.map(Cow::Owned))
     } else {
-        Some(value)
+        Ok(Some(value))
     }
 }

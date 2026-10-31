@@ -26,8 +26,9 @@ pub(crate) use reddb_engine::query::runtime::aggregation::{
 use super::filter_compiled::{classify_field, EntityColumnResolver};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
-    eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
-    projection_name, resolve_runtime_field, sort_records_by_order_by_with_db,
+    eval_projection_value_with_db, evaluate_runtime_filter_result_with_db,
+    evaluate_runtime_filter_with_db, field_ref_name, projection_name, resolve_runtime_field,
+    sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
@@ -413,6 +414,7 @@ pub(crate) fn execute_aggregate_query(
         AggregateGroup,
     >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
+    let mut predicate_error = None;
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     crate::runtime::function_budget::try_scan(
@@ -453,20 +455,33 @@ pub(crate) fn execute_aggregate_query(
             }
 
             if let Some(c) = compiled_filter.as_ref() {
-                let matches = c.evaluate(entity).resolve_with_fallback(|| {
-                    let Some(record) = get_or_make_record!() else {
-                        return false;
-                    };
-                    effective_filter.as_ref().is_some_and(|filter| {
-                        evaluate_runtime_filter_with_db(
-                            Some(db),
-                            record,
-                            filter,
-                            Some(table_name),
-                            Some(table_alias),
-                        )
+                let matches = c.try_evaluate(entity).and_then(|decision| {
+                    decision.try_resolve_with_fallback(|| {
+                        let Some(record) = get_or_make_record!() else {
+                            return Ok(false);
+                        };
+                        effective_filter
+                            .as_ref()
+                            .map(|filter| {
+                                evaluate_runtime_filter_result_with_db(
+                                    Some(db),
+                                    record,
+                                    filter,
+                                    Some(table_name),
+                                    Some(table_alias),
+                                )
+                            })
+                            .transpose()
+                            .map(|result| result.unwrap_or(false))
                     })
                 });
+                let matches = match matches {
+                    Ok(matches) => matches,
+                    Err(error) => {
+                        predicate_error = Some(error);
+                        return false;
+                    }
+                };
                 if !matches {
                     return true;
                 }
@@ -617,6 +632,9 @@ pub(crate) fn execute_aggregate_query(
         },
     )?;
 
+    if let Some(error) = predicate_error {
+        return Err(error);
+    }
     // Propagate any spill I/O error from the iteration callback
     if let Some(e) = spill_err {
         return Err(RedDBError::Query(e));
