@@ -39,6 +39,51 @@ fn seeded_runtime(budget: u64, document: bool) -> RedDBRuntime {
 }
 
 #[test]
+fn compressed_secret_expression_input_respects_the_decode_budget() {
+    use reddb_types::Value;
+    use std::sync::Arc;
+
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(64 * 1024))
+            .expect("runtime");
+    let auth = Arc::new(crate::auth::AuthStore::new(
+        crate::auth::AuthConfig::default(),
+    ));
+    auth.ensure_vault_secret_key();
+    let key = auth.vault_secret_key().expect("fixture key");
+    runtime.set_auth_store(auth);
+
+    // This is the existing typed SECRET expression representation. Its
+    // authenticated ciphertext is small, while decoding its TOAST value
+    // would allocate substantially more than the complete engine allowance.
+    let encoded = Value::text("x".repeat(512 * 1024)).to_bytes();
+    assert!(encoded.len() < 1024, "fixture must actually be compressed");
+    let nonce = [7u8; 12];
+    let ciphertext =
+        crate::crypto::aes_gcm::aes256_gcm_encrypt(&key, &nonce, b"reddb.secret.value", &encoded);
+    let mut payload = nonce.to_vec();
+    payload.extend_from_slice(&ciphertext);
+    let secret = Value::Secret(payload);
+    for query in [
+        "SELECT CASE WHEN true THEN 7 ELSE LENGTH($1) END AS selected",
+        "SELECT COALESCE(7, LENGTH($1)) AS selected",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        assert!(
+            result.is_ok(),
+            "unused secret branch must stay lazy: {result:?}"
+        );
+    }
+    let result = runtime.execute_query_with_params(
+        "SELECT LENGTH($1) AS expanded_length",
+        std::slice::from_ref(&secret),
+    );
+    let error = result.expect_err("compressed secret input must not bypass memory admission");
+    assert!(error.to_string().contains("read memory limit"), "{error}");
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+}
+
+#[test]
 fn recovered_row_patch_preserves_fields_outside_the_patch() {
     use crate::storage::{EntityData, EntityId, UnifiedEntity};
     use reddb_types::Value;

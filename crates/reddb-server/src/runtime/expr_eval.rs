@@ -34,49 +34,16 @@ pub(super) fn evaluate_typed_expr_with_secret_literals(
     if !expression_contains_secret_literal(expression) {
         return crate::storage::query::evaluator::evaluate(expression, row);
     }
-    let mut expression = expression.clone();
-    let mut pending = vec![&mut expression];
-    while let Some(expression) = pending.pop() {
-        match expression {
-            Expr::Literal {
-                value: value @ Value::Secret(_),
-                ..
-            } => {
-                *value = super::execution_context::secret_query_input(value.clone())
-                    .unwrap_or(Value::Null);
-            }
-            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
-            Expr::Cast { inner, .. } => pending.push(inner),
-            Expr::BinaryOp { lhs, rhs, .. } => pending.extend([lhs.as_mut(), rhs.as_mut()]),
-            Expr::FunctionCall { args, .. } => pending.extend(args),
-            Expr::WindowFunctionCall { args, window, .. } => {
-                pending.extend(args);
-                pending.extend(&mut window.partition_by);
-                pending.extend(window.order_by.iter_mut().map(|clause| &mut clause.expr));
-            }
-            Expr::Case {
-                branches, else_, ..
-            } => {
-                for (condition, value) in branches {
-                    pending.extend([condition, value]);
-                }
-                if let Some(value) = else_ {
-                    pending.push(value);
-                }
-            }
-            Expr::InList { target, values, .. } => {
-                pending.push(target);
-                pending.extend(values);
-            }
-            Expr::Between {
-                target, low, high, ..
-            } => {
-                pending.extend([target.as_mut(), low.as_mut(), high.as_mut()]);
-            }
-            _ => {}
-        }
-    }
-    crate::storage::query::evaluator::evaluate(&expression, row)
+    crate::storage::query::evaluator::evaluate_with_literal_decoder(expression, row, &|value| {
+        super::execution_context::try_secret_query_input(value.clone())
+            .map(|value| value.unwrap_or(Value::Null))
+            .map_err(
+                |limit| crate::storage::query::evaluator::EvalError::ReadLimitExceeded {
+                    required_bytes: limit.required_bytes,
+                    limit_bytes: limit.limit_bytes,
+                },
+            )
+    })
 }
 
 fn expression_contains_secret_literal(expression: &Expr) -> bool {
@@ -233,7 +200,7 @@ impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost
 {
     type Error = crate::RedDBError;
     fn secret_query_input(&self, value: Value) -> crate::RedDBResult<Option<Value>> {
-        Ok(super::execution_context::secret_query_input(value))
+        super::execution_context::try_secret_query_input(value).map_err(Into::into)
     }
     fn resolve_field(&self, field: &FieldRef) -> crate::RedDBResult<Option<Value>> {
         Ok(resolve_runtime_field(

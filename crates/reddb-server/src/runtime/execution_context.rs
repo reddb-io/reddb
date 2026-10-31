@@ -350,6 +350,21 @@ pub(crate) fn secret_query_input(value: Value) -> Option<Value> {
     })
 }
 
+pub(crate) fn try_secret_query_input(
+    value: Value,
+) -> Result<Option<Value>, super::impl_dml_crypto::SecretInputReadLimit> {
+    if !matches!(value, Value::Secret(_)) {
+        return Ok(Some(value));
+    }
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        let resolver = cell.borrow();
+        match resolver.as_ref() {
+            Some(resolver) => resolver.runtime.try_secret_query_input(value),
+            None => Ok(None),
+        }
+    })
+}
+
 pub(crate) fn secret_query_output(value: Value) -> crate::RedDBResult<Value> {
     if value.is_null() || matches!(value, Value::Secret(_)) {
         return Ok(value);

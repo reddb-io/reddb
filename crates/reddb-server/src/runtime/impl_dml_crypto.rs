@@ -13,6 +13,21 @@ use super::*;
 /// applies the actual crypto transform during INSERT execution.
 pub(crate) const PLAINTEXT_SENTINEL: &str = "@@plain@@";
 
+pub(crate) struct SecretInputReadLimit {
+    pub required_bytes: usize,
+    pub limit_bytes: usize,
+}
+
+impl From<SecretInputReadLimit> for RedDBError {
+    fn from(limit: SecretInputReadLimit) -> Self {
+        crate::storage::unified::StoreError::ReadLimitExceeded {
+            required_bytes: limit.required_bytes,
+            limit_bytes: limit.limit_bytes,
+        }
+        .into()
+    }
+}
+
 impl RedDBRuntime {
     pub(crate) fn resolve_secret_column_value(
         &self,
@@ -41,26 +56,69 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn secret_query_input(&self, value: Value) -> Option<Value> {
+        // Optional compatibility adapters have not all acquired an operating
+        // error channel yet. Keep their existing behavior until each is moved
+        // to the fallible evaluator; never turn a new limit failure into NULL.
+        self.decode_secret_query_input(value, usize::MAX)
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn try_secret_query_input(
+        &self,
+        value: Value,
+    ) -> Result<Option<Value>, SecretInputReadLimit> {
+        let limit_bytes =
+            usize::try_from(self.memory_accounting().budget().resolved_bytes).unwrap_or(usize::MAX);
+        self.decode_secret_query_input(value, limit_bytes)
+    }
+
+    fn decode_secret_query_input(
+        &self,
+        value: Value,
+        limit_bytes: usize,
+    ) -> Result<Option<Value>, SecretInputReadLimit> {
         let Value::Secret(payload) = value else {
-            return Some(value);
+            return Ok(Some(value));
         };
-        let key = self.secret_aes_key()?;
+        let Some(key) = self.secret_aes_key() else {
+            return Ok(None);
+        };
+        let cipher_bytes = payload.len().saturating_mul(2);
+        let crypto_bytes = cipher_bytes.saturating_add(payload.len());
+        if crypto_bytes > limit_bytes {
+            return Err(SecretInputReadLimit {
+                required_bytes: crypto_bytes,
+                limit_bytes,
+            });
+        }
         if let Some(plain) = decrypt_secret_payload(&key, &payload) {
-            return String::from_utf8(plain).ok().map(Value::text);
+            return Ok(String::from_utf8(plain).ok().map(Value::text));
         }
         if payload.len() < 12 {
-            return None;
+            return Ok(None);
         }
-        let nonce: &[u8; 12] = payload[..12].try_into().ok()?;
-        let plain = crate::crypto::aes_gcm::aes256_gcm_decrypt(
+        let nonce: &[u8; 12] = payload[..12].try_into().expect("validated nonce length");
+        let Ok(plain) = crate::crypto::aes_gcm::aes256_gcm_decrypt(
             &key,
             nonce,
             b"reddb.secret.value",
             &payload[12..],
-        )
-        .ok()?;
-        let (value, consumed) = Value::from_bytes(&plain).ok()?;
-        (consumed == plain.len()).then_some(value)
+        ) else {
+            return Ok(None);
+        };
+        let (value, consumed) =
+            match Value::from_bytes_with_limit(&plain, limit_bytes.saturating_sub(cipher_bytes)) {
+                Ok(decoded) => decoded,
+                Err(reddb_types::ValueError::ReadLimitExceeded { required_bytes, .. }) => {
+                    return Err(SecretInputReadLimit {
+                        required_bytes: required_bytes.saturating_add(cipher_bytes),
+                        limit_bytes,
+                    });
+                }
+                Err(_) => return Ok(None),
+            };
+        Ok((consumed == plain.len()).then_some(value))
     }
 
     /// Intermediate expressions are encrypted as typed values. They can pass

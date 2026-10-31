@@ -112,11 +112,18 @@ impl reddb_engine::query::runtime::projection::ProjectionHost for RuntimeProject
         error: crate::storage::query::evaluator::EvalError,
         sensitive: bool,
     ) -> Self::Error {
-        crate::RedDBError::Query(if sensitive {
-            "secret expression evaluation failed".into()
-        } else {
-            error.to_string()
-        })
+        crate::RedDBError::Query(
+            if sensitive
+                && !matches!(
+                    &error,
+                    crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                )
+            {
+                "secret expression evaluation failed".into()
+            } else {
+                error.to_string()
+            },
+        )
     }
     fn secret_query_output(&self, value: Value) -> crate::RedDBResult<Value> {
         crate::runtime::execution_context::secret_query_output(value)

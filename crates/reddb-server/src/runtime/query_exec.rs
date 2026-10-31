@@ -421,11 +421,18 @@ fn project_scalar_via_evaluator(
                     .unwrap_or(Value::Null)
                 }
                 Err(err) => {
-                    return Err(RedDBError::Query(if sensitive {
-                        "secret expression evaluation failed".into()
-                    } else {
-                        err.to_string()
-                    }))
+                    return Err(RedDBError::Query(
+                        if sensitive
+                            && !matches!(
+                                &err,
+                                crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                            )
+                        {
+                            "secret expression evaluation failed".into()
+                        } else {
+                            err.to_string()
+                        },
+                    ))
                 }
             }
         };
