@@ -511,11 +511,12 @@ jobs:
 
   test-shards:
     # Issue #2171 — the integration lane is split deterministically across four
-    # free public runners. Shards 1-4 respectively absorb the non-integration,
+    # free public runners. A separate unit lane keeps the complete crash matrices
+    # from consuming shard 1's integration window. Shards 2-4 also run the
     # doctest, persistent, and size-budget lanes. Individual durations are
     # visible in the matrix; a shard above 2x the median is the signal to
     # revisit the assignment.
-    name: Test Suite shard (${{ matrix.shard }}/4)
+    name: Test Suite ${{ matrix.shard == 'unit' && 'unit' || format('shard ({0}/4)', matrix.shard) }}
     needs: gate
     if: needs.gate.outputs.run_heavy == 'true'
     runs-on: ubuntu-24.04
@@ -523,7 +524,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [unit, 1, 2, 3, 4]
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -556,11 +557,12 @@ jobs:
         if: matrix.shard == 4
         run: ./scripts/check-red-client-size.sh
       - name: Run non-integration test layer
-        if: matrix.shard == 1
+        if: matrix.shard == 'unit'
         env:
           RUST_MIN_STACK: "8388608"
         run: cargo nextest run --workspace --locked --profile ci -E 'not kind(test)'
       - name: Run integration-test shard
+        if: matrix.shard != 'unit'
         # cargo test runs the grouped integration binaries sequentially, so the
         # per-test sleeps (replication/timing tests) sum and blew past the 20m
         # cap. nextest runs every test in a global parallel process pool (sleeps
