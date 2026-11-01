@@ -4,6 +4,79 @@ use crate::json::Value as JsonValue;
 use crate::storage::{UnifiedStore, UnifiedStoreConfig};
 use std::time::Instant;
 
+#[test]
+#[ignore = "requires an owned historical copy, independent SQL results and an external cgroup limit"]
+fn complete_runtime_historical_copy_preserves_sql_results() {
+    use crate::api::RedDBOptions;
+    use crate::runtime::RedDBRuntime;
+    use crate::storage::profile::StorageDeployPreset;
+
+    let root = std::env::var_os("REDDB_QUALIFICATION_COPY_DIR").expect("owned copy directory");
+    let root = std::fs::canonicalize(root).expect("existing copy");
+    let marker = std::fs::read_to_string(root.join(".reddb-owned-qualification-copy"))
+        .expect("explicit ownership marker before opening mutable native files");
+    assert_eq!(marker.trim(), "disk-residency-historical-qualification-v1");
+    let path = root.join("reddb.rdb");
+    assert!(path.is_file(), "never create an empty substitute database");
+    let reference = std::env::var_os("REDDB_QUALIFICATION_SQL_REFERENCE")
+        .expect("independent SQL reference path");
+    let reference = std::fs::read_to_string(reference).expect("SQL reference");
+    let reference: JsonValue = crate::json::from_str(&reference).expect("reference JSON");
+    let cases = reference.as_array().expect("SQL cases");
+    assert_eq!(cases.len(), 10, "complete Platform diagnostic workload");
+    let options = RedDBOptions::persistent(path)
+        .with_memory_budget(768 * 1024 * 1024)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("profile");
+    for pass in 1..=2 {
+        let started = Instant::now();
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("complete runtime opens the historical copy");
+        assert!(runtime
+            .db()
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_some());
+        eprintln!(
+            "runtime qualification phase=open pass={pass} open_ms={} resident_segment_bytes={}",
+            started.elapsed().as_millis(),
+            runtime.db().store().segment_memory_bytes(),
+        );
+        for case in cases {
+            runtime.invalidate_result_cache();
+            let started = Instant::now();
+            let result = runtime
+                .execute_query(case["sql"].as_str().expect("SQL"))
+                .expect("historical SQL succeeds");
+            let actual = crate::presentation::query_result_json::unified_result_json_with_records(
+                &result.result,
+                &result.result.records,
+            );
+            // Match the representation captured through the actual HTTP API,
+            // including a JSON round trip for its numeric representation.
+            let actual: JsonValue = crate::json::from_str(&actual["records"].to_string_compact())
+                .expect("rendered records");
+            assert_eq!(actual, case["rows"], "pass {pass}, {}", case["name"]);
+            eprintln!(
+                "runtime qualification phase=query pass={pass} name={} elapsed_ms={}",
+                case["name"],
+                started.elapsed().as_millis(),
+            );
+        }
+        let started = Instant::now();
+        runtime.flush().expect("historical runtime checkpoint");
+        eprintln!(
+            "runtime qualification phase=checkpoint pass={pass} checkpoint_ms={} resident_segment_bytes={}",
+            started.elapsed().as_millis(),
+            runtime.db().store().segment_memory_bytes(),
+        );
+        drop(runtime);
+    }
+}
+
 fn fingerprint(store: &UnifiedStore, expected: &JsonValue) -> u64 {
     let capture = std::env::var_os("REDDB_QUALIFICATION_MISMATCH_CAPTURE");
     let collections = expected["collections"]

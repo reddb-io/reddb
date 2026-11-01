@@ -589,7 +589,7 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
-        runtime.rehydrate_snapshot_xid_floor();
+        runtime.rehydrate_snapshot_xid_floor()?;
         assert!(
             runtime
                 .inner
@@ -1124,18 +1124,24 @@ impl RedDBRuntime {
         Ok(runtime)
     }
 
-    fn rehydrate_snapshot_xid_floor(&self) {
+    fn rehydrate_snapshot_xid_floor(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
         for collection in store.list_collections() {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
-            for entity in manager.query_all(|_| true) {
-                let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+            // Recovery must include the physical disk base and tombstones,
+            // before any snapshot filters rows using this restored floor.
+            // Visit borrowed resident rows or decode one bounded base record;
+            // never clone the collection merely to inspect its MVCC headers.
+            manager.try_for_each_entity(usize::MAX, |entity| {
                 snapshot_manager.observe_committed_xid(entity.xmin);
                 snapshot_manager.observe_committed_xid(entity.xmax);
-            }
+                true
+            })?;
         }
+        Ok(())
     }
 
     /// Provision an empty Table-shaped collection that backs a

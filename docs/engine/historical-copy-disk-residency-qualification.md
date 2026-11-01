@@ -58,3 +58,21 @@ all collection names/counts/hashes to match, resident segments to fit their
 allowance, no restart and no OOM. This is one storage qualification component;
 it does not establish the full process-wide allocation policy, a 24-hour soak,
 the write workload, all query/transport paths or safe fleet deployment/downscale.
+
+The separate ignored test
+`presentation::entity_json::historical_copy_qualification::complete_runtime_historical_copy_preserves_sql_results`
+opens the real library runtime through a thread-local, test-only factory scope.
+It requires the same owned-copy marker plus `REDDB_QUALIFICATION_SQL_REFERENCE`,
+a private JSON array of the ten diagnostic cases: `name`, `sql`, and `rows`
+independently captured from the source HTTP API. It compares all ten results,
+checkpoints, reopens, and repeats with a 768-MiB engine budget. Keep the external
+1-GiB process limit and capture actual termination, memory peaks and OOM events.
+The runtime can publish internal configuration during boot; this probe changes
+the independent copy's internal records, so retain earlier native fingerprints
+and their exact cutoff rather than silently replacing them.
+
+This probe measures runtime construction and SQL correctness. It does not start
+an HTTP/auth listener, qualify every restored secondary index, control filesystem
+cache temperature, establish optimized performance or enable the production
+factory. The ordinary suite also exercises a small persistent runtime through
+this exact factory, committed CRUD, a checkpoint and a second cold reopen.

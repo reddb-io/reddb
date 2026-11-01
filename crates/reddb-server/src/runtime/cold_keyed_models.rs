@@ -19,6 +19,93 @@ fn runtime() -> (tempfile::TempDir, RedDBRuntime) {
     (directory, runtime)
 }
 
+#[test]
+fn complete_runtime_reopens_cold_tables_and_preserves_committed_crud() {
+    let directory = tempfile::tempdir().expect("cold boot fixture");
+    let options = RedDBOptions::persistent(directory.path().join("runtime.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let rows = |runtime: &RedDBRuntime| {
+        runtime.invalidate_result_cache();
+        runtime
+            .execute_query("SELECT id, payload FROM cold_boot_rows ORDER BY id")
+            .expect("complete SQL read")
+            .result
+            .records
+            .iter()
+            .map(|row| {
+                (
+                    row.get("id").expect("id").clone(),
+                    row.get("payload").expect("payload").clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let seed = RedDBRuntime::with_options(options.clone()).expect("ordinary seed runtime");
+    seed.execute_query("CREATE TABLE cold_boot_rows (id INTEGER, payload TEXT)")
+        .expect("table");
+    for id in 1..=64 {
+        seed.execute_query_with_params(
+            "INSERT INTO cold_boot_rows (id, payload) VALUES ($1, $2)",
+            &[Value::Integer(id), Value::text("x".repeat(2048))],
+        )
+        .expect("seed row");
+    }
+    let expected = rows(&seed);
+    seed.flush().expect("durable source");
+    drop(seed);
+
+    let cold_open = || {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("complete cold runtime boot")
+    };
+    let cold = cold_open();
+    let store = cold.db().store();
+    assert!(store.config().resident_memory_bytes_max.is_some());
+    assert!(store
+        .get_collection("cold_boot_rows")
+        .expect("table")
+        .has_backing());
+    let actual = rows(&cold);
+    assert_eq!(actual.len(), expected.len(), "cold SQL row count");
+    assert_eq!(actual, expected);
+    drop(store);
+    for sql in [
+        "UPDATE cold_boot_rows SET payload = 'changed' WHERE id = 64",
+        "DELETE FROM cold_boot_rows WHERE id = 1",
+        "INSERT INTO cold_boot_rows (id, payload) VALUES (65, 'next')",
+    ] {
+        assert_eq!(
+            cold.execute_query(sql)
+                .expect("cold committed mutation")
+                .affected_rows,
+            1,
+            "{sql}"
+        );
+    }
+    let mut changed = expected[1..].to_vec();
+    changed.last_mut().expect("updated row").1 = Value::text("changed");
+    changed.push((Value::Integer(65), Value::text("next")));
+    assert_eq!(rows(&cold), changed, "all committed mutations are visible");
+    cold.flush().expect("cold checkpoint");
+    drop(cold);
+    let reopened = cold_open();
+    assert_eq!(
+        rows(&reopened),
+        changed,
+        "checkpoint preserves complete SQL values"
+    );
+    let count = reopened
+        .execute_query("SELECT COUNT(*) AS n FROM cold_boot_rows")
+        .expect("logical count");
+    assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(64)));
+}
+
 fn install_cold(runtime: &RedDBRuntime, collection: &str, read_bytes_max: usize) {
     let store = runtime.db().store();
     let manager = store.get_collection(collection).expect("collection");
