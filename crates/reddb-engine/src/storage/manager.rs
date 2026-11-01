@@ -468,9 +468,11 @@ impl SegmentManager {
 
     /// Bytes a pressure-triggered consolidation could plausibly return.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.sealed
-            .read()
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        growing
             .iter()
+            .chain(sealed.iter())
             .map(|segment| segment.read().reclaimable_bytes())
             .fold(0, u64::saturating_add)
     }
@@ -1546,12 +1548,23 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
+        self.seal_current_if(|_| true)?
+            .ok_or(SegmentError::InvalidState(SegmentState::Sealed))
+    }
+
+    fn seal_current_if(
+        &self,
+        should_seal: impl FnOnce(&GrowingSegment) -> bool,
+    ) -> Result<Option<SegmentId>, SegmentError> {
         let disk_residency = self.has_backing();
         // Keep topology publication atomic for cursors that capture growing
         // and sealed under the same lock order: growing, then sealed.
         let mut growing_slot = self.growing.write();
-        if let Some(growing_arc) = growing_slot.take() {
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let mut growing = growing_arc.write();
+            if !should_seal(&growing) {
+                return Ok(None);
+            }
             if disk_residency {
                 self.next_sequence_id
                     .fetch_max(growing.sequence_id_next(), Ordering::SeqCst);
@@ -1567,6 +1580,9 @@ impl SegmentManager {
 
             // In a real implementation, we'd convert to SealedSegment here
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
+            let growing_arc = growing_slot
+                .take()
+                .expect("sealed source remains published");
             self.sealed.write().push(growing_arc);
             drop(growing_slot);
 
@@ -1583,10 +1599,10 @@ impl SegmentManager {
 
             self.emit(LifecycleEvent::SegmentSealed(seg_id));
 
-            return Ok(seg_id);
+            return Ok(Some(seg_id));
         }
 
-        Err(SegmentError::InvalidState(SegmentState::Sealed))
+        Ok(None)
     }
 
     /// Force seal (for testing/manual control)
@@ -2747,6 +2763,15 @@ impl SegmentManager {
 
         let running = self.consolidation.read().is_some();
         if !running {
+            // Foreground churn can exhaust the budget before a growing segment
+            // reaches its ordinary size threshold. Publish only a dirty source;
+            // the existing paced consolidation then reclaims its dead slots.
+            if self
+                .seal_current_if(|segment| segment.reclaimable_bytes() > 0)
+                .is_err()
+            {
+                return false;
+            }
             let sources = self.dirty_sealed_segments();
             if !self.start_consolidation_from_sources(sources) {
                 return false;
@@ -4396,6 +4421,133 @@ mod tests {
                 manager.resident_bytes()
             );
         });
+    }
+
+    #[test]
+    fn physical_cursor_tracks_individual_and_mixed_insertions() {
+        for mode in 0..3 {
+            let manager = SegmentManager::new("physical_rows");
+            let row = |id| {
+                UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "physical_rows",
+                    id,
+                    vec![Value::Integer(id as i64)],
+                )
+            };
+            match mode {
+                0 => {
+                    for id in [10, 30, 20] {
+                        manager.insert(row(id)).expect("individual row");
+                    }
+                }
+                1 => {
+                    manager.insert(row(10)).expect("individual prefix");
+                    manager
+                        .bulk_insert(vec![row(30), row(31)])
+                        .expect("batch suffix");
+                }
+                _ => {
+                    manager
+                        .bulk_insert(vec![row(30), row(31)])
+                        .expect("batch prefix");
+                    manager.insert(row(10)).expect("individual suffix");
+                }
+            }
+            let mut cursor = manager.physical_scan_cursor();
+            let mut ids = Vec::new();
+            for _ in 0..32 {
+                if cursor.finished() {
+                    break;
+                }
+                let mut work = 1;
+                let batch = manager.physical_scan_batch(&mut cursor, &mut work);
+                assert!(batch.len() <= 1);
+                ids.extend(batch.into_iter().map(|id| id.raw()));
+            }
+            assert!(cursor.finished());
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                if mode == 0 {
+                    vec![10, 20, 30]
+                } else {
+                    vec![10, 30, 31]
+                },
+                "mode={mode}"
+            );
+        }
+    }
+
+    fn growing_tombstones_fixture() -> SegmentManager {
+        let manager = consolidating_manager(1);
+        let ids = manager
+            .bulk_insert(
+                (0..64)
+                    .map(|id| {
+                        UnifiedEntity::table_row(
+                            manager.next_entity_id(),
+                            "users",
+                            id,
+                            vec![Value::Blob(vec![7; 2048])],
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("growing rows");
+        for id in ids.iter().take(48) {
+            manager.delete(*id).expect("physical tombstone");
+        }
+        assert_eq!(manager.stats().sealed_count, 0);
+        manager
+    }
+
+    #[test]
+    fn pressure_consolidation_reclaims_unsealed_tombstones() {
+        let manager = growing_tombstones_fixture();
+        let before = manager.resident_bytes();
+        assert!(manager.reclaimable_bytes() > 0);
+        assert!(manager.pressure_consolidation_tick());
+        drain_maintenance(&manager);
+        assert_eq!(live_ids(&manager), (49..=64).collect::<Vec<_>>());
+        assert!(manager.resident_bytes() < before);
+        assert_eq!(manager.stats().consolidation.tombstones_reclaimed, 48);
+    }
+
+    #[test]
+    fn pressure_consolidation_preserves_pinned_growing_source_accounting() {
+        let manager = growing_tombstones_fixture();
+        let source = Arc::clone(manager.growing.read().as_ref().expect("growing source"));
+        let weak = Arc::downgrade(&source);
+        assert!(manager.pressure_consolidation_tick());
+        drain_maintenance(&manager);
+        assert_eq!(live_ids(&manager), (49..=64).collect::<Vec<_>>());
+        let source_bytes = source.read().resident_bytes();
+        let held = manager.resident_bytes();
+        assert!(held >= source_bytes);
+        drop(source);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(held - manager.resident_bytes(), source_bytes);
+    }
+
+    #[test]
+    fn pressure_consolidation_keeps_clean_and_disabled_growing_sources_open() {
+        let clean = consolidating_manager(1);
+        clean
+            .insert(UnifiedEntity::table_row(
+                clean.next_entity_id(),
+                "users",
+                1,
+                vec![Value::Integer(1)],
+            ))
+            .expect("clean row");
+        assert!(!clean.pressure_consolidation_tick());
+        assert_eq!(clean.stats().sealed_count, 0);
+        let mut disabled = growing_tombstones_fixture();
+        disabled.config.enable_consolidation = false;
+        assert!(!disabled.pressure_consolidation_tick());
+        assert_eq!(disabled.stats().sealed_count, 0);
+        assert_eq!(live_ids(&disabled), (49..=64).collect::<Vec<_>>());
     }
 
     #[test]

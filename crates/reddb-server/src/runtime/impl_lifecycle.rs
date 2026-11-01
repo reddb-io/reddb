@@ -276,6 +276,7 @@ impl RedDBRuntime {
                 memory_reservations: parking_lot::Mutex::new(
                     super::memory_admission::MemoryReservations::default(),
                 ),
+                mvcc_maintenance: parking_lot::Mutex::new(Default::default()),
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
                     options.has_capability(crate::api::Capability::Graph),
@@ -915,8 +916,6 @@ impl RedDBRuntime {
                         let tick = std::time::Duration::from_millis(200);
                         let work_interval = std::time::Duration::from_secs(60);
                         let mut last_work = std::time::Instant::now();
-                        let mut mvcc_maintenance =
-                            super::mvcc_maintenance::MvccMaintenance::default();
                         let mut allocator_pressure =
                             super::allocator_pressure::AllocatorPressure::default();
                         loop {
@@ -937,7 +936,7 @@ impl RedDBRuntime {
                                 background_tasks: None,
                                 inner,
                             };
-                            rt.reclaim_history_tick(&mut mvcc_maintenance);
+                            rt.try_reclaim_history_tick();
                             allocator_pressure.tick();
                         }
                     },

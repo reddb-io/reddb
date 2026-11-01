@@ -1127,6 +1127,7 @@ struct RuntimeInner {
     /// of the budget above, and the live usage they report into it.
     pub(crate) memory_accounting: Arc<crate::storage::memory_pools::MemoryAccounting>,
     memory_reservations: parking_lot::Mutex<memory_admission::MemoryReservations>,
+    mvcc_maintenance: parking_lot::Mutex<mvcc_maintenance::MvccMaintenance>,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
