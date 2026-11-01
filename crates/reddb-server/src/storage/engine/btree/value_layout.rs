@@ -1,8 +1,8 @@
 //! Native compatibility paths for the shared large-value layout.
 use crate::storage::engine::pager::Pager;
 pub use reddb_engine::storage::btree::value_layout::{
-    pointer_head, projected_cell_len, ValueLayoutError, MAX_VALUE_SIZE, OVERFLOW_THRESHOLD,
-    POINTER_CELL_LEN,
+    pointer_head, projected_cell_len, ValueLayoutError, COMPRESSION_THRESHOLD, MAX_VALUE_SIZE,
+    OVERFLOW_THRESHOLD, POINTER_CELL_LEN,
 };
 pub fn encode(pager: &Pager, value: &[u8]) -> Result<Vec<u8>, ValueLayoutError> {
     reddb_engine::storage::btree::value_layout::encode(pager, value)
@@ -45,9 +45,9 @@ mod tests {
     }
 
     #[test]
-    fn inline_raw_round_trip_below_threshold() {
+    fn inline_raw_round_trip_below_compression_threshold() {
         let (pager, path) = fresh_pager();
-        let value = vec![0xABu8; OVERFLOW_THRESHOLD - 1];
+        let value = vec![0xABu8; COMPRESSION_THRESHOLD - 1];
         let stored = encode(&pager, &value).unwrap();
         assert_eq!(
             reddb_file::decode_btree_value_cell(&stored).unwrap(),
@@ -63,9 +63,9 @@ mod tests {
     }
 
     #[test]
-    fn inline_raw_at_exact_threshold() {
+    fn inline_raw_at_exact_compression_threshold() {
         let (pager, path) = fresh_pager();
-        let value = vec![0x7Eu8; OVERFLOW_THRESHOLD];
+        let value = vec![0x7Eu8; COMPRESSION_THRESHOLD];
         let stored = encode(&pager, &value).unwrap();
         assert!(matches!(
             reddb_file::decode_btree_value_cell(&stored).unwrap(),

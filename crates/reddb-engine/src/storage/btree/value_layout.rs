@@ -16,8 +16,9 @@
 //!
 //! 1. `value.len() > MAX_VALUE_SIZE` → [`ValueLayoutError::ValueTooLarge`]
 //!    (no allocation, no LZ4 work).
-//! 2. `value.len() <= OVERFLOW_THRESHOLD` → inline raw.
-//! 3. Else try LZ4. If the compressed bytes fit inline → inline compressed.
+//! 2. `value.len() <= COMPRESSION_THRESHOLD` → inline raw.
+//! 3. Else try LZ4. If the selected raw/compressed bytes fit the native
+//!    leaf's `OVERFLOW_THRESHOLD` → inline with the matching flag.
 //! 4. Else spill via [`OverflowChain`], storing only the pointer in the
 //!    leaf cell.
 //!
@@ -30,10 +31,12 @@ use crate::storage::page_store::PageStore;
 use reddb_file::vector_value_codec as value_codec;
 use reddb_file::BTreeValueCell;
 
-/// At or below this length a value stores inline in the leaf, raw or
-/// compressed. Above it, the value spills via [`OverflowChain`]. Set per
-/// ADR 0023 — preserves leaf fanout regardless of page size.
+/// Encoded values up to this size share a native leaf, raw or compressed.
+/// Larger values spill via [`OverflowChain`] (ADR 0023).
 pub const OVERFLOW_THRESHOLD: usize = reddb_file::BTREE_VALUE_OVERFLOW_THRESHOLD;
+
+/// Preserve compression above the established 1-KiB raw fast path.
+pub const COMPRESSION_THRESHOLD: usize = reddb_file::BTREE_VALUE_COMPRESSION_THRESHOLD;
 
 /// Hard upper bound on logical value size. Values above this are
 /// rejected before any LZ4 or overflow work runs.
@@ -123,12 +126,15 @@ pub(crate) fn encode_inline_without_pages(
     if value.len() > MAX_VALUE_SIZE {
         return Err(ValueLayoutError::ValueTooLarge(value.len()));
     }
-    if value.len() <= OVERFLOW_THRESHOLD {
+    if value.len() <= COMPRESSION_THRESHOLD {
         return Ok(Some(reddb_file::encode_btree_inline_raw(value)));
     }
     let (flag, bytes) = value_codec::encode(value);
-    if flag == value_codec::ValueFlag::Lz4 && bytes.len() <= OVERFLOW_THRESHOLD {
-        return Ok(Some(reddb_file::encode_btree_inline_compressed(&bytes)));
+    if bytes.len() <= OVERFLOW_THRESHOLD {
+        return Ok(Some(match flag {
+            value_codec::ValueFlag::Raw => reddb_file::encode_btree_inline_raw(&bytes),
+            value_codec::ValueFlag::Lz4 => reddb_file::encode_btree_inline_compressed(&bytes),
+        }));
     }
     Ok(None)
 }
@@ -144,7 +150,7 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
     // Step 1: small values short-circuit to inline raw. No LZ4 work, no
     // overflow allocation — preserves the legacy hot path for tiny
     // values like entity IDs or short JSON.
-    if value.len() <= OVERFLOW_THRESHOLD {
+    if value.len() <= COMPRESSION_THRESHOLD {
         return Ok(reddb_file::encode_btree_inline_raw(value));
     }
 
@@ -152,12 +158,13 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
     // compression would not shrink the input.
     let (codec_flag, codec_bytes) = value_codec::encode(value);
 
-    // Step 3: if compressed bytes (including their length header) fit
-    // inline, keep them in the leaf. Note this only fires when codec
-    // actually produced Lz4 bytes — Raw bytes ≥ original length > threshold
-    // by construction, so they cannot inline.
-    if codec_flag == value_codec::ValueFlag::Lz4 && codec_bytes.len() <= OVERFLOW_THRESHOLD {
-        return Ok(reddb_file::encode_btree_inline_compressed(&codec_bytes));
+    // Step 3: share leaf space for either selected representation. Keep the
+    // previous compression trigger even when a medium raw value now fits.
+    if codec_bytes.len() <= OVERFLOW_THRESHOLD {
+        return Ok(match codec_flag {
+            value_codec::ValueFlag::Raw => reddb_file::encode_btree_inline_raw(&codec_bytes),
+            value_codec::ValueFlag::Lz4 => reddb_file::encode_btree_inline_compressed(&codec_bytes),
+        });
     }
 
     // Step 4: spill. We always store the bytes the codec produced —

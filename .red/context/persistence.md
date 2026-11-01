@@ -55,6 +55,13 @@ strictly advancing leaf-range validation remain in force. With 2,000 inline rows
 in five tree pages, the deterministic regression reduces 4,004 page reads to four;
 this does not establish runtime boot, RSS or query latency improvements.
 
+Native B-tree writes keep the 1-KiB compression trigger and pack the selected
+raw/compressed representation inline up to one quarter of the 16-KiB native
+page. Larger representations retain the existing overflow-chain path. This is
+an allocation policy over unchanged cell framing; existing cells keep their
+layout until rebuilt. See ADR 0023's page-size amendment for density and
+compatibility qualification.
+
 ## Checkpoint reuse
 
 Double-write page batches synchronize each frame's staging image before its

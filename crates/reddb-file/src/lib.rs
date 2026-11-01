@@ -120,8 +120,8 @@ pub use bloom_segment::{
 pub use btree_value_layout::{
     btree_projected_cell_len, btree_value_pointer_head, decode_btree_inline_payload,
     decode_btree_value_cell, encode_btree_inline_compressed, encode_btree_inline_raw,
-    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
-    BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
+    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_COMPRESSION_THRESHOLD,
+    BTREE_VALUE_MAX_SIZE, BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{

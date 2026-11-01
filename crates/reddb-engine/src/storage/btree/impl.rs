@@ -129,8 +129,9 @@ impl<P: PageStore> BTree<P> {
     ///
     /// Applies the value-layout spill ladder before touching the tree:
     /// the 256 MB ceiling rejects here without any allocation; values
-    /// at or below `OVERFLOW_THRESHOLD` go inline raw; larger values may
-    /// inline compressed or spill into an [`crate::storage::overflow::OverflowChain`].
+    /// at or below `COMPRESSION_THRESHOLD` go inline raw; larger values
+    /// select raw/compressed bytes and spill beyond `OVERFLOW_THRESHOLD`
+    /// into an [`crate::storage::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
         let _writer = self.writer.lock();

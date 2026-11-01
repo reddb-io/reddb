@@ -65,6 +65,114 @@ fn noise(bytes: usize) -> Vec<u8> {
 }
 
 #[test]
+fn medium_values_pack_into_native_leaves_without_dedicated_overflow_pages() {
+    const ROWS: u64 = 256;
+    for length in [1025, 2048, 3072, 4096] {
+        let pages = Arc::new(Pages::default());
+        let tree = BTree::new(Arc::clone(&pages));
+        let value = noise(length);
+        for id in 0..ROWS {
+            tree.insert(&id.to_be_bytes(), &value)
+                .expect("medium value");
+        }
+        let images = pages.pages.lock().expect("fixture lock");
+        let overflow_pages = images
+            .values()
+            .filter(|page| page.page_type().expect("page type") == PageType::Overflow)
+            .count();
+        let physical_bytes = images.len() * reddb_engine::storage::page::PAGE_SIZE;
+        let payload_bytes = usize::try_from(ROWS).expect("fixture row count") * length;
+        eprintln!("medium values: length={length} physical_bytes={physical_bytes} payload_bytes={payload_bytes} overflow_pages={overflow_pages}");
+        assert_eq!(
+            overflow_pages, 0,
+            "medium values must share the 16-KiB leaves"
+        );
+        assert!(
+            physical_bytes <= payload_bytes * 3 + 4 * reddb_engine::storage::page::PAGE_SIZE,
+            "splits and interior pages must not turn medium records into page-per-row storage"
+        );
+        drop(images);
+        let mut cursor = tree.cursor_first().expect("readback cursor");
+        for id in 0..ROWS {
+            let (key, actual) = cursor.next().expect("readback").expect("row");
+            assert_eq!(key, id.to_be_bytes());
+            assert_eq!(actual, value);
+        }
+        assert!(cursor.next().expect("end").is_none());
+    }
+}
+
+#[test]
+fn medium_compressible_values_keep_the_existing_compression_policy() {
+    use reddb_engine::storage::btree::value_layout;
+    let pages = Pages::default();
+    for length in [1025, 2048, 3072, 4096] {
+        let value = vec![b'x'; length];
+        let encoded = value_layout::encode(&pages, &value).expect("compressed medium value");
+        assert!(
+            matches!(
+                reddb_file::decode_btree_value_cell(&encoded).expect("cell framing"),
+                reddb_file::BTreeValueCell::Inline {
+                    is_compressed: true,
+                    ..
+                }
+            ),
+            "packing more raw values inline must not disable compression"
+        );
+        assert!(encoded.len() < value.len() / 4);
+        assert_eq!(
+            value_layout::decode(&pages, &encoded).expect("readback"),
+            value
+        );
+    }
+}
+
+#[test]
+fn medium_inline_values_keep_large_keys_and_overflow_replacements_intact() {
+    let pages = Arc::new(Pages::default());
+    let tree = BTree::new(Arc::clone(&pages));
+    let key = |id: u64| {
+        let mut key = vec![0x5a; reddb_engine::storage::btree::MAX_KEY_SIZE];
+        key[..8].copy_from_slice(&id.to_be_bytes());
+        key
+    };
+    let value = noise(4096);
+    for id in 0..128 {
+        tree.insert(&key(id), &value)
+            .expect("maximum key and medium value");
+    }
+    let overflow_pages = || {
+        pages
+            .pages
+            .lock()
+            .expect("fixture lock")
+            .values()
+            .filter(|page| page.page_type().expect("page type") == PageType::Overflow)
+            .count()
+    };
+    assert_eq!(overflow_pages(), 0);
+    for _ in 0..6 {
+        let overflow = noise(4097);
+        tree.upsert(&key(64), &overflow)
+            .expect("grow beyond inline capacity");
+        assert_eq!(
+            tree.get(&key(64)).expect("overflow readback"),
+            Some(overflow)
+        );
+        assert_eq!(overflow_pages(), 1);
+        tree.upsert(&key(64), &value)
+            .expect("shrink back into shared leaf");
+        assert_eq!(overflow_pages(), 0, "replaced chain must be reclaimed");
+    }
+    for id in 0..128 {
+        assert_eq!(
+            tree.get(&key(id)).expect("unchanged row"),
+            Some(value.clone())
+        );
+    }
+}
+
+#[test]
 fn ordered_cursor_peek_and_read_have_bounded_page_read_amplification() {
     let pages = Arc::new(Pages::default());
     let tree = Arc::new(BTree::new(Arc::clone(&pages)));

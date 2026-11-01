@@ -78,6 +78,13 @@ const LEAF_NEXT_OFFSET: usize = HEADER_SIZE + 4;
 /// offset of its cell.
 const LEAF_SLOT_ARRAY_OFFSET: usize = HEADER_SIZE + 8;
 
+// A split must still fit two maximum-key inline cells, including the value
+// flag, cell headers and slot pointers, after the native page-size change.
+const _: () = assert!(
+    2 * (MAX_KEY_SIZE + value_layout::OVERFLOW_THRESHOLD + 1 + 4 + 2)
+        <= PAGE_SIZE - LEAF_SLOT_ARRAY_OFFSET
+);
+
 /// Kept for source-compat with older code paths (e.g. interior-node
 /// helpers); equivalent to `LEAF_SLOT_ARRAY_OFFSET` for leaves.
 const LEAF_DATA_OFFSET: usize = LEAF_SLOT_ARRAY_OFFSET;
