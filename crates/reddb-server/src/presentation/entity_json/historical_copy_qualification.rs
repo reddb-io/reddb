@@ -154,6 +154,33 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             "runtime qualification phase=boot_markers pass={pass} markers={:?}",
             runtime.lifecycle().cold_start_phases().durations_ms(),
         );
+        let store = runtime.db().store();
+        let source_collections = index_reference["sourceCollections"]
+            .as_array()
+            .expect("independent complete physical collection list");
+        assert!(
+            !source_collections.is_empty(),
+            "never qualify a partial substitute"
+        );
+        for collection in source_collections {
+            let name = collection.as_str().expect("source collection name");
+            assert!(
+                store.get_collection(name).is_some(),
+                "source collection {name} survives"
+            );
+        }
+        for orphan in index_reference["orphanedDescriptors"]
+            .as_array()
+            .expect("explicitly audited orphan descriptor list")
+        {
+            let name = orphan["collection"]
+                .as_str()
+                .expect("absent original collection");
+            assert!(
+                store.get_collection(name).is_none(),
+                "orphan reference cannot hide a live collection {name}"
+            );
+        }
         let indices = runtime_index_descriptors(&runtime);
         assert_eq!(
             indices, index_reference["indices"],
