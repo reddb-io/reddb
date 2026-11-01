@@ -388,7 +388,7 @@ impl RedDBRuntime {
         };
         // A cold registry is physical data too. Reduce by durable entity ID,
         // without copying or sorting its append-only descriptor history.
-        let (_scratch, read_bytes_max) = self.reserve_index_scan(&manager)?;
+        let (mut registry_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
         let mut latest = std::collections::HashMap::<
             _,
             (u64, Option<super::index_store::RegisteredIndex>),
@@ -470,6 +470,10 @@ impl RedDBRuntime {
                     .push(index);
             }
         }
+        // The visitor, decoder and overlay identities are gone. Keep the
+        // conservative descriptor/grouping allowance, but return unused scan
+        // scratch before admitting each collection's replacement indexes.
+        registry_workspace.shrink_to(retained_bytes.saturating_mul(4));
         for (collection, indices) in collections {
             let topology_lock = self.inner.index_store.collection_topology_lock(&collection);
             let _topology_guard = topology_lock.write();
@@ -547,6 +551,26 @@ mod tests {
             runtime
                 .try_reserve_query_buffer(0)
                 .expect("refresh accounting"),
+        );
+        let available = runtime.memory_accounting().budget().resolved_bytes
+            - runtime.memory_accounting().total_used_bytes();
+        // The registry's preferred decode scratch plus one minimum backfill
+        // scratch fits, but retaining both leaves no room for index metadata.
+        // Once decoding finishes, only the owned descriptors need to stay
+        // charged while the collection's complete replacement is built.
+        let registry_headroom = 16 * MIB + 256 * 1024 + 1;
+        assert!(available > registry_headroom);
+        let held = runtime
+            .try_reserve_query_buffer((available - registry_headroom) as usize)
+            .expect("independent workspace leaves room for a complete registry rebuild");
+        runtime
+            .rehydrate_runtime_index_registry()
+            .expect("completed registry decoding must release unused scratch before backfill");
+        drop(held);
+        drop(
+            runtime
+                .try_reserve_query_buffer(0)
+                .expect("refresh after registry rebuild"),
         );
         let available = runtime.memory_accounting().budget().resolved_bytes
             - runtime.memory_accounting().total_used_bytes();

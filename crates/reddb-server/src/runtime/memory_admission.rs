@@ -39,6 +39,21 @@ pub(super) struct QueryBufferReservation {
     bytes: u64,
 }
 
+impl QueryBufferReservation {
+    /// Release scratch that has been freed, retaining the charge for live owners.
+    pub(super) fn shrink_to(&mut self, retained_bytes: usize) {
+        let retained_bytes = u64::try_from(retained_bytes)
+            .expect("invariant: a smaller reservation fits the original byte counter");
+        assert!(
+            retained_bytes <= self.bytes,
+            "a reservation cannot grow by shrinking"
+        );
+        let released = self.bytes - retained_bytes;
+        self.bytes = retained_bytes;
+        self.accounting.release_query_buffer(released);
+    }
+}
+
 impl Drop for QueryBufferReservation {
     fn drop(&mut self) {
         self.accounting.release_query_buffer(self.bytes);
