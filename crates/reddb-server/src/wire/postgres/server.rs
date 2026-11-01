@@ -75,7 +75,7 @@ struct PgPortal {
     #[allow(dead_code)]
     result_format_codes: Vec<i16>,
     row_description_sent: bool,
-    result: Option<crate::runtime::RuntimeQueryResult>,
+    result: Option<crate::runtime::OwnedQueryResult>,
     row_offset: usize,
 }
 
@@ -824,7 +824,7 @@ fn execute_pg_query_result(
     prepared_id: PreparedId,
     sql: &str,
     params: &[ParamValue],
-) -> Result<crate::runtime::RuntimeQueryResult, String> {
+) -> Result<crate::runtime::OwnedQueryResult, String> {
     let executor = QueryRequestExecutor::new(runtime, prepared_registry);
     let bound = executor
         .bind(QueryRequest::prepared(prepared_id, params.to_vec()))
@@ -832,22 +832,26 @@ fn execute_pg_query_result(
     if pg_scalar_select_param_index(sql).is_some() {
         let values = params.iter().cloned().map(Value::from).collect::<Vec<_>>();
         if let Some(result) = try_execute_pg_scalar_select(sql, &values) {
-            return Ok(result);
+            return runtime
+                .own_query_result(result)
+                .map_err(|error| error.to_string());
         }
     }
     if params.is_empty() {
         return match translate_pg_catalog_query(runtime, sql) {
-            Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
-                query: sql.to_string(),
-                mode: reddb_rql::modes::QueryMode::Sql,
-                statement: "select",
-                engine: "pg-catalog",
-                result,
-                affected_rows: 0,
-                statement_type: "select",
-                bookmark: None,
-                notice: None,
-            }),
+            Ok(Some(result)) => runtime
+                .own_query_result(crate::runtime::RuntimeQueryResult {
+                    query: sql.to_string(),
+                    mode: reddb_rql::modes::QueryMode::Sql,
+                    statement: "select",
+                    engine: "pg-catalog",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                    bookmark: None,
+                    notice: None,
+                })
+                .map_err(|error| error.to_string()),
             Ok(None) => run_runtime_blocking(|| {
                 execute_with_pg_auth_context(auth_context, || {
                     // Utility statements use the full dispatcher after registry validation.
@@ -874,7 +878,9 @@ fn execute_pg_query_result(
                     ) {
                         executor.execute_bound(bound)
                     } else {
-                        runtime.execute_query(sql)
+                        runtime
+                            .execute_query(sql)
+                            .and_then(|result| runtime.own_query_result(result))
                     }
                 })
             })
@@ -1230,7 +1236,7 @@ where
     }
 
     let query_result = match translate_pg_catalog_query(runtime, sql) {
-        Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
+        Ok(Some(result)) => runtime.own_query_result(crate::runtime::RuntimeQueryResult {
             query: sql.to_string(),
             mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
@@ -1242,7 +1248,11 @@ where
             notice: None,
         }),
         Ok(None) => run_runtime_blocking(|| {
-            execute_with_pg_auth_context(auth_context, || runtime.execute_query(sql))
+            execute_with_pg_auth_context(auth_context, || {
+                runtime
+                    .execute_query(sql)
+                    .and_then(|result| runtime.own_query_result(result))
+            })
         }),
         Err(err) => Err(err),
     };

@@ -57,7 +57,7 @@ pub enum MemoryPool {
     IndexMemory,
     /// WAL group-commit queue and writer buffers.
     WalBuffers,
-    /// Serialized query buffers, retained until their last transport owner drops.
+    /// Owned result and serialized query buffers, retained until their last owner drops.
     QueryBuffers,
 }
 

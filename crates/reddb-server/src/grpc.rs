@@ -492,7 +492,7 @@ fn execute_grpc_query_request(
     query: String,
     params: Vec<QueryValue>,
     commit_policy: Option<crate::replication::CommitPolicy>,
-) -> Result<RuntimeQueryResult, Status> {
+) -> Result<crate::runtime::OwnedQueryResult, Status> {
     if query.trim().is_empty() {
         return Err(Status::invalid_argument("query field cannot be empty"));
     }

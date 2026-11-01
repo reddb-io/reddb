@@ -1635,6 +1635,8 @@ pub(crate) mod mvcc_lifecycle;
 pub(crate) mod mvcc_maintenance;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
+pub(crate) mod owned_query_result;
+pub use owned_query_result::OwnedQueryResult;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;

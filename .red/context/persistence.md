@@ -28,9 +28,12 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 Buffered HTTP SELECT envelopes reserve serialized capacity against the same
 memory budget as storage growth, including both allocations during resizing.
 Clones and transport bodies share the allocation and retain its charge until
-the last owner drops. Intermediate query rows and presentation trees, streaming
-responses and other protocols still require their own owned admission; this
-buffer accounting alone does not establish a process-wide memory ceiling.
+the last owner drops. The request executor also returns immutable shared owners
+for completed materialized reads, charging retained row/model/metadata capacities
+through the last result clone. PostgreSQL portals retain these owners too.
+Executor workspaces, legacy raw runtime results, presentation trees, streaming
+responses and encoded non-HTTP outputs still require their own owned admission;
+this accounting alone does not establish a process-wide memory ceiling.
 
 On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
 every five seconds. At 75% of a finite controller limit it asks the allocator to

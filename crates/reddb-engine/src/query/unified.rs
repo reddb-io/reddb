@@ -3,6 +3,8 @@ use reddb_types::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod memory;
+
 /// Execution error
 #[derive(Debug, Clone)]
 pub struct ExecutionError {

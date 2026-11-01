@@ -118,7 +118,16 @@ impl RedDBServer {
                     let mut error_obj = crate::json::Map::new();
                     error_obj.insert(
                         "code".to_string(),
-                        crate::json::Value::String("materialization_limit_exceeded".to_string()),
+                        crate::json::Value::String(
+                            if *executor
+                                == crate::runtime::owned_query_result::SHARED_RESULT_EXECUTOR
+                            {
+                                "memory_limit_exceeded"
+                            } else {
+                                "materialization_limit_exceeded"
+                            }
+                            .to_string(),
+                        ),
                     );
                     error_obj.insert(
                         "executor".to_string(),

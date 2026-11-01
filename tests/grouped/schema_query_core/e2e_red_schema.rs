@@ -1494,12 +1494,13 @@ const MEMORY_BUDGET_SOURCES: [&str; 5] = [
 
 // Issue #1962 (ADR 0073 §2) — the pools that receive shares of that budget,
 // in the order `red.stats` reports them.
-const MEMORY_POOL_NAMES: [&str; 5] = [
+const MEMORY_POOL_NAMES: [&str; 6] = [
     "page_cache",
     "blob_cache_l1",
     "segment_arena",
     "index_memory",
     "wal_buffers",
+    "query_buffers",
 ];
 
 fn budget_metric(rt: &RedDBRuntime, metric: &str) -> Value {
@@ -1540,6 +1541,51 @@ fn pool_metric(rt: &RedDBRuntime, pool: &str, metric: &str) -> u64 {
         Some(Value::UnsignedInteger(bytes)) => *bytes,
         other => panic!("{pool}.{metric} should be unsigned, got {other:?}"),
     }
+}
+
+#[test]
+fn red_stats_reports_retained_request_result_ownership_through_clones() {
+    use reddb::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
+    cleanup_scope();
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("runtime");
+    exec(&runtime, "CREATE TABLE result_usage (payload TEXT)");
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO result_usage (payload) VALUES ($1)",
+            &[Value::text("x".repeat(8192))],
+        )
+        .expect("seed");
+    let prepared = PreparedRegistry::new();
+    let result = QueryRequestExecutor::new(&runtime, &prepared)
+        .execute(QueryRequest::sql(
+            "SELECT payload FROM result_usage",
+            Vec::new(),
+        ))
+        .expect("read");
+    let held_bytes = pool_metric(&runtime, "query_buffers", "used_bytes");
+    assert!(
+        held_bytes >= 8192,
+        "public stats include the held result payload"
+    );
+    let copy = result.clone();
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        held_bytes
+    );
+    drop(result);
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        held_bytes,
+        "sampling cannot erase a live clone's charge"
+    );
+    drop(copy);
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        0,
+        "last owner returns the public pool usage to zero"
+    );
 }
 
 #[test]

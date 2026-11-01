@@ -1373,7 +1373,10 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
     crate::presentation::query_result::summary_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1403,7 +1406,10 @@ fn run_query_with_params(
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
     crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 

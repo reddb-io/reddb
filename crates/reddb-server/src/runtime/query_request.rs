@@ -1,4 +1,4 @@
-use super::{RedDBRuntime, RuntimeQueryResult};
+use super::{OwnedQueryResult, RedDBRuntime};
 use crate::storage::query::planner::shape::{bind_parameterized_query, parameterize_query_expr};
 use crate::storage::query::user_params;
 use crate::{RedDBError, RedDBResult};
@@ -8,6 +8,9 @@ use reddb_types::Value;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[cfg(test)]
+mod memory_tests;
 
 const DEFAULT_PREPARED_CAPACITY: usize = 1_024;
 
@@ -589,8 +592,10 @@ impl<'a> QueryRequestExecutor<'a> {
         })
     }
 
-    /// Execute an already-bound request and enforce its commit policy.
-    pub fn execute_bound(&self, bound: BoundRequest) -> RedDBResult<RuntimeQueryResult> {
+    /// Execute an already-bound request and enforce its commit policy. Returned
+    /// data is immutable: result clones share the complete allocation and keep
+    /// materialized-read admission alive until their last owner drops.
+    pub fn execute_bound(&self, bound: BoundRequest) -> RedDBResult<OwnedQueryResult> {
         let commit_policy = bound.commit_policy;
         let result = match bound.statement {
             BoundStatement::Sql { sql, params } => {
@@ -604,10 +609,10 @@ impl<'a> QueryRequestExecutor<'a> {
             self.runtime
                 .enforce_commit_policy_for_request(self.runtime.cdc_current_lsn(), commit_policy)?;
         }
-        Ok(result)
+        self.runtime.own_query_result(result)
     }
 
-    pub fn execute(&self, request: QueryRequest) -> RedDBResult<RuntimeQueryResult> {
+    pub fn execute(&self, request: QueryRequest) -> RedDBResult<OwnedQueryResult> {
         self.execute_bound(self.bind(request)?)
     }
 
