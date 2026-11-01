@@ -1619,6 +1619,81 @@ mod artifact_memory_tests {
     use super::*;
 
     #[test]
+    fn physical_roots_hash_borrowed_payloads_without_rendered_copies() {
+        fn legacy_root(db: &RedDB) -> u64 {
+            fn hash<T: Debug>(root: &mut u64, value: &T) {
+                fnv1a_hash_bytes(root, format!("{value:?}").as_bytes());
+            }
+            let manager = db.store().get_collection("root_source").expect("source");
+            let stats = manager.stats();
+            let mut root = fnv1a_seed();
+            hash(&mut root, &"root_source".to_string());
+            hash(&mut root, &stats.total_entities);
+            hash(&mut root, &stats.growing_count);
+            hash(&mut root, &stats.sealed_count);
+            hash(&mut root, &stats.archived_count);
+            hash(&mut root, &stats.total_memory_bytes);
+            hash(&mut root, &stats.seal_ops);
+            hash(&mut root, &stats.consolidation.runs_completed);
+            manager.for_each_entity_in_id_order(|entity| {
+                hash(&mut root, &entity.id.raw());
+                hash(&mut root, &entity.kind);
+                hash(&mut root, &entity.created_at);
+                hash(&mut root, &entity.updated_at);
+                hash(&mut root, &entity.data);
+                hash(&mut root, &entity.sequence_id);
+                hash(&mut root, &entity.embeddings().len());
+                hash(&mut root, &entity.cross_refs().len());
+                true
+            });
+            root
+        }
+
+        let runtime =
+            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE root_source (payload BLOB, label TEXT, body JSON)")
+            .expect("table");
+        let db = runtime.db();
+        let manager = db.store().get_collection("root_source").expect("source");
+        let mut entity = UnifiedEntity::table_row(
+            EntityId::new(1001),
+            "root_source",
+            1,
+            vec![
+                Value::Blob(vec![255; 2 * 1024 * 1024]),
+                Value::text("escaped\n\t\0\"\\ and Unicode ç🦀"),
+                Value::Json(br#"{"nested":[null,true,17,"kept"]}"#.to_vec()),
+            ],
+        );
+        manager.insert(entity.clone()).expect("source row");
+        let expected = legacy_root(&db);
+        let (roots, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.physical_collection_roots()
+        });
+        assert_eq!(roots["root_source"], expected, "retain legacy hash bytes");
+        eprintln!(
+            "physical root allocation bytes: {}",
+            measured.allocated_bytes
+        );
+        assert!(
+            measured.allocated_bytes < 64 * 1024,
+            "fingerprinting must not render the borrowed payload: {measured:?}"
+        );
+        assert_eq!(db.physical_collection_roots(), roots, "unchanged cache");
+        let EntityData::Row(row) = &mut entity.data else {
+            unreachable!("fixture is a table row");
+        };
+        row.columns[0] = Value::Blob(vec![254; 2 * 1024 * 1024]);
+        manager
+            .update(entity)
+            .expect("replace payload of equal size");
+        let updated = db.physical_collection_roots();
+        assert_ne!(updated["root_source"], roots["root_source"]);
+        assert_eq!(updated["root_source"], legacy_root(&db));
+    }
+
+    #[test]
     fn document_artifact_paths_survive_shared_recovery_shapes() {
         let mut entity = UnifiedEntity::table_row(EntityId::new(1), "documents", 1, vec![]);
         entity.data = EntityData::Row(crate::storage::unified::entity::RowData::with_names(
