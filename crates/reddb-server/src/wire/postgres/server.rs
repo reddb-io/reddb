@@ -240,6 +240,13 @@ pub async fn start_pg_wire_listener_on(
         let Some(permit) = admission.try_admit() else {
             continue;
         };
+        // Small result/control frames must not wait for a client's delayed ACK
+        // before the next frame (notably ReadyForQuery) can leave the server.
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(transport = "pg-wire", peer = %peer, err = %error,
+                "failed to configure connection");
+            continue;
+        }
         let rt = Arc::clone(&runtime);
         let cfg = Arc::clone(&cfg);
         let acceptor = tls_acceptor.clone();
