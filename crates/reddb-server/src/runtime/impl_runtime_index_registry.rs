@@ -278,9 +278,10 @@ impl RedDBRuntime {
         &self,
         manager: &crate::storage::unified::SegmentManager,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
-        let read_bytes_max = usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
-            .unwrap_or(usize::MAX)
-            .max(1);
+        let mut read_bytes_max =
+            usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
+                .unwrap_or(usize::MAX)
+                .max(1);
         // Decode, indexed projection and descriptor reduction share this owned
         // scratch. Resident-only visitors borrow rows already charged to the
         // arena. Disk-backed visitors also retain overlay identities; reserve
@@ -298,15 +299,27 @@ impl RedDBRuntime {
         } else {
             0
         };
-        let scratch = read_bytes_max
-            .saturating_mul(4)
-            .saturating_add(overlay_bytes);
-        let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
-            RedDBError::InvalidOperation(
-                "index restoration workspace exceeds the shared memory budget".into(),
-            )
-        })?;
-        Ok((reservation, read_bytes_max))
+        // The configured allowance is a ceiling, not a minimum allocation.
+        // Reduce owned scratch under pressure, but reserve it before scanning
+        // and pass the effective limit to every reader and projection. Keep a
+        // 64 KiB floor (or the smaller configured ceiling) to bound retries.
+        let read_bytes_min = read_bytes_max.min(64 * 1024);
+        loop {
+            let scratch = read_bytes_max
+                .saturating_mul(4)
+                .saturating_add(overlay_bytes);
+            if let Some(reservation) = self.try_reserve_query_buffer(scratch) {
+                return Ok((reservation, read_bytes_max));
+            }
+            if read_bytes_max == read_bytes_min {
+                let accounting = self.memory_accounting();
+                return Err(RedDBError::InvalidOperation(format!(
+                    "index restoration workspace exceeds the shared memory budget: requested {scratch} bytes (overlay {overlay_bytes}), used {}, budget {}",
+                    accounting.total_used_bytes(), accounting.budget().resolved_bytes
+                )));
+            }
+            read_bytes_max = (read_bytes_max / 2).max(read_bytes_min);
+        }
     }
 
     /// Two bounded passes: estimate the final resident indexes, admit their
@@ -526,9 +539,24 @@ mod tests {
         let held = runtime
             .try_reserve_query_buffer(16 * MIB as usize)
             .expect("independent retained query workspace fits");
+        runtime
+            .rebuild_runtime_indexes_for_table("eager_scan_payloads")
+            .expect("backfill adapts its owned read workspace to remaining headroom");
+        drop(held);
+        drop(
+            runtime
+                .try_reserve_query_buffer(0)
+                .expect("refresh accounting"),
+        );
+        let available = runtime.memory_accounting().budget().resolved_bytes
+            - runtime.memory_accounting().total_used_bytes();
+        assert!(available > 32 * 1024);
+        let held = runtime
+            .try_reserve_query_buffer((available - 32 * 1024) as usize)
+            .expect("retain all but a small amount of actual headroom");
         let error = runtime
             .rebuild_runtime_indexes_for_table("eager_scan_payloads")
-            .expect_err("real scratch still competes with retained query workspace");
+            .expect_err("minimum scan scratch still competes with retained query workspace");
         assert!(error.to_string().contains("workspace exceeds"), "{error}");
         drop(held);
         let result = runtime
