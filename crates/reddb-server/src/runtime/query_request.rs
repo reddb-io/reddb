@@ -9,9 +9,6 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(test)]
-mod memory_tests;
-
 const DEFAULT_PREPARED_CAPACITY: usize = 1_024;
 
 /// Transport-neutral parameter value vocabulary from ADR 0015.
@@ -638,3 +635,6 @@ impl<'a> QueryRequestExecutor<'a> {
             .map_err(super::impl_replication_commit::commit_policy_violation_error)
     }
 }
+
+#[cfg(test)]
+mod memory_tests;
