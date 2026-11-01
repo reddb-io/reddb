@@ -13,17 +13,19 @@
 #      `scripts/sync-version.js`.
 #   2. Validate it looks like a release version (semver, no prerelease
 #      suffix unless the operator opted into one).
-#   3. Tag and push `v<version>`. The pushed tag triggers the existing
-#      release.yml workflow, which builds the binaries and publishes
-#      to npm / crates.io / PyPI / GHCR.
+#   3. Tag and push `v<version>`, then dispatch release.yml on that tag.
+#      Checkout uses the workflow token, whose pushes do not trigger workflows.
 #
-# Idempotent: if the tag already exists locally or remotely we exit 0
-# without re-pushing — re-running this script must never break.
+# An existing tag without a publisher is recoverable. Never move the tag or
+# submit another publisher for a commit that already has a release run.
 #
 # Env:
-#   GITHUB_TOKEN  Required, set by changesets/action via the workflow.
-#                 Used implicitly by `git push` via the checkout token.
+#   GH_TOKEN  Workflow token with Actions write permission, used by gh.
+#             Git uses checkout's workflow-token credentials.
+#   GITHUB_REPOSITORY  Repository receiving the release workflow dispatch.
 set -euo pipefail
+
+RELEASE_REPOSITORY="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must identify the release repository}"
 
 VERSION="$(node -e 'process.stdout.write(require("./package.json").version)')"
 
@@ -38,18 +40,34 @@ fi
 
 TAG="v$VERSION"
 
-# If the tag already exists locally and matches HEAD, nothing to do.
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  echo "changesets-tag-release: tag $TAG already exists locally — skipping create"
+RELEASE_REMOTE_REFS="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+if [[ -n "$RELEASE_REMOTE_REFS" ]]; then
+  echo "changesets-tag-release: tag $TAG already on origin — skipping push"
 else
-  git tag -a "$TAG" -m "Release $TAG"
+  if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    git tag -a "$TAG" -m "Release $TAG"
+  fi
+  git push origin "refs/tags/$TAG"
+  RELEASE_REMOTE_REFS="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
 fi
 
-# If the remote already has the tag, skip the push.
-if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
-  echo "changesets-tag-release: tag $TAG already on origin — skipping push"
+# Resolve the immutable remote tag, including recovery after main advanced.
+RELEASE_COMMIT="$(printf '%s\n' "$RELEASE_REMOTE_REFS" | awk -v tag="$TAG" '
+  $2 == "refs/tags/" tag { direct = $1 }
+  $2 == "refs/tags/" tag "^{}" { peeled = $1 }
+  END { print peeled != "" ? peeled : direct }
+')"
+if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "changesets-tag-release: cannot resolve remote commit for $TAG" >&2
+  exit 1
+fi
+RELEASE_EXISTING_RUNS="$(gh run list --repo "$RELEASE_REPOSITORY" --workflow release.yml \
+  --branch "$TAG" --limit 100 --json databaseId,headSha \
+  --jq ".[] | select(.headSha == \"$RELEASE_COMMIT\") | .databaseId")"
+if [[ -n "$RELEASE_EXISTING_RUNS" ]]; then
+  echo "changesets-tag-release: publisher already exists for $TAG ($RELEASE_COMMIT)"
   exit 0
 fi
-
-git push origin "refs/tags/$TAG"
-echo "changesets-tag-release: pushed $TAG — release.yml will take over"
+gh workflow run release.yml --repo "$RELEASE_REPOSITORY" --ref "$TAG" \
+  -f channel=stable -f version="$VERSION" -f publish_cargo=true
+echo "changesets-tag-release: dispatched publisher for $TAG ($RELEASE_COMMIT)"

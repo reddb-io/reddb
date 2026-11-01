@@ -37,19 +37,20 @@ and write a one-line summary. Commit the generated
    will refresh the PR.
 4. **Merge the Release PR.** That re-fires the changesets workflow,
    which now sees zero pending changesets and therefore:
-   - runs `pnpm release:version` — `changeset version` bumps the four
-     npm packages and writes `CHANGELOG.md`, then
-     `node scripts/sync-version.js` propagates the new version into
-     every lock-stepped manifest (`Cargo.toml`, `crates/**/Cargo.toml`,
-     `drivers/python/{Cargo,pyproject}.toml`,
-     `packages/internal-*/package.json`, `drivers/bun/package.json`).
-   - commits the version bump with author `github-actions[bot]`.
    - runs [`scripts/changesets-tag-release.sh`](../../scripts/changesets-tag-release.sh),
-     which creates and pushes `v<version>`.
-5. The pushed tag triggers `.github/workflows/release.yml`, which
+     which creates and pushes `v<version>`, then dispatches the publisher
+     on that immutable tag. The synchronized manifests and changelog were
+     already generated in the release PR by `pnpm release:version`.
+5. The explicit dispatch starts `.github/workflows/release.yml`, which
    builds every platform binary, creates the GitHub Release with the
    assets attached, and only **after** that publishes to npm /
    crates.io / PyPI / GHCR.
+
+Checkout uses the workflow token, whose tag pushes do not start other workflows.
+The publisher therefore uses `workflow_dispatch` with Actions write permission.
+Re-running Changesets recovers an existing tag that has no release run; an
+existing run for the tag's commit is observed without submitting another. Use
+that run's failed-job recovery when publication itself fails.
 
 There is no step at which an `@reddb-io/sdk@X.Y.Z` exists on npm
 without a corresponding GitHub Release containing `red-<plat>-<arch>`
