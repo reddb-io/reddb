@@ -1604,6 +1604,19 @@ impl RedDBRuntime {
         let entry = ops.get_vault_entry(collection, key)?;
         let value = match entry.as_ref() {
             Some(entry) if entry.tombstone => None,
+            // SQL references retain the nullable policy while Vault is sealed.
+            // Physical reads above and unsealed decode failures below still
+            // propagate; VAULT REVEAL keeps its explicit sealed error.
+            Some(_)
+                if !self
+                    .inner
+                    .auth_store
+                    .read()
+                    .as_ref()
+                    .is_some_and(|auth| auth.is_vault_backed()) =>
+            {
+                None
+            }
             Some(entry) => Some(self.unseal_vault_value_for_tenant(
                 collection,
                 &entry.value,
