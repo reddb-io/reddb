@@ -371,9 +371,21 @@ impl HashIndexManager {
         Ok(index.paged.is_none().then(|| index.get(key).to_vec()))
     }
 
+    /// Compatibility API for independently managed resident HASH indexes.
+    pub fn lookup(
+        &self,
+        collection: &str,
+        name: &str,
+        key: &[u8],
+    ) -> Result<Vec<EntityId>, HashIndexError> {
+        self.lookup_resident(collection, name, key)?.ok_or_else(|| {
+            HashIndexError::Read("paged HASH requires an owned candidate result".into())
+        })
+    }
+
     /// Never hold the manager lock across disk I/O or runtime admission:
     /// mutation/publication and memory sampling acquire these locks in reverse.
-    pub fn lookup(
+    pub(crate) fn lookup_owned(
         &self,
         collection: &str,
         index_name: &str,

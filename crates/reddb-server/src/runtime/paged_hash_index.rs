@@ -346,7 +346,7 @@ mod tests {
         runtime
             .index_store_ref()
             .hash
-            .lookup("hash_rows", "by_email", key.as_bytes())
+            .lookup_owned("hash_rows", "by_email", key.as_bytes())
             .expect("lookup")
     }
 
@@ -466,7 +466,7 @@ mod tests {
                     runtime
                         .index_store_ref()
                         .hash
-                        .lookup("hash_rows", "by_email", b"alpha");
+                        .lookup_owned("hash_rows", "by_email", b"alpha");
                 send.send(
                     candidates
                         .as_ref()
@@ -579,7 +579,7 @@ mod tests {
         let error = runtime
             .index_store_ref()
             .hash
-            .lookup("hash_rows", "by_email", b"alpha")
+            .lookup_owned("hash_rows", "by_email", b"alpha")
             .expect_err("deny before allocating");
         assert!(error.to_string().contains("workspace exceeds"), "{error}");
         drop(held);

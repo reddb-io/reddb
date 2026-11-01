@@ -1636,7 +1636,7 @@ impl IndexStore {
         key: &[u8],
     ) -> Result<crate::storage::unified::hash_index::HashCandidates, String> {
         self.hash
-            .lookup(collection, index_name, key)
+            .lookup_owned(collection, index_name, key)
             .map_err(|err| err.to_string())
     }
 
