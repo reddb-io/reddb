@@ -2046,13 +2046,42 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         .expect("collection exists")
         .force_seal()
         .expect("force seal");
-    exec(&rt, "DELETE FROM reclaim_gate WHERE id < 159");
+    // Undo ownership can exceed this tiny budget even while the live seed
+    // fits. A refusal must preserve every row and release its reservations;
+    // bounded statements then prepare the same reclamation workload.
+    // DELETE workspace can trigger consolidation before the following insert
+    // needs it; measure the complete pressure/reclamation workflow.
+    let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
+    if let Err(error) = rt.execute_query("DELETE FROM reclaim_gate WHERE id < 159") {
+        let message = error.to_string();
+        assert!(message.contains("bytes over budget"), "{message}");
+        for first_id in (0..160).step_by(8) {
+            let rows = rt
+                .execute_query(&format!(
+                    "SELECT id FROM reclaim_gate WHERE id >= {first_id} AND id < {} ORDER BY id",
+                    first_id + 8
+                ))
+                .expect("bounded read after refused atomic delete");
+            assert_eq!(rows.result.records.len(), 8);
+            for (record, id) in rows.result.records.iter().zip(first_id..first_id + 8) {
+                assert_eq!(record.get("id"), Some(&Value::Integer(id)));
+            }
+        }
+        for first_id in (0..159).step_by(8) {
+            exec(
+                &rt,
+                &format!(
+                    "DELETE FROM reclaim_gate WHERE id >= {first_id} AND id < {}",
+                    (first_id + 8).min(159)
+                ),
+            );
+        }
+    }
     assert!(
         rt.db().store().reclaimable_segment_bytes() > 0,
         "bulk-seeded sealed deletes should be reclaimable"
     );
 
-    let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
     // Rows plus their index must fit after reclamation, not just current usage.
     let pressure_rows = (10_000..10_048)
         .map(|id| format!("({id}, 'pressure')"))
@@ -2073,6 +2102,15 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     );
 
     assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
+
+    let rows = rt
+        .execute_query("SELECT id FROM reclaim_gate ORDER BY id")
+        .expect("reclamation preserves surviving and newly inserted rows");
+    assert_eq!(rows.result.records.len(), 49);
+    let expected_ids = std::iter::once(159).chain(10_000..10_048);
+    for (record, id) in rows.result.records.iter().zip(expected_ids) {
+        assert_eq!(record.get("id"), Some(&Value::Integer(id)));
+    }
 
     cleanup_scope();
 }
