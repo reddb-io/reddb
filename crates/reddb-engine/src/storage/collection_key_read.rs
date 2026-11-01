@@ -21,7 +21,10 @@ impl<P: PageStore> KeyCursor<P> {
     ) -> Result<Self, StoreError> {
         let fingerprint = native_key_index::fingerprint(key);
         let start = native_key_index::encode_candidate(&fingerprint, 0);
-        let candidates = index.cursor_seek(&start).map_err(read_error)?;
+        let candidates = index
+            .cursor_seek(&start)
+            .map_err(read_error)?
+            .with_immutable_leaves();
         Ok(Self {
             records,
             candidates,

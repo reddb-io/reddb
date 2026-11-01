@@ -186,11 +186,76 @@ pub struct BTreeCursor<P: PageStore> {
     /// this leaf. Reset to false every time we move to a new leaf so the
     /// hint fires once per leaf, at the halfway point.
     prefetched_next: bool,
+    /// Published collection generations are immutable. Retain at most one
+    /// leaf while walking them; mutable-tree cursors keep re-reading pages.
+    immutable: bool,
+    immutable_leaf: Option<Box<Page>>,
 }
 
 impl<P: PageStore> BTreeCursor<P> {
+    /// Only collection readers whose host pins an immutable published root
+    /// may retain a leaf across calls. This is not a mutable-tree snapshot.
+    pub(crate) fn with_immutable_leaves(mut self) -> Self {
+        self.immutable = true;
+        self
+    }
+
+    fn prepare_immutable_leaf(&mut self) -> BTreeResult<bool> {
+        if self.leaf_page_id == 0 {
+            return Ok(false);
+        }
+        if self.immutable_leaf.is_none() {
+            let page = self.pager.read_page(self.leaf_page_id)?;
+            if page.page_type()? != PageType::BTreeLeaf {
+                return Err(BTreeError::Corrupted(
+                    "cursor reached a non-leaf page".into(),
+                ));
+            }
+            self.immutable_leaf = Some(Box::new(page));
+        }
+        let page = self.immutable_leaf.as_ref().expect("loaded immutable leaf");
+        if self.position < usize::from(page.cell_count()) {
+            return Ok(true);
+        }
+        let next = read_next_leaf(page);
+        if next == 0 {
+            self.leaf_page_id = 0;
+            self.immutable_leaf = None;
+            return Ok(false);
+        }
+        let next_page = self.pager.read_page(next)?;
+        if next_page.page_type()? != PageType::BTreeLeaf || next_page.cell_count() == 0 {
+            return Err(BTreeError::Corrupted(
+                "leaf chain reached an invalid leaf".into(),
+            ));
+        }
+        let first_key = read_leaf_cell_borrowed(&next_page, 0)?.0;
+        if leaf_high_key(page)?
+            .as_ref()
+            .is_some_and(|key| first_key <= key.as_slice())
+        {
+            return Err(BTreeError::Corrupted(
+                "leaf chain does not advance its key range".into(),
+            ));
+        }
+        **self.immutable_leaf.as_mut().expect("loaded immutable leaf") = next_page;
+        self.leaf_page_id = next;
+        self.position = 0;
+        self.prefetched_next = false;
+        Ok(true)
+    }
+
     /// Inspect the next key without materializing its value or advancing.
     pub fn peek_key(&mut self) -> BTreeResult<Option<Vec<u8>>> {
+        if self.immutable {
+            if !self.prepare_immutable_leaf()? {
+                return Ok(None);
+            }
+            let page = self.immutable_leaf.as_ref().expect("loaded immutable leaf");
+            return Ok(Some(
+                read_leaf_cell_borrowed(page, self.position)?.0.to_vec(),
+            ));
+        }
         let Some(page) = self.prepare_next_leaf()? else {
             return Ok(None);
         };
@@ -199,6 +264,13 @@ impl<P: PageStore> BTreeCursor<P> {
 
     /// Skip a shadowed or deleted base record without reading its overflow value.
     pub fn skip_next(&mut self) -> BTreeResult<bool> {
+        if self.immutable {
+            if !self.prepare_immutable_leaf()? {
+                return Ok(false);
+            }
+            self.position += 1;
+            return Ok(true);
+        }
         if self.prepare_next_leaf()?.is_none() {
             return Ok(false);
         }
@@ -259,6 +331,9 @@ impl<P: PageStore> BTreeCursor<P> {
     }
 
     fn next_impl(&mut self, limit_bytes: usize) -> BTreeResult<Option<(Vec<u8>, Vec<u8>)>> {
+        if self.immutable {
+            return self.next_immutable(limit_bytes);
+        }
         if self.leaf_page_id == 0 {
             return Ok(None);
         }
@@ -332,6 +407,24 @@ impl<P: PageStore> BTreeCursor<P> {
         let value = value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
         self.position = 1;
         Ok(Some((key, value)))
+    }
+
+    fn next_immutable(&mut self, limit_bytes: usize) -> BTreeResult<Option<(Vec<u8>, Vec<u8>)>> {
+        if !self.prepare_immutable_leaf()? {
+            return Ok(None);
+        }
+        let page = self.immutable_leaf.as_ref().expect("loaded immutable leaf");
+        if !self.prefetched_next && self.position >= usize::from(page.cell_count()) / 2 {
+            let next = read_next_leaf(page);
+            if next != 0 {
+                self.pager.prefetch_hint(next);
+            }
+            self.prefetched_next = true;
+        }
+        let (key, stored) = read_leaf_cell_borrowed(page, self.position)?;
+        let value = value_layout::decode_with_budget(self.pager.as_ref(), stored, limit_bytes)?;
+        self.position += 1;
+        Ok(Some((key.to_vec(), value)))
     }
 
     /// Peek at current entry without advancing
@@ -522,6 +615,11 @@ fn interior_entries_size(keys: &[Vec<u8>]) -> usize {
 /// into the cell data area; the cell header is `[key_len:u16][val_len:u16]`
 /// followed by the raw key and value bytes.
 fn read_leaf_cell(page: &Page, index: usize) -> BTreeResult<(Vec<u8>, Vec<u8>)> {
+    let (key, value) = read_leaf_cell_borrowed(page, index)?;
+    Ok((key.to_vec(), value.to_vec()))
+}
+
+fn read_leaf_cell_borrowed(page: &Page, index: usize) -> BTreeResult<(&[u8], &[u8])> {
     let cell_count = page.cell_count() as usize;
     if index >= cell_count {
         return Err(BTreeError::Corrupted("Cell index out of range".into()));
@@ -537,8 +635,8 @@ fn read_leaf_cell(page: &Page, index: usize) -> BTreeResult<(Vec<u8>, Vec<u8>)> 
     if end > PAGE_SIZE {
         return Err(BTreeError::Corrupted("cell body out of range".into()));
     }
-    let key = data[offset + 4..offset + 4 + key_len].to_vec();
-    let value = data[offset + 4 + key_len..end].to_vec();
+    let key = &data[offset + 4..offset + 4 + key_len];
+    let value = &data[offset + 4 + key_len..end];
     Ok((key, value))
 }
 

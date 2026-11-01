@@ -726,6 +726,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -738,6 +740,8 @@ impl<P: PageStore> BTree<P> {
             position: 0,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 
@@ -751,6 +755,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -768,6 +774,8 @@ impl<P: PageStore> BTree<P> {
             position,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 

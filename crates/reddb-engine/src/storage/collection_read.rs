@@ -110,7 +110,11 @@ impl<P: PageStore> PagedCollection<P> {
 
     pub fn scan(&self) -> Result<PagedCursor<P>, StoreError> {
         Ok(PagedCursor {
-            cursor: self.tree.cursor_first().map_err(read_error)?,
+            cursor: self
+                .tree
+                .cursor_first()
+                .map_err(read_error)?
+                .with_immutable_leaves(),
         })
     }
 }

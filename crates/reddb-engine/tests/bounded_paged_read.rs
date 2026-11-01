@@ -87,8 +87,106 @@ fn ordered_cursor_peek_and_read_have_bounded_page_read_amplification() {
     let rows = usize::try_from(rows).expect("fixture row count");
     eprintln!("ordered cursor: {reads} page reads, {rows} rows, {tree_pages} tree pages");
     assert!(
-        reads <= 2 * rows + 4 * tree_pages,
-        "one peek and one read must not fetch a leaf three times per row: {reads} reads, {rows} rows, {tree_pages} pages"
+        reads <= 4 * tree_pages,
+        "an immutable cursor must fetch each leaf once instead of re-reading and copying it for each row: {reads} reads, {rows} rows, {tree_pages} pages"
+    );
+}
+
+#[test]
+fn mutable_tree_cursor_keeps_observing_in_place_updates() {
+    let tree = BTree::new(Arc::new(Pages::default()));
+    for id in 1_u64..=3 {
+        tree.insert(&id.to_be_bytes(), b"old").expect("fixture");
+    }
+    let mut cursor = tree.cursor_first().expect("mutable cursor");
+    assert_eq!(
+        cursor.peek_key().expect("peek"),
+        Some(1_u64.to_be_bytes().to_vec())
+    );
+    tree.upsert(&1_u64.to_be_bytes(), b"new")
+        .expect("in-place update");
+    assert_eq!(
+        cursor.next_with_budget(3).expect("updated entry"),
+        Some((1_u64.to_be_bytes().to_vec(), b"new".to_vec()))
+    );
+    assert_eq!(
+        cursor.peek_key().expect("peek"),
+        Some(2_u64.to_be_bytes().to_vec())
+    );
+    tree.upsert(&2_u64.to_be_bytes(), b"changed")
+        .expect("second update");
+    assert_eq!(
+        cursor.next_with_budget(7).expect("updated entry"),
+        Some((2_u64.to_be_bytes().to_vec(), b"changed".to_vec()))
+    );
+}
+
+#[test]
+fn immutable_cursor_preserves_budget_retry_after_crossing_leaves() {
+    let tree = Arc::new(BTree::new(Arc::new(Pages::default())));
+    for id in 0_u64..32 {
+        tree.insert(&id.to_be_bytes(), &noise(1000))
+            .expect("fixture");
+    }
+    let large = vec![b'x'; 256 * 1024];
+    tree.insert(&32_u64.to_be_bytes(), &large)
+        .expect("large final row");
+    let base = PagedCollection::new(tree);
+    let mut cursor = base.scan().expect("immutable cursor");
+    for id in 0_u64..32 {
+        assert_eq!(cursor.peek_id().expect("peek"), Some(EntityId::new(id)));
+        assert_eq!(
+            cursor.next_record(2048).expect("entry").expect("row").id,
+            EntityId::new(id)
+        );
+    }
+    assert!(matches!(
+        cursor.next_record(2048),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    assert_eq!(
+        cursor.peek_id().expect("same oversized row"),
+        Some(EntityId::new(32))
+    );
+    let record = cursor
+        .next_record(1024 * 1024)
+        .expect("retry")
+        .expect("row");
+    assert_eq!(record.id, EntityId::new(32));
+    assert_eq!(record.bytes, large);
+    assert!(cursor.next_record(0).expect("end").is_none());
+}
+
+#[test]
+fn immutable_cursor_rejects_corruption_when_entering_another_leaf() {
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    for id in 1_u64..=2000 {
+        tree.insert(&id.to_be_bytes(), b"cold").expect("fixture");
+    }
+    let mut images = pages.pages.lock().expect("fixture lock");
+    let last_leaf = images
+        .iter()
+        .filter(|(_, page)| page.page_type().expect("fixture page type") == PageType::BTreeLeaf)
+        .map(|(id, _)| *id)
+        .max()
+        .expect("leaf pages");
+    images.insert(last_leaf, Page::new(PageType::Overflow, last_leaf));
+    drop(images);
+    let base = PagedCollection::new(tree);
+    let mut cursor = base.scan().expect("first leaf remains valid");
+    let mut rows = 0;
+    loop {
+        match cursor.next_record(4) {
+            Ok(Some(_)) => rows += 1,
+            Ok(None) => panic!("corrupt leaf must not look like end of data"),
+            Err(StoreError::StorageIntegrity(_)) => break,
+            Err(error) => panic!("unexpected failure: {error}"),
+        }
+    }
+    assert!(
+        rows > 0 && rows < 2000,
+        "valid prefix followed by corrupt leaf"
     );
 }
 

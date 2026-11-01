@@ -47,6 +47,14 @@ HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
 empty beyond-end pages describe the same physical scan, including historical
 versions; this does not introduce logical MVCC filtering or a transaction snapshot.
 
+Cursors over immutable published collection generations retain at most one 16 KiB
+leaf, avoiding a page-cache read and page copy for each peek and record read.
+Hosts retain their existing root publication and retirement fences. Mutable-tree
+cursors still re-read pages; value decoding, read limits, retry positions and
+strictly advancing leaf-range validation remain in force. With 2,000 inline rows
+in five tree pages, the deterministic regression reduces 4,004 page reads to four;
+this does not establish runtime boot, RSS or query latency improvements.
+
 ## Checkpoint reuse
 
 Double-write page batches synchronize each frame's staging image before its
