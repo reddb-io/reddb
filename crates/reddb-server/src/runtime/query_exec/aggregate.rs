@@ -28,7 +28,7 @@ use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_result_with_db,
     evaluate_runtime_filter_with_db, field_ref_name, projection_name, resolve_runtime_field,
-    sort_records_by_order_by_with_db,
+    sort_records_by_order_by_with_db, try_eval_projection_value_with_db, try_secret_runtime_input,
 };
 use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
@@ -85,6 +85,9 @@ impl reddb_engine::query::runtime::aggregate_results::AggregateResultHost
     }
     fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool {
         evaluate_runtime_filter_with_db(Some(self.db), record, filter, None, None)
+    }
+    fn try_having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> RedDBResult<bool> {
+        evaluate_runtime_filter_result_with_db(Some(self.db), record, filter, None, None)
     }
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
         sort_records_by_order_by_with_db(Some(self.db), records, clauses, None, None)
@@ -414,10 +417,9 @@ pub(crate) fn execute_aggregate_query(
         AggregateGroup,
     >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
-    let mut predicate_error = None;
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::try_scan(
+    crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             // ── Lazy record materialisation ──────────────────────────────────
@@ -455,35 +457,26 @@ pub(crate) fn execute_aggregate_query(
             }
 
             if let Some(c) = compiled_filter.as_ref() {
-                let matches = c.try_evaluate(entity).and_then(|decision| {
-                    decision.try_resolve_with_fallback(|| {
-                        let Some(record) = get_or_make_record!() else {
-                            return Ok(false);
-                        };
-                        effective_filter
-                            .as_ref()
-                            .map(|filter| {
-                                evaluate_runtime_filter_result_with_db(
-                                    Some(db),
-                                    record,
-                                    filter,
-                                    Some(table_name),
-                                    Some(table_alias),
-                                )
-                            })
-                            .transpose()
-                            .map(|result| result.unwrap_or(false))
-                    })
-                });
-                let matches = match matches {
-                    Ok(matches) => matches,
-                    Err(error) => {
-                        predicate_error = Some(error);
-                        return false;
-                    }
-                };
+                let matches = c.try_evaluate(entity)?.try_resolve_with_fallback(|| {
+                    let Some(record) = get_or_make_record!() else {
+                        return Ok(false);
+                    };
+                    effective_filter
+                        .as_ref()
+                        .map(|filter| {
+                            evaluate_runtime_filter_result_with_db(
+                                Some(db),
+                                record,
+                                filter,
+                                Some(table_name),
+                                Some(table_alias),
+                            )
+                        })
+                        .transpose()
+                        .map(|result| result.unwrap_or(false))
+                })?;
                 if !matches {
-                    return true;
+                    return Ok(true);
                 }
             }
 
@@ -496,7 +489,9 @@ pub(crate) fn execute_aggregate_query(
                             resolver
                                 .get_value(0, entity)
                                 .map(|v| v.into_owned())
-                                .and_then(crate::runtime::execution_context::secret_query_input)
+                                .map(try_secret_runtime_input)
+                                .transpose()?
+                                .flatten()
                         } else {
                             None
                         };
@@ -506,10 +501,10 @@ pub(crate) fn execute_aggregate_query(
                             // Shouldn't happen (group_by_all_fast is true) but
                             // fall back gracefully.
                             let Some(rec) = get_or_make_record!() else {
-                                return true;
+                                return Ok(true);
                             };
-                            let Some(v) = resolve_group_by_value(db, expr, rec) else {
-                                return true;
+                            let Some(v) = resolve_group_by_value(db, expr, rec)? else {
+                                return Ok(true);
                             };
                             values.push(v);
                         }
@@ -518,12 +513,12 @@ pub(crate) fn execute_aggregate_query(
                 } else {
                     // Slow path: at least one complex GROUP BY expr.
                     let Some(rec) = get_or_make_record!() else {
-                        return true;
+                        return Ok(true);
                     };
                     let mut values = Vec::with_capacity(effective_group_by.len());
                     for group_expr in effective_group_by {
-                        let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
-                            return true;
+                        let Some(value) = resolve_group_by_value(db, group_expr, rec)? else {
+                            return Ok(true);
                         };
                         values.push(value);
                     }
@@ -558,7 +553,7 @@ pub(crate) fn execute_aggregate_query(
                             spill_err = Some(
                                 "secret aggregation exceeded its in-memory group limit".into(),
                             );
-                            return false;
+                            return Ok(false);
                         }
                         // Re-extract the key (consumed by the insert) and
                         // flush every existing group to the spill file,
@@ -570,7 +565,7 @@ pub(crate) fn execute_aggregate_query(
                         for (k, v) in batch {
                             if let Err(e) = spill_agg.accumulate(k, v) {
                                 spill_err = Some(format!("agg spill error: {e}"));
-                                return false; // stop iteration
+                                return Ok(false); // stop iteration
                             }
                         }
                         groups.entry(fresh_key).or_insert_with(|| AggregateGroup {
@@ -610,31 +605,30 @@ pub(crate) fn execute_aggregate_query(
 
                 // Resolve argument value: entity fast path first, then record.
                 let val = if let Some(kind) = agg_arg_kinds.get(proj_idx).and_then(|k| k.as_ref()) {
-                    super::filter_compiled::resolve_kind(kind, entity)
-                        .map(|v| v.into_owned())
-                        .or_else(|| {
-                            get_or_make_record!().and_then(|rec| {
-                                resolve_aggregate_argument_value(db, args.first(), rec)
-                            })
-                        })
+                    match super::filter_compiled::resolve_kind(kind, entity) {
+                        Some(value) => Some(value.into_owned()),
+                        None => match get_or_make_record!() {
+                            Some(record) => {
+                                resolve_aggregate_argument_value(db, args.first(), record)?
+                            }
+                            None => continue,
+                        },
+                    }
                 } else {
                     match get_or_make_record!() {
-                        Some(rec) => resolve_aggregate_argument_value(db, args.first(), rec),
+                        Some(rec) => resolve_aggregate_argument_value(db, args.first(), rec)?,
                         None => continue,
                     }
                 };
-                let val = val.and_then(crate::runtime::execution_context::secret_query_input);
+                let val = val.map(try_secret_runtime_input).transpose()?.flatten();
                 let Some(val) = val else { continue };
                 state.accumulate(&NativeAggregateHost, slot, val);
             }
 
-            true
+            Ok(true)
         },
     )?;
 
-    if let Some(error) = predicate_error {
-        return Err(error);
-    }
     // Propagate any spill I/O error from the iteration callback
     if let Some(e) = spill_err {
         return Err(RedDBError::Query(e));
@@ -682,11 +676,11 @@ fn resolve_aggregate_argument_value(
     db: &RedDB,
     arg: Option<&Projection>,
     record: &UnifiedRecord,
-) -> Option<Value> {
+) -> RedDBResult<Option<Value>> {
     match arg {
-        Some(Projection::All) => None,
-        Some(arg) => eval_projection_value_with_db(Some(db), arg, record),
-        _ => None,
+        Some(Projection::All) => Ok(None),
+        Some(arg) => try_eval_projection_value_with_db(Some(db), arg, record),
+        _ => Ok(None),
     }
 }
 
@@ -827,29 +821,39 @@ fn resolve_group_by_value(
     db: &RedDB,
     binding: &AggregateGroupBinding,
     record: &UnifiedRecord,
-) -> Option<Value> {
+) -> RedDBResult<Option<Value>> {
     let group_expr = &binding.expression;
     if let Some((bucket_ns, timestamp_column)) =
         parse_time_bucket_group_expr(binding.key.as_deref().unwrap_or_default())
     {
-        let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
+        let Some(timestamp_ns) = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())
+        else {
+            return Ok(None);
+        };
         let bucket_start = timestamp_ns
             .checked_div(bucket_ns)
             .map(|bucket| bucket * bucket_ns)
             .unwrap_or(timestamp_ns);
-        return Some(Value::UnsignedInteger(bucket_start));
+        return Ok(Some(Value::UnsignedInteger(bucket_start)));
     }
 
     match group_expr {
         Expr::Column { field, .. } => resolve_runtime_field(record, field, None, None)
-            .and_then(crate::runtime::execution_context::secret_query_input),
+            .map(try_secret_runtime_input)
+            .transpose()
+            .map(Option::flatten),
         _ => {
-            let projection = projection_from_expr(group_expr)?;
-            let value = eval_projection_value_with_db(Some(db), &projection, record)?;
+            let Some(projection) = projection_from_expr(group_expr) else {
+                return Ok(None);
+            };
+            let Some(value) = try_eval_projection_value_with_db(Some(db), &projection, record)?
+            else {
+                return Ok(None);
+            };
             if h3_group_expr_yields_null_drop(group_expr) && matches!(value, Value::Null) {
-                None
+                Ok(None)
             } else {
-                Some(value)
+                Ok(Some(value))
             }
         }
     }

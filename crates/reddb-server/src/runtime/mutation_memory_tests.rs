@@ -106,6 +106,12 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
         "SELECT id FROM secret_inputs ORDER BY payload LIMIT 1",
         "SELECT id FROM secret_inputs ORDER BY payload DESC LIMIT 1",
         "SELECT id FROM secret_inputs WHERE payload IN ('x','y')",
+        "SELECT MIN(payload) FROM secret_inputs",
+        "SELECT COUNT(payload) FROM secret_inputs",
+        "SELECT ARRAY_AGG(payload) FROM secret_inputs",
+        "SELECT COUNT(DISTINCT payload) FROM secret_inputs",
+        "SELECT payload, COUNT(*) FROM secret_inputs GROUP BY payload",
+        "SELECT LENGTH(payload), COUNT(*) FROM secret_inputs GROUP BY LENGTH(payload)",
     ] {
         let result = runtime.execute_query(query);
         let error = result.expect_err(query);
@@ -120,6 +126,7 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
         "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
         "SELECT COUNT(*) FROM secret_inputs WHERE payload = $1",
         "SELECT id, COUNT(*) FROM secret_inputs WHERE payload = $1 GROUP BY id",
+        "SELECT id, COUNT(*) FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
         "UPDATE secret_inputs SET id = 77 WHERE payload = $1",
         "DELETE FROM secret_inputs WHERE payload = $1",
     ] {
@@ -139,6 +146,26 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
                 assert_eq!(row.get("id"), Some(&Value::Integer(expected)));
             }
         }
+    }
+
+    for query in [
+        "SELECT COUNT(*) AS total FROM secret_inputs",
+        "SELECT SUM(CASE WHEN id > 0 THEN 1 ELSE LENGTH(payload) END) AS total FROM secret_inputs",
+        "SELECT SUM(COALESCE(1, LENGTH(payload))) AS total FROM secret_inputs",
+    ] {
+        let result = runtime
+            .execute_query(query)
+            .expect("unused secret input stays lazy");
+        let total = result.result.records[0]
+            .get("total")
+            .expect("aggregate total");
+        assert_eq!(
+            runtime
+                .try_secret_query_input(total.clone())
+                .expect("small aggregate output"),
+            Some(Value::Integer(3)),
+            "{query}"
+        );
     }
 
     runtime
@@ -176,12 +203,24 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
     for query in [
         "SELECT id FROM secret_inputs WHERE payload = $1",
         "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) AS total FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
     ] {
         let result = larger
             .execute_query_with_params(query, std::slice::from_ref(&secret))
             .expect("value fits the larger allowance");
         assert_eq!(result.result.records.len(), 3, "{query}");
     }
+    let result = larger
+        .execute_query("SELECT MIN(payload) AS minimum FROM secret_inputs")
+        .expect("aggregate input fits larger budget");
+    let minimum = result.result.records[0].get("minimum").expect("minimum");
+    assert_eq!(
+        larger
+            .try_secret_query_input(minimum.clone())
+            .expect("decode result"),
+        Some(Value::text("x".repeat(512 * 1024))),
+        "budget enforcement must retain the actual aggregate value"
+    );
 }
 
 #[test]
