@@ -191,25 +191,24 @@ pub struct BTreeCursor<P: PageStore> {
 impl<P: PageStore> BTreeCursor<P> {
     /// Inspect the next key without materializing its value or advancing.
     pub fn peek_key(&mut self) -> BTreeResult<Option<Vec<u8>>> {
-        if !self.prepare_next_leaf()? {
+        let Some(page) = self.prepare_next_leaf()? else {
             return Ok(None);
-        }
-        let page = self.pager.read_page(self.leaf_page_id)?;
+        };
         Ok(Some(read_leaf_cell(&page, self.position)?.0))
     }
 
     /// Skip a shadowed or deleted base record without reading its overflow value.
     pub fn skip_next(&mut self) -> BTreeResult<bool> {
-        if !self.prepare_next_leaf()? {
+        if self.prepare_next_leaf()?.is_none() {
             return Ok(false);
         }
         self.position += 1;
         Ok(true)
     }
 
-    fn prepare_next_leaf(&mut self) -> BTreeResult<bool> {
+    fn prepare_next_leaf(&mut self) -> BTreeResult<Option<Page>> {
         if self.leaf_page_id == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         let page = self.pager.read_page(self.leaf_page_id)?;
         if page.page_type()? != PageType::BTreeLeaf {
@@ -218,12 +217,12 @@ impl<P: PageStore> BTreeCursor<P> {
             ));
         }
         if self.position < usize::from(page.cell_count()) {
-            return Ok(true);
+            return Ok(Some(page));
         }
         let next = read_next_leaf(&page);
         if next == 0 {
             self.leaf_page_id = 0;
-            return Ok(false);
+            return Ok(None);
         }
         let next_page = self.pager.read_page(next)?;
         if next_page.page_type()? != PageType::BTreeLeaf || next_page.cell_count() == 0 {
@@ -243,7 +242,7 @@ impl<P: PageStore> BTreeCursor<P> {
         self.leaf_page_id = next;
         self.position = 0;
         self.prefetched_next = false;
-        Ok(true)
+        Ok(Some(next_page))
     }
 
     /// Read one value within the caller's materialization allowance.

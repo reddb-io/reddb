@@ -65,6 +65,34 @@ fn noise(bytes: usize) -> Vec<u8> {
 }
 
 #[test]
+fn ordered_cursor_peek_and_read_have_bounded_page_read_amplification() {
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    let rows = 2000u64;
+    for id in 1..=rows {
+        tree.insert(&id.to_be_bytes(), b"cold").expect("fixture");
+    }
+    let tree_pages = pages.pages.lock().expect("fixture lock").len();
+    let base = PagedCollection::new(tree);
+    let mut cursor = base.scan().expect("cursor");
+    pages.reads.store(0, Ordering::Relaxed);
+    for id in 1..=rows {
+        assert_eq!(cursor.peek_id().expect("peek"), Some(EntityId::new(id)));
+        let record = cursor.next_record(4).expect("bounded read").expect("row");
+        assert_eq!(record.id, EntityId::new(id));
+        assert_eq!(record.bytes, b"cold");
+    }
+    assert!(cursor.peek_id().expect("end").is_none());
+    let reads = pages.reads.load(Ordering::Relaxed);
+    let rows = usize::try_from(rows).expect("fixture row count");
+    eprintln!("ordered cursor: {reads} page reads, {rows} rows, {tree_pages} tree pages");
+    assert!(
+        reads <= 2 * rows + 4 * tree_pages,
+        "one peek and one read must not fetch a leaf three times per row: {reads} reads, {rows} rows, {tree_pages} pages"
+    );
+}
+
+#[test]
 fn raw_overflow_is_refused_before_reading_its_chain() {
     let pages = Arc::new(Pages::default());
     let tree = BTree::new(Arc::clone(&pages));
