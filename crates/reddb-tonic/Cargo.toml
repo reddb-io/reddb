@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "reddb-io-tonic"
-version = "1.27.6"
+version = "1.27.7"
 authors = ["Lucio Franco <luciofranco14@gmail.com>"]
 build = false
 exclude = ["benches-disabled"]
