@@ -4,6 +4,40 @@ use crate::json::Value as JsonValue;
 use crate::storage::{UnifiedStore, UnifiedStoreConfig};
 use std::time::Instant;
 
+fn sql_projection(result: &crate::storage::query::unified::UnifiedResult) -> JsonValue {
+    let rendered = crate::presentation::query_result_json::unified_result_json_with_records(
+        result,
+        &result.records,
+    );
+    // The independent SQL reference contains each HTTP record's complete
+    // projected values map, not its multimodel envelope. Preserve every field
+    // and use the same transport round trip to normalize JSON numbers.
+    let rows = JsonValue::Array(
+        rendered["records"]
+            .as_array()
+            .expect("rendered records")
+            .iter()
+            .map(|record| record["values"].clone())
+            .collect(),
+    );
+    crate::json::from_str(&rows.to_string_compact()).expect("rendered SQL values")
+}
+
+#[test]
+fn historical_sql_reference_matches_projected_http_values() {
+    let runtime = crate::runtime::RedDBRuntime::with_options(
+        crate::api::RedDBOptions::in_memory().with_memory_budget(64 * 1024 * 1024),
+    )
+    .expect("reference-format runtime");
+    let result = runtime
+        .execute_query("SELECT 178120 AS n, 'reference' AS id, NULL AS optional")
+        .expect("reference projection");
+    let expected: JsonValue =
+        crate::json::from_str(r#"[{"n":178120,"id":"reference","optional":null}]"#)
+            .expect("independent flat SQL reference");
+    assert_eq!(sql_projection(&result.result), expected);
+}
+
 #[test]
 #[ignore = "requires an owned historical copy, independent SQL results and an external cgroup limit"]
 fn complete_runtime_historical_copy_preserves_sql_results() {
@@ -51,14 +85,7 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             let result = runtime
                 .execute_query(case["sql"].as_str().expect("SQL"))
                 .expect("historical SQL succeeds");
-            let actual = crate::presentation::query_result_json::unified_result_json_with_records(
-                &result.result,
-                &result.result.records,
-            );
-            // Match the representation captured through the actual HTTP API,
-            // including a JSON round trip for its numeric representation.
-            let actual: JsonValue = crate::json::from_str(&actual["records"].to_string_compact())
-                .expect("rendered records");
+            let actual = sql_projection(&result.result);
             assert_eq!(actual, case["rows"], "pass {pass}, {}", case["name"]);
             eprintln!(
                 "runtime qualification phase=query pass={pass} name={} elapsed_ms={}",
