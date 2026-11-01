@@ -93,7 +93,9 @@ pub(super) fn show_indexes_snapshot(
                     ),
                     Value::text(render_index_method_for_ddl(index.method)),
                     Value::Boolean(index.unique),
-                    Value::UnsignedInteger(entries_indexed),
+                    entries_indexed
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
                 ],
             ));
         }

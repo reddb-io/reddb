@@ -115,11 +115,43 @@ tree handles. Reopen retains O(indexes) descriptors; a seek reads O(tree height 
 matching postings). The primary-key preparation still has its separate pass.
 This is not a measured boot/maintenance claim or global memory admission.
 
-The runtime HASH/BTREE providers **still use resident maps**. Connecting them
-requires canonical key codecs (including oversized/composite keys), full-key
-verification for hashed candidates, snapshot-aware UNIQUE, WAL-overlay merging,
-fallible query call sites and checkpoint rebasing. This foundation deliberately
-does not activate a provider whose candidates would miss pending writes.
+## Runtime HASH integration (2026-11-01)
+
+The opt-in cold runtime installs HASH providers with immutable definition/schema
+fingerprints instead of resident posting maps. Restore registers all projectors
+before a shared checkpoint builds missing roots; a compatible prepared root is
+reused. Standalone BTREE/H3/bitmap providers and BTREE equality pockets remain
+resident and still perform their existing restoration passes.
+
+HASH seeks use a SHA-256 projection of the historical canonical key encoding,
+then verify the complete raw key against current physical source rows. Composite
+and debug-encoded keys have a preflight expansion bound before allocation. The
+publication fence covers native-root capture, source recheck and the resident
+WAL overlay. Physical deletions/replacements mask old candidates, and in-place
+sorting removes duplicate physical IDs without a second HashSet. Snapshot-aware
+UNIQUE admission still distinguishes active, aborted and superseded versions;
+its source re-read is now fallible and owns decode scratch.
+
+Lookups start with a 64-KiB decode/candidate allowance and retry larger rows or
+posting lists with admitted geometric growth up to the configured ceiling.
+Candidate vectors are bounded and admitted before allocation. Their reservation
+travels with the result and its consuming iterator. Exhaustion produces an error,
+never an incomplete successful list. Missing/incompatible roots use a fallible
+source scan until checkpoint publication. I/O failures in the selected HASH path
+propagate through SELECT, DML, UNIQUE and the binary wire response. Legacy IN
+unions and sorted/bitmap intersections that cannot retain an owned allocation
+skip the paged optimization; these paths still need an admitted streaming design.
+Catalog entry counts are NULL for paged HASH until exact cardinality is persisted;
+an unknown count is not reported as zero.
+
+Resource sketch: retained HASH metadata is O(index definitions), lookup scratch
+and candidates share the runtime budget, and lookup work is O(tree height +
+matching physical postings + resident overlay). Publication currently serializes
+this lookup with checkpoint/mutation; its latency impact still needs measurement.
+Explicit CREATE INDEX still stages its existing resident construction before
+installing the paged provider, so that transient peak is not solved by this slice.
+This integration does not enable the managed factory or establish the global
+server/transport memory ceiling, boot target, or STG qualification.
 
 ## Required acceptance gates
 

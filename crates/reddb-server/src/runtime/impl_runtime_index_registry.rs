@@ -232,7 +232,13 @@ impl RedDBRuntime {
         store
             .insert_auto(RUNTIME_INDEX_REGISTRY_COLLECTION, entity)
             .map(|_| ())
-            .map_err(|err| RedDBError::Internal(format!("{err:?}")))
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
+        if index.method == super::index_store::IndexMethodKind::Hash
+            && store.config().resident_memory_bytes_max.is_some()
+        {
+            self.prepare_paged_hash(&index, self.index_store_ref())?;
+        }
+        Ok(())
     }
 
     pub(crate) fn persist_runtime_index_drop(
@@ -271,17 +277,26 @@ impl RedDBRuntime {
         store
             .insert_auto(RUNTIME_INDEX_REGISTRY_COLLECTION, entity)
             .map(|_| ())
-            .map_err(|err| RedDBError::Internal(format!("{err:?}")))
+            .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
+        store.unregister_secondary_index(collection, name);
+        Ok(())
     }
 
-    fn reserve_index_scan(
+    pub(super) fn reserve_index_scan(
         &self,
         manager: &crate::storage::unified::SegmentManager,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
-        let mut read_bytes_max =
-            usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
-                .unwrap_or(usize::MAX)
-                .max(1);
+        let read_bytes_max = usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        self.reserve_index_scan_with_limit(manager, read_bytes_max)
+    }
+
+    pub(super) fn reserve_index_scan_with_limit(
+        &self,
+        manager: &crate::storage::unified::SegmentManager,
+        mut read_bytes_max: usize,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
         // Decode, indexed projection and descriptor reduction share this owned
         // scratch. Resident-only visitors borrow rows already charged to the
         // arena. Disk-backed visitors also retain overlay identities; reserve
@@ -322,9 +337,9 @@ impl RedDBRuntime {
         }
     }
 
-    /// Two bounded passes: estimate the final resident indexes, admit their
-    /// growth, then build privately. Failure never publishes an incomplete index.
-    /// This is still a resident secondary-index provider, not lazy disk indexing.
+    /// Install paged HASH descriptors without hydrating postings. Remaining
+    /// resident providers use two bounded passes: estimate/admit, then build
+    /// privately. Failure never publishes an incomplete runtime collection.
     fn restore_index_collection(
         &self,
         collection: &str,
@@ -338,7 +353,21 @@ impl RedDBRuntime {
             (registered.len() as u64).saturating_mul(4096),
         )?;
         let prepared = super::index_store::IndexStore::new();
+        let mut resident = false;
         for index in registered {
+            if index.method == super::index_store::IndexMethodKind::Hash
+                && self
+                    .db()
+                    .store()
+                    .config()
+                    .resident_memory_bytes_max
+                    .is_some()
+            {
+                self.prepare_paged_hash(&index, &prepared)?;
+                prepared.register(index);
+                continue;
+            }
+            resident = true;
             prepared
                 .create_index(
                     &index.name,
@@ -354,6 +383,12 @@ impl RedDBRuntime {
                 )
                 .map_err(RedDBError::Internal)?;
             prepared.register(index);
+        }
+        if !resident {
+            self.inner
+                .index_store
+                .replace_collection_from(collection, prepared);
+            return Ok(());
         }
         let columns = prepared.indexed_columns_set_with_parents(collection);
         let mut growth = 0u64;
@@ -462,12 +497,14 @@ impl RedDBRuntime {
             return Err(error);
         }
         let mut collections = std::collections::BTreeMap::<String, Vec<_>>::new();
-        for (_, index) in latest.into_values() {
+        for ((collection, name), (_, index)) in latest {
             if let Some(index) = index {
                 collections
                     .entry(index.collection.clone())
                     .or_default()
                     .push(index);
+            } else {
+                store.unregister_secondary_index(&collection, &name);
             }
         }
         // The visitor, decoder and overlay identities are gone. Keep the
@@ -481,6 +518,9 @@ impl RedDBRuntime {
                 continue;
             };
             self.restore_index_collection(&collection, &manager, indices)?;
+        }
+        if store.config().resident_memory_bytes_max.is_some() {
+            store.checkpoint_missing_secondary_indices()?;
         }
         self.invalidate_plan_cache();
         Ok(())

@@ -1414,6 +1414,9 @@ impl IndexStore {
             }
         }
         for index in indexes {
+            if self.hash.is_paged(collection, &index.name) {
+                continue;
+            }
             for fields in rows.clone() {
                 growth = growth.saturating_add(estimate_registered_index_growth(index, fields));
             }
@@ -1447,6 +1450,7 @@ impl IndexStore {
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         indexes
+            .filter(|index| !self.hash.is_paged(collection, &index.name))
             .filter(|index| {
                 versioned
                     || index.columns.iter().any(|column| {
@@ -1630,7 +1634,7 @@ impl IndexStore {
         collection: &str,
         index_name: &str,
         key: &[u8],
-    ) -> Result<Vec<EntityId>, String> {
+    ) -> Result<crate::storage::unified::hash_index::HashCandidates, String> {
         self.hash
             .lookup(collection, index_name, key)
             .map_err(|err| err.to_string())
@@ -1740,8 +1744,11 @@ impl IndexStore {
         })
     }
 
-    pub fn entries_indexed(&self, index: &RegisteredIndex) -> u64 {
-        match index.method {
+    pub fn entries_indexed(&self, index: &RegisteredIndex) -> Option<u64> {
+        if self.hash.is_paged(&index.collection, &index.name) {
+            return None;
+        }
+        Some(match index.method {
             IndexMethodKind::Hash => self
                 .hash
                 .index_stats(&index.collection, &index.name)
@@ -1758,7 +1765,7 @@ impl IndexStore {
                 .and_then(|column| self.bitmap.index_stats(&index.collection, column).ok())
                 .map(|stats| stats.entity_count as u64)
                 .unwrap_or(0),
-        }
+        })
     }
 
     /// Collect the column-name set covered by any index on `collection`
@@ -2588,6 +2595,40 @@ pub(crate) fn hash_index_key(columns: &[String], fields: &[(String, Value)]) -> 
     }
 }
 
+/// Bound composite/debug key expansion before materializing the canonical key.
+/// A small source row may name the same large value in many indexed columns.
+pub(crate) fn bounded_hash_index_key(
+    columns: &[String],
+    fields: &[(String, Value)],
+    bytes_max: usize,
+) -> Result<Option<Vec<u8>>, crate::storage::StoreError> {
+    let mut bytes = 0u64;
+    for column in columns {
+        let Some(value) = index_field_value(fields, column) else {
+            return Ok(None);
+        };
+        if columns.len() > 1 && matches!(value.as_ref(), Value::Null) {
+            return Ok(None);
+        }
+        let component = value_to_bytes_len(value.as_ref());
+        if columns.len() > 1 && component > u32::MAX as u64 {
+            return Err(crate::storage::StoreError::Serialization(
+                "HASH component exceeds its canonical length prefix".into(),
+            ));
+        }
+        bytes = bytes
+            .saturating_add(component)
+            .saturating_add(if columns.len() > 1 { 4 } else { 0 });
+        if bytes > bytes_max as u64 {
+            return Err(crate::storage::StoreError::ReadLimitExceeded {
+                required_bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+                limit_bytes: bytes_max,
+            });
+        }
+    }
+    Ok(hash_index_key(columns, fields))
+}
+
 /// Key a standalone UNIQUE index reserves for `fields`, or `None` when the row
 /// reserves nothing. Same bytes as [`hash_index_key`], except that a NULL
 /// single column reserves no key either: a NULL never equals another NULL, as
@@ -2903,7 +2944,7 @@ mod tests {
         for index in store.list_indices("rows") {
             assert_eq!(
                 store.entries_indexed(&index),
-                1,
+                Some(1),
                 "one posting per composite index"
             );
         }

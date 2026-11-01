@@ -138,8 +138,8 @@ impl<'a> DmlTargetScan<'a> {
                     filter,
                     self.table,
                     self.runtime.index_store_ref(),
-                ) {
-                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
+                )? {
+                    return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
                 }
 
                 if let Some(ids) = query_exec::try_sorted_index_lookup(
@@ -148,7 +148,7 @@ impl<'a> DmlTargetScan<'a> {
                     self.runtime.index_store_ref(),
                     None,
                 ) {
-                    return self.recheck_index_candidates(ids, compiled_filter.as_ref());
+                    return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
                 }
             }
         }
@@ -268,7 +268,7 @@ impl<'a> DmlTargetScan<'a> {
 
     fn recheck_index_candidates(
         &self,
-        entity_ids: Vec<EntityId>,
+        entity_ids: &[EntityId],
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
     ) -> RedDBResult<Vec<EntityId>> {
         let db = self.runtime.db();
@@ -293,7 +293,7 @@ impl<'a> DmlTargetScan<'a> {
             // Decode only the current candidate, including when LIMIT stops
             // before a later unreadable row. The callback owns no manager lock.
             for id in entity_ids {
-                if let Some(entity) = manager.try_get(id, usize::MAX)? {
+                if let Some(entity) = manager.try_get(*id, usize::MAX)? {
                     if !visit(entity)? {
                         break;
                     }
@@ -301,7 +301,7 @@ impl<'a> DmlTargetScan<'a> {
             }
         } else {
             // Retain the resident batched-fetch fast path.
-            for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+            for entity in manager.get_many(entity_ids).into_iter().flatten() {
                 if !visit(entity)? {
                     break;
                 }

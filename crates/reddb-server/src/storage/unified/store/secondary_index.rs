@@ -102,6 +102,25 @@ impl UnifiedStore {
         Ok(())
     }
 
+    /// Preparation is a full ownership/checkpoint epoch, not merely a catalog
+    /// flush. Reopened compatible roots need no source scan or publication.
+    pub(crate) fn checkpoint_missing_secondary_indices(&self) -> Result<(), StoreError> {
+        let missing = {
+            let _publication = self.vault_publication_lock.lock();
+            let specs = self.secondary_index_specs.read();
+            specs.iter().any(|(collection, indices)| {
+                indices.iter().any(|(name, spec)| {
+                    self.secondary_index(collection, name, &spec.identity)
+                        .is_none()
+                })
+            })
+        };
+        if missing {
+            self.persist()?;
+        }
+        Ok(())
+    }
+
     /// Pin an immutable index only if both the data generation and definition
     /// still match. A miss requires rebuilding or a correct scan fallback.
     /// This is a physical base index: callers must merge the live WAL overlay.
@@ -138,6 +157,9 @@ impl UnifiedStore {
             .and_then(|generation| generation.secondary.remove(name))
         {
             self.retire_btree(index.tree);
+            self.resident
+                .paged_registry_dirty
+                .store(true, Ordering::Release);
         }
     }
 

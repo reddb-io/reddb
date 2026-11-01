@@ -310,7 +310,7 @@ fn try_sorted_index_lookup_leaf(
             op: CompareOp::Eq, ..
         }
         | Filter::In { .. } => try_sorted_index_lookup(filter, table, idx_store, limit)
-            .or_else(|| super::helpers::try_hash_eq_lookup(filter, table, idx_store)),
+            .or_else(|| super::helpers::resident_hash_eq_lookup(filter, table, idx_store)),
         other => try_sorted_index_lookup(other, table, idx_store, limit),
     }
 }

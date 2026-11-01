@@ -8,15 +8,101 @@
 //! Unique constraint is enforced at insert time when `unique = true`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
 use super::entity::EntityId;
 
+/// An owned candidate allocation. A disk provider keeps its memory reservation
+/// attached until the IDs (or their consuming iterator) have been destroyed.
+pub struct HashCandidates {
+    ids: Vec<EntityId>,
+    owner: Option<Box<dyn Send + Sync>>,
+}
+
+impl HashCandidates {
+    pub(crate) fn owned(ids: Vec<EntityId>, owner: Box<dyn Send + Sync>) -> Self {
+        Self {
+            ids,
+            owner: Some(owner),
+        }
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.ids.truncate(len);
+    }
+
+    /// Only resident providers may enter legacy unaccounted vector paths.
+    pub(crate) fn into_resident(self) -> Option<Vec<EntityId>> {
+        self.owner.is_none().then_some(self.ids)
+    }
+}
+
+impl From<Vec<EntityId>> for HashCandidates {
+    fn from(ids: Vec<EntityId>) -> Self {
+        Self { ids, owner: None }
+    }
+}
+impl std::ops::Deref for HashCandidates {
+    type Target = [EntityId];
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+impl std::fmt::Debug for HashCandidates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.ids.fmt(f)
+    }
+}
+impl PartialEq<Vec<EntityId>> for HashCandidates {
+    fn eq(&self, rhs: &Vec<EntityId>) -> bool {
+        self.ids == *rhs
+    }
+}
+impl PartialEq for HashCandidates {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.ids == rhs.ids
+    }
+}
+pub struct HashCandidateIterator {
+    ids: std::vec::IntoIter<EntityId>,
+    _owner: Option<Box<dyn Send + Sync>>,
+}
+impl Iterator for HashCandidateIterator {
+    type Item = EntityId;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ids.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.ids.size_hint()
+    }
+}
+impl ExactSizeIterator for HashCandidateIterator {}
+impl std::iter::FusedIterator for HashCandidateIterator {}
+impl IntoIterator for HashCandidates {
+    type Item = EntityId;
+    type IntoIter = HashCandidateIterator;
+    fn into_iter(self) -> Self::IntoIter {
+        HashCandidateIterator {
+            ids: self.ids.into_iter(),
+            _owner: self.owner,
+        }
+    }
+}
+
+/// The source store owns all mutations. This provider resolves physical
+/// candidates; snapshot visibility and logical uniqueness remain runtime work.
+pub(crate) trait PagedHashIndex: Send + Sync {
+    fn lookup(&self, key: &[u8]) -> Result<HashCandidates, HashIndexError>;
+    fn memory_bytes(&self) -> usize;
+}
+
 /// A single hash index on one or more columns
 pub struct HashIndex {
     /// Maps key bytes → set of entity IDs
     entries: HashMap<Vec<u8>, Vec<EntityId>>,
+    paged: Option<Arc<dyn PagedHashIndex>>,
     /// Whether this index enforces uniqueness
     pub unique: bool,
     /// Number of keys
@@ -30,6 +116,7 @@ impl HashIndex {
     pub fn new(unique: bool) -> Self {
         Self {
             entries: HashMap::new(),
+            paged: None,
             unique,
             key_count: 0,
             entry_memory_bytes: 0,
@@ -39,6 +126,9 @@ impl HashIndex {
     /// Insert a key → entity mapping.
     /// Returns `Err` if the index is unique and the key already exists.
     pub fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) -> Result<(), HashIndexError> {
+        if self.paged.is_some() {
+            return Ok(());
+        }
         let key_bytes = key.len();
         let entry = self.entries.entry(key).or_default();
         if self.unique && !entry.is_empty() {
@@ -124,7 +214,12 @@ impl HashIndex {
 
     /// Approximate memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.entry_memory_bytes
+        std::mem::size_of::<Self>()
+            + self.entry_memory_bytes
+            + self
+                .paged
+                .as_ref()
+                .map_or(0, |provider| provider.memory_bytes())
     }
 }
 
@@ -133,6 +228,13 @@ impl HashIndex {
 pub enum HashIndexError {
     /// Attempted to insert a duplicate key in a unique index
     DuplicateKey,
+    /// An authoritative disk read or memory admission failed.
+    Read(String),
+    /// A retry may reserve a larger bounded decode/candidate workspace.
+    ReadLimit {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     /// The requested index was not found in the manager registry.
     MissingIndex { collection: String, name: String },
 }
@@ -140,6 +242,14 @@ pub enum HashIndexError {
 impl std::fmt::Display for HashIndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadLimit {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "hash index read needs {required_bytes} bytes; reserved workspace is {limit_bytes}"
+            ),
+            Self::Read(message) => write!(f, "hash index read failed: {message}"),
             Self::DuplicateKey => write!(f, "duplicate key in unique hash index"),
             Self::MissingIndex { collection, name } => {
                 write!(
@@ -223,22 +333,66 @@ impl HashIndexManager {
         }
     }
 
-    /// Lookup in a named index
+    pub(crate) fn install_paged(
+        &self,
+        collection: &str,
+        name: &str,
+        provider: Arc<dyn PagedHashIndex>,
+    ) {
+        let mut index = HashIndex::new(false);
+        index.paged = Some(provider);
+        self.indices
+            .write()
+            .insert((collection.into(), name.into()), index);
+    }
+
+    pub(crate) fn is_paged(&self, collection: &str, name: &str) -> bool {
+        self.indices
+            .read()
+            .get(&(collection.into(), name.into()))
+            .is_some_and(|index| index.paged.is_some())
+    }
+
+    /// Atomically select the resident-only path. A separate `is_paged` probe
+    /// can race DDL replacement and accidentally enter disk I/O in an Option API.
+    pub(crate) fn lookup_resident(
+        &self,
+        collection: &str,
+        name: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<EntityId>>, HashIndexError> {
+        let indices = self.indices.read();
+        let index = indices
+            .get(&(collection.into(), name.into()))
+            .ok_or_else(|| HashIndexError::MissingIndex {
+                collection: collection.into(),
+                name: name.into(),
+            })?;
+        Ok(index.paged.is_none().then(|| index.get(key).to_vec()))
+    }
+
+    /// Never hold the manager lock across disk I/O or runtime admission:
+    /// mutation/publication and memory sampling acquire these locks in reverse.
     pub fn lookup(
         &self,
         collection: &str,
         index_name: &str,
         key: &[u8],
-    ) -> Result<Vec<EntityId>, HashIndexError> {
-        let indices = self.indices.read();
-        if let Some(index) = indices.get(&(collection.to_string(), index_name.to_string())) {
-            Ok(index.get(key).to_vec())
-        } else {
-            Err(HashIndexError::MissingIndex {
-                collection: collection.to_string(),
-                name: index_name.to_string(),
-            })
-        }
+    ) -> Result<HashCandidates, HashIndexError> {
+        let provider = {
+            let indices = self.indices.read();
+            let index = indices
+                .get(&(collection.into(), index_name.into()))
+                .ok_or_else(|| HashIndexError::MissingIndex {
+                    collection: collection.into(),
+                    name: index_name.into(),
+                })?;
+            match &index.paged {
+                Some(provider) => Arc::clone(provider),
+                None => return Ok(index.get(key).to_vec().into()),
+            }
+        };
+        provider.lookup(key)
     }
 
     /// Remove from a named index
@@ -275,6 +429,7 @@ impl HashIndexManager {
         let indices = self.indices.read();
         indices
             .get(&(collection.to_string(), name.to_string()))
+            .filter(|idx| idx.paged.is_none())
             .map(|idx| HashIndexStats {
                 name: name.to_string(),
                 collection: collection.to_string(),

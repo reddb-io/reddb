@@ -1013,8 +1013,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             extract_cross_index_predicates(filter, &query.table, idx_store)
         {
             if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &eq_col) {
-                if let Ok(hash_ids) =
-                    idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &eq_bytes)
+                // Unowned bitmap/set intersections remain resident-only.
+                if let Some(hash_ids) = idx_store
+                    .hash
+                    .lookup_resident(&query.table, &idx.hash_lookup_name(), &eq_bytes)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     if !hash_ids.is_empty() {
                         let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
@@ -1103,8 +1106,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let mut bitmaps: Vec<crate::storage::index::tid_bitmap::TidBitmap> = Vec::new();
         for (col, val_bytes, _val) in &eq_candidates {
             if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, col) {
-                if let Ok(ids) =
-                    idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), val_bytes)
+                if let Some(ids) = idx_store
+                    .hash
+                    .lookup_resident(&query.table, &idx.hash_lookup_name(), val_bytes)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     let mut bmp = crate::storage::index::tid_bitmap::TidBitmap::with_cap_bytes(0);
                     let _ = bmp.extend_from_iter(ids.iter().map(|e| e.raw() as u32));

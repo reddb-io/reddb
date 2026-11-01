@@ -493,59 +493,82 @@ pub(crate) fn resolve_entity_document_path(
     None
 }
 
-/// Try to resolve a simple equality filter (`WHERE col = val`) via hash index.
-///
-/// Returns `Some(entity_ids)` when:
-/// - The filter contains a simple `col = val` equality predicate
-/// - A hash index exists for that column on the given table
-/// - The lookup succeeds
-///
-/// Returns `None` when any condition isn't met — caller falls back to full scan.
-/// Only extracts the first equality predicate; compound filters with extra
-/// predicates still need post-fetch filtering.
+/// Resolve an equality via HASH. Absence permits a scan; read/admission failures
+/// are authoritative and must reach SELECT/UPDATE/DELETE unchanged.
 pub(crate) fn try_hash_eq_lookup(
     filter: &reddb_rql::ast::Filter,
     table: &str,
     idx_store: &super::super::index_store::IndexStore,
-) -> Option<Vec<crate::storage::unified::entity::EntityId>> {
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
+    hash_eq_lookup(filter, table, idx_store, false)
+}
+
+fn hash_eq_lookup(
+    filter: &reddb_rql::ast::Filter,
+    table: &str,
+    idx_store: &super::super::index_store::IndexStore,
+    resident_only: bool,
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
     use reddb_rql::ast::{FieldRef, Filter};
-
-    // `WHERE col IN (v1, v2, ...)` — one hash lookup per value, union the
-    // id sets. Cheap per-value because each lookup is O(1) in the HashMap
-    // bucket. Without this path `WHERE id IN (...)` falls through to a
-    // full scan, which is catastrophic for bulk_update batches.
     if let Filter::In { field, values } = filter {
-        let col = match field {
-            FieldRef::TableColumn { column, .. } => column.as_str(),
-            _ => return None,
+        let FieldRef::TableColumn { column, .. } = field else {
+            return Ok(None);
         };
-        let idx = idx_store.find_hash_index_for_column(table, col)?;
-        let lookup_name = idx.hash_lookup_name();
-        let mut ids = Vec::with_capacity(values.len());
+        let Some(idx) = idx_store.find_hash_index_for_column(table, column) else {
+            return Ok(None);
+        };
+        let name = idx.hash_lookup_name();
+        // The legacy IN union allocates an unowned vector. Paged indexes use
+        // the ordinary bounded source scan until that union has an owned budget.
+        let mut ids = Vec::new();
         for value in values {
-            let lookup = match value {
-                Value::Text(s) => idx_store.hash_lookup(table, lookup_name.as_ref(), s.as_bytes()),
-                Value::Integer(n) => {
-                    let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
-                }
-                Value::UnsignedInteger(n) => {
-                    let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
-                }
-                _ => return None,
-            }
-            .ok()?;
-            ids.extend(lookup);
+            let key = match value {
+                Value::Text(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_le_bytes().to_vec(),
+                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return Ok(None),
+            };
+            let Some(found) = idx_store
+                .hash
+                .lookup_resident(table, &name, &key)
+                .map_err(|error| crate::RedDBError::Internal(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            ids.extend(found);
         }
-        return Some(ids);
+        return Ok(Some(ids.into()));
     }
-
-    let (col, val_bytes) = extract_index_candidate(filter)?;
-    let idx = idx_store.find_hash_index_for_column(table, &col)?;
+    let Some((column, key)) = extract_index_candidate(filter) else {
+        return Ok(None);
+    };
+    let Some(index) = idx_store.find_hash_index_for_column(table, &column) else {
+        return Ok(None);
+    };
+    if resident_only {
+        return idx_store
+            .hash
+            .lookup_resident(table, &index.hash_lookup_name(), &key)
+            .map(|ids| ids.map(Into::into))
+            .map_err(|error| crate::RedDBError::Internal(error.to_string()));
+    }
     idx_store
-        .hash_lookup(table, idx.hash_lookup_name().as_ref(), &val_bytes)
+        .hash_lookup(table, &index.hash_lookup_name(), &key)
+        .map(Some)
+        .map_err(crate::RedDBError::Internal)
+}
+
+/// Legacy sorted intersections return unowned Vecs and cannot retain a paged
+/// reservation or propagate I/O. Do not invoke a disk provider in this path.
+pub(crate) fn resident_hash_eq_lookup(
+    filter: &reddb_rql::ast::Filter,
+    table: &str,
+    idx_store: &super::super::index_store::IndexStore,
+) -> Option<Vec<crate::storage::EntityId>> {
+    hash_eq_lookup(filter, table, idx_store, true)
         .ok()
+        .flatten()?
+        .into_resident()
 }
 
 /// Evaluate a SQL Filter directly against a UnifiedEntity without creating a

@@ -193,6 +193,58 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
 }
 
 #[test]
+fn cold_hash_indexes_do_not_retain_a_posting_map_on_reopen() {
+    let directory = tempfile::tempdir().expect("paged hash fixture");
+    let options = RedDBOptions::persistent(directory.path().join("hash.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+    seed.execute_query("CREATE TABLE paged_hash_rows (id INTEGER, email TEXT)")
+        .expect("table");
+    seed.execute_query("CREATE UNIQUE INDEX paged_email ON paged_hash_rows (email) USING HASH")
+        .expect("index");
+    for id in 1..=128 {
+        seed.execute_query_with_params(
+            "INSERT INTO paged_hash_rows (id, email) VALUES ($1, $2)",
+            &[
+                Value::Integer(id),
+                Value::text(format!("{id}-{}", "x".repeat(256))),
+            ],
+        )
+        .expect("row");
+    }
+    seed.flush().expect("seed checkpoint");
+    drop(seed);
+    for _ in 0..2 {
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold open");
+        let bytes = runtime.index_store_ref().hash.memory_bytes();
+        eprintln!("cold HASH metadata bytes: {bytes}");
+        assert!(
+            bytes < 8192,
+            "cold HASH retains {bytes} bytes for 128 postings"
+        );
+        let result = runtime
+            .execute_query_with_params(
+                "SELECT id FROM paged_hash_rows WHERE email = $1",
+                &[Value::text(format!("128-{}", "x".repeat(256)))],
+            )
+            .expect("indexed read");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("id"),
+            Some(&Value::Integer(128))
+        );
+        runtime.flush().expect("checkpoint");
+    }
+}
+
+#[test]
 fn cold_secondary_index_history_and_null_keys_survive_reopen() {
     for method in ["HASH", "BTREE"] {
         let directory = tempfile::tempdir().expect("cold index history");
