@@ -118,7 +118,8 @@ impl<P: PageStore> BTree<P> {
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
                 let (_, stored) = read_leaf_cell(&page, pos)?;
-                let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                let value =
+                    value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
                 Ok(Some(value))
             }
             SearchResult::NotFound(_) => Ok(None),
