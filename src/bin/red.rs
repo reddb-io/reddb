@@ -2148,10 +2148,8 @@ fn main() {
                 for entity in entities {
                     let mut row_obj = reddb::json::Map::new();
                     if let reddb::storage::EntityData::Row(ref row) = entity.data {
-                        if let Some(named) = &row.named {
-                            for (k, v) in named {
-                                row_obj.insert(k.clone(), v.to_json());
-                            }
+                        for (name, value) in row.iter_fields() {
+                            row_obj.insert(name.to_string(), value.to_json());
                         }
                     }
                     let mut wrapper = reddb::json::Map::new();
