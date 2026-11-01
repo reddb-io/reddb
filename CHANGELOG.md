@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.7
+
+### Patch Changes
+
+- [#2571](https://github.com/reddb-io/reddb/pull/2571) [`bc8f58e`](https://github.com/reddb-io/reddb/commit/bc8f58e83befc09264f3968b5facccc3532d9e6e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Avoid cloning already published append-only payloads during checkpoints. Preserve physical row order while materializing only new segment rows, reducing temporary memory and work under the publication fence.
+
 ## 1.27.6
 
 ### Patch Changes
