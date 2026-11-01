@@ -414,11 +414,15 @@ fn autocommit_reservations_and_replay() {
     let captured = manager.snapshot(reader);
     let later = manager.allocate_committed_xid();
     assert!(
-        later < reader,
-        "exercise an unused reserved xid below the reader"
+        later > reader,
+        "begin must retire older unused slots before a later autocommit insert"
     );
     assert!(captured.sees(first, 0));
     assert!(!captured.sees(later, 0));
+    assert!(
+        captured.sees(first, later),
+        "a later delete cannot hide the reader's preimage"
+    );
     assert!(manager.fresh_read_snapshot().sees(later, 0));
     let recovered = later + 1;
     manager.observe_committed_xid(recovered);
