@@ -20,12 +20,16 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so `changesets/action` can rewrite tags / detect
           # changes against main.
           fetch-depth: 0
+          # Tag pushes use the workflow token; the publish script dispatches
+          # release.yml explicitly instead of relying on a suppressed push event.
+          token: ${{ github.token }}
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
@@ -35,6 +39,9 @@ jobs:
         with:
           node-version: '22'
           cache: pnpm
+
+      - name: Verify tag and publisher recovery
+        run: python3 scripts/test-changesets-tag-release.py
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -56,8 +63,7 @@ jobs:
           version: pnpm release:version
           # When all changesets have been consumed (i.e. the Version Packages
           # PR has been merged) the action runs this script. We use it to push
-          # the version tag — that tag push then triggers release.yml, which
-          # owns the actual binary builds and multi-registry publish.
+          # the version tag and dispatch release.yml on that immutable ref.
           publish: bash scripts/changesets-tag-release.sh
           commit: 'chore(release): version packages'
           title: 'chore(release): version packages'
@@ -65,7 +71,7 @@ jobs:
           # that as part of the `publish-github` job once binaries are built.
           createGithubReleases: false
         env:
-          # Use a PAT so the version-bump commit pushed by this workflow
-          # can re-trigger downstream tag-driven workflows (release.yml).
-          # Falls back to GITHUB_TOKEN if no PAT is configured.
+          # A PAT lets release PR creation trigger normal PR checks. Publishing
+          # uses workflow_dispatch, which also works with the workflow token.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
