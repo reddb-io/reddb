@@ -83,20 +83,66 @@ O(dirty IDs + one decoded row), and a changed collection's checkpoint currently
 copies O(N + dirty rows) bytes. These intermediate algorithms do not establish the
 required measured boot latency or paced maintenance implementation.
 
+## Secondary-index publication foundation (2026-11-01)
+
+`UnifiedStore::register_secondary_index` registers a deterministic bounded-key
+projector for checkpoint preparation. Its identity includes an explicit codec
+version and a fingerprint of the complete definition. Checkpoint builds all
+changed projections for a collection in one bounded source pass, appends each
+physical entity ID to its projected key, and publishes secondary roots alongside
+the exact data root. Reusing a generation or definition never requires rebuilding
+that index. A changed data root without an available projector invalidates the
+index; callers must rebuild or scan, never trust the preceding generation.
+
+Catalog resume version 5 carries these descriptors. The writer fences file
+version 1.0.5 in both superblocks before building them, so older engines reject
+the file before recovery can release pages belonging to an unknown tree class.
+Files without secondary roots retain the v4 catalog representation; a file fence
+is never downgraded after DROP. Secondary roots may not alias source, key, other
+secondary or retired roots. Empty prepared generations retain their empty index
+identities on reopen.
+
+`SecondaryIndexRead` provides an immutable, fallible candidate cursor. It retains
+one leaf and a bounded key rather than materializing the entire posting list.
+The cursor independently pins retirement after its read handle is dropped.
+Checkpoint retirement, interrupted ownership recovery, DROP and definition
+replacement use the existing page-ownership protocol. A projection failure
+fences further writes until recovery and cannot publish a partial index.
+
+Resource sketch: O(N * changed indexes) compact postings are written during
+preparation, holding one decoded source row, two 1-KiB key buffers and O(indexes)
+tree handles. Reopen retains O(indexes) descriptors; a seek reads O(tree height +
+matching postings). The primary-key preparation still has its separate pass.
+This is not a measured boot/maintenance claim or global memory admission.
+
+The runtime HASH/BTREE providers **still use resident maps**. Connecting them
+requires canonical key codecs (including oversized/composite keys), full-key
+verification for hashed candidates, snapshot-aware UNIQUE, WAL-overlay merging,
+fallible query call sites and checkpoint rebasing. This foundation deliberately
+does not activate a provider whose candidates would miss pending writes.
+
 ## Required acceptance gates
 
 - Platform total process/container memory <=1 GiB, with a 768 MiB engine budget,
   including boot, concurrent query/results and maintenance peaks.
 - Hot-query p95 latency and throughput regressions <=10% on identical hardware.
-- Prepared boot <=2 seconds with node/image ready and short WAL.
+- Prepared boot p95 <=5 seconds across at least 30 opens, measured from process
+  start to the first authenticated query with volume available and conversion
+  already complete. Initial conversion uses one maintenance window per STG DB.
+- Real server tests with 1/4/16 concurrent clients and the 2,000-query workload;
+  proposed p95 point lookup <=50 ms and exact COUNT <=2 seconds.
 - Records, history, models, indexes, authentication, transaction outcomes and crash
   recovery remain intact. No retention reduction or weaker durability to pass.
 - Identical immutable artifact tested on isolated OCI Auth/Platform copies, with
   datasets 1x/4x/16x the budget, >=100 write/delete/checkpoint/drain cycles and a
   24-hour workload, before minor publication and all four STG upgrades.
+- At least 100 constant-live-data churn cycles after warmup, with allocated
+  storage growth <=64 MiB, and no skipped/corrupt data or index keys.
 
 ## Remaining implementation before activation
 
+- Connect persisted secondary trees to runtime providers and finish compact
+  MVCC-aware COUNT/scan projections without loading full row payloads.
 - Qualify prepared metadata publication against I/O failures and superblock
   fallback, then measure boot on the exact OCI artifact and full historical data.
 - All authoritative reads/scans/model/index/auth paths migrated to fallible access;

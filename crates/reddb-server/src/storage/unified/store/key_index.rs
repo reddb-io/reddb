@@ -17,11 +17,15 @@ impl UnifiedStore {
         let previous = self.key_indices.read();
         let mut next = HashMap::with_capacity(live.len());
         for (name, data) in live {
+            let secondary =
+                self.checkpoint_secondary_indices(name, data, previous.get(name), pager, limit)?;
             if let Some(index) = previous
                 .get(name)
                 .filter(|index| index.source.ptr_eq(&Arc::downgrade(data)))
             {
-                next.insert(name.clone(), index.clone());
+                let mut reused = index.clone();
+                reused.secondary = secondary;
+                next.insert(name.clone(), reused);
                 continue;
             }
             let keys = Arc::new(BTree::new(Arc::clone(pager)));
@@ -61,15 +65,18 @@ impl UnifiedStore {
                     indexed,
                     source: Arc::downgrade(data),
                     tree: keys,
+                    secondary,
                 },
             );
         }
         for (name, old) in previous.iter() {
-            if !next
-                .get(name)
-                .is_some_and(|index| Arc::ptr_eq(&index.tree, &old.tree))
-            {
-                self.retire_btree(Arc::clone(&old.tree));
+            for tree in old.trees() {
+                if !next
+                    .get(name)
+                    .is_some_and(|index| index.trees().any(|retained| Arc::ptr_eq(retained, tree)))
+                {
+                    self.retire_btree(Arc::clone(tree));
+                }
             }
         }
         Ok(next)

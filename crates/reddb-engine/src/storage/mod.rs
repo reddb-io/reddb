@@ -43,6 +43,7 @@ mod collection_key_read;
 pub mod collection_read;
 #[doc(hidden)]
 pub mod resident_store;
+pub mod secondary_index_read;
 
 pub mod error;
 #[doc(hidden)]

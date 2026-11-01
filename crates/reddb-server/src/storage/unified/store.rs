@@ -319,6 +319,7 @@ pub struct UnifiedStore {
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
+    secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
@@ -368,6 +369,7 @@ struct PublishedKeyIndex {
     indexed: bool,
     source: std::sync::Weak<BTree>,
     tree: Arc<BTree>,
+    secondary: BTreeMap<String, secondary_index::PublishedSecondaryIndex>,
 }
 
 struct RetiredBTree {
@@ -392,6 +394,7 @@ mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
 mod native_helpers;
 mod recovery_xid;
+pub mod secondary_index;
 
 pub use self::builder::EntityBuilder;
 pub(crate) use self::commit::DeferredStoreWalActions;

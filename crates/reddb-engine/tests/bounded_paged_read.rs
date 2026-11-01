@@ -65,6 +65,81 @@ fn noise(bytes: usize) -> Vec<u8> {
 }
 
 #[test]
+fn secondary_postings_cursor_is_lazy_and_pins_immutable_leaves() {
+    use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    for id in 1..=5000u64 {
+        let mut key = b"same".to_vec();
+        key.extend_from_slice(&id.to_be_bytes());
+        tree.insert(&key, &[]).expect("posting");
+    }
+    pages.reads.store(0, Ordering::Relaxed);
+    let source = Arc::new(BTree::new(Arc::clone(&pages)));
+    let index = SecondaryIndexRead::with_source(Arc::clone(&tree), Arc::clone(&source));
+    let mut cursor = index.candidates(b"same").expect("seek");
+    assert!(tree.has_retirement_readers());
+    drop(index);
+    assert_eq!(Arc::strong_count(&source), 2, "cursor pins paired data");
+    assert_eq!(cursor.next_id().expect("first"), Some(EntityId::new(1)));
+    assert!(
+        pages.reads.load(Ordering::Relaxed) <= 8,
+        "first result must not scan 5000 postings"
+    );
+    for id in 2..=5000u64 {
+        assert_eq!(cursor.next_id().expect("posting"), Some(EntityId::new(id)));
+    }
+    assert_eq!(cursor.next_id().expect("end"), None);
+    assert!(
+        pages.reads.load(Ordering::Relaxed) < 100,
+        "immutable leaves must be retained between postings"
+    );
+    drop(cursor);
+    assert_eq!(Arc::strong_count(&source), 1);
+    assert!(!tree.has_retirement_readers());
+}
+
+#[test]
+fn secondary_exact_lookup_separates_prefix_keys_and_bounds_input() {
+    use reddb_engine::storage::secondary_index_read::{
+        SecondaryIndexRead, SECONDARY_KEY_BYTES_MAX,
+    };
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    let keys = [b"".as_slice(), b"a", b"a\0", b"ab", b"ab\0", b"b"];
+    for (ordinal, key) in keys.iter().enumerate() {
+        for id in [ordinal as u64 + 1, u64::MAX - ordinal as u64] {
+            let mut posting = key.to_vec();
+            posting.extend_from_slice(&id.to_be_bytes());
+            tree.insert(&posting, &[]).expect("posting");
+        }
+    }
+    let index = SecondaryIndexRead::new(tree);
+    for (ordinal, key) in keys.iter().enumerate() {
+        let mut cursor = index.candidates(key).expect("seek");
+        assert_eq!(
+            cursor.next_id().expect("first"),
+            Some(EntityId::new(ordinal as u64 + 1))
+        );
+        assert_eq!(
+            cursor.next_id().expect("second"),
+            Some(EntityId::new(u64::MAX - ordinal as u64))
+        );
+        assert_eq!(cursor.next_id().expect("end"), None);
+    }
+    let before = pages.reads.load(Ordering::Relaxed);
+    assert!(matches!(
+        index.candidates(&vec![0; SECONDARY_KEY_BYTES_MAX + 1]),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    assert_eq!(
+        pages.reads.load(Ordering::Relaxed),
+        before,
+        "reject oversized input before I/O"
+    );
+}
+
+#[test]
 fn medium_values_pack_into_native_leaves_without_dedicated_overflow_pages() {
     const ROWS: u64 = 256;
     for length in [1025, 2048, 3072, 4096] {

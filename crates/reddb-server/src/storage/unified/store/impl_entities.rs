@@ -498,8 +498,11 @@ impl UnifiedStore {
             self.retire_btree(tree);
         }
         if let Some(index) = self.key_indices.write().remove(name) {
-            self.retire_btree(index.tree);
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
         }
+        self.secondary_index_specs.write().remove(name);
 
         self.resident
             .entity_cache

@@ -991,11 +991,21 @@ impl StoreCommitCoordinator {
             .pager
             .as_ref()
             .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
-        let format_version = if store.config.resident_memory_bytes_max.is_some() {
+        let format_version = if !store.secondary_index_specs.read().is_empty() {
+            reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+        } else if store.config.resident_memory_bytes_max.is_some() {
             reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
         } else {
             reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION
         };
+        // Dropping the final secondary tree never permits an old writer to
+        // reopen the file; its retired pages may still be reader-pinned.
+        let format_version = format_version.max(
+            pager
+                .header()
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .version,
+        );
         pager
             .fence_file_format_version(format_version)
             .map_err(|error| io::Error::other(error.to_string()))?;

@@ -467,7 +467,7 @@ impl UnifiedStore {
         for (index, entry) in retired.iter().enumerate() {
             if live
                 .values()
-                .chain(keys.values().map(|index| &index.tree))
+                .chain(keys.values().flat_map(PublishedKeyIndex::trees))
                 .any(|tree| Arc::ptr_eq(tree, &entry.tree))
             {
                 remove.insert(index);
@@ -504,7 +504,7 @@ impl UnifiedStore {
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         let readers = live
             .values()
-            .chain(keys.values().map(|index| &index.tree))
+            .chain(keys.values().flat_map(PublishedKeyIndex::trees))
             .any(|tree| tree.has_retirement_readers())
             || retired
                 .iter()
@@ -603,6 +603,19 @@ impl UnifiedStore {
                                 })
                                 .map(|index| index.tree.root_page_id())
                         }),
+                        secondary_indices: tree
+                            .and_then(|tree| {
+                                keys.get(name)
+                                    .filter(|index| index.source.ptr_eq(&Arc::downgrade(tree)))
+                            })
+                            .map(|index| {
+                                index
+                                    .secondary
+                                    .iter()
+                                    .map(|(name, index)| (name.clone(), index.resume()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                 );
             }
@@ -986,6 +999,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
+            secondary_index_specs: RwLock::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
@@ -1089,6 +1103,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
+            secondary_index_specs: RwLock::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
@@ -1345,11 +1360,12 @@ impl UnifiedStore {
         // `<data>-meta` shadow when page 1 itself is corrupted.
         if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
-            let prepared = pager
+            let file_version = pager
                 .header()
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                .version
-                >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION;
+                .version;
+            let prepared =
+                file_version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION;
             let resume = if prepared {
                 reddb_file::native_resume::decode_catalog_resume(content)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?
@@ -1357,6 +1373,34 @@ impl UnifiedStore {
                 None
             };
             if let Some(resume) = &resume {
+                for state in resume.collections.values() {
+                    if !state.secondary_indices.is_empty()
+                        && file_version < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+                    {
+                        return Err(page_integrity(
+                            1,
+                            None,
+                            "secondary roots require the file format fence",
+                        ));
+                    }
+                    for root in std::iter::once(state.root_page)
+                        .chain(state.key_index_root)
+                        .chain(
+                            state
+                                .secondary_indices
+                                .values()
+                                .map(|index| index.root_page),
+                        )
+                    {
+                        if root >= page_count {
+                            return Err(page_integrity(
+                                root,
+                                None,
+                                "published root exceeds the database page count",
+                            ));
+                        }
+                    }
+                }
                 self.resident
                     .next_entity_id
                     .fetch_max(resume.entity_id_next, Ordering::SeqCst);
@@ -1426,7 +1470,7 @@ impl UnifiedStore {
                         manager.restore_sequence_id_next(counters.sequence_id_next);
                     }
                     // Load B-tree with root page if it exists
-                    if root_page > 0 {
+                    if root_page > 0 || counters.is_some() {
                         let btree = BTree::with_root(Arc::clone(pager), root_page);
 
                         // Load all entities from B-tree into the collection
@@ -1507,11 +1551,20 @@ impl UnifiedStore {
                         let key_tree = counters
                             .and_then(|state| state.key_index_root)
                             .map(|root| Arc::new(BTree::with_root(Arc::clone(pager), root)));
-                        if counters.is_some() {
+                        if let Some(counters) = counters {
                             self.key_indices.write().insert(
                                 name.clone(),
                                 PublishedKeyIndex {
                                     indexed: key_tree.is_some(),
+                                    secondary: counters.secondary_indices.iter().map(|(name, index)| {
+                                        (name.clone(), super::secondary_index::PublishedSecondaryIndex {
+                                            identity: super::secondary_index::SecondaryIndexIdentity {
+                                                codec_version: index.codec_version,
+                                                definition: index.definition,
+                                            },
+                                            tree: Arc::new(BTree::with_root(Arc::clone(pager), index.root_page)),
+                                        })
+                                    }).collect(),
                                     source: Arc::downgrade(&btree),
                                     tree: key_tree.clone().unwrap_or_else(|| {
                                         Arc::new(BTree::with_root(Arc::clone(pager), 0))
@@ -1606,12 +1659,19 @@ impl UnifiedStore {
                 }
                 let retired = reddb_file::decode_native_paged_retired_trees(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
-                let live_roots: std::collections::HashSet<_> = self
+                let mut live_roots: std::collections::HashSet<_> = self
                     .btree_indices
                     .read()
                     .values()
                     .map(|tree| tree.root_page_id())
                     .collect();
+                live_roots.extend(
+                    self.key_indices
+                        .read()
+                        .values()
+                        .flat_map(PublishedKeyIndex::trees)
+                        .map(|tree| tree.root_page_id()),
+                );
                 for root in retired {
                     if live_roots.contains(&root)
                         || root
@@ -1922,6 +1982,13 @@ impl UnifiedStore {
             std::process::exit(183);
         }
         let rebuilt_keys = self.checkpoint_key_indices(pager, &rebuilt_indices)?;
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD").is_some() {
+            pager
+                .sync()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            std::process::exit(196);
+        }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
 
         #[cfg(test)]
