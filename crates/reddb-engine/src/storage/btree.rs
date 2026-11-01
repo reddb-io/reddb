@@ -505,6 +505,10 @@ mod btree_impl;
 #[path = "btree/reclaim.rs"]
 mod reclaim;
 
+#[cfg(test)]
+#[path = "btree/read_budget_tests.rs"]
+mod read_budget_tests;
+
 #[path = "btree/lehman_yao.rs"]
 pub mod lehman_yao;
 
