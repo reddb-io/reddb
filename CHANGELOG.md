@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.8
+
+### Patch Changes
+
+- [#2573](https://github.com/reddb-io/reddb/pull/2573) [`995dcaf`](https://github.com/reddb-io/reddb/commit/995dcaf1c52637a29d99369bda5439363acea2d1) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Hash checkpoint metadata without materializing payload-sized strings, preserving the existing root values. Prevent legacy paged metadata reconciliation from resurrecting dropped collections' derived index descriptors, and reclaim historical descriptors only when roots, contracts and removal history confirm the drop. Preserve unrelated orphan and global descriptors for diagnosis.
+
 ## 1.27.7
 
 ### Patch Changes
