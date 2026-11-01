@@ -686,17 +686,21 @@ impl RedDB {
             let Some(manager) = self.store.get_collection(&contract.name) else {
                 continue;
             };
-            let mut entities = manager.query_all(|_| true);
-            entities.sort_by_key(|entity| entity.id.raw());
             let published_rows = manifest.append_only_published_rows(&contract.name)?;
-            if published_rows >= entities.len() as u64 {
+            // The caller fences mutations. Retain the same physical ID order,
+            // but materialize only the unpublished tail, not its old payloads.
+            let entity_count = manager.count();
+            if published_rows >= entity_count as u64 {
+                continue;
+            }
+            let offset = usize::try_from(published_rows)
+                .expect("invariant: published prefix is below the entity count");
+            let (_, entities) = manager.page_in_id_order(offset, entity_count - offset);
+            if entities.is_empty() {
                 continue;
             }
             let next_segment_id = manifest.next_append_only_segment_id(&contract.name)?;
-            let segment_entities = entities
-                .iter()
-                .skip(published_rows as usize)
-                .collect::<Vec<_>>();
+            let segment_entities = entities.iter().collect::<Vec<_>>();
             let (retention_min_ms, retention_max_ms) =
                 append_only_retention_bounds(&contract, &segment_entities);
             let rows = segment_entities
@@ -1479,6 +1483,100 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
 
 thread_local! {
     static QUALIFICATION_DISK_RESIDENCY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+mod append_only_publication_tests {
+    use super::*;
+    use crate::storage::RowData;
+
+    #[test]
+    fn already_published_append_only_checkpoint_does_not_clone_payloads() {
+        let directory = tempfile::tempdir().expect("checkpoint fixture");
+        let path = directory.path().join("append-only-memory.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE checkpoint_events (id INTEGER, payload BLOB) APPEND ONLY")
+            .expect("append-only table");
+        let store = runtime.db().store();
+        let manager = store.get_collection("checkpoint_events").expect("source");
+        let schema = Arc::new(vec!["id".into(), "payload".into()]);
+        for id in 1..=16 {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(1000 + id),
+                "checkpoint_events",
+                id,
+                Vec::new(),
+            );
+            entity.data = EntityData::Row(RowData {
+                columns: vec![
+                    Value::Integer(id as i64),
+                    Value::Blob(vec![id as u8; 128 * 1024]),
+                ],
+                named: None,
+                schema: Some(Arc::clone(&schema)),
+            });
+            manager.insert(entity).expect("source row");
+        }
+        runtime.flush().expect("initial durable segment");
+        let manifest = reddb_file::OperationalManifest::for_db_path(&path);
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("published count"),
+            16
+        );
+
+        let _publication = store.vault_publication_lock.lock();
+        let (result, unchanged_allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.db().publish_append_only_segments(&path)
+            });
+        result.expect("unchanged publication succeeds");
+        assert!(
+            unchanged_allocations.allocated_bytes < 256 * 1024,
+            "already published payloads must stay borrowed: {unchanged_allocations:?}"
+        );
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("same published count"),
+            16
+        );
+        assert_eq!(manager.count(), 16);
+
+        let mut tail =
+            UnifiedEntity::table_row(EntityId::new(1017), "checkpoint_events", 17, Vec::new());
+        tail.data = EntityData::Row(RowData {
+            columns: vec![Value::Integer(17), Value::Blob(vec![17; 32])],
+            named: None,
+            schema: Some(Arc::clone(&schema)),
+        });
+        manager.insert(tail).expect("new unpublished row");
+        let (result, allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.db().publish_append_only_segments(&path)
+            });
+        result.expect("tail publication succeeds");
+        assert!(
+            allocations.allocated_bytes < 256 * 1024,
+            "tail publication must not clone previously published payloads: {allocations:?}"
+        );
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("tail included"),
+            17
+        );
+        eprintln!(
+            "append-only publication allocation bytes: unchanged={} tail={}",
+            unchanged_allocations.allocated_bytes, allocations.allocated_bytes
+        );
+    }
 }
 
 #[cfg(test)]
