@@ -3288,3 +3288,124 @@ mod bounded_spill_decode_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod streaming_group_memory_tests {
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+    use crate::storage::{EntityData, EntityId, UnifiedEntity};
+    use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
+
+    fn grouped_runtime() -> RedDBRuntime {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
+            .expect("in-memory aggregate fixture");
+        runtime
+            .execute_query("CREATE TABLE grouped_rows (cohort INTEGER, amount INTEGER)")
+            .expect("declared aggregate schema");
+        let fields = vec!["cohort".to_string(), "amount".to_string()];
+        runtime
+            .db()
+            .store()
+            .bulk_insert(
+                "grouped_rows",
+                (0..8192)
+                    .map(|_| {
+                        let mut entity =
+                            UnifiedEntity::table_row(EntityId::new(0), "grouped_rows", 0, vec![]);
+                        entity.data =
+                            EntityData::Row(crate::storage::unified::entity::RowData::with_names(
+                                vec![Value::Integer(1), Value::Integer(2)],
+                                fields.clone(),
+                            ));
+                        entity
+                    })
+                    .collect(),
+            )
+            .expect("aggregate input rows");
+        runtime
+    }
+
+    #[test]
+    fn group_by_one_group_does_not_buffer_every_input_row() {
+        let runtime = grouped_runtime();
+        runtime
+            .execute_query("SET CONFIG stream.executor.max_materialized_rows = 1")
+            .expect("existing group remains admissible at the ceiling");
+        let (result, allocation) = measure_allocations(|| {
+            runtime.execute_query(
+                "SELECT cohort, COUNT(*), SUM(amount) FROM grouped_rows GROUP BY cohort",
+            )
+        });
+        let result = result.expect("streamed grouped SQL");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("COUNT(*)"),
+            Some(&Value::Integer(8192))
+        );
+        assert_eq!(
+            result.result.records[0].get("SUM(amount)"),
+            Some(&Value::Integer(16384))
+        );
+        assert!(
+            allocation.largest_allocation_bytes <= 64 * 1024,
+            "one aggregate group must not allocate an input-sized row buffer: {allocation:?}"
+        );
+    }
+
+    #[test]
+    fn group_by_rejects_next_group_before_scanning_remaining_rows() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory())
+            .expect("in-memory group limit fixture");
+        runtime
+            .execute_query("CREATE TABLE grouped_many (cohort INTEGER)")
+            .expect("declared group schema");
+        for id in 0..25 {
+            runtime
+                .execute_query(&format!("INSERT INTO grouped_many (cohort) VALUES ({id})"))
+                .expect("group row");
+        }
+        runtime
+            .execute_query("SET CONFIG stream.executor.max_materialized_rows = 10")
+            .expect("group ceiling");
+        let error = runtime
+            .execute_query("SELECT cohort, COUNT(*) FROM grouped_many GROUP BY cohort")
+            .expect_err("reject the first group beyond the ceiling");
+        match error {
+            crate::RedDBError::MaterializationLimitExceeded {
+                executor,
+                limit,
+                current,
+            } => {
+                assert_eq!(executor, "aggregation");
+                assert_eq!(limit, 10);
+                assert_eq!(
+                    current, 11,
+                    "stop admitting groups at the ceiling, not after the full scan"
+                );
+            }
+            other => panic!("expected materialization limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interrupted_group_scan_does_not_return_or_cache_partial_aggregates() {
+        let runtime = grouped_runtime();
+        let sql = "SELECT cohort, COUNT(*) FROM grouped_rows GROUP BY cohort";
+        {
+            let _budget = crate::runtime::function_budget::Scope::enter(256, 10_000)
+                .expect("bounded scan work");
+            let error = runtime
+                .execute_query(sql)
+                .expect_err("abort a partial aggregate");
+            assert!(error.to_string().contains("work_max"), "{error}");
+        }
+        let result = runtime
+            .execute_query(sql)
+            .expect("retry after budget cleanup");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("COUNT(*)"),
+            Some(&Value::Integer(8192))
+        );
+    }
+}

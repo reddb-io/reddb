@@ -53,6 +53,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 pub(crate) struct AllocationCount {
     pub(crate) allocs: usize,
     pub(crate) allocated_bytes: usize,
+    pub(crate) largest_allocation_bytes: usize,
     deallocs: usize,
 }
 
@@ -60,6 +61,7 @@ struct AllocationCounter {
     enabled: Cell<bool>,
     allocs: Cell<usize>,
     allocated_bytes: Cell<usize>,
+    largest_allocation_bytes: Cell<usize>,
     deallocs: Cell<usize>,
 }
 
@@ -69,6 +71,7 @@ impl AllocationCounter {
             enabled: Cell::new(false),
             allocs: Cell::new(0),
             allocated_bytes: Cell::new(0),
+            largest_allocation_bytes: Cell::new(0),
             deallocs: Cell::new(0),
         }
     }
@@ -76,6 +79,8 @@ impl AllocationCounter {
     fn record_alloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.allocs.set(self.allocs.get() + 1);
+            self.largest_allocation_bytes
+                .set(self.largest_allocation_bytes.get().max(bytes));
             self.allocated_bytes
                 .set(self.allocated_bytes.get().saturating_add(bytes));
         }
@@ -94,6 +99,7 @@ impl AllocationCounter {
         );
         self.allocs.set(0);
         self.allocated_bytes.set(0);
+        self.largest_allocation_bytes.set(0);
         self.deallocs.set(0);
     }
 
@@ -101,6 +107,7 @@ impl AllocationCounter {
         let count = AllocationCount {
             allocs: self.allocs.get(),
             allocated_bytes: self.allocated_bytes.get(),
+            largest_allocation_bytes: self.largest_allocation_bytes.get(),
             deallocs: self.deallocs.get(),
         };
         self.enabled.set(false);

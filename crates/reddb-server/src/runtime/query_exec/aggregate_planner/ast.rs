@@ -58,13 +58,14 @@ pub struct AggregateQueryAst {
     pub aggregates: Vec<AggregateExpr>,
 }
 
-/// Errors the planner surfaces for inputs it cannot handle. The
-/// dispatch site treats any of these as "fall back to the legacy
-/// path".
+/// Planning and admission errors. The dispatcher propagates them; a rejected
+/// group must not retry through an unbounded fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
     /// Aggregate list is empty — at least one expression is required.
     NoAggregates,
+    /// The next distinct group would exceed the configured output ceiling.
+    GroupLimitExceeded { limit: usize, current: usize },
     /// Output name collision (duplicate column name in the AST).
     DuplicateOutputName(String),
     /// Aggregate references an input slot that the scan iterator
@@ -75,6 +76,7 @@ pub enum PlanError {
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PlanError::GroupLimitExceeded { limit, current } => write!(f, "aggregate group count {current} exceeds limit {limit}"),
             PlanError::NoAggregates => write!(f, "aggregate plan has no aggregates"),
             PlanError::DuplicateOutputName(n) => write!(f, "duplicate aggregate output name: {n}"),
             PlanError::InputIndexOutOfRange { aggregate, index } => write!(

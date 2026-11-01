@@ -17,48 +17,68 @@ use std::collections::HashSet;
 
 use super::accumulator::GroupAccumulator;
 use super::ast::{AggregateOp, AggregateQueryAst, PlanError};
-use super::scan::{AggregateRow, AggregateRowStream, ScanIterator};
+use super::scan::{AggregateRow, AggregateRowStream, ScanIterator, ScanRow};
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
-/// Push-down GROUP BY planner — see module header.
-pub struct AggregateQueryPlanner;
+/// Push-down GROUP BY accumulator. Retains one state per group, not per input.
+pub struct AggregateQueryPlanner<'a> {
+    ast: &'a AggregateQueryAst,
+    groups: HashMap<GroupKey, (Value, GroupAccumulator)>,
+    groups_max: usize,
+}
 
-impl AggregateQueryPlanner {
-    /// Plan a GROUP BY query against the supplied scan iterator.
-    /// Returns a stream of one row per distinct group with the
-    /// configured aggregates evaluated.
-    pub fn plan<S: ScanIterator>(
-        ast: &AggregateQueryAst,
-        mut scan: S,
-    ) -> Result<AggregateRowStream, PlanError> {
+impl<'a> AggregateQueryPlanner<'a> {
+    pub fn new(ast: &'a AggregateQueryAst, groups_max: usize) -> Result<Self, PlanError> {
         validate_ast(ast)?;
+        Ok(Self {
+            ast,
+            groups: HashMap::new(),
+            groups_max,
+        })
+    }
 
-        // Per-group state. Keyed on canonical encoding of the
-        // GROUP BY value — `Value` itself is not `Eq` for floats
-        // and generally messy to use as a key.
-        let mut groups: HashMap<GroupKey, (Value, GroupAccumulator)> = HashMap::new();
+    /// Fold an input immediately. Reject a new group before allocating its
+    /// accumulator, so a cardinality ceiling stops the source scan itself.
+    pub fn push(&mut self, row: ScanRow) -> Result<(), PlanError> {
+        let key = canonical_group_key(&row.group_key);
+        let count_next = self.groups.len().saturating_add(1);
+        let entry = match self.groups.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if count_next > self.groups_max {
+                    return Err(PlanError::GroupLimitExceeded {
+                        limit: self.groups_max,
+                        current: count_next,
+                    });
+                }
+                entry.insert((row.group_key, GroupAccumulator::new(&self.ast.aggregates)))
+            }
+        };
+        entry.1.accumulate(&self.ast.aggregates, &row.agg_inputs);
+        Ok(())
+    }
 
-        while let Some(row) = scan.next_row() {
-            let key = canonical_group_key(&row.group_key);
-            let entry = groups.entry(key).or_insert_with(|| {
-                (
-                    row.group_key.clone(),
-                    GroupAccumulator::new(&ast.aggregates),
-                )
-            });
-            entry.1.accumulate(&ast.aggregates, &row.agg_inputs);
-        }
-
-        let mut emitted = Vec::with_capacity(groups.len());
-        for (_, (group_value, acc)) in groups {
-            let aggregate_values = acc.finalize();
+    pub fn finish(self) -> AggregateRowStream {
+        let mut emitted = Vec::with_capacity(self.groups.len());
+        for (_, (group_value, acc)) in self.groups {
             emitted.push(AggregateRow {
                 group_key: group_value,
-                aggregate_values,
+                aggregate_values: acc.finalize(),
             });
         }
+        AggregateRowStream::from_rows(emitted)
+    }
 
-        Ok(AggregateRowStream::from_rows(emitted))
+    /// Iterator adapter for callers whose source is already pull-based.
+    pub fn plan<S: ScanIterator>(
+        ast: &'a AggregateQueryAst,
+        mut scan: S,
+    ) -> Result<AggregateRowStream, PlanError> {
+        let mut planner = Self::new(ast, usize::MAX)?;
+        while let Some(row) = scan.next_row() {
+            planner.push(row)?;
+        }
+        Ok(planner.finish())
     }
 }
 

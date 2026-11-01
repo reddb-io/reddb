@@ -35,6 +35,13 @@ Executor workspaces, legacy raw runtime results, presentation trees, streaming
 responses and encoded non-HTTP outputs still require their own owned admission;
 this accounting alone does not establish a process-wide memory ceiling.
 
+Single-column push-down GROUP BY folds inputs during the physical scan instead
+of retaining an input-row vector. Its materialized-group ceiling is captured
+once per query and rejects the first excess group before allocating that group's
+accumulator. Scan failures discard partial aggregates. Group keys, aggregate
+values and final result buffers still require shared byte-budget admission;
+a group-count ceiling alone is not a process-wide RAM guarantee.
+
 On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
 every five seconds. At 75% of a finite controller limit it asks the allocator to
 return already free pages to the OS. This complements logical pool reclamation;
