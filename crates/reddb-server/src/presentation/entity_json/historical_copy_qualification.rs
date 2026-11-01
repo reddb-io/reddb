@@ -4,6 +4,136 @@ use crate::json::Value as JsonValue;
 use crate::storage::{UnifiedStore, UnifiedStoreConfig};
 use std::time::Instant;
 
+/// Phase-boundary observations only; no per-row instrumentation. CPU is scoped
+/// to the qualifier's cgroup, while I/O counters belong to the test process.
+#[derive(Default)]
+struct PhaseResources {
+    cpu_usage_us: Option<u64>,
+    read_bytes: Option<u64>,
+    read_chars: Option<u64>,
+    read_calls: Option<u64>,
+    write_bytes: Option<u64>,
+}
+
+impl PhaseResources {
+    fn capture() -> Self {
+        Self::parse(
+            std::fs::read_to_string("/sys/fs/cgroup/cpu.stat")
+                .ok()
+                .as_deref(),
+            std::fs::read_to_string("/proc/self/io").ok().as_deref(),
+        )
+    }
+
+    fn parse(cpu: Option<&str>, io: Option<&str>) -> Self {
+        Self {
+            cpu_usage_us: cpu.and_then(|text| resource_counter(text, "usage_usec")),
+            read_bytes: io.and_then(|text| resource_counter(text, "read_bytes")),
+            read_chars: io.and_then(|text| resource_counter(text, "rchar")),
+            read_calls: io.and_then(|text| resource_counter(text, "syscr")),
+            write_bytes: io.and_then(|text| resource_counter(text, "write_bytes")),
+        }
+    }
+
+    fn delta(&self, after: &Self) -> JsonValue {
+        let difference = |before: Option<u64>, after: Option<u64>| {
+            before
+                .zip(after)
+                .and_then(|(before, after)| after.checked_sub(before))
+                .map(|value| {
+                    i64::try_from(value)
+                        .map(JsonValue::Integer)
+                        .unwrap_or_else(|_| JsonValue::Decimal(value.to_string()))
+                })
+                .unwrap_or(JsonValue::Null)
+        };
+        crate::json::json!({
+            "cgroup_cpu_usage_us": difference(self.cpu_usage_us, after.cpu_usage_us),
+            "process_read_bytes": difference(self.read_bytes, after.read_bytes),
+            "process_read_chars": difference(self.read_chars, after.read_chars),
+            "process_read_calls": difference(self.read_calls, after.read_calls),
+            "process_write_bytes": difference(self.write_bytes, after.write_bytes),
+        })
+    }
+
+    fn report(&self, step: &str, pass: usize, name: &str) {
+        let after = Self::capture();
+        eprintln!("runtime qualification phase=resources step={step} pass={pass} name={name:?} counters={}",
+            self.delta(&after).to_string_compact());
+    }
+}
+
+fn resource_counter(text: &str, name: &str) -> Option<u64> {
+    let mut found = None;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(key) = fields.next() else { continue };
+        if key.trim_end_matches(':') != name {
+            continue;
+        }
+        let value = fields.next()?.parse::<u64>().ok()?;
+        if fields.next().is_some() || found.replace(value).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
+#[test]
+fn historical_resource_observations_preserve_unknown_and_reset_counters() {
+    let before = PhaseResources::parse(
+        Some("usage_usec 100\nuser_usec 50\n"),
+        Some("rchar: 300\nsyscr: 10\nread_bytes: 4096\nwrite_bytes: 0\n"),
+    );
+    let after = PhaseResources::parse(
+        Some("usage_usec 160\n"),
+        Some("rchar: 300\nsyscr: 12\nread_bytes: 8192\nwrite_bytes: 4096\n"),
+    );
+    assert_eq!(
+        crate::json::from_str::<JsonValue>(&before.delta(&after).to_string_compact())
+            .expect("resource JSON"),
+        crate::json::from_str::<JsonValue>(
+            r#"{
+            "cgroup_cpu_usage_us": 60,
+            "process_read_chars": 0,
+            "process_read_calls": 2,
+            "process_read_bytes": 4096,
+            "process_write_bytes": 4096
+        }"#
+        )
+        .expect("independent counters")
+    );
+    assert_eq!(after.delta(&before)["process_read_bytes"], JsonValue::Null);
+    assert_eq!(
+        before.delta(&PhaseResources::default())["cgroup_cpu_usage_us"],
+        JsonValue::Null
+    );
+    assert_eq!(resource_counter("read_bytes: 0\n", "read_bytes"), Some(0));
+    assert_eq!(
+        resource_counter("\nread_bytes: 0\n\n", "read_bytes"),
+        Some(0)
+    );
+    let large = PhaseResources {
+        read_bytes: Some(u64::MAX),
+        ..Default::default()
+    };
+    let zero = PhaseResources {
+        read_bytes: Some(0),
+        ..Default::default()
+    };
+    let parsed: JsonValue = crate::json::from_str(&zero.delta(&large).to_string_compact())
+        .expect("lossless u64 counter");
+    assert_eq!(parsed["process_read_bytes"].as_u64(), Some(u64::MAX));
+    for invalid in [
+        "read_bytes: -1",
+        "read_bytes: bad",
+        "read_bytes: 2 extra",
+        "read_bytes: 1\nread_bytes: 2",
+    ] {
+        assert_eq!(resource_counter(invalid, "read_bytes"), None);
+    }
+}
+
 fn sql_projection(result: &crate::storage::query::unified::UnifiedResult) -> JsonValue {
     let rendered = crate::presentation::query_result_json::unified_result_json_with_records(
         result,
@@ -152,6 +282,7 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
         .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
         .expect("profile");
     for pass in 1..=2 {
+        let resources = PhaseResources::capture();
         let started = Instant::now();
         let runtime = if eager_control {
             RedDBRuntime::with_options(options.clone())
@@ -176,6 +307,7 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             started.elapsed().as_millis(),
             runtime.db().store().segment_memory_bytes(),
         );
+        resources.report("open", pass, "runtime");
         eprintln!(
             "runtime qualification phase=boot_markers pass={pass} markers={:?}",
             runtime.lifecycle().cold_start_phases().durations_ms(),
@@ -219,6 +351,7 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
         );
         for case in cases {
             runtime.invalidate_result_cache();
+            let resources = PhaseResources::capture();
             let started = Instant::now();
             let result = runtime
                 .execute_query(case["sql"].as_str().expect("SQL"))
@@ -230,7 +363,9 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
                 case["name"],
                 started.elapsed().as_millis(),
             );
+            resources.report("query", pass, case["name"].as_str().expect("case name"));
         }
+        let resources = PhaseResources::capture();
         let started = Instant::now();
         runtime.flush().expect("historical runtime checkpoint");
         eprintln!(
@@ -238,6 +373,7 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             started.elapsed().as_millis(),
             runtime.db().store().segment_memory_bytes(),
         );
+        resources.report("checkpoint", pass, "runtime");
         drop(runtime);
     }
 }
