@@ -111,6 +111,282 @@ fn complete_runtime_reopens_cold_tables_and_preserves_committed_crud() {
     assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(64)));
 }
 
+#[test]
+fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
+    let directory = tempfile::tempdir().expect("indexed cold boot fixture");
+    let options = RedDBOptions::persistent(directory.path().join("indexes.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    for sql in [
+        "CREATE TABLE cold_indexed_rows (id INTEGER, email TEXT)",
+        "CREATE UNIQUE INDEX cold_email_unique ON cold_indexed_rows (email) USING HASH",
+        "INSERT INTO cold_indexed_rows (id, email) VALUES (1, 'first@example.test')",
+        "INSERT INTO cold_indexed_rows (id, email) VALUES (2, 'second@example.test')",
+    ] {
+        seed.execute_query(sql).expect("indexed source");
+    }
+    let duplicate = "INSERT INTO cold_indexed_rows (id, email) VALUES (3, 'first@example.test')";
+    assert!(
+        seed.execute_query(duplicate).is_err(),
+        "source enforces uniqueness"
+    );
+    seed.flush().expect("indexed checkpoint");
+    drop(seed);
+    let cold = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+        RedDBRuntime::with_options(options)
+    })
+    .expect("real indexed cold constructor");
+    let registry = cold
+        .db()
+        .store()
+        .get_collection("red_index_registry")
+        .expect("persisted index registry");
+    let mut persisted = false;
+    registry
+        .try_for_each_entity(64 * 1024, |entity| {
+            if let EntityData::Row(row) = &entity.data {
+                if let Some(named) = &row.named {
+                    if named.get("name") == Some(&Value::text("cold_email_unique")) {
+                        assert_eq!(
+                            named.get("collection"),
+                            Some(&Value::text("cold_indexed_rows"))
+                        );
+                        assert_eq!(named.get("columns"), Some(&Value::text("email")));
+                        assert_eq!(named.get("method"), Some(&Value::text("hash")));
+                        assert_eq!(named.get("unique"), Some(&Value::Boolean(true)));
+                        persisted = true;
+                    }
+                }
+            }
+            true
+        })
+        .expect("physical descriptor read");
+    assert!(persisted, "the original unique descriptor must be durable");
+    let indices = cold.index_store_ref().list_indices("cold_indexed_rows");
+    assert!(
+        indices
+            .iter()
+            .any(|index| index.name == "cold_email_unique" && index.unique),
+        "cold runtime must restore the durable descriptor: {indices:?}"
+    );
+    let error = cold
+        .execute_query(duplicate)
+        .err()
+        .expect("cold boot must retain unique admission");
+    assert!(
+        error.to_string().to_lowercase().contains("unique"),
+        "{error}"
+    );
+    assert!(cold
+        .index_store_ref()
+        .list_indices("cold_indexed_rows")
+        .iter()
+        .any(|index| index.name == "cold_email_unique" && index.unique));
+    let result = cold
+        .execute_query("SELECT COUNT(*) AS n FROM cold_indexed_rows")
+        .expect("unchanged source rows");
+    assert_eq!(result.result.records[0].get("n"), Some(&Value::Integer(2)));
+}
+
+#[test]
+fn cold_secondary_index_history_and_null_keys_survive_reopen() {
+    for method in ["HASH", "BTREE"] {
+        let directory = tempfile::tempdir().expect("cold index history");
+        let options = RedDBOptions::persistent(directory.path().join("history.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+        for sql in [
+            "CREATE TABLE cold_index_history (id INTEGER, tenant_id INTEGER, email TEXT)",
+            "CREATE INDEX reused_index ON cold_index_history (tenant_id) USING HASH",
+            "DROP INDEX reused_index ON cold_index_history",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (1, 10, 'one')",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (2, 20, 'one')",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (3, 10, NULL)",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (4, 10, NULL)",
+        ] {
+            seed.execute_query(sql).expect(sql);
+        }
+        seed.execute_query(&format!("CREATE UNIQUE INDEX reused_index ON cold_index_history (tenant_id, email) USING {method}"))
+            .expect("composite unique source with NULLs");
+        seed.flush().expect("checkpoint");
+        drop(seed);
+        let cold = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("restore composite index with NULLs");
+        let registered = cold.index_store_ref().list_indices("cold_index_history");
+        let index = registered
+            .iter()
+            .find(|index| index.name == "reused_index")
+            .expect("latest descriptor");
+        assert_eq!(index.columns, ["tenant_id", "email"]);
+        assert!(index.unique);
+        assert!(cold
+            .execute_query(
+                "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (5, 10, 'one')"
+            )
+            .is_err());
+        cold.execute_query(
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (6, 10, NULL)",
+        )
+        .expect("NULL is distinct in a composite unique key");
+        cold.execute_query(
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (7, 30, 'one')",
+        )
+        .expect("different complete tuple");
+        for sql in [
+            "BEGIN",
+            "UPDATE cold_index_history SET email = 'pending' WHERE id = 7",
+            "ROLLBACK",
+            "UPDATE cold_index_history SET email = 'changed' WHERE id = 1",
+            "DELETE FROM cold_index_history WHERE id = 2",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (8, 20, 'one')",
+            "INSERT INTO cold_index_history (id, tenant_id, email) VALUES (9, 10, 'one')",
+        ] {
+            cold.execute_query(sql).expect(sql);
+        }
+        cold.flush()
+            .expect("checkpoint committed updates and rollback");
+        drop(cold);
+        let reopened = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("restore historical unique keys after update, delete and rollback");
+        for (tenant, email) in [(10, "one"), (20, "one"), (30, "one"), (10, "changed")] {
+            let duplicate = format!("INSERT INTO cold_index_history (id, tenant_id, email) VALUES (100, {tenant}, '{email}')");
+            let error = reopened
+                .execute_query(&duplicate)
+                .err()
+                .expect("restored UNIQUE must reject a live duplicate");
+            assert!(
+                error.to_string().to_lowercase().contains("unique"),
+                "{method}: {error}"
+            );
+        }
+        let count = reopened
+            .execute_query("SELECT COUNT(*) AS n FROM cold_index_history")
+            .expect("visible count");
+        assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(7)));
+    }
+}
+
+#[test]
+fn cold_index_backfill_failure_preserves_complete_indexes_and_is_retryable() {
+    use reddb_engine::storage::collection_read::{CollectionRead, EncodedRecord};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FailSecondPass {
+        source: Arc<dyn CollectionRead + Send + Sync>,
+        opened: AtomicUsize,
+    }
+    impl CollectionRead for FailSecondPass {
+        fn get_record(
+            &self,
+            id: EntityId,
+            limit: usize,
+        ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
+            self.source.get_record(id, limit)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
+            if self.opened.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(crate::storage::StoreError::Io(std::io::Error::other(
+                    "injected index backfill failure",
+                )));
+            }
+            self.source.cursor()
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
+            self.source.owned_cursor()
+        }
+    }
+    for method in ["HASH", "BTREE", "BITMAP"] {
+        let (_directory, runtime) = runtime();
+        for sql in [
+            "CREATE TABLE cold_index_retry (id INTEGER, score INTEGER)",
+            "INSERT INTO cold_index_retry (id, score) VALUES (1, 10)",
+            "INSERT INTO cold_index_retry (id, score) VALUES (2, 20)",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        runtime
+            .execute_query(&format!(
+                "CREATE INDEX retry_index ON cold_index_retry (score) USING {method}"
+            ))
+            .expect("index");
+        runtime.flush().expect("checkpoint");
+        let store = runtime.db().store();
+        let root = store
+            .collection_root_page("cold_index_retry")
+            .expect("root");
+        let source = Arc::new(FailSecondPass {
+            source: Arc::new(PagedCollection::new(Arc::new(BTree::with_root(
+                Arc::clone(store.pager().expect("pager")),
+                root,
+            )))),
+            opened: AtomicUsize::new(0),
+        });
+        let manager = store.get_collection("cold_index_retry").expect("table");
+        manager.install_backing(source.clone(), root, store.format_version(), 1024 * 1024, 2);
+        let before = runtime.index_store_ref().memory_bytes();
+        let error = runtime
+            .rebuild_runtime_indexes_for_table("cold_index_retry")
+            .expect_err("second pass fails");
+        assert!(
+            error
+                .to_string()
+                .contains("injected index backfill failure"),
+            "{error}"
+        );
+        assert_eq!(
+            runtime.index_store_ref().memory_bytes(),
+            before,
+            "old physical indexes survive"
+        );
+        assert!(runtime
+            .index_store_ref()
+            .list_indices("cold_index_retry")
+            .iter()
+            .any(|index| index.name == "retry_index"));
+        runtime
+            .rebuild_runtime_indexes_for_table("cold_index_retry")
+            .expect("retry backfill");
+        let result = runtime
+            .execute_query("SELECT id FROM cold_index_retry WHERE score = 20")
+            .expect("restored indexed lookup");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(2)));
+        runtime.refresh_memory_accounting();
+        let budget = runtime.memory_accounting().budget().resolved_bytes;
+        let available = budget.saturating_sub(runtime.memory_accounting().total_used_bytes());
+        let reservation = runtime
+            .admit_non_evictable_growth(
+                crate::storage::memory_pools::MemoryPool::IndexMemory,
+                "test index workspace denial",
+                available.saturating_sub(1024),
+            )
+            .expect("occupy headroom");
+        let before = runtime.index_store_ref().memory_bytes();
+        let opened = source.opened.load(Ordering::SeqCst);
+        let error = runtime
+            .rebuild_runtime_indexes_for_table("cold_index_retry")
+            .expect_err("workspace denied before reading");
+        assert!(error.to_string().contains("memory budget"), "{error}");
+        assert_eq!(source.opened.load(Ordering::SeqCst), opened);
+        assert_eq!(runtime.index_store_ref().memory_bytes(), before);
+        drop(reservation);
+        runtime
+            .rebuild_runtime_indexes_for_table("cold_index_retry")
+            .expect("retry after headroom release");
+    }
+}
+
 fn install_cold(runtime: &RedDBRuntime, collection: &str, read_bytes_max: usize) {
     let store = runtime.db().store();
     let manager = store.get_collection(collection).expect("collection");

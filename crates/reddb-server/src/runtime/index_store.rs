@@ -1312,6 +1312,23 @@ impl IndexStore {
         }
     }
 
+    /// The caller exclusively fences collection topology until publication.
+    /// No live backing is changed until the complete replacement is ready.
+    pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let mut registry = self.registry.write();
+        self.hash.replace_collection_from(collection, prepared.hash);
+        self.bitmap
+            .replace_collection_from(collection, prepared.bitmap);
+        let mut sorted = self.sorted.indices.write();
+        sorted.retain(|(table, _), _| table != collection);
+        sorted.extend(prepared.sorted.indices.into_inner());
+        let mut composite = self.sorted.composite.write();
+        composite.retain(|(table, _), _| table != collection);
+        composite.extend(prepared.sorted.composite.into_inner());
+        registry.retain(|(table, _), _| table != collection);
+        registry.extend(prepared.registry.into_inner());
+    }
+
     #[cfg(test)]
     pub(crate) fn mutation_test_hook(&self, collection: &str, phase: MutationTestPhase) {
         let hook = self.mutation_hook.lock().clone();
@@ -1658,6 +1675,7 @@ impl IndexStore {
             .values()
             .find(|idx| {
                 idx.collection == collection
+                    && matches!(idx.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
                     && idx.columns.len() == 1
                     && idx.columns.first().is_some_and(|c| c == column)
             })
@@ -2457,7 +2475,7 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
     if matches!(index.method, IndexMethodKind::BTree | IndexMethodKind::Hash)
         && index.columns.len() > 1
     {
-        return index
+        let growth = index
             .columns
             .iter()
             .try_fold(INDEX_GROWTH_ENTRY_BYTES, |growth, column| {
@@ -2469,6 +2487,12 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
                 )
             })
             .unwrap_or(0);
+        // A UNIQUE composite BTREE owns both sorted tuples and a hash pocket.
+        return if matches!(index.method, IndexMethodKind::BTree) && index.unique {
+            growth.saturating_mul(2)
+        } else {
+            growth
+        };
     }
     let Some(column) = index.columns.first() else {
         return 0;
@@ -2936,6 +2960,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn composite_unique_backfill_estimate_covers_sorted_and_hash_backing() {
+        let store = IndexStore::new();
+        let columns = vec!["a".to_string(), "b".to_string()];
+        store
+            .create_index(
+                "unique_tuple",
+                "rows",
+                &columns,
+                IndexMethodKind::BTree,
+                true,
+                &[],
+            )
+            .expect("index");
+        store.register(RegisteredIndex {
+            name: "unique_tuple".into(),
+            collection: "rows".into(),
+            columns,
+            method: IndexMethodKind::BTree,
+            unique: true,
+        });
+        let fields = row(&[
+            ("a", Value::text("a".repeat(2048))),
+            ("b", Value::text("b".repeat(2048))),
+        ]);
+        let before = store.memory_bytes();
+        let estimate =
+            store.estimate_insert_growth("rows", std::iter::once(fields.as_slice()), false);
+        store
+            .index_entity_insert("rows", EntityId::new(1), &fields)
+            .expect("backfill");
+        let actual = store.memory_bytes() - before;
+        assert!(
+            estimate >= actual,
+            "estimated {estimate}, resident growth {actual}"
+        );
     }
 
     #[test]

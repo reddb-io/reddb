@@ -73,6 +73,15 @@ shared schema before mutation or index backfill. Explicit row schemas and named
 fields remain authoritative. This changes neither the stored record format nor
 the raw segment revisions used by checkpoint reuse.
 
+Runtime secondary-index restoration reads the physical descriptor registry and
+reduces append-only history by durable entity ID, including DROP/recreate.
+Backfill projects one row at a time, admits its estimated resident growth against
+the shared budget and publishes a complete replacement under the collection
+index-topology fence. Read failures and budget denial preserve the prior indexes
+and permit retry. These secondary-index providers still retain keys in RAM and
+reconstruction still scans the source; this does not establish lazy persisted
+indexing or constant-time startup.
+
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Active and aborted transaction visibility, pending vault
 versions and record format also participate in reuse admission.

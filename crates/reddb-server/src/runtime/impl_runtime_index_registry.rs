@@ -7,29 +7,96 @@
 //! The private `named_*` / `index_method_kind_*` free helpers and the
 //! `RUNTIME_INDEX_REGISTRY_COLLECTION` const moved here alongside their only
 //! callers.
-use super::impl_lifecycle::table_row_index_fields;
 use super::*;
 
 const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red_index_registry";
 
-fn index_entity_fields(
+/// Borrow one source row, projecting only indexed fields and document bodies.
+/// Neither callback may re-enter storage: the visitor holds publication locks.
+fn for_each_index_row(
     manager: &crate::storage::unified::SegmentManager,
-) -> Vec<(crate::storage::EntityId, Vec<(String, reddb_types::Value)>)> {
+    columns: &std::collections::HashSet<String>,
+    read_bytes_max: usize,
+    mut visit: impl FnMut(crate::storage::EntityId, &[(String, reddb_types::Value)]) -> RedDBResult<()>,
+) -> RedDBResult<()> {
     let schema = manager.column_schema();
-    manager
-        .query_all(|entity| matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }))
-        .into_iter()
-        .map(|mut entity| {
-            // Positional records do not persist Arc schema pointers. Rebuild
-            // with the restored collection schema, just as query scans do.
-            if let crate::storage::EntityData::Row(row) = &mut entity.data {
-                if row.schema.is_none() {
-                    row.schema = schema.clone();
-                }
-            }
-            (entity.id, table_row_index_fields(&entity))
+    let mut failure = None;
+    manager.try_for_each_entity(read_bytes_max, |entity| {
+        if !matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
+            return true;
+        }
+        let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
+        if required_bytes > read_bytes_max {
+            failure = Some(RedDBError::InvalidOperation(format!(
+                "index backfill row needs {required_bytes} bytes; workspace row limit is {read_bytes_max}"
+            )));
+            return false;
+        }
+        let crate::storage::EntityData::Row(row) = &entity.data else {
+            return true;
+        };
+        let selected = |name: &str| columns.contains(name) || name == "body";
+        let fields: Vec<_> = if let Some(named) = &row.named {
+            named.iter().filter(|(name, _)| selected(name))
+                .map(|(name, value)| (name.clone(), value.clone())).collect()
+        } else if let Some(schema) = row.schema.as_ref().or(schema.as_ref()) {
+            schema.iter().zip(&row.columns).filter(|(name, _)| selected(name))
+                .map(|(name, value)| (name.clone(), value.clone())).collect()
+        } else {
+            Vec::new()
+        };
+        match visit(entity.id, &fields) {
+            Ok(()) => true,
+            Err(error) => { failure = Some(error); false }
+        }
+    })?;
+    failure.map_or(Ok(()), Err)
+}
+
+type IndexDescriptor = (
+    (String, String),
+    Option<super::index_store::RegisteredIndex>,
+);
+
+fn index_descriptor(entity: &crate::storage::UnifiedEntity) -> Option<IndexDescriptor> {
+    let crate::storage::EntityData::Row(row) = &entity.data else {
+        return None;
+    };
+    let named = row.named.as_ref()?;
+    let collection = named_text(named, "collection")?;
+    let name = named_text(named, "name")?;
+    let key = (collection.clone(), name.clone());
+    if named_bool(named, "dropped").unwrap_or(false) {
+        return Some((key, None));
+    }
+    let columns = named_text(named, "columns")
+        .map(|raw| {
+            raw.split('\u{1f}')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    let resolution = named_i64(named, "resolution")
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(0);
+    let raw_method = named_text(named, "method")?;
+    if matches!(raw_method.as_str(), "spatial" | "rtree") {
+        tracing::warn!(collection = %collection, index = %name, method = %raw_method,
+            "dropping retired RTREE index descriptor during load; the in-RAM R-tree indexed nothing and served no queries");
+        return Some((key, None));
+    }
+    let method = index_method_kind_from_str(&raw_method, resolution)?;
+    Some((
+        key,
+        Some(super::index_store::RegisteredIndex {
+            name,
+            collection,
+            columns,
+            method,
+            unique: named_bool(named, "unique").unwrap_or(false),
+        }),
+    ))
 }
 
 fn named_text(
@@ -107,23 +174,7 @@ impl RedDBRuntime {
         let Some(manager) = store.get_collection(table) else {
             return Ok(());
         };
-        let entity_fields = index_entity_fields(&manager);
-
-        for index in registered {
-            self.inner.index_store.drop_index(&index.name, table);
-            self.inner
-                .index_store
-                .create_index(
-                    &index.name,
-                    table,
-                    &index.columns,
-                    index.method,
-                    index.unique,
-                    &entity_fields,
-                )
-                .map_err(RedDBError::Internal)?;
-            self.inner.index_store.register(index);
-        }
+        self.restore_index_collection(table, &manager, registered)?;
         self.invalidate_plan_cache();
         Ok(())
     }
@@ -223,98 +274,181 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(format!("{err:?}")))
     }
 
+    fn reserve_index_scan(
+        &self,
+        manager: &crate::storage::unified::SegmentManager,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
+        let read_bytes_max = usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        // Decode, indexed projection and descriptor reduction share this owned
+        // scratch. The merged visitor also retains resident overlay identities.
+        let scratch = read_bytes_max
+            .saturating_mul(4)
+            .saturating_add(usize::try_from(manager.resident_bytes()).unwrap_or(usize::MAX));
+        let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
+            RedDBError::InvalidOperation(
+                "index restoration workspace exceeds the shared memory budget".into(),
+            )
+        })?;
+        Ok((reservation, read_bytes_max))
+    }
+
+    /// Two bounded passes: estimate the final resident indexes, admit their
+    /// growth, then build privately. Failure never publishes an incomplete index.
+    /// This is still a resident secondary-index provider, not lazy disk indexing.
+    fn restore_index_collection(
+        &self,
+        collection: &str,
+        manager: &crate::storage::unified::SegmentManager,
+        registered: Vec<super::index_store::RegisteredIndex>,
+    ) -> RedDBResult<()> {
+        let (_scratch, read_bytes_max) = self.reserve_index_scan(manager)?;
+        let _metadata = self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::IndexMemory,
+            "index restoration metadata",
+            (registered.len() as u64).saturating_mul(4096),
+        )?;
+        let prepared = super::index_store::IndexStore::new();
+        for index in registered {
+            prepared
+                .create_index(
+                    &index.name,
+                    collection,
+                    &index.columns,
+                    index.method,
+                    // HASH postings include superseded committed versions.
+                    // Snapshot-aware runtime admission enforces logical UNIQUE,
+                    // as it does for BTREE's multi-valued equality pocket.
+                    index.unique
+                        && !matches!(index.method, super::index_store::IndexMethodKind::Hash),
+                    &[],
+                )
+                .map_err(RedDBError::Internal)?;
+            prepared.register(index);
+        }
+        let columns = prepared.indexed_columns_set_with_parents(collection);
+        let mut growth = 0u64;
+        for_each_index_row(manager, &columns, read_bytes_max, |_, fields| {
+            growth = growth.saturating_add(prepared.estimate_insert_growth(
+                collection,
+                std::iter::once(fields),
+                false,
+            ));
+            Ok(())
+        })?;
+        let _entries = self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::IndexMemory,
+            "index restoration entries",
+            growth,
+        )?;
+        for_each_index_row(manager, &columns, read_bytes_max, |id, fields| {
+            prepared
+                .index_entity_insert(collection, id, fields)
+                .map_err(RedDBError::Internal)
+        })?;
+        self.inner
+            .index_store
+            .replace_collection_from(collection, prepared);
+        Ok(())
+    }
+
     pub(crate) fn rehydrate_runtime_index_registry(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(RUNTIME_INDEX_REGISTRY_COLLECTION) else {
             return Ok(());
         };
-        let mut rows = manager.query_all(|_| true);
-        rows.sort_by_key(|entity| entity.id.raw());
-
+        // A cold registry is physical data too. Reduce by durable entity ID,
+        // without copying or sorting its append-only descriptor history.
+        let (_scratch, read_bytes_max) = self.reserve_index_scan(&manager)?;
         let mut latest = std::collections::HashMap::<
-            (String, String),
-            Option<super::index_store::RegisteredIndex>,
+            _,
+            (u64, Option<super::index_store::RegisteredIndex>),
         >::new();
-        for entity in rows {
-            let crate::storage::EntityData::Row(row) = &entity.data else {
-                continue;
-            };
-            let Some(named) = &row.named else {
-                continue;
-            };
-            let Some(collection) = named_text(named, "collection") else {
-                continue;
-            };
-            let Some(name) = named_text(named, "name") else {
-                continue;
-            };
-            let dropped = named_bool(named, "dropped").unwrap_or(false);
-            let key = (collection.clone(), name.clone());
-            if dropped {
-                latest.insert(key, None);
-                continue;
+        let mut retained_bytes = 0usize;
+        let mut failure = None;
+        manager.try_for_each_entity(read_bytes_max, |entity| {
+            if crate::storage::unified::memory_size::entity_bytes(entity) > read_bytes_max {
+                failure = Some(RedDBError::InvalidOperation(
+                    "index descriptor exceeds the reserved restoration workspace".into(),
+                ));
+                return false;
             }
-            let columns = named_text(named, "columns")
-                .map(|raw| {
-                    raw.split('\u{1f}')
+            // A short delimited string can expand to many owned column names.
+            // Bound that expansion before collecting the descriptor's Vec.
+            if let crate::storage::EntityData::Row(row) = &entity.data {
+                if let Some(reddb_types::Value::Text(columns)) = row.get_field("columns") {
+                    let expanded = columns
+                        .split('\u{1f}')
                         .filter(|part| !part.is_empty())
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let resolution = named_i64(named, "resolution")
-                .and_then(|v| u8::try_from(v).ok())
-                .unwrap_or(0);
-            let Some(raw_method) = named_text(named, "method") else {
-                continue;
-            };
-            if matches!(raw_method.as_str(), "spatial" | "rtree") {
-                tracing::warn!(
-                    collection = %collection,
-                    index = %name,
-                    method = %raw_method,
-                    "dropping retired RTREE index descriptor during load; the in-RAM R-tree indexed nothing and served no queries"
-                );
-                latest.insert(key, None);
-                continue;
+                        .map(|column| column.len().saturating_add(64))
+                        .fold(0usize, usize::saturating_add);
+                    if expanded > read_bytes_max {
+                        failure = Some(RedDBError::InvalidOperation(
+                            "index descriptor columns exceed the reserved restoration workspace"
+                                .into(),
+                        ));
+                        return false;
+                    }
+                }
             }
-            let Some(method) = index_method_kind_from_str(&raw_method, resolution) else {
-                continue;
+            let Some((key, descriptor)) = index_descriptor(entity) else {
+                return true;
             };
-            latest.insert(
-                key,
-                Some(super::index_store::RegisteredIndex {
-                    name,
-                    collection,
-                    columns,
-                    method,
-                    unique: named_bool(named, "unique").unwrap_or(false),
-                }),
-            );
+            if latest
+                .get(&key)
+                .is_some_and(|(id, _)| *id >= entity.id.raw())
+            {
+                return true;
+            }
+            let descriptor_bytes =
+                |key: &(String, String), index: &Option<super::index_store::RegisteredIndex>| {
+                    256usize
+                        .saturating_add(key.0.len())
+                        .saturating_add(key.1.len())
+                        .saturating_add(index.as_ref().map_or(0, |index| {
+                            index.name.len()
+                                + index.collection.len()
+                                + index
+                                    .columns
+                                    .iter()
+                                    .map(|column| column.len() + 64)
+                                    .sum::<usize>()
+                        }))
+                };
+            let before = latest
+                .get(&key)
+                .map_or(0, |(_, index)| descriptor_bytes(&key, index));
+            let after = descriptor_bytes(&key, &descriptor);
+            retained_bytes = retained_bytes.saturating_sub(before).saturating_add(after);
+            if retained_bytes > read_bytes_max {
+                failure = Some(RedDBError::InvalidOperation(
+                    "index descriptor registry exceeds the reserved restoration workspace".into(),
+                ));
+                return false;
+            }
+            latest.insert(key, (entity.id.raw(), descriptor));
+            true
+        })?;
+        if let Some(error) = failure {
+            return Err(error);
         }
-
-        for index in latest.into_values().flatten() {
-            let topology_lock = self
-                .inner
-                .index_store
-                .collection_topology_lock(&index.collection);
+        let mut collections = std::collections::BTreeMap::<String, Vec<_>>::new();
+        for (_, index) in latest.into_values() {
+            if let Some(index) = index {
+                collections
+                    .entry(index.collection.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        for (collection, indices) in collections {
+            let topology_lock = self.inner.index_store.collection_topology_lock(&collection);
             let _topology_guard = topology_lock.write();
-            let Some(manager) = store.get_collection(&index.collection) else {
+            let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
-            let entity_fields = index_entity_fields(&manager);
-            self.inner
-                .index_store
-                .create_index(
-                    &index.name,
-                    &index.collection,
-                    &index.columns,
-                    index.method,
-                    index.unique,
-                    &entity_fields,
-                )
-                .map_err(RedDBError::Internal)?;
-            self.inner.index_store.register(index);
+            self.restore_index_collection(&collection, &manager, indices)?;
         }
         self.invalidate_plan_cache();
         Ok(())
