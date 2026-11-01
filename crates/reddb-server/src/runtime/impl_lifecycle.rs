@@ -604,7 +604,20 @@ impl RedDBRuntime {
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
+        runtime.prepare_paged_counts()?;
         runtime.rehydrate_runtime_index_registry()?;
+        if runtime
+            .db()
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_some()
+        {
+            runtime
+                .db()
+                .store()
+                .checkpoint_missing_secondary_indices()?;
+        }
         runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()

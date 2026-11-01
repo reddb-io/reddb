@@ -392,6 +392,7 @@ mod key_index;
 mod keyed_write;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
+pub(crate) mod count_index;
 mod native_helpers;
 mod recovery_xid;
 pub mod secondary_index;

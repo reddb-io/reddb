@@ -153,6 +153,33 @@ installing the paged provider, so that transient peak is not solved by this slic
 This integration does not enable the managed factory or establish the global
 server/transport memory ceiling, boot target, or STG qualification.
 
+## Compact exact COUNT projection (2026-11-01)
+
+The opt-in runtime prepares an internal secondary projection containing xmin,
+xmax and moderation visibility for every physical record. Physical identity is
+the posting suffix. The codec/schema fingerprint and exact data generation must
+match before a query trusts the root. Initial preparation shares the secondary
+projection pass and may read all payloads once; it is not a prepared boot timing.
+Subsequent opens reuse compatible roots.
+
+Unfiltered scalar `COUNT(*)` scans these compact keys, hides base postings
+replaced/deleted by the resident overlay, and counts resident versions under the
+same captured snapshot. It uses the existing transaction-outcome predicate,
+including active, aborted and own savepoint writers. Moderation markers in both
+named and positional rows remain hidden. It never treats physical catalog
+cardinality as a visible count. Serializable readers retain the entity scan for
+logical read tracking; predicates (including tenant/RLS), column counts, grouping,
+HAVING, ordering, expansion and CALL work budgets also retain the existing path.
+Missing/incompatible projections fall back; malformed/unreadable projections fail
+the query. New collections can use the scan until their next runtime preparation.
+
+Cost sketch: 17 visibility bytes plus an 8-byte identity and native slot overhead
+per physical version; counting reads O(compact index pages + overlay rows), keeps
+one immutable leaf, borrows keys without per-row allocation, and never decodes
+base payloads. It uses the existing publication fence through base/overlay merge;
+concurrent-write latency still needs qualification. This slice does not establish
+global admission, HTTP behavior, boot p95 or a release performance result.
+
 ## Required acceptance gates
 
 - Platform total process/container memory <=1 GiB, with a 768 MiB engine budget,
@@ -173,8 +200,8 @@ server/transport memory ceiling, boot target, or STG qualification.
 
 ## Remaining implementation before activation
 
-- Connect persisted secondary trees to runtime providers and finish compact
-  MVCC-aware COUNT/scan projections without loading full row payloads.
+- Connect the remaining persisted secondary trees to runtime providers and
+  qualify compact MVCC-aware COUNT; extend scan projections where needed.
 - Qualify prepared metadata publication against I/O failures and superblock
   fallback, then measure boot on the exact OCI artifact and full historical data.
 - All authoritative reads/scans/model/index/auth paths migrated to fallible access;

@@ -214,6 +214,17 @@ impl SegmentManager {
             .map(|base| base.total_entities)
     }
 
+    /// Whether a projected base posting has been replaced or physically
+    /// removed. The host must fence publication/mutations while merging the
+    /// projected base with resident rows. This never reads a base payload.
+    pub fn backing_row_is_shadowed(&self, id: EntityId) -> bool {
+        let backing = self.backing.read();
+        backing
+            .as_ref()
+            .is_none_or(|base| base.removed.contains(&id))
+            || self.get_with(id, |_| ()).is_some()
+    }
+
     /// Preserve I/O and decode failures instead of treating them as absent rows.
     pub fn try_get(
         &self,

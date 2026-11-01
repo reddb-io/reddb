@@ -395,6 +395,46 @@ pub(crate) fn execute_aggregate_query(
     let agg_plan = CompiledAggPlan::compile(all_aggregate_projections)
         .ok_or_else(|| RedDBError::Query("aggregate projection exceeds nesting limit".into()))?;
 
+    // COUNT(*) needs visibility, not row payloads. Keep filters (including
+    // injected tenant/RLS predicates), expressions, SSI and CALL work budgets
+    // on the full scan path. Reuse the ordinary result assembly for aliases,
+    // empty input, materialization admission and OFFSET/LIMIT semantics.
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    if effective_filter.is_none()
+        && !has_group_by
+        && effective_table_having_filter(query).is_none()
+        && query.order_by.is_empty()
+        && query.expand.is_none()
+        && !crate::runtime::function_budget::active()
+        && !effective_projections.is_empty()
+        && effective_projections.iter().all(|projection| {
+            matches!(projection, Projection::Function(name, args)
+                if base_function_name(name) == "COUNT" && projection_is_count_star(args))
+        })
+    {
+        if let Some(count) = db
+            .store()
+            .try_count_from_index(table_name, snapshot.as_ref())?
+        {
+            let mut state = SlottedAggState::new(&agg_plan);
+            state.count = count;
+            return reddb_engine::query::runtime::aggregate_results::finish_aggregate_results_with_host(
+                &NativeAggregateResultHost { db },
+                reddb_engine::query::runtime::aggregate_results::AggregateResultContext {
+                    query,
+                    visible_projections: &effective_projections,
+                    runtime_plan: &runtime_plan,
+                    slots: &agg_plan,
+                    sensitivity_source: None,
+                },
+                std::iter::once(reddb_engine::query::runtime::aggregate_results::AggregateGroupRef {
+                    group_values: &[],
+                    state: &state,
+                }),
+            );
+        }
+    }
+
     // Work-mem cap: 64 MB mirrors PostgreSQL's work_mem GUC default.
     // When the in-memory HashMap exceeds `max_groups` entries, we flush the
     // current partial state to a SpilledHashAgg batch file on tmpfs and reset
@@ -418,7 +458,6 @@ pub(crate) fn execute_aggregate_query(
     >::new(spill_dir.path(), WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
-    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {

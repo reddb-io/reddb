@@ -253,6 +253,26 @@ impl<P: PageStore> BTreeCursor<P> {
     }
 
     /// Inspect the next key without materializing its value or advancing.
+    pub(crate) fn peek_key_with<T>(
+        &mut self,
+        visit: impl FnOnce(&[u8]) -> T,
+    ) -> BTreeResult<Option<T>> {
+        if self.immutable {
+            if !self.prepare_immutable_leaf()? {
+                return Ok(None);
+            }
+            let page = self.immutable_leaf.as_ref().expect("loaded immutable leaf");
+            return Ok(Some(visit(read_leaf_cell_borrowed(page, self.position)?.0)));
+        }
+        let Some(page) = self.prepare_next_leaf()? else {
+            return Ok(None);
+        };
+        Ok(Some(visit(
+            read_leaf_cell_borrowed(&page, self.position)?.0,
+        )))
+    }
+
+    /// Inspect the next key without materializing its value or advancing.
     pub fn peek_key(&mut self) -> BTreeResult<Option<Vec<u8>>> {
         if self.immutable {
             if !self.prepare_immutable_leaf()? {

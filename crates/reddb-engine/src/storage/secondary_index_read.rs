@@ -43,6 +43,44 @@ impl<P: PageStore> SecondaryIndexRead<P> {
         self.tree.root_page_id()
     }
 
+    /// Visit compact projected keys without reading source records or posting
+    /// values. The immutable handle pins both trees for the entire traversal.
+    /// Retains one leaf and at most one bounded key, independent of row count.
+    pub fn try_for_each(
+        &self,
+        mut visit: impl FnMut(&[u8], EntityId) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut cursor = self
+            .tree
+            .cursor_seek(&[])
+            .map_err(read_error)?
+            .with_immutable_leaves();
+        while let Some(result) = cursor
+            .peek_key_with(|posting| {
+                if !(8..=SECONDARY_KEY_BYTES_MAX + 8).contains(&posting.len()) {
+                    return Err(StoreError::StorageIntegrity(StorageIntegrityError::new(
+                        "secondary-index",
+                        "posting",
+                        None,
+                        "invalid projected key length",
+                    )));
+                }
+                let split = posting.len() - 8;
+                let id = EntityId::new(u64::from_be_bytes(
+                    posting[split..]
+                        .try_into()
+                        .expect("invariant: eight-byte identity"),
+                ));
+                visit(&posting[..split], id)
+            })
+            .map_err(read_error)?
+        {
+            result?;
+            cursor.skip_next().map_err(read_error)?;
+        }
+        Ok(())
+    }
+
     /// Return physical candidates for exactly these projected bytes. A hashed
     /// projection still requires full-key verification by its caller. Both
     /// MVCC visibility and the dirty overlay are outside this base-only reader.
