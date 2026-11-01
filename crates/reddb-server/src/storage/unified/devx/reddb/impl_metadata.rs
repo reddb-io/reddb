@@ -509,9 +509,43 @@ impl RedDB {
         let native_state = self.native_physical_state();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-state");
-        let indexes = native_state
+        let mut indexes = native_state
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
+        if let Some(previous) = previous.as_ref() {
+            // Legacy paged contract edits publish the sidecar first. Do not
+            // resurrect a dropped collection from the older native registry.
+            // Preserve unrelated orphan descriptors without a removal proof.
+            let absent = |name: &str| {
+                !collection_roots.contains_key(name)
+                    && !previous
+                        .collection_contracts
+                        .iter()
+                        .any(|contract| contract.name == name)
+            };
+            let mut removed: BTreeSet<&str> = previous
+                .superblock
+                .collection_roots
+                .keys()
+                .map(String::as_str)
+                .filter(|name| absent(name))
+                .collect();
+            let mut seen = BTreeSet::new();
+            for event in previous.manifest_events.iter().rev() {
+                if seen.insert(event.collection.as_str())
+                    && matches!(&event.kind, crate::physical::ManifestEventKind::Remove)
+                    && absent(&event.collection)
+                {
+                    removed.insert(event.collection.as_str());
+                }
+            }
+            indexes.retain(|index| {
+                !index
+                    .collection
+                    .as_deref()
+                    .is_some_and(|collection| removed.contains(collection))
+            });
+        }
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "index-state");
         let mut metadata = PhysicalMetadataFile::from_state(
@@ -1571,6 +1605,144 @@ fn current_unix_ms() -> u64 {
 #[cfg(test)]
 mod catalog_observation_tests {
     use super::*;
+
+    #[test]
+    fn legacy_paged_drop_does_not_resurrect_derived_index_descriptors() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("drop-descriptors.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        {
+            let runtime = crate::RedDBRuntime::with_options(options).expect("paged runtime");
+            runtime
+                .execute_query("CREATE TABLE retained_source (value INTEGER)")
+                .expect("retained table");
+            runtime
+                .execute_query("INSERT INTO retained_source (value) VALUES (17)")
+                .expect("retained row");
+            runtime.checkpoint().expect("initial checkpoint");
+        }
+        // Managed legacy files also reopen with the default embedded options.
+        // That path edits contracts without rebuilding every native artifact.
+        let options = RedDBOptions::persistent(&path).with_memory_budget(64 * 1024 * 1024);
+        {
+            let runtime =
+                crate::RedDBRuntime::with_options(options.clone()).expect("legacy reopen");
+            assert!(runtime.db().is_paged());
+            assert_eq!(
+                runtime.db().options().storage_profile.deploy_profile,
+                crate::storage::DeployProfile::Embedded
+            );
+            // Exercise both distinct names and recreation after a removal proof.
+            for cycle in 0..6 {
+                let table = format!("discarded_source_{}", cycle % 4);
+                runtime
+                    .execute_query(&format!("CREATE TABLE {table} (value INTEGER)"))
+                    .expect("temporary table");
+                runtime.checkpoint().expect("publish derived descriptors");
+                let before = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(before
+                    .indexes
+                    .iter()
+                    .any(|index| index.collection.as_deref() == Some(table.as_str())));
+                runtime
+                    .execute_query(&format!("DROP TABLE {table}"))
+                    .expect("drop temporary table");
+                for _ in 0..2 {
+                    runtime.checkpoint().expect("checkpoint after drop");
+                    let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                    assert!(
+                        !metadata.indexes.iter().any(|index| index
+                            .collection
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("discarded_source_"))),
+                        "a dropped collection's derived descriptors were resurrected"
+                    );
+                    let native = runtime
+                        .db()
+                        .native_registry_summary()
+                        .expect("native registry");
+                    assert!(!native.indexes.iter().any(|index| index
+                        .collection
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("discarded_source_"))));
+                }
+                if cycle == 0 {
+                    // Model the consistent sidecar/native pair left by an older
+                    // writer. Its final Remove event is a durable removal proof.
+                    let ghost = before
+                        .indexes
+                        .iter()
+                        .find(|index| index.collection.as_deref() == Some(table.as_str()))
+                        .expect("old derived descriptor")
+                        .clone();
+                    runtime
+                        .db()
+                        .update_physical_metadata(|metadata| {
+                            assert!(metadata.manifest_events.iter().any(|event| {
+                                event.collection == table
+                                    && matches!(
+                                        &event.kind,
+                                        crate::physical::ManifestEventKind::Remove
+                                    )
+                            }));
+                            metadata.indexes.push(ghost.clone());
+                            let mut orphan = ghost.clone();
+                            orphan.name = "audited_legacy_orphan".into();
+                            orphan.collection = Some("audited_missing_source".into());
+                            orphan.artifact_root_page = None;
+                            orphan.artifact_checksum = None;
+                            metadata.indexes.push(orphan.clone());
+                            orphan.name = "global_descriptor".into();
+                            orphan.collection = None;
+                            metadata.indexes.push(orphan);
+                        })
+                        .expect("simulate old metadata without deleting any rows");
+                    runtime
+                        .checkpoint()
+                        .expect("repair a confirmed old removal");
+                }
+                let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "audited_legacy_orphan"));
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "global_descriptor"));
+            }
+        }
+        let runtime = crate::RedDBRuntime::with_options(options).expect("second legacy reopen");
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("retained_source")
+                .expect("retained source")
+                .count(),
+            1
+        );
+        let metadata = runtime.db().physical_metadata().expect("physical metadata");
+        assert!(!metadata.indexes.iter().any(|index| index
+            .collection
+            .as_deref()
+            .is_some_and(|name| name.starts_with("discarded_source_"))));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.collection.as_deref() == Some("retained_source")));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "audited_legacy_orphan"));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "global_descriptor"));
+    }
 
     #[test]
     fn index_reconciliation_reads_one_native_observation() {
