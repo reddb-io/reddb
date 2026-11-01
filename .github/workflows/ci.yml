@@ -528,6 +528,10 @@ jobs:
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
+      # Hundreds of statically linked integration binaries exhausted runner disk.
+      # Keep test assertions; only omit debug symbols in this correctness lane.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
@@ -538,7 +542,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: ubuntu-rust-1.91.0
+          shared-key: ubuntu-tests-nodebug-v1
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
           workspaces: |
