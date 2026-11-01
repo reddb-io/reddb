@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.6
+
+### Patch Changes
+
+- [#2568](https://github.com/reddb-io/reddb/pull/2568) [`3b50082`](https://github.com/reddb-io/reddb/commit/3b50082df513cfeadfe16ddda96c4c05d60d4e2a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Avoid profiling unrelated collections and materializing WAL payloads when querying memory-budget statistics. Preserve typed batch-mutation errors so duplicate values in standalone UNIQUE indexes return a client error instead of HTTP 500.
+
 ## 1.27.5
 
 ### Patch Changes
