@@ -2435,7 +2435,7 @@ mod tests {
                 let body = format!(r#"{{"provider":"{provider}",{fields}}}"#);
                 let response = server.handle_ai_credentials(body.into_bytes());
                 assert_eq!(response.status, 400);
-                let body = String::from_utf8(response.body).expect("body");
+                let body = String::from_utf8(response.body.to_vec()).expect("body");
                 assert!(
                     body.contains("api_key") && body.contains("endpoint"),
                     "{body}"
@@ -2490,7 +2490,7 @@ mod tests {
             format!(r#"{{"provider":"openai","alias":"{alias}","api_key":"sk_test_vault"}}"#);
         let response = server.handle_ai_credentials(body_json.into_bytes());
         assert_eq!(response.status, 200);
-        let body = String::from_utf8(response.body).expect("json body");
+        let body = String::from_utf8(response.body.to_vec()).expect("json body");
         assert!(
             !body.contains("sk_test_vault"),
             "credential response must not echo plaintext: {body}"

@@ -44,25 +44,29 @@ impl RedDBServer {
                     &capabilities,
                 );
                 if result.statement_type == "select" {
-                    if let Some(limit) = self
-                        .runtime
-                        .resource_limits()
-                        .max_result_bytes
-                        .filter(|value| *value > 0)
-                    {
-                        return match value
-                            .to_string_compact_limited(usize::try_from(limit).unwrap_or(usize::MAX))
-                        {
-                            Some(body) => HttpResponse {
-                                status: 200,
-                                body: body.into_bytes(),
-                                content_type: "application/json",
-                                extra_headers: Vec::new(),
-                            },
-                            None => json_error(413, "query result exceeds max_result_bytes"),
-                        };
-                    }
+                    use crate::runtime::memory_buffers::QueryBufferError;
+                    return match self.runtime.serialize_query_json(&value) {
+                        Ok(body) => HttpResponse {
+                            status: 200,
+                            body,
+                            content_type: "application/json",
+                            extra_headers: Vec::new(),
+                        },
+                        Err(QueryBufferError::ResultLimit) => {
+                            json_error(413, "query result exceeds max_result_bytes")
+                        }
+                        Err(QueryBufferError::MemoryBudget) => HttpResponse {
+                            status: 507,
+                            body: bytes::Bytes::from_static(
+                                br#"{"ok":false,"error":{"code":"memory_limit_exceeded","message":"query response exceeds the shared memory budget"}}"#,
+                            ),
+                            content_type: "application/json",
+                            extra_headers: Vec::new(),
+                        },
+                    };
                 }
+                // Acknowledgements follow committed DML/DDL. Do not turn a
+                // successful write into a late memory-admission failure.
                 json_response(200, value)
             }
             Err(err) => {
@@ -469,7 +473,7 @@ impl RedDBServer {
         let request = match extract_query_request(&body) {
             Ok(req) => req,
             Err(response) => {
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -491,7 +495,7 @@ impl RedDBServer {
                 Ok(scope) => Some(scope),
                 Err(cause) => {
                     let (status, message) = map_runtime_error(&cause);
-                    writer.write_all(&json_error(status, message).to_http_bytes())?;
+                    json_error(status, message).write_to(writer)?;
                     return writer.flush();
                 }
             }
@@ -516,7 +520,7 @@ impl RedDBServer {
         if self.runtime.connection_in_transaction(conn_id) {
             let err = OpenStreamError::TransactionActive;
             let response = json_error_code(409, err.code(), err.message());
-            writer.write_all(&response.to_http_bytes())?;
+            response.write_to(writer)?;
             return writer.flush();
         }
 
@@ -525,9 +529,7 @@ impl RedDBServer {
             Ok(config) => config,
             Err(error) => {
                 let (status, message) = map_runtime_error(&error);
-                writer.write_all(
-                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
-                )?;
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -846,7 +848,7 @@ impl RedDBServer {
         if self.runtime.connection_in_transaction(conn_id) {
             let err = OpenStreamError::TransactionActive;
             let response = json_error_code(409, err.code(), err.message());
-            writer.write_all(&response.to_http_bytes())?;
+            response.write_to(writer)?;
             return writer.flush();
         }
 
@@ -859,7 +861,7 @@ impl RedDBServer {
             Some(b) if !b.is_empty() => b,
             _ => {
                 let response = json_error(400, "input stream requires open frame as line 0");
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -867,7 +869,7 @@ impl RedDBServer {
             Ok(parsed) => parsed,
             Err(message) => {
                 let response = json_error(400, message);
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -877,9 +879,7 @@ impl RedDBServer {
             Ok(config) => config,
             Err(error) => {
                 let (status, message) = map_runtime_error(&error);
-                writer.write_all(
-                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
-                )?;
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -894,10 +894,7 @@ impl RedDBServer {
         if verify_mode.is_enabled() {
             if let Err(error) = self.runtime.ensure_integrity_tombstones_loaded() {
                 let (status, message) = map_runtime_error(&error);
-                writer.write_all(
-                    &json_error_code(status, "integrity_state_unavailable", message)
-                        .to_http_bytes(),
-                )?;
+                json_error_code(status, "integrity_state_unavailable", message).write_to(writer)?;
                 return writer.flush();
             }
         }
@@ -1235,7 +1232,7 @@ impl RedDBServer {
             Ok(scope) => scope,
             Err(cause) => {
                 let (status, message) = map_runtime_error(&cause);
-                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                json_error(status, message).write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -1383,7 +1380,7 @@ impl RedDBServer {
             Ok(scope) => scope,
             Err(cause) => {
                 let (status, message) = map_runtime_error(&cause);
-                writer.write_all(&json_error(status, message).to_http_bytes())?;
+                json_error(status, message).write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -1395,9 +1392,7 @@ impl RedDBServer {
             Ok(config) => config,
             Err(error) => {
                 let (status, message) = map_runtime_error(&error);
-                writer.write_all(
-                    &json_error_code(status, "stream_config_unavailable", message).to_http_bytes(),
-                )?;
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -1428,7 +1423,7 @@ impl RedDBServer {
                         // failure, and an unauthorized caller cannot learn
                         // the cursor exists.
                         let response = cursor_reject_response(&reject);
-                        writer.write_all(&response.to_http_bytes())?;
+                        response.write_to(writer)?;
                         return writer.flush();
                     }
                 }
@@ -1436,7 +1431,7 @@ impl RedDBServer {
                 let request = match extract_query_request(&body) {
                     Ok(req) => req,
                     Err(response) => {
-                        writer.write_all(&response.to_http_bytes())?;
+                        response.write_to(writer)?;
                         return writer.flush();
                     }
                 };
@@ -1488,13 +1483,13 @@ impl RedDBServer {
                         ),
                         kind,
                     );
-                    writer.write_all(&response.to_http_bytes())?;
+                    response.write_to(writer)?;
                     return writer.flush();
                 }
             }
             Err(err) => {
                 let response = json_error_code(400, "query_error", err.to_string());
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         }
@@ -1517,12 +1512,12 @@ impl RedDBServer {
                     );
                     object.insert("validation".to_string(), validation.clone());
                     let response = json_response(422, crate::json::Value::Object(object));
-                    writer.write_all(&response.to_http_bytes())?;
+                    response.write_to(writer)?;
                     return writer.flush();
                 }
                 let (status, msg) = map_runtime_error(&err);
                 let response = json_error(status, msg);
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -1783,7 +1778,7 @@ fn with_statement_kind(response: HttpResponse, kind: &str) -> HttpResponse {
         );
     }
     let mut updated = response;
-    updated.body = value.to_string_compact().into_bytes();
+    updated.body = value.to_string_compact().into_bytes().into();
     updated
 }
 
@@ -2188,7 +2183,7 @@ fn write_sse_http_response<W: std::io::Write>(
     writer: &mut W,
 ) -> io::Result<()> {
     if response.content_type != "text/event-stream" {
-        writer.write_all(&response.to_http_bytes())?;
+        response.write_to(writer)?;
         writer.flush()?;
         return Ok(());
     }
@@ -2242,7 +2237,7 @@ fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse
     match ask_sse_body(result) {
         Some(body) => HttpResponse {
             status: 200,
-            body: body.into_bytes(),
+            body: body.into_bytes().into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         },
@@ -2254,7 +2249,8 @@ fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse
                     message: "ASK STREAM result missing ASK row".to_string(),
                 },
             )
-            .into_bytes(),
+            .into_bytes()
+            .into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         },
@@ -2271,7 +2267,8 @@ fn ask_sse_error_response(err: &crate::api::RedDBError) -> HttpResponse {
         body: crate::runtime::ai::sse_frame_encoder::encode(
             &crate::runtime::ai::sse_frame_encoder::Frame::Error { code, message },
         )
-        .into_bytes(),
+        .into_bytes()
+        .into(),
         content_type: "text/event-stream",
         extra_headers: Vec::new(),
     }
@@ -2761,6 +2758,134 @@ mod tests {
 
     fn body_str(resp: &HttpResponse) -> String {
         String::from_utf8_lossy(&resp.body).to_string()
+    }
+
+    #[test]
+    fn http_query_buffers_share_the_budget_until_the_last_transport_owner_drops() {
+        assert_http_query_buffer_ownership(1024 * 1024, false);
+    }
+
+    #[test]
+    fn http_query_buffers_compete_with_storage_growth_and_release_it_for_retry() {
+        // The 256KiB insert also reserves its complete storage/WAL workspace.
+        // This larger control budget admits that write when responses are gone.
+        assert_http_query_buffer_ownership(2 * 1024 * 1024, true);
+    }
+
+    fn assert_http_query_buffer_ownership(budget: u64, check_writes: bool) {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+                .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE response_buffers (payload TEXT)")
+            .expect("table");
+        let payload = "x".repeat(64 * 1024);
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO response_buffers (payload) VALUES ($1)",
+                &[Value::text(payload.clone())],
+            )
+            .expect("seed fits budget");
+        let servers = [
+            RedDBServer::new(runtime.clone()),
+            RedDBServer::new(runtime.clone()),
+        ];
+        let request = br#"{"query":"SELECT payload FROM response_buffers"}"#;
+        assert_eq!(servers[0].handle_query(request.to_vec()).status, 200);
+        let mut responses = Vec::new();
+        let mut refused = false;
+        for request_id in 0..32 {
+            let response = servers[request_id % 2].handle_query(request.to_vec());
+            if response.status != 200 {
+                assert_eq!(response.status, 507, "{}", body_str(&response));
+                assert!(body_str(&response).contains("memory_limit_exceeded"));
+                refused = true;
+                break;
+            }
+            responses.push(response);
+        }
+        assert!(
+            refused,
+            "retained responses must compete for the shared runtime budget"
+        );
+        assert!(
+            !responses.is_empty(),
+            "a fitting response must succeed first"
+        );
+        runtime.refresh_memory_accounting();
+        assert!(runtime.memory_accounting().total_used_bytes() <= budget);
+
+        let copies: Vec<_> = responses
+            .iter()
+            .map(|response| response.body.clone())
+            .collect();
+        for (response, copy) in responses.iter().zip(&copies) {
+            assert_eq!(
+                response.body.as_ptr(),
+                copy.as_ptr(),
+                "transport clones share their allocation"
+            );
+        }
+        let outgoing: Vec<_> = responses
+            .into_iter()
+            .map(super::super::axum_edge::buffered_response_to_axum)
+            .collect();
+        assert_eq!(servers[0].handle_query(request.to_vec()).status, 507);
+        let competing_payload = Value::text("y".repeat(256 * 1024));
+        let insert = "INSERT INTO response_buffers (payload) VALUES ($1)";
+        if check_writes {
+            let refused_write = runtime
+                .execute_query_with_params(insert, std::slice::from_ref(&competing_payload))
+                .expect_err("retained responses and writes compete for the same budget");
+            assert!(
+                refused_write.to_string().contains("over budget"),
+                "{refused_write}"
+            );
+        }
+        drop(copies);
+        assert_eq!(
+            servers[0].handle_query(request.to_vec()).status,
+            507,
+            "queued transport still owns responses"
+        );
+        assert_eq!(
+            servers[1]
+                .handle_query(br#"{"query":"SELECT 1 AS healthy"}"#.to_vec())
+                .status,
+            200
+        );
+        drop(outgoing);
+
+        let retried = servers[0].handle_query(request.to_vec());
+        assert_eq!(retried.status, 200, "last owner returns headroom");
+        assert!(
+            body_str(&retried).contains(&payload),
+            "response retains the complete value"
+        );
+        assert_eq!(
+            runtime
+                .execute_query("SELECT COUNT(*) AS n FROM response_buffers")
+                .expect("read after refusal")
+                .result
+                .records[0]
+                .get("n"),
+            Some(&Value::Integer(1))
+        );
+        drop(retried);
+        if check_writes {
+            runtime
+                .execute_query_with_params(insert, &[competing_payload])
+                .expect("the identical write fits after transport releases its buffers");
+            assert_eq!(
+                runtime
+                    .execute_query("SELECT COUNT(*) AS n FROM response_buffers")
+                    .expect("count after retry")
+                    .result
+                    .records[0]
+                    .get("n"),
+                Some(&Value::Integer(2))
+            );
+        }
     }
 
     #[test]

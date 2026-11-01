@@ -31,6 +31,20 @@ pub(super) struct OwnedMemoryReservation {
     bytes: u64,
 }
 
+/// Unlike mutation reservations, these bytes have exactly one owned allocation
+/// and can be returned immediately after that allocation is freed. Keep only
+/// the accounting Arc: a queued response must not retain the entire runtime.
+pub(super) struct QueryBufferReservation {
+    accounting: std::sync::Arc<crate::storage::memory_pools::MemoryAccounting>,
+    bytes: u64,
+}
+
+impl Drop for QueryBufferReservation {
+    fn drop(&mut self) {
+        self.accounting.release_query_buffer(self.bytes);
+    }
+}
+
 impl MemoryReservation<'_> {
     pub(super) fn into_owned(mut self, runtime: &crate::RedDBRuntime) -> OwnedMemoryReservation {
         assert!(std::ptr::eq(
@@ -125,6 +139,26 @@ const FIELD_BASE_BYTES: u64 = 64;
 const INDEX_ENTRY_BYTES: u64 = 96;
 
 impl crate::RedDBRuntime {
+    pub(super) fn try_reserve_query_buffer(&self, bytes: usize) -> Option<QueryBufferReservation> {
+        let bytes = u64::try_from(bytes).ok()?;
+        let mut reservations = self.inner.memory_reservations.lock();
+        self.refresh_memory_accounting_with_reservations(&mut reservations);
+        let accounting = self.memory_accounting();
+        let projected = accounting
+            .total_used_bytes()
+            .checked_add(reservations.reserved_bytes)?
+            .checked_add(bytes)?;
+        if projected > accounting.budget().resolved_bytes {
+            return None;
+        }
+        accounting.charge(MemoryPool::QueryBuffers, bytes);
+        accounting.observe_total_used(projected);
+        Some(QueryBufferReservation {
+            accounting: std::sync::Arc::clone(&self.inner.memory_accounting),
+            bytes,
+        })
+    }
+
     pub(crate) fn admit_entity_mutation(
         &self,
         applied: &crate::application::entity::AppliedEntityMutation,
@@ -341,6 +375,7 @@ fn didactic_pool_name(pool: MemoryPool) -> &'static str {
         MemoryPool::IndexMemory => "indexes",
         MemoryPool::BlobCacheL1 => "blob-l1",
         MemoryPool::WalBuffers => "wal-buffers",
+        MemoryPool::QueryBuffers => "query-buffers",
     }
 }
 

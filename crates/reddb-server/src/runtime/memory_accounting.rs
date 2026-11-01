@@ -8,7 +8,7 @@
 //! one shared pool, so `red.stats` can show per-pool `share_bytes` /
 //! `used_bytes` against a single total.
 //!
-//! **Pull, not push.** The alternative — every subsystem holding an
+//! Storage pools use **pull, not push**. The alternative — every subsystem holding an
 //! `Arc<MemoryAccounting>` and updating it inline — would thread the pool into
 //! the page-cache hit path and the segment insert path, which is exactly the
 //! per-operation cost ADR 0073 §3 forbids. Instead the pools keep the atomics
@@ -18,6 +18,10 @@
 //!
 //! This sampler reports usage. `memory_admission` applies the growth checks
 //! against the shared budget (ADR 0073 §4).
+//!
+//! Query buffers are the exception: their owned reservations charge capacity
+//! before allocation and return it after the last owner drops. Never overwrite
+//! that pool with a sampled estimate.
 
 use crate::runtime::RedDBRuntime;
 use crate::storage::memory_pools::MemoryPool;

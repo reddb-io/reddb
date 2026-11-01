@@ -1624,6 +1624,7 @@ pub(crate) mod materialization_limit;
 /// (ADR 0073 §2).
 pub mod memory_accounting;
 pub(crate) mod memory_admission;
+pub(crate) mod memory_buffers;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 #[cfg(test)]

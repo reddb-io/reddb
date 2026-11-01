@@ -120,13 +120,13 @@ impl RedDBServer {
         }
 
         if !self.surface_allows(&request.method, &request_path) {
-            writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
+            json_error(404, "not found on this listener").write_to(writer)?;
             writer.flush()?;
             return Ok(true);
         }
 
         if !self.is_authorized(&request.method, &request_path, &request.headers) {
-            writer.write_all(&json_error(401, "unauthorized").to_http_bytes())?;
+            json_error(401, "unauthorized").write_to(writer)?;
             writer.flush()?;
             return Ok(true);
         }
@@ -146,10 +146,11 @@ impl RedDBServer {
                     status: 429,
                     content_type: "application/json",
                     body: format!("{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}")
-                        .into_bytes(),
+                        .into_bytes()
+                        .into(),
                     extra_headers: Vec::new(),
                 };
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 writer.flush()?;
                 Ok(true)
             }
@@ -192,10 +193,8 @@ impl RedDBServer {
                         Ok(config) => config,
                         Err(error) => {
                             let (status, message) = map_runtime_error(&error);
-                            writer.write_all(
-                                &json_error_code(status, "stream_config_unavailable", message)
-                                    .to_http_bytes(),
-                            )?;
+                            json_error_code(status, "stream_config_unavailable", message)
+                                .write_to(writer)?;
                             writer.flush()?;
                             return Ok(true);
                         }
@@ -215,7 +214,7 @@ impl RedDBServer {
                         Err(err) => {
                             emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
-                            writer.write_all(&response.to_http_bytes())?;
+                            response.write_to(writer)?;
                             writer.flush()?;
                         }
                     }
@@ -232,10 +231,8 @@ impl RedDBServer {
                         Ok(config) => config,
                         Err(error) => {
                             let (status, message) = map_runtime_error(&error);
-                            writer.write_all(
-                                &json_error_code(status, "stream_config_unavailable", message)
-                                    .to_http_bytes(),
-                            )?;
+                            json_error_code(status, "stream_config_unavailable", message)
+                                .write_to(writer)?;
                             writer.flush()?;
                             return Ok(true);
                         }
@@ -255,7 +252,7 @@ impl RedDBServer {
                         Err(err) => {
                             emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
-                            writer.write_all(&response.to_http_bytes())?;
+                            response.write_to(writer)?;
                             writer.flush()?;
                         }
                     }
@@ -377,12 +374,12 @@ impl RedDBServer {
         // before a cross-origin request; it must be answered *before*
         // auth/surface checks (a 401/404 on preflight would block the
         // real request). 204 + the permissive `Access-Control-*` headers
-        // that ride on every response (see `HttpResponse::to_http_bytes`).
+        // that ride on every response (see `HttpResponse::write_to`).
         if method == "OPTIONS" {
             return HttpResponse {
                 status: 204,
                 content_type: "application/json",
-                body: Vec::new(),
+                body: Vec::new().into(),
                 extra_headers: Vec::new(),
             };
         }
@@ -425,7 +422,8 @@ impl RedDBServer {
                         body: format!(
                             "{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}"
                         )
-                        .into_bytes(),
+                        .into_bytes()
+                        .into(),
                         extra_headers: Vec::new(),
                     };
                 }

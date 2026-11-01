@@ -25,6 +25,13 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
 - **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
 
+Buffered HTTP SELECT envelopes reserve serialized capacity against the same
+memory budget as storage growth, including both allocations during resizing.
+Clones and transport bodies share the allocation and retain its charge until
+the last owner drops. Intermediate query rows and presentation trees, streaming
+responses and other protocols still require their own owned admission; this
+buffer accounting alone does not establish a process-wide memory ceiling.
+
 On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
 every five seconds. At 75% of a finite controller limit it asks the allocator to
 return already free pages to the OS. This complements logical pool reclamation;

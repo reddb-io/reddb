@@ -562,7 +562,7 @@ pub fn write_chunked_response_header<W: std::io::Write>(
     content_type: &str,
 ) -> std::io::Result<()> {
     // Streaming responses write their own head here instead of going
-    // through `HttpResponse::to_http_bytes`, so they must repeat the
+    // through `HttpResponse::write_to`, so they must repeat the
     // same permissive CORS posture — otherwise a browser that can call
     // the JSON endpoints cross-origin would still be blocked on the
     // NDJSON/SSE streaming routes (graph/vector results). API auth is
