@@ -523,7 +523,9 @@ mod tests {
             columns: vec!["id".into()],
             unique: false,
         };
-        manager.create_index(&config).expect("create resident index");
+        manager
+            .create_index(&config)
+            .expect("create resident index");
         manager.install_paged("paged", "shared_name", Arc::new(NoReadProvider));
         let (_, allocations) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
             assert!(!manager.is_paged("resident", "shared_name"));
