@@ -1605,7 +1605,7 @@ mod impl_tree;
 mod impl_vcs;
 mod index_store;
 #[cfg(test)]
-pub(crate) use index_store::MutationTestPhase;
+pub(crate) use index_store::{IndexMethodKind as QualificationIndexMethodKind, MutationTestPhase};
 #[cfg(test)]
 mod cold_keyed_models;
 pub mod integrity_tombstone;

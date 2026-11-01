@@ -23,6 +23,65 @@ fn sql_projection(result: &crate::storage::query::unified::UnifiedResult) -> Jso
     crate::json::from_str(&rows.to_string_compact()).expect("rendered SQL values")
 }
 
+fn runtime_index_descriptors(runtime: &crate::runtime::RedDBRuntime) -> JsonValue {
+    use crate::runtime::QualificationIndexMethodKind as IndexMethodKind;
+
+    let mut indices = Vec::new();
+    for collection in runtime.db().store().list_collections() {
+        for index in runtime.index_store_ref().list_indices(&collection) {
+            let (method, resolution) = match index.method {
+                IndexMethodKind::Hash => ("hash", 0),
+                IndexMethodKind::Bitmap => ("bitmap", 0),
+                IndexMethodKind::BTree => ("btree", 0),
+                IndexMethodKind::H3 { resolution } => ("h3", resolution),
+            };
+            indices.push(crate::json::json!({
+                "collection": index.collection,
+                "name": index.name,
+                "columns": index.columns,
+                "method": method,
+                "unique": index.unique,
+                "resolution": JsonValue::Integer(i64::from(resolution)),
+            }));
+        }
+    }
+    indices.sort_by(|left, right| {
+        (left["collection"].as_str(), left["name"].as_str())
+            .cmp(&(right["collection"].as_str(), right["name"].as_str()))
+    });
+    JsonValue::Array(indices)
+}
+
+#[test]
+fn historical_index_reference_preserves_unique_method_and_column_order() {
+    let runtime = crate::runtime::RedDBRuntime::with_options(
+        crate::api::RedDBOptions::in_memory().with_memory_budget(64 * 1024 * 1024),
+    )
+    .expect("index reference runtime");
+    runtime
+        .execute_query("CREATE TABLE reference_rows (account_id INTEGER, item TEXT)")
+        .expect("table");
+    runtime
+        .execute_query(
+            "CREATE UNIQUE INDEX reference_tuple ON reference_rows (item, account_id) USING BTREE",
+        )
+        .expect("composite unique index");
+    assert_eq!(
+        runtime_index_descriptors(&runtime),
+        crate::json::from_str::<JsonValue>(
+            r#"[{
+            "collection": "reference_rows",
+            "name": "reference_tuple",
+            "columns": ["item", "account_id"],
+            "method": "btree",
+            "unique": true,
+            "resolution": 0
+        }]"#
+        )
+        .expect("independent descriptor JSON")
+    );
+}
+
 #[test]
 fn historical_sql_reference_matches_projected_http_values() {
     let runtime = crate::runtime::RedDBRuntime::with_options(
@@ -58,6 +117,18 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
     let reference: JsonValue = crate::json::from_str(&reference).expect("reference JSON");
     let cases = reference.as_array().expect("SQL cases");
     assert_eq!(cases.len(), 10, "complete Platform diagnostic workload");
+    let index_reference = std::env::var_os("REDDB_QUALIFICATION_INDEX_REFERENCE")
+        .expect("independent index descriptor reference path");
+    let index_reference = std::fs::read_to_string(index_reference).expect("index reference");
+    let index_reference: JsonValue =
+        crate::json::from_str(&index_reference).expect("index reference JSON");
+    assert!(
+        !index_reference["indices"]
+            .as_array()
+            .expect("expected index descriptors")
+            .is_empty(),
+        "a zero-index substitute cannot qualify the real historical database"
+    );
     let options = RedDBOptions::persistent(path)
         .with_memory_budget(768 * 1024 * 1024)
         .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
@@ -82,6 +153,16 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
         eprintln!(
             "runtime qualification phase=boot_markers pass={pass} markers={:?}",
             runtime.lifecycle().cold_start_phases().durations_ms(),
+        );
+        let indices = runtime_index_descriptors(&runtime);
+        assert_eq!(
+            indices, index_reference["indices"],
+            "all declared index descriptors survive runtime construction, pass {pass}"
+        );
+        eprintln!(
+            "runtime qualification phase=indices pass={pass} restored_indices={} index_memory_bytes={}",
+            indices.as_array().expect("restored indices").len(),
+            runtime.index_store_ref().memory_bytes(),
         );
         for case in cases {
             runtime.invalidate_result_cache();
