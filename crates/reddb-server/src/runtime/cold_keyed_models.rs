@@ -1682,6 +1682,20 @@ fn seed_expression_config(runtime: &RedDBRuntime) {
         .expect("expression config");
 }
 
+fn expression_probe_ids(runtime: &RedDBRuntime) -> Vec<Value> {
+    // Inspect DML effects while red_config is still unreadable. SQL ORDER BY
+    // must read its materialization ceiling, so sort only the test observation.
+    let mut ids: Vec<_> = observe(runtime, "SELECT id FROM expression_probe")
+        .into_iter()
+        .map(|row| row.get("id").cloned().expect("candidate id"))
+        .collect();
+    ids.sort_by_key(|value| match value {
+        Value::Integer(id) => *id,
+        other => panic!("expected integer candidate id, got {other:?}"),
+    });
+    ids
+}
+
 #[test]
 fn cold_config_expressions_retain_the_published_value() {
     let (_directory, runtime) = runtime();
@@ -1885,16 +1899,13 @@ fn unreadable_config_update_expressions_do_not_publish_fallback_values() {
             runtime.execute_query(query).is_err(),
             "an operating read failure must not publish a fallback UPDATE: {query}"
         );
-        let ids = |runtime: &RedDBRuntime| {
-            observe(runtime, "SELECT id FROM expression_probe ORDER BY id")
-                .into_iter()
-                .map(|row| row.get("id").cloned().expect("update target id"))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(ids(&runtime), vec![Value::Integer(1), Value::Integer(2)]);
+        assert_eq!(
+            expression_probe_ids(&runtime),
+            vec![Value::Integer(1), Value::Integer(2)]
+        );
         install_indexed_cold(&runtime, "red_config", 4096);
         runtime.execute_query(query).expect("retry config UPDATE");
-        assert_eq!(ids(&runtime), expected.map(Value::Integer));
+        assert_eq!(expression_probe_ids(&runtime), expected.map(Value::Integer));
     }
 }
 
@@ -1947,7 +1958,7 @@ fn unreadable_config_window_expressions_propagate_errors_and_retry() {
 }
 
 #[test]
-fn unreadable_config_in_unvisited_ordering_and_window_branches_is_not_loaded() {
+fn unreadable_config_blocks_materialization_even_with_unvisited_expression_branches() {
     let (_directory, runtime) = runtime();
     seed_expression_config(&runtime);
     runtime
@@ -1965,9 +1976,41 @@ fn unreadable_config_in_unvisited_ordering_and_window_branches_is_not_loaded() {
     runtime.db().store().persist().expect("publish lazy config");
     install_indexed_cold(&runtime, "red_config", 1);
     assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
+    // A streaming expression still skips its unvisited CONFIG branch. Sort
+    // and window admission must independently read the configured ceiling.
+    let mut lazy_rows = observe(
+        &runtime,
+        "SELECT CASE WHEN id > 0 THEN id ELSE LENGTH(CONFIG('fixture.flag')) END AS id FROM expression_probe",
+    );
+    lazy_rows.sort_by_key(|row| match &row["id"] {
+        Value::Integer(id) => *id,
+        other => panic!("expected integer lazy id, got {other:?}"),
+    });
+    assert_eq!(
+        lazy_rows
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        expression_probe_ids(&runtime)
+    );
+    for query in queries {
+        runtime.invalidate_result_cache();
+        let error = runtime
+            .execute_query(query)
+            .expect_err("unreadable materialization ceiling must reject admission");
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+    }
+    install_indexed_cold(&runtime, "red_config", 4096);
     for (query, expected) in queries.iter().zip(expected) {
         runtime.invalidate_result_cache();
-        assert_eq!(observe(&runtime, query), expected, "lazy branch: {query}");
+        assert_eq!(
+            observe(&runtime, query),
+            expected,
+            "restored admission: {query}"
+        );
     }
 }
 
@@ -2043,21 +2086,15 @@ fn unreadable_config_dml_predicates_fail_before_publication_and_retry() {
                 runtime.execute_query(&query).is_err(),
                 "unreadable DML predicate succeeded ({index:?}): {query}"
             );
-            let ids = |runtime: &RedDBRuntime| {
-                observe(runtime, "SELECT id FROM expression_probe ORDER BY id")
-                    .into_iter()
-                    .map(|row| row.get("id").cloned().expect("candidate id"))
-                    .collect::<Vec<_>>()
-            };
             assert_eq!(
-                ids(&runtime),
+                expression_probe_ids(&runtime),
                 vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)],
                 "failed predicate published a mutation: {query}"
             );
             install_indexed_cold(&runtime, "red_config", 4096);
             runtime.execute_query(&query).expect("retry DML predicate");
             assert_eq!(
-                ids(&runtime),
+                expression_probe_ids(&runtime),
                 expected.into_iter().map(Value::Integer).collect::<Vec<_>>(),
                 "predicate retry: {query}"
             );
@@ -2165,10 +2202,7 @@ fn unreadable_config_dml_predicates_preserve_lazy_branches_and_limit() {
         .execute_query(&query)
         .expect("LIMIT stops before an unreadable later row");
     assert_eq!(updated.affected_rows, 1);
-    let ids: Vec<_> = observe(&runtime, "SELECT id FROM expression_probe ORDER BY id")
-        .into_iter()
-        .map(|row| row.get("id").cloned().expect("remaining candidate id"))
-        .collect();
+    let ids = expression_probe_ids(&runtime);
     let mut expected: Vec<_> = (1..=3)
         .map(Value::Integer)
         .filter(|value| value != &previous)
