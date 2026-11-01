@@ -397,6 +397,9 @@ use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
 
 #[cfg(test)]
+mod historical_copy_qualification;
+
+#[cfg(test)]
 mod shared_state_tests {
     use super::*;
 
