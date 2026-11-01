@@ -278,8 +278,8 @@ pub struct HashIndexConfig {
 
 /// Manager for all hash indices across collections
 pub struct HashIndexManager {
-    /// (collection, index_name) → HashIndex
-    indices: RwLock<HashMap<(String, String), HashIndex>>,
+    /// Collection → index name → backing; borrowed probes allocate no names.
+    indices: RwLock<HashMap<String, HashMap<String, HashIndex>>>,
 }
 
 impl HashIndexManager {
@@ -287,7 +287,7 @@ impl HashIndexManager {
     /// Moving the backing preserves the old indexes if preparation fails.
     pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
         let mut indices = self.indices.write();
-        indices.retain(|(table, _), _| table != collection);
+        indices.remove(collection);
         indices.extend(prepared.indices.into_inner());
     }
 
@@ -301,17 +301,24 @@ impl HashIndexManager {
     /// Create a new hash index
     pub fn create_index(&self, config: &HashIndexConfig) -> Result<(), HashIndexError> {
         let mut indices = self.indices.write();
-        let key = (config.collection.clone(), config.name.clone());
-        indices.insert(key, HashIndex::new(config.unique));
+        indices
+            .entry(config.collection.clone())
+            .or_default()
+            .insert(config.name.clone(), HashIndex::new(config.unique));
         Ok(())
     }
 
     /// Drop a hash index
     pub fn drop_index(&self, collection: &str, name: &str) -> bool {
         let mut indices = self.indices.write();
-        indices
-            .remove(&(collection.to_string(), name.to_string()))
-            .is_some()
+        let removed = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.remove(name))
+            .is_some();
+        if indices.get(collection).is_some_and(HashMap::is_empty) {
+            indices.remove(collection);
+        }
+        removed
     }
 
     /// Insert into a named index
@@ -323,7 +330,10 @@ impl HashIndexManager {
         entity_id: EntityId,
     ) -> Result<(), HashIndexError> {
         let mut indices = self.indices.write();
-        if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
+        if let Some(index) = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.get_mut(index_name))
+        {
             index.insert(key, entity_id)
         } else {
             Err(HashIndexError::MissingIndex {
@@ -343,13 +353,16 @@ impl HashIndexManager {
         index.paged = Some(provider);
         self.indices
             .write()
-            .insert((collection.into(), name.into()), index);
+            .entry(collection.into())
+            .or_default()
+            .insert(name.into(), index);
     }
 
     pub(crate) fn is_paged(&self, collection: &str, name: &str) -> bool {
         self.indices
             .read()
-            .get(&(collection.into(), name.into()))
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
             .is_some_and(|index| index.paged.is_some())
     }
 
@@ -363,7 +376,8 @@ impl HashIndexManager {
     ) -> Result<Option<Vec<EntityId>>, HashIndexError> {
         let indices = self.indices.read();
         let index = indices
-            .get(&(collection.into(), name.into()))
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
             .ok_or_else(|| HashIndexError::MissingIndex {
                 collection: collection.into(),
                 name: name.into(),
@@ -394,7 +408,8 @@ impl HashIndexManager {
         let provider = {
             let indices = self.indices.read();
             let index = indices
-                .get(&(collection.into(), index_name.into()))
+                .get(collection)
+                .and_then(|indexes| indexes.get(index_name))
                 .ok_or_else(|| HashIndexError::MissingIndex {
                     collection: collection.into(),
                     name: index_name.into(),
@@ -416,7 +431,10 @@ impl HashIndexManager {
         entity_id: EntityId,
     ) -> Result<bool, HashIndexError> {
         let mut indices = self.indices.write();
-        if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
+        if let Some(index) = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.get_mut(index_name))
+        {
             Ok(index.remove(key, entity_id))
         } else {
             Err(HashIndexError::MissingIndex {
@@ -430,9 +448,9 @@ impl HashIndexManager {
     pub fn list_indices(&self, collection: &str) -> Vec<String> {
         let indices = self.indices.read();
         indices
-            .keys()
-            .filter(|(coll, _)| coll == collection)
-            .map(|(_, name)| name.clone())
+            .get(collection)
+            .into_iter()
+            .flat_map(|indexes| indexes.keys().cloned())
             .collect()
     }
 
@@ -440,7 +458,8 @@ impl HashIndexManager {
     pub fn index_stats(&self, collection: &str, name: &str) -> Option<HashIndexStats> {
         let indices = self.indices.read();
         indices
-            .get(&(collection.to_string(), name.to_string()))
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
             .filter(|idx| idx.paged.is_none())
             .map(|idx| HashIndexStats {
                 name: name.to_string(),
@@ -458,6 +477,7 @@ impl HashIndexManager {
         self.indices
             .read()
             .values()
+            .flat_map(|indexes| indexes.values())
             .map(|idx| idx.memory_bytes() as u64)
             .sum()
     }
@@ -483,6 +503,47 @@ pub struct HashIndexStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backing_probes_allocate_nothing_and_collection_replacement_is_isolated() {
+        struct NoReadProvider;
+        impl PagedHashIndex for NoReadProvider {
+            fn lookup(&self, _: &[u8]) -> Result<HashCandidates, HashIndexError> {
+                panic!("a backing probe must not read the provider");
+            }
+            fn memory_bytes(&self) -> usize {
+                0
+            }
+        }
+
+        let manager = HashIndexManager::new();
+        let config = HashIndexConfig {
+            collection: "resident".into(),
+            name: "shared_name".into(),
+            columns: vec!["id".into()],
+            unique: false,
+        };
+        manager.create_index(&config).expect("create resident index");
+        manager.install_paged("paged", "shared_name", Arc::new(NoReadProvider));
+        let (_, allocations) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            assert!(!manager.is_paged("resident", "shared_name"));
+            assert!(manager.is_paged("paged", "shared_name"));
+            assert!(!manager.is_paged("paged", "missing"));
+            assert!(!manager.is_paged("missing", "shared_name"));
+        });
+        assert_eq!(allocations.allocs, 0);
+
+        let replacement = HashIndexManager::new();
+        replacement.install_paged("resident", "replacement", Arc::new(NoReadProvider));
+        manager.replace_collection_from("resident", replacement);
+        assert_eq!(manager.list_indices("resident"), vec!["replacement"]);
+        assert!(manager.is_paged("paged", "shared_name"));
+        assert!(manager.is_paged("resident", "replacement"));
+        assert!(!manager.drop_index("resident", "shared_name"));
+        assert!(manager.drop_index("resident", "replacement"));
+        assert!(!manager.indices.read().contains_key("resident"));
+        assert!(manager.is_paged("paged", "shared_name"));
+    }
 
     fn assert_memory_accounting(index: &HashIndex) {
         let recomputed = std::mem::size_of::<HashIndex>()
