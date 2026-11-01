@@ -160,6 +160,7 @@ async function sharedConformance(browserPage) {
     'aggregate_group_bindings_shape_and_host_admission', 'aggregate_group_bindings_depth_limits',
     'aggregate_group_bindings_result_metadata',
     'aggregate_results_grouped_columns_and_hidden', 'aggregate_results_empty_input_semantics',
+    'aggregate_results_fallible_having_and_retry',
     'aggregate_results_wide_pagination', 'aggregate_results_admission_and_secret_policy',
     'aggregate_planning_aliases_and_hidden_reuse', 'aggregate_planning_dedup_and_legacy_inputs',
     'aggregate_planning_nested_expressions_and_ordering', 'aggregate_planning_parameters_and_pagination',
