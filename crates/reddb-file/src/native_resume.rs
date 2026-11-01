@@ -7,7 +7,7 @@ use crate::{RdbFileError, RdbFileResult, METADATA_HEADER_BYTES};
 use std::collections::BTreeMap;
 
 const MAGIC: &[u8; 4] = b"RDRS";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionResume {
@@ -22,6 +22,7 @@ pub struct CollectionResume {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogResume {
     pub entity_id_next: u64,
+    pub xid_high_water_mark: Option<u64>,
     pub collections: BTreeMap<String, CollectionResume>,
 }
 
@@ -72,6 +73,8 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&resume.entity_id_next.to_le_bytes());
+    out.push(u8::from(resume.xid_high_water_mark.is_some()));
+    out.extend_from_slice(&resume.xid_high_water_mark.unwrap_or(0).to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for (name, state) in &resume.collections {
         encode_native_paged_collection_root(out, name, state.root_page);
@@ -119,10 +122,22 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
         return Ok(None);
     }
     position += 4;
-    if read_u32(data, &mut position)? != VERSION {
+    let version = read_u32(data, &mut position)?;
+    if version != 3 && version != VERSION {
         return Err(invalid("unsupported catalog resume version"));
     }
     let entity_id_next = read_u64(data, &mut position)?;
+    let xid_high_water_mark = if version >= 4 {
+        let present = take(data, &mut position, 1)?[0];
+        let value = read_u64(data, &mut position)?;
+        match (present, value) {
+            (0, 0) => None,
+            (1, value) => Some(value),
+            _ => return Err(invalid("invalid transaction resume marker")),
+        }
+    } else {
+        None
+    };
     let count = read_u32(data, &mut position)?;
     if count != header.collection_count || entity_id_next == 0 {
         return Err(invalid("invalid catalog resume header"));
@@ -160,6 +175,7 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
     validate_key_roots(&collections)?;
     Ok(Some(CatalogResume {
         entity_id_next,
+        xid_high_water_mark,
         collections,
     }))
 }
@@ -204,6 +220,7 @@ mod tests {
     fn resume() -> CatalogResume {
         CatalogResume {
             entity_id_next: 999,
+            xid_high_water_mark: Some(4000),
             collections: BTreeMap::from([(
                 "rows".into(),
                 CollectionResume {
@@ -225,6 +242,35 @@ mod tests {
         let state = resume();
         encode_catalog_resume(&mut data, &state).expect("encode");
         assert_eq!(decode_catalog_resume(&data).expect("decode"), Some(state));
+    }
+
+    #[test]
+    fn xid_resume_reads_v3_as_unknown_and_rejects_invalid_presence() {
+        let mut data = catalog();
+        let start = data.len();
+        encode_catalog_resume(&mut data, &resume()).expect("encode");
+        let presence = start + 16;
+        let mut legacy = data.clone();
+        legacy[start + 4..start + 8].copy_from_slice(&3u32.to_le_bytes());
+        legacy.drain(presence..presence + 9);
+        let mut expected = resume();
+        expected.xid_high_water_mark = None;
+        assert_eq!(
+            decode_catalog_resume(&legacy).expect("v3"),
+            Some(expected.clone())
+        );
+        data[presence] = 2;
+        assert!(decode_catalog_resume(&data).is_err());
+        data[presence] = 0;
+        assert!(
+            decode_catalog_resume(&data).is_err(),
+            "unknown markers must have zero payload"
+        );
+        data[presence + 1..presence + 9].fill(0);
+        assert_eq!(
+            decode_catalog_resume(&data).expect("unknown"),
+            Some(expected)
+        );
     }
 
     #[test]

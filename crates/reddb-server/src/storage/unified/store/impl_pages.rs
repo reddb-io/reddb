@@ -459,6 +459,7 @@ impl UnifiedStore {
         live: &HashMap<String, Arc<BTree>>,
         keys: &HashMap<String, PublishedKeyIndex>,
     ) -> Result<(), StoreError> {
+        let mut next_xid_summary = None;
         let mut retired = self.retired_btrees.lock();
         let mut roots = Vec::new();
         let mut reclaim = Vec::new();
@@ -533,6 +534,33 @@ impl UnifiedStore {
             let mut states = std::collections::BTreeMap::new();
             let mut entity_id_next = self.resident.next_entity_id.load(Ordering::SeqCst);
             let collections = self.resident.collections.read();
+            let publishes_rows = {
+                let summary = self.recovery_xid_summary.read();
+                live.iter().any(|(name, tree)| {
+                    let root = tree.root_page_id();
+                    root != 0
+                        && summary.as_ref().and_then(|state| state.roots.get(name)) != Some(&root)
+                })
+            };
+            let xid_high_water_mark =
+                self.base_xid_high_water_mark(&collections).map(|mut high| {
+                    // Ordinary metadata flushes retain the old immutable-base
+                    // bound; WAL overlays are observed at boot. Only replacement
+                    // data roots require a borrowed visit over resident headers.
+                    // The publication fence excludes concurrent header mutations.
+                    if publishes_rows {
+                        for manager in collections.values() {
+                            manager.for_each_entity(|entity| {
+                                high = high.max(entity.xmin).max(entity.xmax);
+                                true
+                            });
+                        }
+                    }
+                    if let Some(snapshots) = self.snapshot_manager.get() {
+                        high = high.max(snapshots.peek_next_xid().saturating_sub(1));
+                    }
+                    high
+                });
             for (name, manager) in collections.iter() {
                 let tree = live.get(name);
                 let (entity_next, row_id_next) = manager.identity_counters();
@@ -578,14 +606,23 @@ impl UnifiedStore {
                     },
                 );
             }
-            encode_catalog_resume(
-                metadata,
-                &CatalogResume {
-                    entity_id_next,
-                    collections: states,
-                },
-            )
-            .map_err(|error| StoreError::Serialization(error.to_string()))?;
+            let resume = CatalogResume {
+                entity_id_next,
+                xid_high_water_mark,
+                collections: states,
+            };
+            encode_catalog_resume(metadata, &resume)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?;
+            next_xid_summary = xid_high_water_mark.map(|high_water_mark| {
+                super::recovery_xid::RecoveryXidSummary {
+                    high_water_mark,
+                    roots: resume
+                        .collections
+                        .into_iter()
+                        .map(|(name, state)| (name, state.root_page))
+                        .collect(),
+                }
+            });
         }
         // Record the exact pages before the catalog can forget their owners.
         // Recovery resolves this intent against the durable catalog epoch.
@@ -600,6 +637,7 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        *self.recovery_xid_summary.write() = next_xid_summary;
         self.ownership_catalog_epoch
             .store(catalog_epoch, Ordering::Release);
         #[cfg(test)]
@@ -948,6 +986,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
+            recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -1050,6 +1089,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
+            recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -1321,6 +1361,18 @@ impl UnifiedStore {
                     .next_entity_id
                     .fetch_max(resume.entity_id_next, Ordering::SeqCst);
             }
+            *self.recovery_xid_summary.write() = resume.as_ref().and_then(|resume| {
+                resume.xid_high_water_mark.map(|high_water_mark| {
+                    super::recovery_xid::RecoveryXidSummary {
+                        high_water_mark,
+                        roots: resume
+                            .collections
+                            .iter()
+                            .map(|(name, state)| (name.clone(), state.root_page))
+                            .collect(),
+                    }
+                })
+            });
             if content.len() >= 4 {
                 let mut pos = 0;
                 let mut format_version = STORE_VERSION_V1;

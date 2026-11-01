@@ -95,6 +95,11 @@ fn complete_runtime_reopens_cold_tables_and_preserves_committed_crud() {
     cold.flush().expect("cold checkpoint");
     drop(cold);
     let reopened = cold_open();
+    assert!(reopened
+        .db()
+        .store()
+        .startup_xid_high_water_mark()
+        .is_some());
     assert_eq!(
         rows(&reopened),
         changed,

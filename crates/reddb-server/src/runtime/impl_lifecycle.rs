@@ -1127,19 +1127,33 @@ impl RedDBRuntime {
     fn rehydrate_snapshot_xid_floor(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let base_high_water_mark = store.startup_xid_high_water_mark();
+        if let Some(high_water_mark) = base_high_water_mark {
+            snapshot_manager.observe_committed_xid(high_water_mark);
+        }
         for collection in store.list_collections() {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
-            // Recovery must include the physical disk base and tombstones,
-            // before any snapshot filters rows using this restored floor.
-            // Visit borrowed resident rows or decode one bounded base record;
-            // never clone the collection merely to inspect its MVCC headers.
-            manager.try_for_each_entity(usize::MAX, |entity| {
+            let observe = |entity: &crate::storage::UnifiedEntity| {
                 snapshot_manager.observe_committed_xid(entity.xmin);
                 snapshot_manager.observe_committed_xid(entity.xmax);
                 true
-            })?;
+            };
+            if base_high_water_mark.is_some() {
+                // The catalog covers the exact immutable roots. Committed WAL
+                // replay remains resident and must still advance the floor.
+                manager.for_each_entity(observe);
+            } else {
+                // Older or unproven generations require complete physical
+                // validation, one bounded record at a time, before filtering.
+                manager.try_for_each_entity(usize::MAX, observe)?;
+            }
+        }
+        if base_high_water_mark.is_none() {
+            store.remember_startup_xid_high_water_mark(
+                snapshot_manager.peek_next_xid().saturating_sub(1),
+            );
         }
         Ok(())
     }
@@ -1324,5 +1338,182 @@ impl RedDBRuntime {
         &self,
     ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
         self.inner.browser_token_authority.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod xid_resume_tests {
+    use super::*;
+    use reddb_engine::storage::collection_read::{CollectionCursor, CollectionRead, EncodedRecord};
+
+    struct Unreadable;
+
+    fn unavailable() -> crate::storage::StoreError {
+        crate::storage::StoreError::Io(std::io::Error::other("XID bootstrap read a base payload"))
+    }
+
+    impl CollectionRead for Unreadable {
+        fn get_record(
+            &self,
+            id: crate::storage::EntityId,
+            _: usize,
+        ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
+            if id.raw() == 999 {
+                Ok(None)
+            } else {
+                Err(unavailable())
+            }
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
+            Err(unavailable())
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
+            Err(unavailable())
+        }
+    }
+
+    #[test]
+    fn xid_resume_survives_pending_checkpoint_process_exit() {
+        const FIXTURE: &str = "REDDB_XID_RESUME_CRASH_FIXTURE";
+        let open = |path: std::path::PathBuf| {
+            let options = RedDBOptions::persistent(path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_storage_profile(
+                    crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                )
+                .expect("profile");
+            crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options)
+            })
+            .expect("crash recovery runtime")
+        };
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = std::path::PathBuf::from(root);
+            assert_eq!(
+                std::fs::read_to_string(root.join("owned-fixture")).expect("owned fixture"),
+                "xid-resume-crash-v1"
+            );
+            let runtime = open(root.join("crash.rdb"));
+            for sql in [
+                "CREATE TABLE crash_rows (id INTEGER, payload TEXT)",
+                "INSERT INTO crash_rows (id, payload) VALUES (1, 'committed')",
+                "BEGIN",
+                "UPDATE crash_rows SET payload = 'pending' WHERE id = 1",
+                "INSERT INTO crash_rows (id, payload) VALUES (2, 'pending')",
+            ] {
+                runtime.execute_query(sql).expect("crash fixture statement");
+            }
+            runtime
+                .flush()
+                .expect("checkpoint with pending transaction");
+            std::fs::write(
+                root.join("checkpoint-complete"),
+                "pending transaction remains open",
+            )
+            .expect("acknowledged fixture checkpoint");
+            // Deliberately skip all runtime destructors and rollback. The
+            // parent must recover the committed preimage from the native file.
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().expect("owned crash fixture");
+        std::fs::write(
+            directory.path().join("owned-fixture"),
+            "xid-resume-crash-v1",
+        )
+        .expect("ownership marker");
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "runtime::impl_lifecycle::xid_resume_tests::xid_resume_survives_pending_checkpoint_process_exit",
+                "--test-threads=1",
+            ])
+            .env(FIXTURE, directory.path())
+            .output()
+            .expect("crashing owned child");
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(directory.path().join("checkpoint-complete").is_file());
+        let path = directory.path().join("crash.rdb");
+        assert!(path.is_file());
+        let runtime = open(path.clone());
+        let result = runtime
+            .execute_query("SELECT id, payload FROM crash_rows ORDER BY id")
+            .expect("committed preimage");
+        assert_eq!(
+            result.result.records.len(),
+            1,
+            "pending insert must stay invisible"
+        );
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(
+            result.result.records[0].get("payload"),
+            Some(&Value::text("committed"))
+        );
+        runtime
+            .execute_query("INSERT INTO crash_rows (id, payload) VALUES (3, 'after')")
+            .expect("new writer after recovery");
+        runtime.flush().expect("recovered checkpoint");
+        drop(runtime);
+        let reopened = open(path);
+        let result = reopened
+            .execute_query("SELECT id FROM crash_rows ORDER BY id")
+            .expect("second recovery");
+        assert_eq!(result.result.records.len(), 2);
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(result.result.records[1].get("id"), Some(&Value::Integer(3)));
+    }
+
+    #[test]
+    fn xid_resume_skips_known_base_payloads_but_rejects_an_unproven_root() {
+        let directory = tempfile::tempdir().expect("resume fixture");
+        let options = RedDBOptions::persistent(directory.path().join("resume.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE resume_rows (id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO resume_rows (id) VALUES (1)")
+            .expect("row");
+        runtime.flush().expect("publish complete XID summary");
+        let store = runtime.db().store();
+        assert!(store.startup_xid_high_water_mark().is_some());
+        let root = store
+            .collection_root_page("resume_rows")
+            .expect("published root");
+        let manager = store.get_collection("resume_rows").expect("manager");
+        for (candidate, proven) in [(root, true), (root + 1, false)] {
+            manager.install_backing(
+                Arc::new(Unreadable),
+                candidate,
+                store.format_version(),
+                4096,
+                1,
+            );
+            let mut overlay = crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(999),
+                "resume_rows",
+                999,
+                vec![Value::Integer(2)],
+            );
+            overlay.xmin = 500_000;
+            overlay.xmax = 600_000;
+            manager.insert(overlay).expect("resident WAL overlay");
+            let result = runtime.rehydrate_snapshot_xid_floor();
+            assert_eq!(result.is_ok(), proven, "root={candidate}: {result:?}");
+            if proven {
+                assert!(runtime.snapshot_manager().peek_next_xid() > 600_000);
+            }
+        }
     }
 }

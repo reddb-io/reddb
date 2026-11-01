@@ -155,6 +155,11 @@ impl SegmentManager {
         self.backing.read().is_some()
     }
 
+    /// Identity of the immutable base currently installed by the host.
+    pub fn backing_root_page(&self) -> Option<u32> {
+        self.backing.read().as_ref().map(|base| base.root_page)
+    }
+
     /// The host applies the same row allowance to model-specific expansion
     /// such as decrypting a compressed Vault value after native record decode.
     pub fn backing_read_bytes_max(&self) -> Option<usize> {

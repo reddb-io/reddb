@@ -76,3 +76,18 @@ an HTTP/auth listener, qualify every restored secondary index, control filesyste
 cache temperature, establish optimized performance or enable the production
 factory. The ordinary suite also exercises a small persistent runtime through
 this exact factory, committed CRUD, a checkpoint and a second cold reopen.
+
+Prepared catalogs can carry a transaction-ID upper bound in resume trailer V4;
+the decoder still accepts V3 with an unknown bound. The enclosing metadata
+checksum binds the bound to the published collection roots. Bootstrap uses it
+only while every installed base matches those roots, then also visits resident
+WAL headers, including tombstones. Missing or replaced proof requires the full
+fallible physical scan before transaction visibility is initialized.
+
+Replacing data roots folds resident headers into the bound while holding the
+publication fence. Ordinary metadata flushes retain the immutable-base bound
+and the allocator ceiling, avoiding a scan of the growing write overlay on each
+flush. Only successful durable catalog publication advances the volatile proof;
+the live base can then be replaced. V3 copies need the initial scan before a
+later checkpoint can publish the bound. Older experimental readers that only
+understand V3 reject V4 rather than interpreting its fields as old counters.

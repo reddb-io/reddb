@@ -79,6 +79,10 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             started.elapsed().as_millis(),
             runtime.db().store().segment_memory_bytes(),
         );
+        eprintln!(
+            "runtime qualification phase=boot_markers pass={pass} markers={:?}",
+            runtime.lifecycle().cold_start_phases().durations_ms(),
+        );
         for case in cases {
             runtime.invalidate_result_cache();
             let started = Instant::now();
