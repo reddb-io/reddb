@@ -282,10 +282,25 @@ impl RedDBRuntime {
             .unwrap_or(usize::MAX)
             .max(1);
         // Decode, indexed projection and descriptor reduction share this owned
-        // scratch. The merged visitor also retains resident overlay identities.
+        // scratch. Resident-only visitors borrow rows already charged to the
+        // arena. Disk-backed visitors also retain overlay identities; reserve
+        // for bounded stores even before a checkpoint installs their backing.
+        let overlay_bytes = if manager.has_backing()
+            || self
+                .inner
+                .db
+                .store()
+                .config()
+                .resident_memory_bytes_max
+                .is_some()
+        {
+            usize::try_from(manager.resident_bytes()).unwrap_or(usize::MAX)
+        } else {
+            0
+        };
         let scratch = read_bytes_max
             .saturating_mul(4)
-            .saturating_add(usize::try_from(manager.resident_bytes()).unwrap_or(usize::MAX));
+            .saturating_add(overlay_bytes);
         let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
             RedDBError::InvalidOperation(
                 "index restoration workspace exceeds the shared memory budget".into(),
@@ -452,5 +467,80 @@ impl RedDBRuntime {
         }
         self.invalidate_plan_cache();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+
+    #[test]
+    fn resident_index_backfill_borrows_payloads_and_still_enforces_workspace_budget() {
+        const MIB: u64 = 1024 * 1024;
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory().with_memory_budget(64 * MIB),
+        )
+        .expect("resident runtime");
+        runtime
+            .execute_query("CREATE TABLE eager_scan_payloads (id INTEGER, payload BLOB)")
+            .expect("table");
+        runtime
+            .execute_query("CREATE INDEX eager_scan_id ON eager_scan_payloads (id) USING BTREE")
+            .expect("index");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("eager_scan_payloads")
+            .expect("source manager");
+        let schema = std::sync::Arc::new(vec!["id".into(), "payload".into()]);
+        for id in 1..=32 {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(1000 + id),
+                "eager_scan_payloads",
+                id,
+                vec![],
+            );
+            entity.data = EntityData::Row(RowData {
+                columns: vec![
+                    Value::Integer(id as i64),
+                    Value::Blob(vec![id as u8; MIB as usize]),
+                ],
+                named: None,
+                schema: Some(std::sync::Arc::clone(&schema)),
+            });
+            manager.insert(entity).expect("source row");
+        }
+        assert!(!manager.has_backing(), "resident-only source");
+        let resident_bytes = manager.resident_bytes();
+        assert!(resident_bytes >= 32 * MIB);
+        assert!(
+            resident_bytes < 40 * MIB,
+            "compact recovered row payloads plus zone bounds: {resident_bytes}"
+        );
+        runtime
+            .rebuild_runtime_indexes_for_table("eager_scan_payloads")
+            .expect("backfill must not reserve a second copy of borrowed source payloads");
+
+        let held = runtime
+            .try_reserve_query_buffer(16 * MIB as usize)
+            .expect("independent retained query workspace fits");
+        let error = runtime
+            .rebuild_runtime_indexes_for_table("eager_scan_payloads")
+            .expect_err("real scratch still competes with retained query workspace");
+        assert!(error.to_string().contains("workspace exceeds"), "{error}");
+        drop(held);
+        let result = runtime
+            .execute_query("SELECT id FROM eager_scan_payloads WHERE id = 17")
+            .expect("prior complete index survives denied rebuild");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("id"),
+            Some(&Value::Integer(17))
+        );
+        runtime
+            .rebuild_runtime_indexes_for_table("eager_scan_payloads")
+            .expect("retry after the owned query workspace is released");
     }
 }
