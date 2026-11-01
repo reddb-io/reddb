@@ -1,10 +1,11 @@
 //! Opt-in qualification over an independently preserved historical copy. Never
 //! selected by the normal suite or the managed runtime's storage factory.
-use super::*;
 use crate::json::Value as JsonValue;
+use crate::storage::{UnifiedStore, UnifiedStoreConfig};
 use std::time::Instant;
 
 fn fingerprint(store: &UnifiedStore, expected: &JsonValue) -> u64 {
+    let capture = std::env::var_os("REDDB_QUALIFICATION_MISMATCH_CAPTURE");
     let collections = expected["collections"]
         .as_array()
         .expect("reference collections");
@@ -20,20 +21,34 @@ fn fingerprint(store: &UnifiedStore, expected: &JsonValue) -> u64 {
         "all physical collections survive"
     );
     let mut total = 0;
-    for reference in collections {
+    for (index, reference) in collections.iter().enumerate() {
         let name = reference["name"].as_str().expect("collection");
         let manager = store.get_collection(name).expect("physical manager");
         let mut count = 0u64;
         let mut sum = [0u8; 32];
         let mut xor = [0u8; 32];
+        let mut samples = String::new();
         manager
             .try_scan_for_each(None, 16 * 1024 * 1024, |entity| {
+                // The external API reference was produced by ordinary recovery,
+                // which compacts eligible named maps into positional rows. Use
+                // that exact projection, without retaining the decoded rows.
+                // It preserves conflicting explicit positions and the bounded
+                // per-collection schema diversity rather than sorting blindly.
+                let mut entity = entity.clone();
+                manager.restore_snapshot_row_layout(&mut entity);
                 // This is the actual public native entity DTO used to produce
                 // the independently exported reference. Its object maps are
                 // ordered, and its integer/decimal lexemes stay lossless.
-                let json =
-                    crate::presentation::entity_json::entity_json(entity).to_string_compact();
+                let json = super::entity_json(&entity).to_string_compact();
                 let digest = crate::crypto::sha256(json.as_bytes());
+                if capture.is_some()
+                    && count < 3
+                    && samples.len().saturating_add(json.len()) < 1024 * 1024
+                {
+                    samples.push_str(&json);
+                    samples.push('\n');
+                }
                 let mut carry = 0u16;
                 for index in (0..32).rev() {
                     let value = u16::from(sum[index]) + u16::from(digest[index]) + carry;
@@ -46,6 +61,23 @@ fn fingerprint(store: &UnifiedStore, expected: &JsonValue) -> u64 {
             })
             .expect("every physical read succeeds; no truncated prefix");
         assert_eq!(count, reference["count"].as_u64().expect("count"), "{name}");
+        if hex::encode(sum) != reference["sha256Sum"].as_str().expect("sum") {
+            if let Some(path) = &capture {
+                use std::io::Write;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options
+                    .open(path)
+                    .expect("new private mismatch capture")
+                    .write_all(samples.as_bytes())
+                    .expect("bounded private mismatch capture");
+            }
+        }
         assert_eq!(
             hex::encode(sum),
             reference["sha256Sum"].as_str().expect("sum"),
@@ -57,6 +89,10 @@ fn fingerprint(store: &UnifiedStore, expected: &JsonValue) -> u64 {
             "{name}"
         );
         total += count;
+        println!(
+            "qualification verified_collections={} verified_entities={total}",
+            index + 1
+        );
     }
     assert_eq!(total, expected["rows"].as_u64().expect("reference total"));
     total

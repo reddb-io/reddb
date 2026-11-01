@@ -682,17 +682,25 @@ impl SegmentManager {
         Some(schema)
     }
 
+    /// Apply the ordinary recovery row layout without retaining the entity.
+    /// Hosts comparing disk-backed views with resident recovery must use the
+    /// same bounded schema cache and positional-value preservation rules.
+    #[doc(hidden)]
+    pub fn restore_snapshot_row_layout(&self, entity: &mut UnifiedEntity) {
+        if let super::entity::EntityData::Row(row) = &mut entity.data {
+            if let Some(schema) = self.recovery_schema(row) {
+                row.compact_with_schema(&schema);
+            }
+        }
+    }
+
     /// Restore a snapshot image without allocating a new sequence identity.
     #[doc(hidden)]
     pub fn restore_snapshot_entity(
         &self,
         mut entity: UnifiedEntity,
     ) -> Result<EntityId, SegmentError> {
-        if let super::entity::EntityData::Row(row) = &mut entity.data {
-            if let Some(schema) = self.recovery_schema(row) {
-                row.compact_with_schema(&schema);
-            }
-        }
+        self.restore_snapshot_row_layout(&mut entity);
         self.maybe_seal_growing()?;
         if self.get(entity.id).is_some() {
             return Err(SegmentError::AlreadyExists(entity.id));
@@ -3056,6 +3064,41 @@ mod tests {
     use crate::storage::entity::{EntityData, EntityKind, RowData};
     use crate::transaction::snapshot::{Snapshot, SnapshotManager};
     use reddb_types::Value;
+
+    #[test]
+    fn recovery_view_projection_keeps_schema_bounds_without_retaining_rows_or_identities() {
+        for collection in ["rows", "red_internal"] {
+            let manager = SegmentManager::new(collection);
+            let identities = manager.identity_counters();
+            for id in 1..=18 {
+                let field = format!("field_{id}");
+                let mut entity =
+                    UnifiedEntity::table_row(EntityId::new(id), collection, id, vec![]);
+                entity.data = EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(HashMap::from([
+                        (field.clone(), Value::Integer(id as i64)),
+                        ("id".into(), Value::Integer(id as i64)),
+                    ])),
+                    schema: None,
+                });
+                manager.restore_snapshot_row_layout(&mut entity);
+                let row = entity.data.as_row().expect("row");
+                assert_eq!(row.get_field(&field), Some(&Value::Integer(id as i64)));
+                assert_eq!(row.get_field("id"), Some(&Value::Integer(id as i64)));
+                assert_eq!(
+                    row.named.is_some(),
+                    collection.starts_with("red_") || id > 16
+                );
+            }
+            assert_eq!(manager.count(), 0, "a projection never adopts payloads");
+            assert_eq!(manager.identity_counters(), identities);
+            assert_eq!(
+                manager.recovery_row_schemas.read().len(),
+                if collection == "rows" { 16 } else { 0 }
+            );
+        }
+    }
 
     #[test]
     fn physical_pages_keep_global_order_across_segments_and_deleted_slots() {
