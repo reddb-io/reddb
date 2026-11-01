@@ -44,14 +44,15 @@ pub(crate) const DEFAULT_MAX_MATERIALIZED_ROWS: usize = 1_000_000;
 ///
 /// Missing or unparseable values fall back to
 /// [`DEFAULT_MAX_MATERIALIZED_ROWS`] — bad config never terminates a
-/// query that would otherwise succeed. A configured `0` means
+/// query that would otherwise succeed. Physical read failures propagate rather
+/// than silently relaxing admission. A configured `0` means
 /// "explicitly unbounded" (mirrors the `RED_MAX_*` resource-limit
 /// convention) and disables the guard by returning [`usize::MAX`].
-pub(crate) fn max_materialized_rows(db: &RedDB) -> usize {
+pub(crate) fn max_materialized_rows(db: &RedDB) -> RedDBResult<usize> {
     // (entity_id, parsed_value) of the newest matching config row.
     let mut newest: Option<(u64, u64)> = None;
     if let Some(manager) = db.store().get_collection(RED_CONFIG_COLLECTION) {
-        manager.for_each_entity(|entity| {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             let Some(row) = entity.data.as_row() else {
                 return true;
             };
@@ -75,13 +76,13 @@ pub(crate) fn max_materialized_rows(db: &RedDB) -> usize {
                 }
             }
             true
-        });
+        })?;
     }
-    match newest {
+    Ok(match newest {
         None => DEFAULT_MAX_MATERIALIZED_ROWS,
         Some((_, 0)) => usize::MAX, // explicit unbounded
         Some((_, v)) => v as usize,
-    }
+    })
 }
 
 /// Terminate the query when `current` materialized rows have exceeded
@@ -103,7 +104,7 @@ pub(crate) fn check(executor: &'static str, current: usize, limit: usize) -> Red
 /// `current`. Convenience wrapper over [`check`] for the executor call
 /// sites that hold a `&RedDB`.
 pub(crate) fn guard(db: &RedDB, executor: &'static str, current: usize) -> RedDBResult<()> {
-    check(executor, current, max_materialized_rows(db))
+    check(executor, current, max_materialized_rows(db)?)
 }
 
 #[cfg(test)]
@@ -143,7 +144,7 @@ mod tests {
     fn default_applies_when_key_absent() {
         let rt = mk_runtime();
         assert_eq!(
-            max_materialized_rows(&rt.db()),
+            max_materialized_rows(&rt.db()).expect("default limit"),
             DEFAULT_MAX_MATERIALIZED_ROWS
         );
     }
@@ -153,7 +154,10 @@ mod tests {
         let rt = mk_runtime();
         rt.execute_query("SET CONFIG stream.executor.max_materialized_rows = 42")
             .expect("set config ok");
-        assert_eq!(max_materialized_rows(&rt.db()), 42);
+        assert_eq!(
+            max_materialized_rows(&rt.db()).expect("configured limit"),
+            42
+        );
     }
 
     #[test]
@@ -161,6 +165,116 @@ mod tests {
         let rt = mk_runtime();
         rt.execute_query("SET CONFIG stream.executor.max_materialized_rows = 0")
             .expect("set config ok");
-        assert_eq!(max_materialized_rows(&rt.db()), usize::MAX);
+        assert_eq!(
+            max_materialized_rows(&rt.db()).expect("unbounded config"),
+            usize::MAX
+        );
+    }
+
+    fn cold_limit_fixture() -> (tempfile::TempDir, crate::RedDBOptions, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("cold limit fixture");
+        let options = RedDBOptions::persistent(directory.path().join("limits.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+        for sql in [
+            "CREATE TABLE limit_groups (cohort INTEGER)",
+            "INSERT INTO limit_groups (cohort) VALUES (1), (2), (3)",
+            "SET CONFIG stream.executor.max_materialized_rows = 1",
+            "SET CONFIG stream.executor.max_materialized_rows = 2",
+        ] {
+            runtime.execute_query(sql).expect("seed limit and groups");
+        }
+        runtime.flush().expect("persist configured limit");
+        drop(runtime);
+        let runtime = cold_open(&options);
+        assert!(runtime
+            .db()
+            .store()
+            .get_collection(RED_CONFIG_COLLECTION)
+            .expect("config collection")
+            .has_backing());
+        (directory, options, runtime)
+    }
+
+    fn cold_open(options: &RedDBOptions) -> RedDBRuntime {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold runtime")
+    }
+
+    #[test]
+    fn cold_group_limit_survives_reopen_and_overlay_update() {
+        let (_directory, options, runtime) = cold_limit_fixture();
+        let sql = "SELECT cohort, COUNT(*) FROM limit_groups GROUP BY cohort";
+        let error = runtime
+            .execute_query(sql)
+            .expect_err("cold configured ceiling applies");
+        assert!(
+            matches!(
+                error,
+                RedDBError::MaterializationLimitExceeded {
+                    executor: "aggregation",
+                    limit: 2,
+                    current: 3,
+                }
+            ),
+            "{error:?}"
+        );
+        runtime
+            .execute_query("SET CONFIG stream.executor.max_materialized_rows = 4")
+            .expect("newest overlay limit");
+        assert_eq!(
+            runtime
+                .execute_query(sql)
+                .expect("raised limit")
+                .result
+                .records
+                .len(),
+            3
+        );
+        runtime.flush().expect("persist new limit");
+        drop(runtime);
+        let reopened = cold_open(&options);
+        assert_eq!(
+            reopened
+                .execute_query(sql)
+                .expect("persisted new limit")
+                .result
+                .records
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn cold_group_limit_page_failure_does_not_relax_admission() {
+        use crate::storage::engine::{Page, PageType};
+        let (_directory, _options, runtime) = cold_limit_fixture();
+        let store = runtime.db().store();
+        let root = store
+            .get_collection(RED_CONFIG_COLLECTION)
+            .expect("config")
+            .backing_root_page()
+            .expect("config root");
+        let pager = store.pager().expect("fixture pager");
+        let original = pager.read_page(root).expect("config page");
+        pager
+            .write_page(root, Page::new(PageType::Overflow, root))
+            .expect("inject page failure");
+        let result = guard(&runtime.db(), "aggregation", 1);
+        pager
+            .write_page(root, original)
+            .expect("restore fixture before assertions");
+        let error = result.expect_err("unreadable config must not select the default ceiling");
+        assert!(
+            !matches!(error, RedDBError::MaterializationLimitExceeded { .. }),
+            "{error:?}"
+        );
+        guard(&runtime.db(), "aggregation", 1).expect("restored config read");
     }
 }

@@ -138,7 +138,7 @@ pub(super) fn try_execute_pushdown_aggregate(
         return Ok(None);
     }
 
-    let groups_max = crate::runtime::materialization_limit::max_materialized_rows(db);
+    let groups_max = crate::runtime::materialization_limit::max_materialized_rows(db)?;
     let mut planner = AggregateQueryPlanner::new(&ast, groups_max).map_err(planner_error)?;
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     crate::runtime::function_budget::try_scan_result(

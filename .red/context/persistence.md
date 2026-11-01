@@ -41,6 +41,9 @@ once per query and rejects the first excess group before allocating that group's
 accumulator. Scan failures discard partial aggregates. Group keys, aggregate
 values and final result buffers still require shared byte-budget admission;
 a group-count ceiling alone is not a process-wide RAM guarantee.
+The ceiling lookup reads both published config pages and the resident overlay,
+selects the newest config row, and propagates physical read failures instead of
+silently substituting the default ceiling.
 
 On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
 every five seconds. At 75% of a finite controller limit it asks the allocator to
