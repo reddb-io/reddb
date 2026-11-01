@@ -1660,24 +1660,40 @@ impl IndexStore {
             .map_err(|err| err.to_string())
     }
 
-    /// Find which index (if any) covers a collection + column
+    /// Find a single-column index for method-aware planning, including H3.
     pub fn find_index_for_column(&self, collection: &str, column: &str) -> Option<RegisteredIndex> {
-        let registry = read_unpoisoned(&self.registry);
-        // Callers (`try_hash_eq_lookup`, IN-list lookup) feed `idx.name`
-        // straight to `hash_lookup`, which only works for indexes that
-        // actually own a hash backing — Hash itself, or a single-col
-        // BTree whose `create_index` also registers an `{name}_hash`
-        // aux. Composite BTree indexes only live in `sorted`, so
-        // returning one here causes a `MissingIndex` error at lookup
-        // time. Restrict the search to single-column indexes so the
-        // ID list the caller gets back is always servable.
-        registry
+        self.registry
+            .read()
             .values()
-            .find(|idx| {
-                idx.collection == collection
-                    && matches!(idx.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
-                    && idx.columns.len() == 1
-                    && idx.columns.first().is_some_and(|c| c == column)
+            .find(|index| {
+                index.collection == collection
+                    && index.columns.len() == 1
+                    && index
+                        .columns
+                        .first()
+                        .is_some_and(|candidate| candidate == column)
+            })
+            .cloned()
+    }
+
+    /// Equality paths need a physical hash pocket. BITMAP and H3 remain
+    /// discoverable by their own planners but cannot serve these lookups.
+    pub(crate) fn find_hash_index_for_column(
+        &self,
+        collection: &str,
+        column: &str,
+    ) -> Option<RegisteredIndex> {
+        self.registry
+            .read()
+            .values()
+            .find(|index| {
+                index.collection == collection
+                    && index.columns.len() == 1
+                    && index
+                        .columns
+                        .first()
+                        .is_some_and(|candidate| candidate == column)
+                    && matches!(index.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
             })
             .cloned()
     }
@@ -2960,6 +2976,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hash_lookup_selection_preserves_method_aware_index_discovery() {
+        let store = IndexStore::new();
+        let columns = vec!["value".to_string()];
+        for (collection, method) in [
+            ("hash", IndexMethodKind::Hash),
+            ("btree", IndexMethodKind::BTree),
+            ("bitmap", IndexMethodKind::Bitmap),
+            ("h3", IndexMethodKind::H3 { resolution: 9 }),
+        ] {
+            store
+                .create_index("lookup", collection, &columns, method, false, &[])
+                .expect("physical index");
+            store.register(RegisteredIndex {
+                name: "lookup".into(),
+                collection: collection.into(),
+                columns: columns.clone(),
+                method,
+                unique: false,
+            });
+            assert_eq!(
+                store
+                    .find_index_for_column(collection, "value")
+                    .expect("general discovery")
+                    .method,
+                method
+            );
+            assert_eq!(
+                store
+                    .find_hash_index_for_column(collection, "value")
+                    .is_some(),
+                matches!(method, IndexMethodKind::Hash | IndexMethodKind::BTree)
+            );
+        }
+        store
+            .create_index(
+                "other_hash",
+                "bitmap",
+                &columns,
+                IndexMethodKind::Hash,
+                false,
+                &[],
+            )
+            .expect("same column hash backing");
+        store.register(RegisteredIndex {
+            name: "other_hash".into(),
+            collection: "bitmap".into(),
+            columns,
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        assert_eq!(
+            store
+                .find_hash_index_for_column("bitmap", "value")
+                .expect("select actual hash pocket")
+                .name,
+            "other_hash"
+        );
     }
 
     #[test]

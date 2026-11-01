@@ -519,7 +519,7 @@ pub(crate) fn try_hash_eq_lookup(
             FieldRef::TableColumn { column, .. } => column.as_str(),
             _ => return None,
         };
-        let idx = idx_store.find_index_for_column(table, col)?;
+        let idx = idx_store.find_hash_index_for_column(table, col)?;
         let lookup_name = idx.hash_lookup_name();
         let mut ids = Vec::with_capacity(values.len());
         for value in values {
@@ -542,7 +542,7 @@ pub(crate) fn try_hash_eq_lookup(
     }
 
     let (col, val_bytes) = extract_index_candidate(filter)?;
-    let idx = idx_store.find_index_for_column(table, &col)?;
+    let idx = idx_store.find_hash_index_for_column(table, &col)?;
     idx_store
         .hash_lookup(table, idx.hash_lookup_name().as_ref(), &val_bytes)
         .ok()

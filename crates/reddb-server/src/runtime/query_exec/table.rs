@@ -1012,7 +1012,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if let Some((eq_col, eq_bytes, range_filter)) =
             extract_cross_index_predicates(filter, &query.table, idx_store)
         {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, &eq_col) {
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &eq_col) {
                 if let Ok(hash_ids) =
                     idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &eq_bytes)
                 {
@@ -1102,7 +1102,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Entity IDs are cast to u32; safe for any reasonable in-memory DB size (< 4 B).
         let mut bitmaps: Vec<crate::storage::index::tid_bitmap::TidBitmap> = Vec::new();
         for (col, val_bytes, _val) in &eq_candidates {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, col) {
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, col) {
                 if let Ok(ids) =
                     idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), val_bytes)
                 {
@@ -1212,7 +1212,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         uses_document_projection,
     ) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &column) {
                 let mut entity_ids = idx_store
                     .hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &value_bytes)
                     .map_err(|err| {

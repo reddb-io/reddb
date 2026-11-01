@@ -682,7 +682,7 @@ pub(crate) fn extract_cross_index_predicates<'a>(
 
     // Try left = equality (hash index), right = range (sorted index)
     if let Some((col, bytes)) = super::helpers::extract_index_candidate(left) {
-        if idx_store.find_index_for_column(table, &col).is_some()
+        if idx_store.find_hash_index_for_column(table, &col).is_some()
             && is_range_filter_with_sorted_index(right, table, idx_store)
         {
             return Some((col, bytes, right.as_ref()));
@@ -691,7 +691,7 @@ pub(crate) fn extract_cross_index_predicates<'a>(
 
     // Try right = equality (hash index), left = range (sorted index)
     if let Some((col, bytes)) = super::helpers::extract_index_candidate(right) {
-        if idx_store.find_index_for_column(table, &col).is_some()
+        if idx_store.find_hash_index_for_column(table, &col).is_some()
             && is_range_filter_with_sorted_index(left, table, idx_store)
         {
             return Some((col, bytes, left.as_ref()));

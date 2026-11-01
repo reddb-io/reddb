@@ -612,7 +612,7 @@ fn execute_simple_hash_eq_select(
     parsed: &SimpleHashEqSelect,
 ) -> Option<Vec<u8>> {
     let idx_store = runtime.index_store_ref();
-    let idx = idx_store.find_index_for_column(&parsed.table, &parsed.filter_column)?;
+    let idx = idx_store.find_hash_index_for_column(&parsed.table, &parsed.filter_column)?;
     let key = parsed.value.to_le_bytes();
     let ids = idx_store
         .hash_lookup(&parsed.table, idx.hash_lookup_name().as_ref(), &key)
