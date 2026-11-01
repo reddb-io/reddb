@@ -102,6 +102,102 @@ fn optional_compiled_entity_filter_matches(
     }
 }
 
+/// Filter borrowed index candidates before copying their projected fields.
+/// Batch visitors may visit growing rows before sealed rows, so restore the
+/// index's order explicitly. A finite window uses ordered single-ID visits to
+/// avoid copying or evaluating candidates beyond the accepted prefix.
+fn indexed_table_records(
+    db: &RedDB,
+    table: &str,
+    entity_ids: &[EntityId],
+    columns: &[String],
+    limit: usize,
+    mut matches: impl FnMut(&UnifiedEntity) -> RedDBResult<bool>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let store = db.store();
+    let Some(manager) = store.get_collection(table) else {
+        return Ok(Vec::new());
+    };
+    let schema = manager.column_schema();
+    let resolver = TableRowMvccReadResolver::current_statement();
+    let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+    let mut failure = None;
+    let mut consume = |position, entity: &UnifiedEntity| {
+        if failure.is_some() {
+            return false;
+        }
+        let result = (|| -> RedDBResult<bool> {
+            crate::runtime::function_budget::charge(1)?;
+            if resolver.resolve_read_candidate(entity).is_none()
+                || !db.replica_allows_entity_at_read(table, entity)
+                || !matches(entity)?
+            {
+                return Ok(true);
+            }
+            let record = match &entity.data {
+                EntityData::Row(row)
+                    if !columns.is_empty() && (row.named.is_some() || row.schema.is_some()) =>
+                {
+                    super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                        entity, columns,
+                    )
+                }
+                _ => {
+                    // Keep the owned materializer's model-specific behavior.
+                    // Compact recovered rows also need their collection schema.
+                    // At most one accepted entity is copied at a time.
+                    let mut owned = entity.clone();
+                    if let EntityData::Row(row) = &mut owned.data {
+                        if row.schema.is_none() {
+                            row.schema = schema.clone();
+                        }
+                    }
+                    if columns.is_empty() {
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            owned, table,
+                        )
+                    } else {
+                        runtime_table_record_from_entity_projected(owned, columns)
+                    }
+                }
+            };
+            if let Some(record) = record {
+                records.push((position, record));
+            }
+            Ok(records.len() < limit)
+        })();
+        match result {
+            Ok(keep_scanning) => keep_scanning,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        }
+    };
+    if limit < entity_ids.len() {
+        for (position, id) in entity_ids.iter().enumerate() {
+            let mut keep_scanning = true;
+            manager.try_for_each_id(std::slice::from_ref(id), usize::MAX, |_, entity| {
+                keep_scanning = consume(position, entity);
+                keep_scanning
+            })?;
+            if !keep_scanning {
+                break;
+            }
+        }
+    } else {
+        manager.try_for_each_id(entity_ids, usize::MAX, &mut consume)?;
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    records.sort_unstable_by_key(|(position, _)| *position);
+    Ok(records.into_iter().map(|(_, record)| record).collect())
+}
+
 /// Build the JSON result from a set of entity IDs (from index lookup).
 /// Scan entities sequentially but only process those in the candidate set (from hash index).
 /// Faster than individual store.get() because HashMap iteration is sequential/cache-friendly.
@@ -809,9 +905,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
             // combination to skip the `UnifiedEntity::clone` inside
             // `get_batch` (~20% of scan CPU on `select_range`/`filtered`).
-            // Projection paths keep the old owned-entity flow because
-            // `runtime_table_record_from_entity_projected` consumes the
-            // entity.
+            // Explicit projections borrow only their selected fields below.
             if lean {
                 let manager = match store.get_collection(&query.table) {
                     Some(m) => m,
@@ -868,42 +962,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 );
             }
 
-            // Projection path (explicit columns): keep owned-entity flow.
-            let entities = store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
-            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
-                    break;
-                }
-                if table_row_resolver
-                    .resolve_read_candidate(&entity_opt)
-                    .is_none()
-                {
-                    continue;
-                }
-                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                    continue;
-                }
-                if let Some(cf) = compiled_filter.as_ref() {
-                    if !compiled_entity_filter_matches(
+            let records = indexed_table_records(
+                db,
+                &query.table,
+                &entity_ids,
+                &explicit_cols,
+                limit,
+                |entity| {
+                    optional_compiled_entity_filter_matches(
                         db,
-                        cf,
-                        &entity_opt,
-                        filter,
+                        compiled_filter.as_ref(),
+                        entity,
+                        Some(filter),
                         table_name,
                         table_alias,
-                    )? {
-                        continue;
-                    }
-                }
-                let record_opt =
-                    runtime_table_record_from_entity_projected(entity_opt, &explicit_cols);
-                if let Some(record) = record_opt {
-                    records.push(record);
-                }
-            }
+                    )
+                },
+            )?;
             return finish_ordered_index_records(
                 db,
                 query,
@@ -978,50 +1053,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 });
                             let explicit_cols = extract_select_column_names(&effective_projections);
 
-                            let store = db.store();
-                            let entities =
-                                store.try_get_batch(&query.table, &intersection_ids, usize::MAX)?;
-                            let lean = explicit_cols.is_empty();
-                            let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
-                            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                            for entity_opt in entities.into_iter().flatten() {
-                                crate::runtime::function_budget::charge(1)?;
-                                if records.len() >= limit {
-                                    break;
-                                }
-                                if table_row_resolver
-                                    .resolve_read_candidate(&entity_opt)
-                                    .is_none()
-                                {
-                                    continue;
-                                }
-                                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                                    continue;
-                                }
-                                if optional_compiled_entity_filter_matches(
-                                    db,
-                                    compiled_filter.as_ref(),
-                                    &entity_opt,
-                                    Some(filter),
-                                    table_name,
-                                    table_alias,
-                                )? {
-                                    let record_opt = if lean {
-                                        super::super::record_search::runtime_table_record_lean_in_collection(
-                                            entity_opt,
-                                            &query.table,
-                                        )
-                                    } else {
-                                        runtime_table_record_from_entity_projected(
-                                            entity_opt,
-                                            &explicit_cols,
-                                        )
-                                    };
-                                    if let Some(record) = record_opt {
-                                        records.push(record);
-                                    }
-                                }
-                            }
+                            let records = indexed_table_records(
+                                db,
+                                &query.table,
+                                &intersection_ids,
+                                &explicit_cols,
+                                limit,
+                                |entity| {
+                                    optional_compiled_entity_filter_matches(
+                                        db,
+                                        compiled_filter.as_ref(),
+                                        entity,
+                                        Some(filter),
+                                        table_name,
+                                        table_alias,
+                                    )
+                                },
+                            )?;
                             return Ok(records);
                         }
                     }
@@ -1105,8 +1153,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let explicit_cols = extract_select_column_names(&effective_projections);
-            let lean = explicit_cols.is_empty();
-
             // Optional: narrow via sorted range index filtered by the eq-intersection set.
             // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
             // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
@@ -1136,45 +1182,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 sorted.into_iter().map(EntityId::new).collect()
             };
 
-            let store = db.store();
-            let entities = store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
-            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
-                    break;
-                }
-                if table_row_resolver
-                    .resolve_read_candidate(&entity_opt)
-                    .is_none()
-                {
-                    continue;
-                }
-                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                    continue;
-                }
-                if compiled_entity_filter_matches(
-                    db,
-                    &compiled_filter,
-                    &entity_opt,
-                    filter,
-                    table_name,
-                    table_alias,
-                )? {
-                    let record_opt = if lean {
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            entity_opt,
-                            &query.table,
-                        )
-                    } else {
-                        runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
-                    };
-                    if let Some(record) = record_opt {
-                        records.push(record);
-                    }
-                }
-            }
+            let records = indexed_table_records(
+                db,
+                &query.table,
+                &entity_ids,
+                &explicit_cols,
+                limit,
+                |entity| {
+                    compiled_entity_filter_matches(
+                        db,
+                        &compiled_filter,
+                        entity,
+                        filter,
+                        table_name,
+                        table_alias,
+                    )
+                },
+            )?;
             return Ok(records);
         }
     }
@@ -1259,52 +1283,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         ),
                     }
                         });
-                        let store = db.store();
-                        // Batch fetch: single lock acquisition for the entire candidate set
-                        let entities =
-                            store.try_get_batch(&query.table, &entity_ids, usize::MAX)?;
                         let explicit_cols = extract_select_column_names(&effective_projections);
-                        let lean = explicit_cols.is_empty();
-                        let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-                        let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                        for entity_opt in entities.into_iter().flatten() {
-                            crate::runtime::function_budget::charge(1)?;
-                            if records.len() >= limit {
-                                break;
-                            }
-                            if table_row_resolver
-                                .resolve_read_candidate(&entity_opt)
-                                .is_none()
-                            {
-                                continue;
-                            }
-                            if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                                continue;
-                            }
-                            if optional_compiled_entity_filter_matches(
-                                db,
-                                compiled_filter.as_ref(),
-                                &entity_opt,
-                                effective_filter.as_ref(),
-                                table_name,
-                                table_alias,
-                            )? {
-                                let record_opt = if lean {
-                                    super::super::record_search::runtime_table_record_lean_in_collection(
-                                        entity_opt,
-                                        &query.table,
-                                    )
-                                } else {
-                                    runtime_table_record_from_entity_projected(
-                                        entity_opt,
-                                        &explicit_cols,
-                                    )
-                                };
-                                if let Some(record) = record_opt {
-                                    records.push(record);
-                                }
-                            }
-                        }
+                        let records = indexed_table_records(
+                            db,
+                            &query.table,
+                            &entity_ids,
+                            &explicit_cols,
+                            limit,
+                            |entity| {
+                                optional_compiled_entity_filter_matches(
+                                    db,
+                                    compiled_filter.as_ref(),
+                                    entity,
+                                    effective_filter.as_ref(),
+                                    table_name,
+                                    table_alias,
+                                )
+                            },
+                        )?;
                         return Ok(records);
                     } // end else (hash batch path)
                 }
@@ -3039,6 +3035,269 @@ mod tests {
             );
             assert!(measured.allocated_bytes <= baseline.allocated_bytes + 1024 * 1024,
                 "unreturned payloads must not be cloned before projection: {baseline:?} -> {measured:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_projections_do_not_clone_unreturned_payloads() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+
+        let cases = [
+            (
+                "sorted",
+                vec!["cohort USING BTREE"],
+                "WHERE cohort >= 0 ORDER BY id DESC LIMIT 2 OFFSET 1",
+            ),
+            ("hash", vec!["cohort USING HASH"], "WHERE cohort = 0"),
+            (
+                "cross",
+                vec!["cohort USING HASH", "id USING BTREE"],
+                "WHERE cohort = 0 AND id >= 1",
+            ),
+            (
+                "bitmap",
+                vec!["cohort USING HASH", "bucket USING HASH"],
+                "WHERE cohort = 0 AND bucket = 0",
+            ),
+        ];
+        let mut regressions = Vec::new();
+        for (name, indexes, predicate) in cases {
+            for columnar in [false, true] {
+                let observe = |payload_bytes| {
+                    let runtime = rt();
+                    exec(&runtime, "CREATE TABLE indexed_projection (id INTEGER, cohort INTEGER, bucket INTEGER, payload BLOB)");
+                    let manager = runtime
+                        .db()
+                        .store()
+                        .get_collection("indexed_projection")
+                        .expect("manager");
+                    let schema = std::sync::Arc::new(vec![
+                        "id".into(),
+                        "cohort".into(),
+                        "bucket".into(),
+                        "payload".into(),
+                    ]);
+                    for id in 1..=256 {
+                        let mut entity = UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "indexed_projection",
+                            id,
+                            vec![],
+                        );
+                        let values = vec![
+                            Value::Integer(id as i64),
+                            Value::Integer(0),
+                            Value::Integer(0),
+                            Value::Blob(vec![7; payload_bytes]),
+                        ];
+                        entity.data = EntityData::Row(if columnar {
+                            RowData {
+                                columns: values,
+                                named: None,
+                                schema: Some(schema.clone()),
+                            }
+                        } else {
+                            RowData::with_names(values, schema.as_ref().clone())
+                        });
+                        manager.insert(entity).expect("row");
+                    }
+                    for (number, definition) in indexes.iter().enumerate() {
+                        let (column, method) =
+                            definition.split_once(" USING ").expect("index definition");
+                        exec(&runtime, &format!("CREATE INDEX projection_{number} ON indexed_projection ({column}) USING {method}"));
+                        assert!(runtime
+                            .index_store_ref()
+                            .find_index_for_column("indexed_projection", column)
+                            .is_some());
+                    }
+                    let sql = format!("SELECT id FROM indexed_projection {predicate}");
+                    runtime.execute_query(&sql).expect("warm planner");
+                    runtime.invalidate_result_cache();
+                    let (result, allocations) = measure_allocations(|| runtime.execute_query(&sql));
+                    let result = result.expect("indexed projection");
+                    let actual: Vec<_> = result
+                        .result
+                        .records
+                        .iter()
+                        .map(|row| {
+                            assert!(row.get("payload").is_none());
+                            match row.get("id") {
+                                Some(Value::Integer(id)) => *id,
+                                other => panic!("integer id: {other:?}"),
+                            }
+                        })
+                        .collect();
+                    if name == "sorted" {
+                        assert_eq!(actual, vec![255, 254]);
+                    } else {
+                        assert_eq!(
+                            actual
+                                .into_iter()
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            (1..=256).collect()
+                        );
+                    }
+                    allocations
+                };
+                let baseline = observe(0);
+                let measured = observe(16 * 1024);
+                eprintln!(
+                    "indexed {name} allocation bytes (columnar={columnar}): {} -> {}",
+                    baseline.allocated_bytes, measured.allocated_bytes
+                );
+                if measured.allocated_bytes > baseline.allocated_bytes + 1024 * 1024 {
+                    regressions.push(format!(
+                        "{name}, columnar={columnar}: {baseline:?} -> {measured:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            regressions.is_empty(),
+            "unreturned indexed payloads were cloned: {regressions:#?}"
+        );
+    }
+
+    #[test]
+    fn indexed_candidates_preserve_order_windows_and_errors_across_segments() {
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE index_window (id INTEGER, payload BLOB)",
+        );
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("index_window")
+            .expect("manager");
+        for id in 1..=4 {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "index_window", id, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::Integer(id as i64), Value::Blob(vec![7; 8192])],
+                vec!["id".into(), "payload".into()],
+            ));
+            manager.insert(entity).expect("row");
+            if id == 2 {
+                manager.force_seal().expect("sealed prefix");
+            }
+        }
+        assert_eq!(manager.stats().sealed_count, 1);
+        let candidates = [2, 4, 1, 99, 3].map(|id| EntityId::new(1_000_000 + id));
+        let columns = vec!["id".to_string()];
+        let ids = |records: Vec<crate::storage::query::unified::UnifiedRecord>| {
+            records
+                .into_iter()
+                .map(|record| record.get("id").cloned().expect("id"))
+                .collect::<Vec<_>>()
+        };
+        let records = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            usize::MAX,
+            |_| Ok(true),
+        )
+        .expect("all candidates");
+        assert_eq!(ids(records), [2, 4, 1, 3].map(Value::Integer));
+        let mut visited = Vec::new();
+        let records = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            1,
+            |entity| {
+                visited.push(entity.id.raw());
+                Ok(entity.id.raw() % 2 == 1)
+            },
+        )
+        .expect("filtered prefix");
+        assert_eq!(ids(records), vec![Value::Integer(1)]);
+        assert_eq!(visited, vec![1_000_002, 1_000_004, 1_000_001]);
+        let result = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            usize::MAX,
+            |entity| {
+                if entity.id.raw() == 1_000_003 {
+                    Err(crate::RedDBError::Internal(
+                        "injected indexed predicate failure".into(),
+                    ))
+                } else {
+                    Ok(true)
+                }
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a predicate failure must reject the accepted prefix"
+        );
+        let zero = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            0,
+            |_| panic!("LIMIT 0 must not evaluate candidates"),
+        )
+        .expect("zero window");
+        assert!(zero.is_empty());
+    }
+
+    #[test]
+    fn indexed_compact_rows_restore_schema_and_selected_payloads() {
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE compact_index (id INTEGER, tenant_id TEXT, payload BLOB)",
+        );
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("compact_index")
+            .expect("manager");
+        manager.set_column_schema_if_empty(vec!["id".into(), "tenant_id".into(), "payload".into()]);
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1_000_001), "compact_index", 1, vec![]);
+        entity.data = EntityData::Row(RowData::new(vec![
+            Value::Integer(1),
+            Value::text("tenant-a"),
+            Value::Blob(vec![7; 8192]),
+        ]));
+        manager.insert(entity).expect("compact row");
+        manager
+            .get_with(EntityId::new(1_000_001), |entity| {
+                let EntityData::Row(row) = &entity.data else {
+                    panic!("row")
+                };
+                assert!(row.named.is_none() && row.schema.is_none());
+            })
+            .expect("resident raw row");
+        let candidates = [EntityId::new(1_000_001)];
+        for columns in [vec![], vec!["id".into(), "tenant".into(), "payload".into()]] {
+            let records = super::indexed_table_records(
+                &runtime.db(),
+                "compact_index",
+                &candidates,
+                &columns,
+                usize::MAX,
+                |_| Ok(true),
+            )
+            .expect("schema-restored projection");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].get("id"), Some(&Value::Integer(1)));
+            assert_eq!(records[0].get("tenant"), Some(&Value::text("tenant-a")));
+            assert_eq!(records[0].get("payload"), Some(&Value::Blob(vec![7; 8192])));
         }
     }
 
