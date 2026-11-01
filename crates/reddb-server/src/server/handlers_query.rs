@@ -2770,6 +2770,83 @@ mod tests {
     }
 
     #[test]
+    fn http_query_unique_rejections_preserve_client_error_and_batch_atomicity() {
+        for method in ["HASH", "BTREE"] {
+            let server = make_server();
+            for query in [
+                "CREATE TABLE unique_http (id INTEGER, payload TEXT)".to_string(),
+                format!("CREATE UNIQUE INDEX unique_http_id ON unique_http (id) USING {method}"),
+                "INSERT INTO unique_http (id, payload) VALUES (1, 'original')".to_string(),
+            ] {
+                let body = format!(r#"{{"query":"{query}"}}"#);
+                let response = server.handle_query(body.into_bytes());
+                assert_eq!(response.status, 200, "{}", body_str(&response));
+            }
+
+            for body in [
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES (1,'duplicate')"}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES ($1,$2)","params":[1,"duplicate"]}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES (2,'new'),(1,'duplicate')"}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES ($1,$2),($3,$4)","params":[2,"new",2,"duplicate"]}"#,
+            ] {
+                let response = server.handle_query(body.as_bytes().to_vec());
+                assert_eq!(response.status, 400, "{method}: {}", body_str(&response));
+                assert!(body_str(&response).contains("duplicate key violates unique index"));
+                let rows = server
+                    .runtime
+                    .execute_query("SELECT id, payload FROM unique_http")
+                    .expect("read after rejected insert")
+                    .result
+                    .records;
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "a rejected batch must not install its prefix"
+                );
+                assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+                assert_eq!(rows[0].get("payload"), Some(&Value::text("original")));
+            }
+
+            let response = server.handle_query(
+                br#"{"query":"INSERT INTO unique_http (id,payload) VALUES (2,'retry')"}"#.to_vec(),
+            );
+            assert_eq!(response.status, 200, "{}", body_str(&response));
+        }
+    }
+
+    #[test]
+    fn http_query_prevalidated_unique_rejection_preserves_native_error() {
+        use crate::application::ports::RuntimeEntityPort;
+        use crate::application::{CreateRowInput, CreateRowsBatchInput};
+
+        let server = make_server();
+        for query in [
+            "CREATE TABLE unique_prevalidated (id INTEGER)",
+            "CREATE UNIQUE INDEX unique_prevalidated_id ON unique_prevalidated (id) USING BTREE",
+            "INSERT INTO unique_prevalidated (id) VALUES (1)",
+        ] {
+            server.runtime.execute_query(query).expect("fixture");
+        }
+        let error = server
+            .runtime
+            .create_rows_batch_prevalidated_with_outputs(CreateRowsBatchInput {
+                collection: "unique_prevalidated".to_string(),
+                rows: vec![CreateRowInput {
+                    collection: "unique_prevalidated".to_string(),
+                    fields: vec![("id".to_string(), Value::Integer(1))],
+                    metadata: Vec::new(),
+                    node_links: Vec::new(),
+                    vector_links: Vec::new(),
+                }],
+                suppress_events: false,
+            })
+            .err()
+            .expect("prevalidated input must still enforce standalone UNIQUE indexes");
+        assert!(matches!(error, crate::RedDBError::Query(_)), "{error}");
+        assert_eq!(map_runtime_error(&error).0, 400);
+    }
+
+    #[test]
     fn http_query_buffers_share_the_budget_until_the_last_transport_owner_drops() {
         assert_http_query_buffer_ownership(1024 * 1024, false);
     }

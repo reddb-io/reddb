@@ -558,18 +558,25 @@ pub(super) fn stats_snapshot(
     visible_collections: Option<&std::collections::HashSet<String>>,
     query: &TableQuery,
 ) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
     let schema = Arc::new(
         STATS_COLUMNS
             .iter()
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let store = runtime.db().store();
     // `SHOW STATS <name>` desugars to a `collection = '<name>'` filter;
     // scope the profiling scan to that one collection so an unfiltered
     // `SELECT * FROM red.stats` is the only path that scans everything.
     let target = stats_target_collection(query);
+    // Process memory counters need no catalog, snapshot validation or WAL scan.
+    // In particular, reporting RAM must not materialize pending WAL payloads.
+    if target.as_deref() == Some(MEMORY_BUDGET_COLLECTION) {
+        let mut rows = Vec::new();
+        append_memory_budget_stats(&mut rows, &schema, runtime, target.as_deref());
+        return rows;
+    }
+    let snapshot = runtime.db().catalog_model_snapshot();
+    let store = runtime.db().store();
 
     let checkpoint_stats = runtime
         .inner
@@ -1601,7 +1608,7 @@ fn timeseries_series_key(metric: &str, tags: &std::collections::HashMap<String, 
 /// equality filter (as produced by `SHOW STATS <name>`). Returns `None`
 /// for any other shape so the caller profiles every visible row table.
 fn stats_target_collection(query: &TableQuery) -> Option<String> {
-    match query.filter.as_ref() {
+    match effective_table_filter(query).as_ref() {
         Some(Filter::Compare {
             field: FieldRef::TableColumn { column, .. },
             op: CompareOp::Eq,
@@ -1810,6 +1817,63 @@ fn infer_document_columns(
 mod scoped_stats_memory_tests {
     use super::*;
     use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+    #[test]
+    fn memory_budget_stats_do_not_materialize_unrelated_wal_payloads() {
+        let directory = tempfile::tempdir().expect("stats fixture");
+        let runtime = RedDBRuntime::with_options(
+            crate::RedDBOptions::persistent(directory.path().join("stats.rdb"))
+                .with_memory_budget(128 * 1024 * 1024),
+        )
+        .expect("persistent runtime");
+        runtime
+            .execute_query("CREATE TABLE stats_payload (payload TEXT)")
+            .expect("table");
+        runtime.checkpoint().expect("initial checkpoint");
+        let observe = || {
+            runtime
+                .execute_query(
+                    "SELECT entity, metric, value FROM red.stats WHERE collection = 'red.memory_budget'",
+                )
+                .expect("memory counters")
+        };
+        observe();
+        let (before, baseline) = measure_allocations(observe);
+        // Repeated bytes compress away in the native WAL. Keep this fixture
+        // deterministic while forcing a genuinely large encoded payload.
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let payload: String = (0..2 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(b'!' + u8::try_from(state >> 58).expect("six random bits"))
+            })
+            .collect();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO stats_payload (payload) VALUES ($1)",
+                &[Value::text(payload)],
+            )
+            .expect("large pending WAL record");
+        assert!(
+            runtime
+                .db()
+                .embedded_pending_wal_records()
+                .expect("native WAL")
+                > 0
+        );
+        let (after, measured) = measure_allocations(observe);
+        assert_eq!(before.result.records.len(), after.result.records.len());
+        eprintln!(
+            "memory budget stats allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(
+            measured.allocated_bytes <= baseline.allocated_bytes + 256 * 1024,
+            "memory counters must not materialize unrelated WAL payloads: {baseline:?} -> {measured:?}"
+        );
+    }
 
     #[test]
     fn collection_stats_do_not_clone_unrelated_database_rows() {
