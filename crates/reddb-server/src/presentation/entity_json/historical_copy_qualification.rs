@@ -129,22 +129,48 @@ fn complete_runtime_historical_copy_preserves_sql_results() {
             .is_empty(),
         "a zero-index substitute cannot qualify the real historical database"
     );
+    let eager_control = match std::env::var("REDDB_QUALIFICATION_RESIDENCY_MODE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("bounded") => false,
+        Ok("eager-control") => true,
+        _ => panic!("explicit bounded or eager-control qualification mode required"),
+    };
+    let memory_budget = if eager_control {
+        // Reproduce the serving Platform's current budget on an independent
+        // historical copy. This control cannot qualify bounded residency.
+        let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+            .expect("eager control requires an external cgroup limit");
+        assert_eq!(limit.trim(), "5368709120", "eager control requires 5 GiB");
+        3584 * 1024 * 1024
+    } else {
+        768 * 1024 * 1024
+    };
+    eprintln!(
+        "runtime qualification phase=configuration eager_control={eager_control} memory_budget_bytes={memory_budget}"
+    );
     let options = RedDBOptions::persistent(path)
-        .with_memory_budget(768 * 1024 * 1024)
+        .with_memory_budget(memory_budget)
         .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
         .expect("profile");
     for pass in 1..=2 {
         let started = Instant::now();
-        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+        let runtime = if eager_control {
             RedDBRuntime::with_options(options.clone())
-        })
+        } else {
+            crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options.clone())
+            })
+        }
         .expect("complete runtime opens the historical copy");
-        assert!(runtime
-            .db()
-            .store()
-            .config()
-            .resident_memory_bytes_max
-            .is_some());
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .config()
+                .resident_memory_bytes_max
+                .is_some(),
+            !eager_control,
+            "the eager control must not open an already migrated bounded base"
+        );
         eprintln!(
             "runtime qualification phase=open pass={pass} open_ms={} resident_segment_bytes={}",
             started.elapsed().as_millis(),

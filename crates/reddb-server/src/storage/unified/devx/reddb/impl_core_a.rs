@@ -1,6 +1,16 @@
 use super::*;
 use crate::api::DurabilityMode;
 
+#[cfg(test)]
+fn flush_local_only_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_native name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 fn write_optional_snapshot_sidecar(
     json: &crate::json::Value,
     field: &str,
@@ -629,8 +639,14 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "publication-lock");
         let _ = self.ec_consolidate_all();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
@@ -640,8 +656,14 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "store-persist");
             self.publish_append_only_segments(path)?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "append-only-publication");
             self.persist_metadata()?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight
