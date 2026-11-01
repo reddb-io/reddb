@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "reddb-io-tonic-prost"
-version = "1.27.5"
+version = "1.27.6"
 authors = ["Lucio Franco <luciofranco14@gmail.com>"]
 build = false
 autolib = false
