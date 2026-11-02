@@ -32,6 +32,144 @@ mod tests {
     }
 
     #[test]
+    fn hash_range_intersection_preserves_order_offset_and_projection() {
+        use reddb_types::Value;
+
+        let runtime = fixture();
+        runtime
+            .execute_query("CREATE INDEX intersection_a_hash ON intersection_budget (a) USING HASH")
+            .unwrap();
+        // b runs in the opposite direction to id. A range-index prefix is
+        // therefore not a valid LIMIT window for ORDER BY id.
+        for predicate in [
+            "a = 7 AND b BETWEEN 0 AND 4095",
+            "b BETWEEN 0 AND 4095 AND a = 7",
+        ] {
+            for (window, expected) in [
+                ("ORDER BY id LIMIT 3", vec![7, 15, 23]),
+                ("ORDER BY id ASC LIMIT 3 OFFSET 2", vec![23, 31, 39]),
+                ("ORDER BY id DESC LIMIT 3 OFFSET 2", vec![4079, 4071, 4063]),
+                ("ORDER BY b LIMIT 3 OFFSET 2", vec![4079, 4071, 4063]),
+                ("ORDER BY id LIMIT 3 OFFSET 511", vec![4095]),
+                ("ORDER BY id LIMIT 3 OFFSET 512", vec![]),
+                ("ORDER BY id LIMIT 0", vec![]),
+                ("LIMIT 3 OFFSET 2", vec![4079, 4071, 4063]),
+            ] {
+                let sql = format!("SELECT id FROM intersection_budget WHERE {predicate} {window}");
+                let result = runtime.execute_query(&sql).unwrap();
+                let actual = result
+                    .result
+                    .records
+                    .iter()
+                    .map(|r| r.get("id").cloned())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    expected
+                        .into_iter()
+                        .map(|v| Some(Value::Integer(v)))
+                        .collect::<Vec<_>>(),
+                    "{sql}"
+                );
+            }
+        }
+        let result = runtime.execute_query(
+            "SELECT b FROM intersection_budget WHERE a = 7 AND b BETWEEN 0 AND 4095 ORDER BY id LIMIT 3 OFFSET 2"
+        ).unwrap();
+        assert_eq!(
+            result
+                .result
+                .records
+                .iter()
+                .map(|r| r.get("b").cloned())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Value::Integer(4072)),
+                Some(Value::Integer(4064)),
+                Some(Value::Integer(4056))
+            ]
+        );
+        assert!(
+            result.result.records.iter().all(|r| r.get("id").is_none()),
+            "temporary sort columns must not leak into the projection"
+        );
+        assert_eq!(used(&runtime), 0);
+    }
+
+    #[test]
+    fn hash_bitmap_intersection_preserves_order_offset_and_projection() {
+        use reddb_types::Value;
+
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(16 * 1024 * 1024),
+        )
+        .unwrap();
+        for sql in [
+            "CREATE TABLE bitmap_order (id INT, a INT, c INT, b INT)",
+            "CREATE INDEX bitmap_a ON bitmap_order (a) USING HASH",
+            "CREATE INDEX bitmap_c ON bitmap_order (c) USING HASH",
+            "CREATE INDEX bitmap_b ON bitmap_order (b) USING BTREE",
+        ] {
+            runtime.execute_query(sql).unwrap();
+        }
+        let rows = (0..32)
+            .map(|id| format!("({id},{},{},{})", id % 2, (id / 2) % 2, 31 - id))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO bitmap_order (id,a,c,b) VALUES {rows}"
+            ))
+            .unwrap();
+        for predicate in ["a = 1 AND c = 0", "a = 1 AND c = 0 AND b BETWEEN 0 AND 31"] {
+            for (window, expected) in [
+                ("ORDER BY id LIMIT 3 OFFSET 2", vec![9, 13, 17]),
+                ("ORDER BY id DESC LIMIT 3 OFFSET 2", vec![21, 17, 13]),
+                ("ORDER BY b LIMIT 3 OFFSET 2", vec![21, 17, 13]),
+                ("ORDER BY id LIMIT 3 OFFSET 7", vec![29]),
+                ("ORDER BY id LIMIT 3 OFFSET 8", vec![]),
+                ("ORDER BY id LIMIT 0", vec![]),
+            ] {
+                let sql = format!("SELECT id FROM bitmap_order WHERE {predicate} {window}");
+                let result = runtime.execute_query(&sql).unwrap();
+                assert_eq!(
+                    result
+                        .result
+                        .records
+                        .iter()
+                        .map(|r| r.get("id").cloned())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .into_iter()
+                        .map(|v| Some(Value::Integer(v)))
+                        .collect::<Vec<_>>(),
+                    "{sql}"
+                );
+            }
+            let sql = format!(
+                "SELECT b FROM bitmap_order WHERE {predicate} ORDER BY id LIMIT 3 OFFSET 2"
+            );
+            let result = runtime.execute_query(&sql).unwrap();
+            assert_eq!(
+                result
+                    .result
+                    .records
+                    .iter()
+                    .map(|r| r.get("b").cloned())
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some(Value::Integer(22)),
+                    Some(Value::Integer(18)),
+                    Some(Value::Integer(14))
+                ],
+                "{sql}"
+            );
+            assert!(result.result.records.iter().all(|r| r.get("id").is_none()));
+        }
+        assert_eq!(used(&runtime), 0);
+    }
+
+    #[test]
     fn sorted_intersection_rejects_candidate_allocations_before_a_small_reply() {
         let runtime = fixture();
         runtime.refresh_memory_accounting();
