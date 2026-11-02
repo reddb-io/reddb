@@ -279,6 +279,10 @@ impl RedDBRuntime {
             .map(|_| ())
             .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
         store.unregister_secondary_index(collection, name);
+        store.unregister_secondary_index(
+            collection,
+            &super::paged_btree_index::equality_storage_name(name),
+        );
         Ok(())
     }
 
@@ -337,7 +341,8 @@ impl RedDBRuntime {
         }
     }
 
-    /// Install paged HASH descriptors without hydrating postings. Remaining
+    /// Install paged HASH and single-column BTREE descriptors without hydrating
+    /// postings. Remaining
     /// resident providers use two bounded passes: estimate/admit, then build
     /// privately. Failure never publishes an incomplete runtime collection.
     fn restore_index_collection(
@@ -355,6 +360,19 @@ impl RedDBRuntime {
         let prepared = super::index_store::IndexStore::new();
         let mut resident = false;
         for index in registered {
+            if index.method == super::index_store::IndexMethodKind::BTree
+                && index.columns.len() == 1
+                && self
+                    .db()
+                    .store()
+                    .config()
+                    .resident_memory_bytes_max
+                    .is_some()
+            {
+                self.prepare_paged_btree(&index, &prepared)?;
+                prepared.register(index);
+                continue;
+            }
             if index.method == super::index_store::IndexMethodKind::Hash
                 && self
                     .db()
@@ -505,6 +523,10 @@ impl RedDBRuntime {
                     .push(index);
             } else {
                 store.unregister_secondary_index(&collection, &name);
+                store.unregister_secondary_index(
+                    &collection,
+                    &super::paged_btree_index::equality_storage_name(&name),
+                );
             }
         }
         // The visitor, decoder and overlay identities are gone. Keep the

@@ -1604,6 +1604,7 @@ mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
 mod index_store;
+mod paged_btree_index;
 mod paged_count;
 mod paged_hash_index;
 #[cfg(test)]
