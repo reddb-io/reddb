@@ -41,9 +41,11 @@ Current qualification boundaries:
 - Native paged record formats 11/12 and canonical resume trailers 4/5. Embedded
   snapshots, encrypted pagers, unknown catalog extensions and pending recovery fail.
   Encrypted Vault pages are preserved without needing to disclose their key.
-- Columnar page owners, tiered/replicated/serverless directories, store forks and
+- Columnar page owners, non-empty tiered layouts, replicated/serverless directories,
+  store forks and
   historical metadata journals require their own relocation qualification and fail
-  closed. Standalone operational collection files are copied with their manifest.
+  closed. Empty standalone support-directory scaffolding is preserved. Standalone
+  operational collection files are copied with their manifest.
 - Tree values have a 32 MiB per-value read allowance. Tree batches are bounded by
   512 records/1 MiB plus one value; the target page cache is 16 MiB. Catalog and
   metadata documents are capped at 64 MiB each, and the source ownership bitmap at

@@ -296,7 +296,9 @@ fn compact_process_loss_preserves_original_and_does_not_publish_partial_file() {
         .expect("child");
     let started = std::time::Instant::now();
     loop {
-        if destination.join(".compacting.rdb").exists() {
+        if std::fs::metadata(destination.join(".compacting.rdb"))
+            .is_ok_and(|metadata| metadata.len() > 1280 * 1024)
+        {
             break;
         }
         assert!(
@@ -381,4 +383,28 @@ fn compact_repeat_has_stable_size() {
         repeated.destination_allocated_bytes
     );
     eprintln!("compaction size evidence: {}", report.machine_json());
+}
+
+#[test]
+fn compact_preserves_empty_support_scaffolding_but_refuses_hidden_wal() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let support = reddb_file::support_dir_for(&source);
+    std::fs::create_dir_all(support.join("indexes")).expect("index scaffold");
+    std::fs::create_dir_all(support.join("snapshots")).expect("snapshot scaffold");
+    let destination = directory.path().join("compacted");
+    compact_paged(&source, &destination).expect("empty support scaffold");
+    let copied = reddb_file::support_dir_for(&destination.join("source.rdb"));
+    assert!(copied.join("indexes").is_dir());
+    assert!(copied.join("snapshots").is_dir());
+    std::fs::create_dir_all(support.join("wal")).expect("tiered WAL directory");
+    let wal = reddb_file::unified_wal_path_in(&support, &source);
+    std::fs::write(wal, b"uncheckpointed").expect("hidden WAL");
+    let rejected = directory.path().join("rejected");
+    assert!(compact_paged(&source, &rejected)
+        .expect_err("non-empty support layout")
+        .to_string()
+        .contains("non-empty support layout"));
+    assert!(!rejected.exists());
 }

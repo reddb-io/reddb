@@ -13,7 +13,6 @@ pub(super) struct Source {
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
         for unsupported in [
-            f::support_dir_for(path),
             f::primary_replica_root(path),
             f::layout::serverless_root(path),
         ] {
@@ -26,6 +25,10 @@ impl Source {
             f::list_physical_metadata_journal_paths(path)?.is_empty(),
             "historical metadata journals require separate compaction qualification",
         )?;
+        let support = f::support_dir_for(path);
+        if support.exists() {
+            validate_empty_directory(&support, 0)?;
+        }
         let mut file = File::open(path)?;
         fs2::FileExt::try_lock_exclusive(&file)?;
         let bytes = file.metadata()?.len();

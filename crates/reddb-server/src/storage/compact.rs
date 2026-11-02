@@ -294,6 +294,11 @@ fn copy_sidecars(source: &Path, destination: &Path) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
+    let support = f::support_dir_for(source);
+    if support.exists() {
+        validate_empty_directory(&support, 0)?;
+        copy_directory(&support, &f::support_dir_for(destination), 0)?;
+    }
     let old = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     let new = destination.with_file_name(format!("{}.ops", f::data_file_name(destination)));
     if old.exists() {
@@ -328,6 +333,22 @@ fn copy_directory(source: &Path, destination: &Path, depth: usize) -> Result<()>
         }
     }
     sync_directory(destination)
+}
+fn validate_empty_directory(path: &Path, depth: usize) -> Result<()> {
+    ensure(depth < 32, "support directory nesting exceeds limit")?;
+    ensure(
+        std::fs::symlink_metadata(path)?.is_dir(),
+        "support directory must not be a symlink",
+    )?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        ensure(
+            entry.file_type()?.is_dir(),
+            "non-empty support layout requires separate compaction qualification",
+        )?;
+        validate_empty_directory(&entry.path(), depth + 1)?;
+    }
+    Ok(())
 }
 fn validate_operational(root: &Path) -> Result<()> {
     ensure(
