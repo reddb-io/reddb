@@ -128,6 +128,9 @@ pub struct UnifiedStoreConfig {
     /// supplies a count derived from the page-cache budget share, so the
     /// default is reached only by direct library callers.
     pub page_cache_slots: Option<usize>,
+    /// Shared resident arena allowance for disk-backed collections. The host
+    /// supplies the segment share of its process memory budget.
+    pub resident_memory_bytes_max: Option<u64>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -145,6 +148,7 @@ impl Default for UnifiedStoreConfig {
             data_dir: None,
             embedded_wal_path: None,
             page_cache_slots: None,
+            resident_memory_bytes_max: None,
         }
     }
 }
@@ -314,6 +318,9 @@ pub struct UnifiedStore {
     /// btree mutation, serialising every concurrent insert across every
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
+    key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
+    secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
@@ -351,6 +358,18 @@ pub struct UnifiedStore {
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
     embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
+    #[cfg(test)]
+    pub(crate) test_fail_deferred_wal_append: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) test_require_deferred_publication_fence: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct PublishedKeyIndex {
+    indexed: bool,
+    source: std::sync::Weak<BTree>,
+    tree: Arc<BTree>,
+    secondary: BTreeMap<String, secondary_index::PublishedSecondaryIndex>,
 }
 
 struct RetiredBTree {
@@ -369,10 +388,14 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
+mod key_index;
 mod keyed_write;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
+pub(crate) mod count_index;
 mod native_helpers;
+mod recovery_xid;
+pub mod secondary_index;
 
 pub use self::builder::EntityBuilder;
 pub(crate) use self::commit::DeferredStoreWalActions;

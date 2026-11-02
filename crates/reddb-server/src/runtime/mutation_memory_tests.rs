@@ -39,6 +39,191 @@ fn seeded_runtime(budget: u64, document: bool) -> RedDBRuntime {
 }
 
 #[test]
+fn compressed_secret_expression_input_respects_the_decode_budget() {
+    use reddb_types::Value;
+    use std::sync::Arc;
+
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(64 * 1024))
+            .expect("runtime");
+    let auth = Arc::new(crate::auth::AuthStore::new(
+        crate::auth::AuthConfig::default(),
+    ));
+    auth.ensure_vault_secret_key();
+    let key = auth.vault_secret_key().expect("fixture key");
+    runtime.set_auth_store(auth.clone());
+
+    // This is the existing typed SECRET expression representation. Its
+    // authenticated ciphertext is small, while decoding its TOAST value
+    // would allocate substantially more than the complete engine allowance.
+    let encoded = Value::text("x".repeat(512 * 1024)).to_bytes();
+    assert!(encoded.len() < 1024, "fixture must actually be compressed");
+    let nonce = [7u8; 12];
+    let ciphertext =
+        crate::crypto::aes_gcm::aes256_gcm_encrypt(&key, &nonce, b"reddb.secret.value", &encoded);
+    let mut payload = nonce.to_vec();
+    payload.extend_from_slice(&ciphertext);
+    let secret = Value::Secret(payload);
+    for query in [
+        "SELECT CASE WHEN true THEN 7 ELSE LENGTH($1) END AS selected",
+        "SELECT COALESCE(7, LENGTH($1)) AS selected",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        assert!(
+            result.is_ok(),
+            "unused secret branch must stay lazy: {result:?}"
+        );
+        let result = result.unwrap();
+        let selected = result.result.records[0].get("selected").expect("selected");
+        assert_eq!(
+            runtime.try_secret_query_input(selected.clone()).unwrap(),
+            Some(Value::Integer(7))
+        );
+    }
+    let result = runtime.execute_query_with_params(
+        "SELECT LENGTH($1) AS expanded_length",
+        std::slice::from_ref(&secret),
+    );
+    let error = result.expect_err("compressed secret input must not bypass memory admission");
+    assert!(error.to_string().contains("read memory limit"), "{error}");
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
+    runtime
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("table");
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("small authenticated ciphertext fits the resident allowance");
+    for query in [
+        "SELECT LENGTH(payload) AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs WHERE LENGTH(payload) > 0",
+        "SELECT MIN(LENGTH(payload)) OVER () AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs ORDER BY LENGTH(payload)",
+        "SELECT id FROM secret_inputs ORDER BY payload",
+        "SELECT id FROM secret_inputs ORDER BY payload LIMIT 1",
+        "SELECT id FROM secret_inputs ORDER BY payload DESC LIMIT 1",
+        "SELECT id FROM secret_inputs WHERE payload IN ('x','y')",
+        "SELECT MIN(payload) FROM secret_inputs",
+        "SELECT COUNT(payload) FROM secret_inputs",
+        "SELECT ARRAY_AGG(payload) FROM secret_inputs",
+        "SELECT COUNT(DISTINCT payload) FROM secret_inputs",
+        "SELECT payload, COUNT(*) FROM secret_inputs GROUP BY payload",
+        "SELECT LENGTH(payload), COUNT(*) FROM secret_inputs GROUP BY LENGTH(payload)",
+    ] {
+        let result = runtime.execute_query(query);
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+    }
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT COUNT(*) FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) FROM secret_inputs WHERE payload = $1 GROUP BY id",
+        "SELECT id, COUNT(*) FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
+        "UPDATE secret_inputs SET id = 77 WHERE payload = $1",
+        "DELETE FROM secret_inputs WHERE payload = $1",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+        if query.starts_with("UPDATE") || query.starts_with("DELETE") {
+            let rows = runtime
+                .execute_query("SELECT id FROM secret_inputs ORDER BY id")
+                .expect("denial preserves rows");
+            assert_eq!(rows.result.records.len(), 3);
+            for (row, expected) in rows.result.records.iter().zip(1..=3) {
+                assert_eq!(row.get("id"), Some(&Value::Integer(expected)));
+            }
+        }
+    }
+
+    for query in [
+        "SELECT COUNT(*) AS total FROM secret_inputs",
+        "SELECT SUM(CASE WHEN id > 0 THEN 1 ELSE LENGTH(payload) END) AS total FROM secret_inputs",
+        "SELECT SUM(COALESCE(1, LENGTH(payload))) AS total FROM secret_inputs",
+    ] {
+        let result = runtime
+            .execute_query(query)
+            .expect("unused secret input stays lazy");
+        let total = result.result.records[0]
+            .get("total")
+            .expect("aggregate total");
+        assert_eq!(
+            runtime
+                .try_secret_query_input(total.clone())
+                .expect("small aggregate output"),
+            Some(Value::Integer(3)),
+            "{query}"
+        );
+    }
+
+    runtime
+        .execute_query("CREATE INDEX secret_inputs_id ON secret_inputs (id) USING BTREE")
+        .expect("index for direct wire candidates");
+    {
+        let _scope = super::execution_context::SecretStoreGuard::install(&runtime);
+        let response = crate::wire::query_direct::try_handle_query_binary_direct(
+            &runtime,
+            "SELECT id FROM secret_inputs WHERE id BETWEEN 1 AND 3 AND payload IS NOT NULL",
+        )
+        .expect("direct indexed scan is eligible");
+        assert_eq!(
+            response.get(4),
+            Some(&reddb_wire::legacy::MSG_ERROR),
+            "direct wire scan must reject rather than publish partial rows"
+        );
+        assert!(String::from_utf8_lossy(&response[5..]).contains("read memory limit"));
+    }
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
+    let larger =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("larger runtime");
+    larger.set_auth_store(auth);
+    larger
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("larger table");
+    larger
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("larger seed");
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) AS total FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
+    ] {
+        let result = larger
+            .execute_query_with_params(query, std::slice::from_ref(&secret))
+            .expect("value fits the larger allowance");
+        assert_eq!(result.result.records.len(), 3, "{query}");
+    }
+    let result = larger
+        .execute_query("SELECT MIN(payload) AS minimum FROM secret_inputs")
+        .expect("aggregate input fits larger budget");
+    let minimum = result.result.records[0].get("minimum").expect("minimum");
+    assert_eq!(
+        larger
+            .try_secret_query_input(minimum.clone())
+            .expect("decode result"),
+        Some(Value::text("x".repeat(512 * 1024))),
+        "budget enforcement must retain the actual aggregate value"
+    );
+}
+
+#[test]
 fn recovered_row_patch_preserves_fields_outside_the_patch() {
     use crate::storage::{EntityData, EntityId, UnifiedEntity};
     use reddb_types::Value;
@@ -1157,4 +1342,102 @@ fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get("id"), Some(&Value::Integer(7)));
     assert_eq!(records[0].get("z_payload"), Some(&Value::Integer(42)));
+}
+
+#[test]
+fn mutation_memory_event_outbox_rejects_growth_before_publishing_a_message() {
+    use reddb_types::Value;
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("bounded event runtime");
+    runtime
+        .execute_query("CREATE QUEUE admitted_events")
+        .expect("outbox");
+    let payload = varied_payload(256 * 1024);
+    let queue = runtime
+        .db()
+        .store()
+        .get_collection("admitted_events")
+        .expect("event collection");
+    let mut admitted = 0;
+    let mut denied = None;
+    for _ in 0..64 {
+        let before = queue.count();
+        match runtime.enqueue_event_payload("admitted_events", Value::text(payload.clone())) {
+            Ok(_) => admitted += 1,
+            Err(error) => {
+                assert_eq!(queue.count(), before, "denied enqueue published a message");
+                denied = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(
+        admitted > 0,
+        "fixture must exercise incremental queue growth"
+    );
+    let error = denied.expect("event outbox must stop resident growth at the shared engine budget");
+    assert!(error.to_string().contains("over budget"), "{error}");
+    assert_eq!(queue.count(), admitted);
+    let reservations = runtime.inner.memory_reservations.lock();
+    assert_eq!(
+        reservations.reserved_bytes, reservations.completed_bytes,
+        "admission failure leaked a credit"
+    );
+}
+
+#[test]
+fn mutation_memory_queue_push_rejects_growth_before_message_or_metadata_publication() {
+    // KEY and DELAY are mutually exclusive in the public grammar.
+    for metadata_suffix in ["", " KEY 'ordering'", " DELAY 5s"] {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024),
+        )
+        .expect("bounded queue runtime");
+        runtime
+            .execute_query("CREATE QUEUE admitted_push")
+            .expect("queue");
+        let queue = runtime
+            .db()
+            .store()
+            .get_collection("admitted_push")
+            .expect("queue collection");
+        let payload = varied_payload(256 * 1024);
+        let mut admitted = 0;
+        let mut denied = None;
+        for attempt in 0..64 {
+            let metadata = runtime
+                .db()
+                .store()
+                .get_collection(super::impl_queue::QUEUE_META_COLLECTION)
+                .expect("queue metadata");
+            let metadata_before = metadata.count();
+            let suffix = if !metadata_suffix.is_empty() {
+                format!("{metadata_suffix} DEDUP 'attempt_{attempt}'")
+            } else {
+                String::new()
+            };
+            match runtime.execute_query(&format!("QUEUE PUSH admitted_push '{payload}'{suffix}")) {
+                Ok(_) => admitted += 1,
+                Err(error) => {
+                    assert_eq!(queue.count(), admitted, "denied push inserted a message");
+                    assert_eq!(
+                        metadata.count(),
+                        metadata_before,
+                        "denied push inserted metadata"
+                    );
+                    denied = Some(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            admitted > 0,
+            "exercise incremental growth for {metadata_suffix}: {denied:?}"
+        );
+        let error = denied.expect("QUEUE PUSH must enforce the shared memory budget");
+        assert!(error.to_string().contains("over budget"), "{error}");
+        let reservations = runtime.inner.memory_reservations.lock();
+        assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
+    }
 }

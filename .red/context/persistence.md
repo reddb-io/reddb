@@ -25,6 +25,26 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
 - **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
 
+Buffered HTTP SELECT envelopes reserve serialized capacity against the same
+memory budget as storage growth, including both allocations during resizing.
+Clones and transport bodies share the allocation and retain its charge until
+the last owner drops. The request executor also returns immutable shared owners
+for completed materialized reads, charging retained row/model/metadata capacities
+through the last result clone. PostgreSQL portals retain these owners too.
+Executor workspaces, legacy raw runtime results, presentation trees, streaming
+responses and encoded non-HTTP outputs still require their own owned admission;
+this accounting alone does not establish a process-wide memory ceiling.
+
+Single-column push-down GROUP BY folds inputs during the physical scan instead
+of retaining an input-row vector. Its materialized-group ceiling is captured
+once per query and rejects the first excess group before allocating that group's
+accumulator. Scan failures discard partial aggregates. Group keys, aggregate
+values and final result buffers still require shared byte-budget admission;
+a group-count ceiling alone is not a process-wide RAM guarantee.
+The ceiling lookup reads both published config pages and the resident overlay,
+selects the newest config row, and propagates physical read failures instead of
+silently substituting the default ceiling.
+
 On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
 every five seconds. At 75% of a finite controller limit it asks the allocator to
 return already free pages to the OS. This complements logical pool reclamation;
@@ -36,6 +56,21 @@ scales with entity count; payload memory does not scale with the skipped prefix.
 HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
 empty beyond-end pages describe the same physical scan, including historical
 versions; this does not introduce logical MVCC filtering or a transaction snapshot.
+
+Cursors over immutable published collection generations retain at most one 16 KiB
+leaf, avoiding a page-cache read and page copy for each peek and record read.
+Hosts retain their existing root publication and retirement fences. Mutable-tree
+cursors still re-read pages; value decoding, read limits, retry positions and
+strictly advancing leaf-range validation remain in force. With 2,000 inline rows
+in five tree pages, the deterministic regression reduces 4,004 page reads to four;
+this does not establish runtime boot, RSS or query latency improvements.
+
+Native B-tree writes keep the 1-KiB compression trigger and pack the selected
+raw/compressed representation inline up to one quarter of the 16-KiB native
+page. Larger representations retain the existing overflow-chain path. This is
+an allocation policy over unchanged cell framing; existing cells keep their
+layout until rebuilt. See ADR 0023's page-size amendment for density and
+compatibility qualification.
 
 ## Checkpoint reuse
 
@@ -62,6 +97,29 @@ Owned row reads restore missing positional column names from the collection's
 shared schema before mutation or index backfill. Explicit row schemas and named
 fields remain authoritative. This changes neither the stored record format nor
 the raw segment revisions used by checkpoint reuse.
+
+Runtime secondary-index restoration reads the physical descriptor registry and
+reduces append-only history by durable entity ID, including DROP/recreate.
+Backfill projects one row at a time, admits its estimated resident growth against
+the shared budget and publishes a complete replacement under the collection
+index-topology fence. Read failures and budget denial preserve the prior indexes
+and permit retry. In the opt-in disk-residency qualifier, HASH and
+BTREE restoration retain generation-bound native root descriptors instead of
+rebuilding resident posting maps. Initial projection preparation scans the source;
+compatible prepared restoration does not. BTREE projections use prefix-free,
+type-ordered bytes; integral and text ranges, including equality prefixes over
+fixed-arity composite keys, merge physical candidates with live changes, retain
+their memory reservation through result assembly and
+recheck visibility and predicates. Unsupported query shapes, coercions, mixed
+families and oversized keys retain the authoritative scan. An overflow marker
+prevents a partial index from reporting complete results; unreadable pages fail.
+UNIQUE keeps a paged equality pocket and the existing snapshot-aware admission.
+Bitmap and H3 providers, and explicit CREATE INDEX construction, still retain
+resident state. Range planning checks each bound component's family within its
+prefix and prefers the most constrained applicable index. Unsupported composite
+predicates still scan; paging does not make those queries constant-cost. Managed
+activation remains disabled; these changes
+do not establish whole-server RAM bounds or qualify historical startup latency.
 
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Active and aborted transaction visibility, pending vault

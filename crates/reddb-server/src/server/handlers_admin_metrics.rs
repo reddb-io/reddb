@@ -1360,7 +1360,7 @@ impl RedDBServer {
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",
-            body: body.into_bytes(),
+            body: body.into_bytes().into(),
             extra_headers: Vec::new(),
         }
     }

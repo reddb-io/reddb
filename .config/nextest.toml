@@ -59,9 +59,10 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 
 # The full checkpoint/recovery crash matrix repeatedly starts child processes
 # and fsyncs real files. The shared runner reached its final cases at the 120s
-# cutoff. Preserve every case and assertion with exclusive, bounded execution.
+# cutoff. Both resident and cold variants run the same complete matrix.
+# Preserve every case and assertion with exclusive, bounded execution.
 [[profile.default.overrides]]
-filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
@@ -87,7 +88,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [[profile.ci.overrides]]
-filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
 retries = 0

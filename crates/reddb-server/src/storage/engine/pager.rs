@@ -59,6 +59,8 @@ static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and durable resume counters.
+    pub disk_residency: bool,
     /// Page cache capacity
     pub cache_size: usize,
     /// Whether to open read-only
@@ -80,6 +82,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: DEFAULT_CACHE_SIZE,
             read_only: false,
             create: true,
@@ -102,6 +105,18 @@ pub struct Pager {
 
 #[doc(hidden)]
 pub struct NativePagerFile(File);
+
+#[cfg(unix)]
+impl Drop for NativePagerFile {
+    fn drop(&mut self) {
+        // flock belongs to the open file description: a concurrent spawn can
+        // retain it until exec closes the inherited CLOEXEC descriptor. That
+        // descriptor is not a pager owner. Release our fence at the end of the
+        // actual owner's lifetime, rather than waiting for every inherited FD.
+        // File close remains the fallback if the explicit unlock fails.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 
 impl reddb_file::VfsFile for NativePagerFile {
     fn try_clone(&self) -> std::io::Result<Self> {
@@ -260,6 +275,50 @@ mod tests {
     };
     use std::fs;
     use std::io::Write;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_pager_drop_releases_lock_with_inherited_descriptor() {
+        use fs2::FileExt;
+        let directory = tempfile::tempdir().expect("lock fixture");
+        let path = directory.path().join("owner.rdb");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("owner file");
+        file.try_lock_exclusive().expect("owner lock");
+        let owner = NativePagerFile(file);
+        // dup and fork retain the same open file description. A concurrent
+        // spawn may hold this non-owner descriptor until the child execs,
+        // even though Rust opens it with CLOEXEC.
+        let inherited = owner.0.try_clone().expect("inherited descriptor");
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("independent contender");
+        assert!(
+            contender.try_lock_exclusive().is_err(),
+            "live owner must exclude a second writer"
+        );
+        drop(owner);
+        contender
+            .try_lock_exclusive()
+            .expect("closed owner must permit immediate reopen, before the child execs");
+        // Releasing the inherited descriptor must not unlock the new owner.
+        drop(inherited);
+        let third = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("third handle");
+        assert!(
+            third.try_lock_exclusive().is_err(),
+            "replacement writer retains its independent fence"
+        );
+    }
 
     fn temp_db_path() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

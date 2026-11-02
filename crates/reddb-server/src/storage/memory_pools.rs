@@ -57,6 +57,8 @@ pub enum MemoryPool {
     IndexMemory,
     /// WAL group-commit queue and writer buffers.
     WalBuffers,
+    /// Owned result and serialized query buffers, retained until their last owner drops.
+    QueryBuffers,
 }
 
 /// Every pool, in the order `red.stats` reports them.
@@ -66,10 +68,11 @@ pub const MEMORY_POOLS: [MemoryPool; MEMORY_POOL_COUNT] = [
     MemoryPool::SegmentArena,
     MemoryPool::IndexMemory,
     MemoryPool::WalBuffers,
+    MemoryPool::QueryBuffers,
 ];
 
 /// Number of pools. Arrays are indexed by [`MemoryPool::index`].
-pub const MEMORY_POOL_COUNT: usize = 5;
+pub const MEMORY_POOL_COUNT: usize = 6;
 
 impl MemoryPool {
     /// Stable label echoed by the boot log and the `red.stats` budget section.
@@ -80,6 +83,7 @@ impl MemoryPool {
             Self::SegmentArena => "segment_arena",
             Self::IndexMemory => "index_memory",
             Self::WalBuffers => "wal_buffers",
+            Self::QueryBuffers => "query_buffers",
         }
     }
 
@@ -91,6 +95,7 @@ impl MemoryPool {
             Self::SegmentArena => 2,
             Self::IndexMemory => 3,
             Self::WalBuffers => 4,
+            Self::QueryBuffers => 5,
         }
     }
 }
@@ -107,8 +112,8 @@ pub struct BudgetSharePolicy {
 
 /// Server-side profiles: the segment arena *is* the database (RAM-resident
 /// store), the page cache backs the paged tier and the B+ trees over it.
-/// The unnamed remainder (10%) absorbs plan caches, connection state, result
-/// buffers and allocator slack — everything that is not a governed pool.
+/// The unnamed remainder (5%) absorbs plan caches, connection state and
+/// allocator slack — everything that is not a governed pool.
 const DEFAULT_POLICY: BudgetSharePolicy = BudgetSharePolicy {
     basis_points: [
         2_000, // page_cache
@@ -116,12 +121,13 @@ const DEFAULT_POLICY: BudgetSharePolicy = BudgetSharePolicy {
         4_000, // segment_arena
         1_000, // index_memory
         500,   // wal_buffers
+        500,   // query_buffers
     ],
 };
 
 /// Serverless: boundedness is a survival contract, not a tuning preference
 /// (ADR 0038 §1). A cold function instance has a small budget and a short
-/// life, so the caches shrink and the unnamed reserve doubles to 20%.
+/// life, so the caches shrink and the unnamed reserve doubles to 10%.
 const SERVERLESS_POLICY: BudgetSharePolicy = BudgetSharePolicy {
     basis_points: [
         1_500, // page_cache
@@ -129,6 +135,7 @@ const SERVERLESS_POLICY: BudgetSharePolicy = BudgetSharePolicy {
         4_000, // segment_arena
         1_000, // index_memory
         500,   // wal_buffers
+        1_000, // query_buffers
     ],
 };
 
@@ -378,6 +385,16 @@ impl MemoryAccounting {
         let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
             Some(used.saturating_sub(bytes))
         });
+    }
+
+    /// Owned buffers must be charged once and released once. A mismatch is an
+    /// ownership bug, not a sampled counter that can safely saturate.
+    pub(crate) fn release_query_buffer(&self, bytes: u64) {
+        self.used_bytes[MemoryPool::QueryBuffers.index()]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.checked_sub(bytes).expect("query buffer released once"))
+            })
+            .expect("query buffer counter update cannot be rejected");
     }
 
     /// This pool's live usage.
@@ -632,7 +649,8 @@ mod tests {
                 "blob_cache_l1",
                 "segment_arena",
                 "index_memory",
-                "wal_buffers"
+                "wal_buffers",
+                "query_buffers"
             ]
         );
         let unique: std::collections::HashSet<_> = labels.iter().collect();

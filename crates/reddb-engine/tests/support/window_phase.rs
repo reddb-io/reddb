@@ -23,6 +23,10 @@ pub const CASES: &[(&str, fn())] = &[
         "window_projection_depth_and_subtraction",
         depth_and_subtraction,
     ),
+    (
+        "window_fallible_inputs_and_retry",
+        fallible_inputs_and_retry,
+    ),
 ];
 
 #[derive(Default)]
@@ -32,6 +36,7 @@ struct Host {
     outputs: Cell<usize>,
     deny_materialization: bool,
     deny_output: bool,
+    failure_at: Cell<Option<usize>>,
 }
 impl WindowHost for Host {
     type Error = String;
@@ -55,6 +60,17 @@ impl WindowHost for Host {
             })
         })
         .ok()
+    }
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        source: &UnifiedRecord,
+    ) -> Result<Option<Value>, String> {
+        if self.failure_at.get() == Some(self.evaluations.get() + 1) {
+            self.evaluations.set(self.evaluations.get() + 1);
+            return Err("window input read failed".into());
+        }
+        Ok(self.evaluate_expression(expression, source))
     }
     fn secret_query_output(&self, value: Value) -> Result<Value, String> {
         self.outputs.set(self.outputs.get() + 1);
@@ -441,4 +457,45 @@ fn depth_and_subtraction() {
     );
     assert_eq!(host.evaluations.get(), 0);
     assert!(rows[0].get("deep").is_none());
+}
+
+fn fallible_inputs_and_retry() {
+    for function in ["SUM", "LAG"] {
+        let arguments = if function == "SUM" {
+            vec![column()]
+        } else {
+            vec![
+                Projection::Function("ABS".into(), vec![column()]),
+                Projection::Function("ABS".into(), vec![literal(1)]),
+                Projection::Function("ABS".into(), vec![literal(9)]),
+            ]
+        };
+        let projection = window(function, arguments, spec(true), "result");
+        let evaluations = if function == "SUM" { 9 } else { 11 };
+        for failure_at in 1..=evaluations {
+            let host = Host::default();
+            host.failure_at.set(Some(failure_at));
+            let mut rows = vec![
+                row("g", 1, Value::Integer(3)),
+                row("g", 2, Value::Integer(4)),
+                row("g", 3, Value::Integer(5)),
+            ];
+            assert_eq!(
+                run(&host, &mut rows, std::slice::from_ref(&projection)),
+                Err("window input read failed".into())
+            );
+            assert_eq!(host.evaluations.get(), failure_at);
+            assert!(rows.iter().all(|row| row.get("result").is_none()));
+            assert_eq!(host.outputs.get(), 0);
+            host.failure_at.set(None);
+            host.evaluations.set(0);
+            run(&host, &mut rows, std::slice::from_ref(&projection)).expect("retry window reads");
+            let expected = if function == "SUM" {
+                [3, 7, 12]
+            } else {
+                [9, 3, 4]
+            };
+            assert_eq!(values(&rows, "result"), integers(&expected));
+        }
+    }
 }

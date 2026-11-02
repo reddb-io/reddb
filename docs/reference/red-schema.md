@@ -347,8 +347,9 @@ The governed pools, in report order, are `page_cache` (preallocated 16 KiB
 slots), `blob_cache_l1` (the blob cache's RAM tier plus L2's resident metadata;
 L2's disk extent is not memory and is excluded), `segment_arena` (growing and
 sealed segments), `index_memory` (hash, bitmap, sorted and composite secondary
-indexes) and `wal_buffers` (the group-commit queue plus the writer's append
-buffer). Shares come from one allocation policy of named fractions,
+indexes), `wal_buffers` (the group-commit queue plus the writer's append
+buffer), and `query_buffers` (owned completed request results and serialized
+HTTP SELECT buffers, retained until their last owner drops). Shares come from one allocation policy of named fractions,
 profile-adjustable, which always leaves an unpooled reserve for plan caches,
 connection state and allocator slack — so `total_share_bytes` is strictly less
 than `resolved_bytes`.

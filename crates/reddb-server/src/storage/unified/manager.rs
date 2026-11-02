@@ -148,6 +148,30 @@ mod tests {
         src.matches("query_all(").count()
             + src.matches(".for_each_entity").count()
             + src.matches("fold_entities_parallel(").count()
+            + src.matches(".try_for_each_entity(").count()
+            + src.matches(".try_for_each_key_entity(").count()
+            + src.matches(".try_paged_physical_cursor(").count()
+            + src.matches(".try_paged_key_physical_cursor(").count()
+    }
+
+    #[test]
+    fn raw_iteration_gate_counts_fallible_physical_entry_points() {
+        for source in [
+            "manager.try_for_each_entity(usize::MAX, visit)",
+            "manager.try_for_each_key_entity(key, visit)",
+            "manager.try_paged_physical_cursor()",
+            "manager.try_paged_key_physical_cursor(key)",
+        ] {
+            assert_eq!(raw_iteration_sites(source), 1, "{source}");
+        }
+        assert_eq!(
+            raw_iteration_sites("manager.try_paged_entity_cursor(snapshot)"),
+            0
+        );
+        assert_eq!(
+            raw_iteration_sites("manager.try_paged_key_entity_cursor(key, snapshot)"),
+            0
+        );
     }
 
     #[test]
@@ -207,9 +231,9 @@ mod tests {
             (
                 "runtime/dml_target_scan.rs",
                 include_str!("../../runtime/dml_target_scan.rs"),
-                2,
+                3,
                 "documented exception: kind-conditional visibility the uniform scan \
-                 API cannot express; both iterations gate on candidate_visible",
+                 API cannot express; resident and cold iterations share candidate_visible",
             ),
             (
                 "runtime/impl_events.rs",
@@ -240,13 +264,25 @@ mod tests {
             (
                 "runtime/impl_kv.rs",
                 include_str!("../../runtime/impl_kv.rs"),
+                1,
+                "non-versioned KV listings intentionally read physical rows; \
+                 versioned listings use the captured snapshot. Vault history/export \
+                 and point visibility are centralized in keyed_spine",
+            ),
+            (
+                "runtime/keyed_spine.rs",
+                include_str!("../../runtime/keyed_spine.rs"),
                 3,
-                "one non-versioned listing fallback (the versioned arm scans under \
-                 the captured snapshot). Point reads use physical key candidates with \
-                 versioned visibility rechecks. Vault reads use snapshot scans. Offline vault \
-                 export preserves all \
-                 physical versions across tenants; restore's emptiness check must reject \
-                 every physical row, including versions invisible to a snapshot",
+                "physical history is explicit only when snapshot is None: \
+                 keyed/all cold cursors and the resident fallback. Snapshot callers \
+                 use paged entity cursors or scan with captured visibility",
+            ),
+            (
+                "runtime/blockchain_kind.rs",
+                include_str!("../../runtime/blockchain_kind.rs"),
+                1,
+                "immutable blockchain tip and verification inspect physical blocks; \
+                 the shared visitor propagates storage/codec errors and work budgets",
             ),
             (
                 "runtime/impl_queue.rs",

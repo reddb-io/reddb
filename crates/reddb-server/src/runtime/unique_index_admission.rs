@@ -72,15 +72,26 @@ impl RedDBRuntime {
         let snapshots = self.snapshot_manager();
         let own_xids = self.own_transaction_xids();
         let pocket = index.hash_lookup_name();
-        for id in self
+        let candidates = self
             .index_store_ref()
             .hash_lookup(&index.collection, &pocket, key)
-            .map_err(RedDBError::Internal)?
-        {
+            .map_err(RedDBError::Internal)?;
+        let read_workspace = if !candidates.is_empty() {
+            match store.get_collection(&index.collection) {
+                Some(manager) if manager.has_backing() => Some(self.reserve_index_scan(&manager)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let read_bytes_max = read_workspace
+            .as_ref()
+            .map_or(usize::MAX, |(_, limit)| *limit);
+        for id in candidates {
             if exclude == Some(id) {
                 continue;
             }
-            if let Some(entity) = store.get(&index.collection, id) {
+            if let Some(entity) = store.try_get(&index.collection, id, read_bytes_max)? {
                 if snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids) {
                     if snapshots.is_active(entity.xmin) && !own_xids.contains(&entity.xmin) {
                         return Err(RedDBError::Query(format!(

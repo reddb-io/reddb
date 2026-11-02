@@ -72,7 +72,7 @@ pub(crate) fn serve_bundle_asset(ui_dir: &Path, request_path: &str) -> Option<Ht
     let body = std::fs::read(ui_dir.join(&rel)).ok()?;
     Some(HttpResponse {
         status: 200,
-        body,
+        body: body.into(),
         content_type,
         extra_headers: Vec::new(),
     })
@@ -99,7 +99,7 @@ mod tests {
         let resp = serve_bundle_asset(dir.path(), "/").expect("index served");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.content_type, "text/html; charset=utf-8");
-        assert_eq!(resp.body, b"<html>red-ui</html>");
+        assert_eq!(resp.body.as_ref(), b"<html>red-ui</html>");
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
         let dir = bundle();
         let resp = serve_bundle_asset(dir.path(), "/app.js").expect("js served");
         assert_eq!(resp.content_type, "text/javascript; charset=utf-8");
-        assert_eq!(resp.body, b"console.log('ui')");
+        assert_eq!(resp.body.as_ref(), b"console.log('ui')");
 
         let css = serve_bundle_asset(dir.path(), "/assets/style.css").expect("css served");
         assert_eq!(css.content_type, "text/css; charset=utf-8");

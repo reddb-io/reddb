@@ -155,7 +155,8 @@ impl From<reddb_file::RdbFileError> for TermStoreError {
             reddb_file::RdbFileError::InvalidOperation(msg) => Self::InvalidFormat(msg),
             // The zone message names the zone and points at scrub/salvage
             // (ADR 0074 §2/§4); keep it verbatim rather than flattening it.
-            err @ reddb_file::RdbFileError::ZoneUnrecoverable { .. } => {
+            err @ (reddb_file::RdbFileError::ZoneUnrecoverable { .. }
+            | reddb_file::RdbFileError::ReadLimitExceeded { .. }) => {
                 Self::InvalidFormat(err.to_string())
             }
         }

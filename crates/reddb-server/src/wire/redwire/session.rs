@@ -569,7 +569,21 @@ where
                         }
                     };
                     let in_tx = runtime.connection_in_transaction(connection.id());
-                    let config = crate::server::output_stream::StreamConfig::load(&runtime);
+                    let config = match crate::server::output_stream::StreamConfig::load(&runtime) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let err = is::build_input_stream_error_frame(
+                                frame_id,
+                                sid,
+                                "stream_config_unavailable",
+                                &error.to_string(),
+                                0,
+                                runtime.cdc_current_lsn(),
+                            )?;
+                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            continue;
+                        }
+                    };
                     let snapshot_lsn = runtime.cdc_current_lsn();
                     let clock = crate::server::output_stream::SystemClock;
                     let lease = match is::open_input_lease(config, snapshot_lsn, in_tx, &clock) {
@@ -1359,7 +1373,10 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
     crate::presentation::query_result::summary_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1389,7 +1406,10 @@ fn run_query_with_params(
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
     crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 

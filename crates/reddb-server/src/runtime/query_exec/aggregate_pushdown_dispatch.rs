@@ -20,7 +20,7 @@
 //! always safe; false positives would be incorrect.
 
 use super::aggregate_planner::{
-    AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, ScanIterator, ScanRow,
+    AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, PlanError, ScanRow,
 };
 use super::filter_compiled::{
     classify_field, resolve_kind, CompiledEntityFilter, CompiledEntityFilterDecision,
@@ -121,14 +121,8 @@ pub(super) fn try_execute_pushdown_aggregate(
         aggregates: lowered.iter().map(|l| l.expr.clone()).collect(),
     };
 
-    // ── Pre-collect rows from the entity scan into ScanRow ──────
-    //
-    // We collect into a Vec<ScanRow> rather than streaming through
-    // a callback iterator. The win we care about is "how many full
-    // `UnifiedRecord`s are materialised?" — and the answer here is
-    // O(group count), not O(row count). A `ScanRow` holds only the
-    // GROUP BY value plus the per-aggregate input values; no
-    // HashMap, no system fields.
+    // Fold each input while scanning: O(groups * aggregate slots) retained
+    // state instead of O(rows * aggregate slots) temporary input storage.
     let manager = db
         .store()
         .get_collection(query.table.as_str())
@@ -144,19 +138,20 @@ pub(super) fn try_execute_pushdown_aggregate(
         return Ok(None);
     }
 
-    let mut rows: Vec<ScanRow> = Vec::new();
+    let groups_max = crate::runtime::materialization_limit::max_materialized_rows(db)?;
+    let mut planner = AggregateQueryPlanner::new(&ast, groups_max).map_err(planner_error)?;
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan_result(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if let Some(f) = compiled_filter.as_ref() {
-                if f.evaluate(entity) != CompiledEntityFilterDecision::Match {
-                    return true;
+                if f.try_evaluate(entity)? != CompiledEntityFilterDecision::Match {
+                    return Ok(true);
                 }
             }
             let group_key = match resolve_kind(&group_kind, entity) {
                 Some(v) => v.into_owned(),
-                None => return true,
+                None => return Ok(true),
             };
             let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
             for slot in &lowered {
@@ -169,16 +164,17 @@ pub(super) fn try_execute_pushdown_aggregate(
                 };
                 agg_inputs.push(value);
             }
-            rows.push(ScanRow {
-                group_key,
-                agg_inputs,
-            });
-            true
+            planner
+                .push(ScanRow {
+                    group_key,
+                    agg_inputs,
+                })
+                .map_err(planner_error)?;
+            Ok(true)
         },
     )?;
 
-    let stream = AggregateQueryPlanner::plan(&ast, VecScanIter(rows.into_iter()))
-        .map_err(|e| RedDBError::Query(format!("aggregate push-down planner: {e}")))?;
+    let stream = planner.finish();
 
     // ── Project planner output back into UnifiedRecord ──────────
     let mut columns: Vec<String> = Vec::with_capacity(1 + ast.aggregates.len());
@@ -188,11 +184,6 @@ pub(super) fn try_execute_pushdown_aggregate(
     }
 
     let group_count = stream.len();
-    // Issue #769 — enforce the materialization ceiling on the push-down
-    // aggregate path too. `group_count` is the planner's distinct-group
-    // cardinality (pre OFFSET/LIMIT), the aggregation's materialized row
-    // count for this query.
-    crate::runtime::materialization_limit::guard(db, "aggregation", group_count)?;
     let mut records: Vec<UnifiedRecord> = Vec::with_capacity(group_count);
     for row in stream {
         let mut record = UnifiedRecord::new();
@@ -397,12 +388,16 @@ fn is_fast_kind(kind: &EntityFieldKind) -> bool {
     )
 }
 
-/// Tiny iterator adapter so we can hand a `Vec<ScanRow>` to the
-/// planner without exposing a public iterator type from this file.
-struct VecScanIter(std::vec::IntoIter<ScanRow>);
-
-impl ScanIterator for VecScanIter {
-    fn next_row(&mut self) -> Option<ScanRow> {
-        self.0.next()
+/// Preserve the public named admission error, including the first rejected group.
+fn planner_error(error: PlanError) -> RedDBError {
+    match error {
+        PlanError::GroupLimitExceeded { limit, current } => {
+            RedDBError::MaterializationLimitExceeded {
+                executor: "aggregation",
+                limit,
+                current,
+            }
+        }
+        other => RedDBError::Query(format!("aggregate push-down planner: {other}")),
     }
 }

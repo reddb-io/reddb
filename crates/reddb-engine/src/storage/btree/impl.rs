@@ -58,6 +58,11 @@ impl<P: PageStore> BTree<P> {
 
     /// Get value for a key
     pub fn get(&self, key: &[u8]) -> BTreeResult<Option<Vec<u8>>> {
+        self.get_with_budget(key, usize::MAX)
+    }
+
+    /// Bound value materialization before allocating overflow or decode buffers.
+    pub fn get_with_budget(&self, key: &[u8], limit_bytes: usize) -> BTreeResult<Option<Vec<u8>>> {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(None);
@@ -82,7 +87,11 @@ impl<P: PageStore> BTree<P> {
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
                     let (_, stored) = read_leaf_cell(&page, pos)?;
-                    let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                    let value = value_layout::decode_with_budget(
+                        self.pager.as_ref(),
+                        &stored,
+                        limit_bytes,
+                    )?;
                     return Ok(Some(value));
                 }
                 SearchResult::NotFound(_) => {
@@ -109,7 +118,8 @@ impl<P: PageStore> BTree<P> {
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
                 let (_, stored) = read_leaf_cell(&page, pos)?;
-                let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                let value =
+                    value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
                 Ok(Some(value))
             }
             SearchResult::NotFound(_) => Ok(None),
@@ -120,8 +130,9 @@ impl<P: PageStore> BTree<P> {
     ///
     /// Applies the value-layout spill ladder before touching the tree:
     /// the 256 MB ceiling rejects here without any allocation; values
-    /// at or below `OVERFLOW_THRESHOLD` go inline raw; larger values may
-    /// inline compressed or spill into an [`crate::storage::overflow::OverflowChain`].
+    /// at or below `COMPRESSION_THRESHOLD` go inline raw; larger values
+    /// select raw/compressed bytes and spill beyond `OVERFLOW_THRESHOLD`
+    /// into an [`crate::storage::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
         let _writer = self.writer.lock();
@@ -717,6 +728,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -729,6 +742,8 @@ impl<P: PageStore> BTree<P> {
             position: 0,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 
@@ -742,6 +757,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -759,6 +776,8 @@ impl<P: PageStore> BTree<P> {
             position,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 

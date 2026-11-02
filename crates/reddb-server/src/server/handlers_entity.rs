@@ -726,7 +726,7 @@ impl RedDBServer {
 
         HttpResponse {
             status: 200,
-            body,
+            body: body.into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         }
@@ -1089,7 +1089,7 @@ impl BatchOutcome {
 fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
     HttpResponse {
         status: outcome.status,
-        body: outcome.body,
+        body: outcome.body.into(),
         content_type: "application/json",
         extra_headers: Vec::new(),
     }

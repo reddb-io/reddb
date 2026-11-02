@@ -1,6 +1,16 @@
 use super::*;
 use crate::api::DurabilityMode;
 
+#[cfg(test)]
+fn flush_local_only_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_native name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 fn write_optional_snapshot_sidecar(
     json: &crate::json::Value,
     field: &str,
@@ -34,6 +44,12 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
+    // Exercise the real factory in library qualification builds. Production
+    // has no setter or environment switch for the unfinished managed mode.
+    if cfg!(test) && QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.get()) {
+        config.resident_memory_bytes_max =
+            Some(shares.share_bytes(crate::storage::memory_pools::MemoryPool::SegmentArena));
+    }
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
@@ -623,8 +639,14 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "publication-lock");
         let _ = self.ec_consolidate_all();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
@@ -634,8 +656,14 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "store-persist");
             self.publish_append_only_segments(path)?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "append-only-publication");
             self.persist_metadata()?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight
@@ -1453,6 +1481,10 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
     }
 }
 
+thread_local! {
+    static QUALIFICATION_DISK_RESIDENCY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(test)]
 mod append_only_publication_tests {
     use super::*;
@@ -1612,5 +1644,50 @@ mod ephemeral_cleanup_tests {
         let options = RedDBOptions::persistent(&path);
 
         assert!(!should_cleanup_ephemeral_data_path(&options, &path));
+    }
+}
+
+#[cfg(test)]
+impl RedDB {
+    pub(crate) fn with_disk_residency_for_qualification<T>(operation: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.set(self.0));
+            }
+        }
+        let previous = QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.replace(true));
+        let _restore = Restore(previous);
+        operation()
+    }
+}
+
+#[cfg(test)]
+mod qualification_scope_tests {
+    use super::*;
+
+    #[test]
+    fn qualification_factory_selection_is_nested_thread_local_and_unwind_safe() {
+        let options = RedDBOptions::in_memory().with_memory_budget(64 * 1024 * 1024);
+        let selected = || {
+            store_config_from_options(&options)
+                .expect("config")
+                .resident_memory_bytes_max
+        };
+        assert_eq!(selected(), None);
+        RedDB::with_disk_residency_for_qualification(|| {
+            assert!(selected().is_some());
+            RedDB::with_disk_residency_for_qualification(|| assert!(selected().is_some()));
+            assert!(selected().is_some());
+            std::thread::scope(|threads| {
+                threads.spawn(|| assert_eq!(selected(), None));
+            });
+        });
+        assert_eq!(selected(), None);
+        let result = std::panic::catch_unwind(|| {
+            RedDB::with_disk_residency_for_qualification(|| panic!("qualification fixture"));
+        });
+        assert!(result.is_err());
+        assert_eq!(selected(), None);
     }
 }

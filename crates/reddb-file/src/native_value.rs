@@ -8,15 +8,126 @@ fn invalid(error: impl std::fmt::Display) -> RdbFileError {
     RdbFileError::InvalidOperation(error.to_string())
 }
 
+/// Conservative accounting of allocations retained during one native decode.
+/// Hosts reserve this allowance in their global scratch pool before decoding.
+#[derive(Debug)]
+pub struct DecodeBudget {
+    pub limit_bytes: usize,
+    pub used_bytes: usize,
+}
+
+impl DecodeBudget {
+    pub fn new(limit_bytes: usize) -> Self {
+        Self {
+            limit_bytes,
+            used_bytes: 0,
+        }
+    }
+    pub fn charge(&mut self, bytes: usize) -> RdbFileResult<()> {
+        let required_bytes =
+            self.used_bytes
+                .checked_add(bytes)
+                .ok_or(RdbFileError::ReadLimitExceeded {
+                    required_bytes: usize::MAX,
+                    limit_bytes: self.limit_bytes,
+                })?;
+        if required_bytes > self.limit_bytes {
+            return Err(RdbFileError::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes: self.limit_bytes,
+            });
+        }
+        self.used_bytes = required_bytes;
+        Ok(())
+    }
+    pub fn elements<T>(&mut self, count: usize) -> RdbFileResult<()> {
+        let bytes =
+            count
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or(RdbFileError::ReadLimitExceeded {
+                    required_bytes: usize::MAX,
+                    limit_bytes: self.limit_bytes,
+                })?;
+        self.charge(bytes)
+    }
+    pub fn map<K, V>(&mut self, count: usize) -> RdbFileResult<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        // Hash table capacity, controls, alignment and growth overlap. Admission
+        // precedes allocation; count alone underestimates small/null values.
+        let bytes = count
+            .max(2)
+            .checked_next_power_of_two()
+            .and_then(|capacity| capacity.checked_mul(3))
+            .and_then(|capacity| capacity.checked_mul(std::mem::size_of::<(K, V)>() + 1))
+            .and_then(|bytes| bytes.checked_add(64))
+            .ok_or(RdbFileError::ReadLimitExceeded {
+                required_bytes: usize::MAX,
+                limit_bytes: self.limit_bytes,
+            })?;
+        self.charge(bytes)
+    }
+}
+
 /// Checked cursor shared by value decoding and the logical entity adapter.
 pub struct NativeReader<'a, 'p> {
     data: &'a [u8],
     position: &'p mut usize,
+    budget: Option<&'p mut DecodeBudget>,
 }
 
 impl<'a, 'p> NativeReader<'a, 'p> {
     pub fn new(data: &'a [u8], position: &'p mut usize) -> Self {
-        Self { data, position }
+        Self {
+            data,
+            position,
+            budget: None,
+        }
+    }
+    pub fn with_budget(
+        data: &'a [u8],
+        position: &'p mut usize,
+        budget: &'p mut DecodeBudget,
+    ) -> Self {
+        Self {
+            data,
+            position,
+            budget: Some(budget),
+        }
+    }
+    pub fn reserve_bytes(&mut self, bytes: usize) -> RdbFileResult<()> {
+        match self.budget.as_mut() {
+            Some(budget) => budget.charge(bytes),
+            None => Ok(()),
+        }
+    }
+    pub fn reserve_elements<T>(&mut self, count: usize) -> RdbFileResult<()> {
+        match self.budget.as_mut() {
+            Some(budget) => budget.elements::<T>(count),
+            None => Ok(()),
+        }
+    }
+    pub fn reserve_map<K, V>(&mut self, count: usize) -> RdbFileResult<()> {
+        match self.budget.as_mut() {
+            Some(budget) => budget.map::<K, V>(count),
+            None => Ok(()),
+        }
+    }
+    pub fn owned_bytes(&mut self) -> RdbFileResult<Vec<u8>> {
+        let bytes = self.bytes()?;
+        self.reserve_bytes(bytes.len())?;
+        Ok(bytes.to_vec())
+    }
+    fn text(&mut self, compressed: bool) -> RdbFileResult<Value> {
+        let bytes = if compressed {
+            self.compressed()?
+        } else {
+            self.owned_bytes()?
+        };
+        // Text's shared owned representation may coexist with this Vec/String.
+        self.reserve_bytes(bytes.len().saturating_add(2 * std::mem::size_of::<usize>()))?;
+        Ok(Value::text(String::from_utf8(bytes).map_err(invalid)?))
     }
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(*self.position)
@@ -72,10 +183,10 @@ impl<'a, 'p> NativeReader<'a, 'p> {
         self.take(size)
     }
     pub fn string(&mut self) -> RdbFileResult<String> {
-        String::from_utf8(self.bytes()?.to_vec()).map_err(invalid)
+        String::from_utf8(self.owned_bytes()?).map_err(invalid)
     }
     pub fn value(&mut self) -> RdbFileResult<Value> {
-        read_native_value(self.data, self.position)
+        read_native_value_from_reader(self)
     }
     fn compressed(&mut self) -> RdbFileResult<Vec<u8>> {
         let original = self.length()?;
@@ -87,6 +198,7 @@ impl<'a, 'p> NativeReader<'a, 'p> {
                 return Err(invalid("native compressed value length mismatch"));
             }
         }
+        self.reserve_bytes(original)?;
         let decoded = zstd::bulk::decompress(compressed, original).map_err(invalid)?;
         if decoded.len() != original {
             return Err(invalid("native compressed value length mismatch"));
@@ -98,7 +210,10 @@ impl<'a, 'p> NativeReader<'a, 'p> {
 /// Read one native value. Arrays use an explicit stack, retaining the same bytes
 /// without consuming the host call stack on deeply nested persisted values.
 pub fn read_native_value(data: &[u8], position: &mut usize) -> RdbFileResult<Value> {
-    let mut reader = NativeReader::new(data, position);
+    read_native_value_from_reader(&mut NativeReader::new(data, position))
+}
+
+fn read_native_value_from_reader(reader: &mut NativeReader<'_, '_>) -> RdbFileResult<Value> {
     let mut arrays: Vec<(usize, Vec<Value>)> = Vec::new();
     loop {
         let tag = reader.byte()?;
@@ -108,12 +223,18 @@ pub fn read_native_value(data: &[u8], position: &mut usize) -> RdbFileResult<Val
         let mut value = if tag == 28 {
             let count = reader.count(1)?;
             if count != 0 {
+                reader.reserve_elements::<Value>(count)?;
+                if arrays.len() == arrays.capacity() {
+                    let capacity_next = arrays.capacity().max(2) * 2;
+                    reader.reserve_elements::<(usize, Vec<Value>)>(capacity_next)?;
+                    arrays.reserve_exact(capacity_next - arrays.len());
+                }
                 arrays.push((count, Vec::with_capacity(count)));
                 continue;
             }
             Value::Array(Vec::new())
         } else {
-            read_atom(&mut reader, tag)?
+            read_atom(reader, tag)?
         };
         loop {
             let Some((remaining, items)) = arrays.last_mut() else {
@@ -137,8 +258,8 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
         2 => Value::Integer(i64::from_le_bytes(reader.fixed()?)),
         3 => Value::UnsignedInteger(u64::from_le_bytes(reader.fixed()?)),
         4 => Value::Float(f64::from_le_bytes(reader.fixed()?)),
-        5 => Value::text(reader.string()?),
-        6 => Value::Blob(reader.bytes()?.to_vec()),
+        5 => reader.text(false)?,
+        6 => Value::Blob(reader.owned_bytes()?),
         7 => Value::Timestamp(i64::from_le_bytes(reader.fixed()?)),
         8 => Value::Duration(i64::from_le_bytes(reader.fixed()?)),
         9 => {
@@ -151,13 +272,14 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
         10 => Value::MacAddr(reader.fixed()?),
         11 => {
             let count = reader.count(4)?;
+            reader.reserve_elements::<f32>(count)?;
             let mut vector = Vec::with_capacity(count);
             for _ in 0..count {
                 vector.push(f32::from_le_bytes(reader.fixed()?));
             }
             Value::Vector(vector)
         }
-        12 => Value::Json(reader.bytes()?.to_vec()),
+        12 => Value::Json(reader.owned_bytes()?),
         13 => Value::Uuid(reader.fixed()?),
         14 => Value::NodeRef(reader.string()?),
         15 => Value::EdgeRef(reader.string()?),
@@ -198,7 +320,7 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
         45 => Value::DocRef(reader.string()?, u64::from_le_bytes(reader.fixed()?)),
         46 => Value::TableRef(reader.string()?),
         47 => Value::PageRef(u32::from_le_bytes(reader.fixed()?)),
-        48 => Value::Secret(reader.bytes()?.to_vec()),
+        48 => Value::Secret(reader.owned_bytes()?),
         49 => Value::Password(reader.string()?),
         50 => Value::AssetCode(reader.string()?),
         51 => Value::Money {
@@ -207,7 +329,7 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
             minor_units: i64::from_le_bytes(reader.fixed()?),
         },
         52 => Value::DecimalText(reader.string()?),
-        0x85 => Value::text(String::from_utf8(reader.compressed()?).map_err(invalid)?),
+        0x85 => reader.text(true)?,
         0x86 => Value::Blob(reader.compressed()?),
         _ => return Err(invalid(format!("Unknown Value type: {tag}"))),
     })
@@ -503,4 +625,22 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
             buf.extend_from_slice(value.as_bytes());
         }
     }
+}
+
+/// Decode under an explicit allowance for expanded native values.
+pub fn read_native_value_with_budget(
+    data: &[u8],
+    position: &mut usize,
+    limit_bytes: usize,
+) -> RdbFileResult<Value> {
+    let mut budget = DecodeBudget::new(limit_bytes);
+    budget.elements::<Value>(1)?;
+    let mut next = *position;
+    let value = read_native_value_from_reader(&mut NativeReader::with_budget(
+        data,
+        &mut next,
+        &mut budget,
+    ))?;
+    *position = next;
+    Ok(value)
 }

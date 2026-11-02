@@ -25,6 +25,62 @@ pub(crate) struct MemoryReservation<'runtime> {
     bytes: u64,
 }
 
+/// Ownership may cross the DML callback until its captured WAL is published.
+pub(super) struct OwnedMemoryReservation {
+    runtime: crate::RedDBRuntime,
+    bytes: u64,
+}
+
+/// Unlike mutation reservations, these bytes have exactly one owned allocation
+/// and can be returned immediately after that allocation is freed. Keep only
+/// the accounting Arc: a queued response must not retain the entire runtime.
+pub(super) struct QueryBufferReservation {
+    accounting: std::sync::Arc<crate::storage::memory_pools::MemoryAccounting>,
+    bytes: u64,
+}
+
+impl QueryBufferReservation {
+    /// Release scratch that has been freed, retaining the charge for live owners.
+    pub(super) fn shrink_to(&mut self, retained_bytes: usize) {
+        let retained_bytes = u64::try_from(retained_bytes)
+            .expect("invariant: a smaller reservation fits the original byte counter");
+        assert!(
+            retained_bytes <= self.bytes,
+            "a reservation cannot grow by shrinking"
+        );
+        let released = self.bytes - retained_bytes;
+        self.bytes = retained_bytes;
+        self.accounting.release_query_buffer(released);
+    }
+}
+
+impl Drop for QueryBufferReservation {
+    fn drop(&mut self) {
+        self.accounting.release_query_buffer(self.bytes);
+    }
+}
+
+impl MemoryReservation<'_> {
+    pub(super) fn into_owned(mut self, runtime: &crate::RedDBRuntime) -> OwnedMemoryReservation {
+        assert!(std::ptr::eq(
+            self.reservations,
+            &runtime.inner.memory_reservations
+        ));
+        OwnedMemoryReservation {
+            runtime: runtime.clone(),
+            bytes: std::mem::take(&mut self.bytes),
+        }
+    }
+}
+
+impl Drop for OwnedMemoryReservation {
+    fn drop(&mut self) {
+        let mut reservations = self.runtime.inner.memory_reservations.lock();
+        reservations.completed_bytes += self.bytes;
+        assert!(reservations.completed_bytes <= reservations.reserved_bytes);
+    }
+}
+
 impl Drop for MemoryReservation<'_> {
     fn drop(&mut self) {
         let mut reservations = self.reservations.lock();
@@ -57,8 +113,12 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
         &mut self,
         applied: &crate::application::entity::AppliedEntityMutation,
     ) -> RedDBResult<()> {
-        const RESERVATION_QUANTUM_BYTES: u64 = 64 * 1024;
         let growth = self.runtime.estimate_entity_mutation_growth(applied);
+        self.admit_growth(growth, "update")
+    }
+
+    pub(super) fn admit_growth(&mut self, growth: u64, operation: &str) -> RedDBResult<()> {
+        const RESERVATION_QUANTUM_BYTES: u64 = 64 * 1024;
         if growth > self.available_bytes {
             let needed = growth - self.available_bytes;
             // Extra slack is optional. If it does not fit, apply the ordinary
@@ -70,7 +130,7 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
                 Some(guard) => guard,
                 None => self.runtime.admit_non_evictable_growth(
                     MemoryPool::SegmentArena,
-                    "update",
+                    operation,
                     needed,
                 )?,
             };
@@ -80,6 +140,13 @@ impl<'runtime> MutationMemoryReservations<'runtime> {
         self.available_bytes -= growth;
         Ok(())
     }
+
+    pub(super) fn into_owned(self) -> Vec<std::rc::Rc<OwnedMemoryReservation>> {
+        self.guards
+            .into_iter()
+            .map(|guard| std::rc::Rc::new(guard.into_owned(self.runtime)))
+            .collect()
+    }
 }
 
 const MAX_PRESSURE_TICKS: usize = 64;
@@ -87,6 +154,26 @@ const FIELD_BASE_BYTES: u64 = 64;
 const INDEX_ENTRY_BYTES: u64 = 96;
 
 impl crate::RedDBRuntime {
+    pub(super) fn try_reserve_query_buffer(&self, bytes: usize) -> Option<QueryBufferReservation> {
+        let bytes = u64::try_from(bytes).ok()?;
+        let mut reservations = self.inner.memory_reservations.lock();
+        self.refresh_memory_accounting_with_reservations(&mut reservations);
+        let accounting = self.memory_accounting();
+        let projected = accounting
+            .total_used_bytes()
+            .checked_add(reservations.reserved_bytes)?
+            .checked_add(bytes)?;
+        if projected > accounting.budget().resolved_bytes {
+            return None;
+        }
+        accounting.charge(MemoryPool::QueryBuffers, bytes);
+        accounting.observe_total_used(projected);
+        Some(QueryBufferReservation {
+            accounting: std::sync::Arc::clone(&self.inner.memory_accounting),
+            bytes,
+        })
+    }
+
     pub(crate) fn admit_entity_mutation(
         &self,
         applied: &crate::application::entity::AppliedEntityMutation,
@@ -140,13 +227,14 @@ impl crate::RedDBRuntime {
         let used = accounting.total_used_bytes();
         if pool == MemoryPool::SegmentArena {
             let store = self.db().store();
-            if store.reclaimable_segment_bytes() > 0 {
+            if store.reclaimable_segment_bytes() > 0 || self.try_reclaim_history_tick() {
                 let before = used;
                 let mut reclaimed = 0;
                 for _ in 0..MAX_PRESSURE_TICKS {
+                    let history_tick_ran = self.try_reclaim_history_tick();
                     let pressure_advanced = store.pressure_consolidation_tick();
                     let maintenance_advanced = store.run_maintenance().is_ok();
-                    if !pressure_advanced && !maintenance_advanced {
+                    if !history_tick_ran && !pressure_advanced && !maintenance_advanced {
                         break;
                     }
                     let reservation = self.try_reserve_memory_growth(growth_bytes);
@@ -303,6 +391,7 @@ fn didactic_pool_name(pool: MemoryPool) -> &'static str {
         MemoryPool::IndexMemory => "indexes",
         MemoryPool::BlobCacheL1 => "blob-l1",
         MemoryPool::WalBuffers => "wal-buffers",
+        MemoryPool::QueryBuffers => "query-buffers",
     }
 }
 
@@ -701,6 +790,74 @@ mod tests {
             ops.get(model, "keyed_rows", "wanted")
                 .expect("read after retry"),
             Some(Value::Integer(7))
+        );
+    }
+
+    #[test]
+    fn deleted_rows_in_the_growing_segment_remain_writable_under_pressure() {
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(2 * 1024 * 1024),
+        )
+        .expect("bounded runtime");
+        // Pressure must make progress without racing the 200-ms background tick.
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE growing_churn (id INTEGER, payload TEXT)")
+            .expect("table");
+        runtime
+            .vcs_set_versioned("growing_churn", false)
+            .expect("no retained history");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("growing_churn")
+            .expect("manager");
+        for cycle in 0..96 {
+            let deleted = runtime.execute_query("DELETE FROM growing_churn WHERE id >= 0");
+            assert!(
+                deleted.is_ok(),
+                "cycle {cycle}: {deleted:?}; manager={:?}",
+                manager.stats()
+            );
+            let payload = format!("cycle{cycle:03}_{}", "x".repeat(2048));
+            let values = (1..=32)
+                .map(|id| format!("({id}, '{payload}')"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let result = runtime.execute_query(&format!(
+                "INSERT INTO growing_churn (id,payload) VALUES {values}"
+            ));
+            assert!(
+                result.is_ok(),
+                "cycle {cycle}: {result:?}; manager={:?}",
+                manager.stats()
+            );
+            let count = runtime
+                .execute_query("SELECT COUNT(*) AS n FROM growing_churn")
+                .expect("visible rows");
+            assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(32)));
+            drop(count);
+            runtime.invalidate_result_cache();
+        }
+        // Pressure reclaims only enough to admit the next operation. Finish
+        // the paced cursor before checking that no obsolete versions remain.
+        for _ in 0..64 {
+            runtime.try_reclaim_history_tick();
+            runtime.db().store().pressure_consolidation_tick();
+            runtime
+                .db()
+                .store()
+                .run_maintenance()
+                .expect("settle consolidation");
+        }
+        assert_eq!(manager.count(), 32);
+        let selected = runtime
+            .execute_query("SELECT payload FROM growing_churn WHERE id = 1")
+            .expect("latest live payload");
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("payload"),
+            Some(&Value::text(format!("cycle095_{}", "x".repeat(2048))))
         );
     }
 

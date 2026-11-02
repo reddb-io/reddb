@@ -316,7 +316,10 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         let pager = Pager::open_owned(
             pager::MemoryFile::default(),
             "format-fence.rdb".into(),
-            PagerConfig::default(),
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
             NoWal,
             true,
         )
@@ -358,7 +361,10 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         let reopened = Pager::open_owned(
             pager::MemoryFile::from_bytes(damaged),
             "format-fallback.rdb".into(),
-            PagerConfig::default(),
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
             NoWal,
             false,
         )

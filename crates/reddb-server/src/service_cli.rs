@@ -1836,7 +1836,8 @@ fn build_runtime_with_bootstrap(
     let bootstrap_already_completed = runtime
         .db()
         .store()
-        .get_config(BOOTSTRAP_COMPLETED_KEY)
+        .try_get_config(BOOTSTRAP_COMPLETED_KEY)
+        .map_err(|error| error.to_string())?
         .is_some();
     let disposition = crate::cluster::authorize_cluster_bootstrap(
         db_options.storage_profile.deploy_profile,
@@ -1986,7 +1987,11 @@ fn apply_preset_from_config(
 ) -> Result<(), String> {
     let store = runtime.db().store();
 
-    if store.get_config(BOOTSTRAP_COMPLETED_KEY).is_some() {
+    if store
+        .try_get_config(BOOTSTRAP_COMPLETED_KEY)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
         crate::cli::bootstrap_manifest::rehydrate_manifest_registry(
             runtime,
             &runtime.config_registry(),
@@ -2010,7 +2015,7 @@ fn apply_preset_from_config(
             &runtime.config_registry(),
             &path,
         )?;
-        persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id));
+        persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id))?;
         tracing::info!("bootstrap manifest applied");
         return Ok(());
     }
@@ -2051,7 +2056,7 @@ fn apply_preset_from_config(
         write_bootstrap_certificate(bootstrap, cert)?;
     }
 
-    persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref());
+    persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref())?;
     tracing::info!(preset = %preset, "bootstrap preset applied");
     Ok(())
 }
@@ -2397,7 +2402,11 @@ fn regulated_registry_entry(
     }
 }
 
-fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id: Option<&str>) {
+fn persist_bootstrap_state(
+    runtime: &RedDBRuntime,
+    preset: &str,
+    first_admin_id: Option<&str>,
+) -> Result<(), String> {
     let store = runtime.db().store();
     let mut tree = crate::serde_json::Map::new();
     tree.insert(
@@ -2415,7 +2424,10 @@ fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id:
         );
     }
     let json = crate::serde_json::Value::Object(tree);
-    store.set_config_tree("", &json);
+    store
+        .try_set_config_tree("", &json)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Read `red.logging.*` keys from the persistent config store and

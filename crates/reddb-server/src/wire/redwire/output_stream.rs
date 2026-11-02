@@ -183,7 +183,20 @@ pub async fn run_output_stream(
     role: Role,
 ) {
     let clock = SystemClock;
-    let config = StreamConfig::load(&runtime);
+    let config = match StreamConfig::load(&runtime) {
+        Ok(config) => config,
+        Err(error) => {
+            if let Ok(frame) = build_stream_error_frame(
+                correlation_id,
+                stream_id,
+                "stream_config_unavailable",
+                &error.to_string(),
+            ) {
+                send.send_frame(frame).await;
+            }
+            return;
+        }
+    };
     let snapshot_lsn = runtime.cdc_current_lsn();
 
     let lease = match outs::open_stream(config, snapshot_lsn, in_transaction, &clock) {

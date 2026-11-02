@@ -28,8 +28,6 @@ use crate::runtime::RedDBRuntime;
 use crate::storage::query::engine::cancel::CancelToken;
 use reddb_types::types::Value;
 
-const RED_CONFIG_COLLECTION: &str = "red_config";
-
 /// Engine page size — the production buffer is always a multiple of this.
 /// Matches `storage::engine::PAGE_SIZE`.
 pub const PAGE_SIZE: usize = 16 * 1024;
@@ -124,54 +122,80 @@ impl StreamConfig {
     };
 
     /// Read every `stream.*` key from `red_config` over the runtime's KV
-    /// store. Missing keys fall back to [`Self::DEFAULT`]. Unparseable or
-    /// out-of-range values fall back silently — bad config never gets to
-    /// terminate a request that would otherwise succeed.
-    pub fn load(runtime: &RedDBRuntime) -> Self {
-        let db = runtime.db();
-        let read_u64 = |key: &str| -> Option<u64> {
-            match db.get_kv(RED_CONFIG_COLLECTION, key) {
-                Some((Value::Integer(v), _)) if v >= 0 => Some(v as u64),
-                Some((Value::UnsignedInteger(v), _)) => Some(v),
-                Some((Value::Text(text), _)) => text.parse().ok(),
-                _ => None,
+    /// store, including paged generations. Missing keys keep their defaults;
+    /// storage errors must not silently widen capacity or disable verification.
+    pub fn load(runtime: &RedDBRuntime) -> crate::RedDBResult<Self> {
+        let store = runtime.db().store();
+        let read_u64 = |key: &str| -> crate::RedDBResult<Option<u64>> {
+            let invalid =
+                || crate::RedDBError::Query(format!("invalid {key}: expected an unsigned integer"));
+            match store.try_get_config(key)? {
+                None => Ok(None),
+                Some(Value::Integer(value)) => {
+                    u64::try_from(value).map(Some).map_err(|_| invalid())
+                }
+                Some(Value::UnsignedInteger(value)) => Ok(Some(value)),
+                Some(Value::Text(text)) => text.parse().map(Some).map_err(|_| invalid()),
+                Some(_) => Err(invalid()),
             }
         };
 
         let mut cfg = Self::DEFAULT;
-        if let Some(v) = read_u64("stream.snapshot.ttl_ms") {
+        if let Some(v) = read_u64("stream.snapshot.ttl_ms")? {
             cfg.snapshot_ttl_ms = v;
         }
-        if let Some(v) = read_u64("stream.chunk.default_pages") {
-            cfg.chunk_default_pages = v as usize;
+        if let Some(v) = read_u64("stream.chunk.default_pages")? {
+            cfg.chunk_default_pages = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query(
+                    "stream.chunk.default_pages exceeds platform size".to_string(),
+                )
+            })?;
         }
-        if let Some(v) = read_u64("stream.chunk.min_pages") {
-            cfg.chunk_min_pages = v as usize;
+        if let Some(v) = read_u64("stream.chunk.min_pages")? {
+            cfg.chunk_min_pages = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query("stream.chunk.min_pages exceeds platform size".to_string())
+            })?;
         }
-        if let Some(v) = read_u64("stream.chunk.max_pages") {
-            cfg.chunk_max_pages = v as usize;
+        if let Some(v) = read_u64("stream.chunk.max_pages")? {
+            cfg.chunk_max_pages = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query("stream.chunk.max_pages exceeds platform size".to_string())
+            })?;
         }
-        if let Some(v) = read_u64("stream.chunk.max_rows") {
-            cfg.chunk_max_rows = v as usize;
+        if let Some(v) = read_u64("stream.chunk.max_rows")? {
+            cfg.chunk_max_rows = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query("stream.chunk.max_rows exceeds platform size".to_string())
+            })?;
         }
-        if let Some(v) = read_u64("stream.chunk.max_latency_ms") {
+        if let Some(v) = read_u64("stream.chunk.max_latency_ms")? {
             cfg.chunk_max_latency_ms = v;
         }
-        if let Some(v) = read_u64("stream.max_global") {
-            cfg.max_global_streams = v as usize;
+        if let Some(v) = read_u64("stream.max_global")? {
+            cfg.max_global_streams = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query("stream.max_global exceeds platform size".to_string())
+            })?;
         }
-        if let Some(v) = read_u64("stream.max_per_principal") {
-            cfg.max_per_principal_streams = v as usize;
+        if let Some(v) = read_u64("stream.max_per_principal")? {
+            cfg.max_per_principal_streams = usize::try_from(v).map_err(|_| {
+                crate::RedDBError::Query(
+                    "stream.max_per_principal exceeds platform size".to_string(),
+                )
+            })?;
         }
-        // Issue #765 / S6 — opt-in integrity default. Stored as a Text key
-        // (`"none"` / `"sha256"`); anything else falls back to `None`.
-        if let Some((Value::Text(text), _)) =
-            db.get_kv(RED_CONFIG_COLLECTION, "stream.integrity.default_verify")
-        {
-            cfg.default_verify = crate::runtime::integrity_tombstone::VerifyMode::parse(&text);
+        match store.try_get_config("stream.integrity.default_verify")? {
+            None => {}
+            Some(Value::Text(text))
+                if matches!(text.trim().to_ascii_lowercase().as_str(), "none" | "sha256") =>
+            {
+                cfg.default_verify = crate::runtime::integrity_tombstone::VerifyMode::parse(&text);
+            }
+            Some(_) => {
+                return Err(crate::RedDBError::Query(
+                    "invalid stream.integrity.default_verify: expected none or sha256".to_string(),
+                ))
+            }
         }
         cfg.normalize();
-        cfg
+        Ok(cfg)
     }
 
     /// Clamp interrelated fields to a self-consistent state. Floors come
@@ -538,7 +562,7 @@ pub fn write_chunked_response_header<W: std::io::Write>(
     content_type: &str,
 ) -> std::io::Result<()> {
     // Streaming responses write their own head here instead of going
-    // through `HttpResponse::to_http_bytes`, so they must repeat the
+    // through `HttpResponse::write_to`, so they must repeat the
     // same permissive CORS posture — otherwise a browser that can call
     // the JSON endpoints cross-origin would still be blocked on the
     // NDJSON/SSE streaming routes (graph/vector results). API auth is

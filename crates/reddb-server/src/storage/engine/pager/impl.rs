@@ -212,6 +212,8 @@ impl Pager {
         } else {
             let _ = FileExt::try_lock_shared(&file);
         }
+        // Own lock release across both ordinary close and later open failures.
+        let file = NativePagerFile(file);
 
         // ADR 0038 phase 3: the DWB sidecar is retired. When DWB is active,
         // the recovery frame is written to a reserved zone inside the data
@@ -232,7 +234,7 @@ impl Pager {
         }
         if !config.double_write && !config.read_only && !fold_dwb {
             let skip_dwb_on_cow =
-                Self::cow_filesystem_has_atomic_page_writes(&path, &file).is_some();
+                Self::cow_filesystem_has_atomic_page_writes(&path, &file.0).is_some();
             if !skip_dwb_on_cow {
                 tracing::warn!(
                     path = %path.display(),
@@ -245,9 +247,10 @@ impl Pager {
         let dwb_enabled = config.double_write && !config.read_only && !fold_dwb;
 
         let core = SharedPager::open_owned(
-            NativePagerFile(file),
+            file,
             path,
             SharedPagerConfig {
+                disk_residency: config.disk_residency,
                 cache_size: config.cache_size,
                 read_only: config.read_only,
                 verify_checksums: config.verify_checksums,

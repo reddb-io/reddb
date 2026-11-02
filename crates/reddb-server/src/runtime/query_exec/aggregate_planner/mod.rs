@@ -17,7 +17,8 @@
 //! ## Public surface
 //!
 //! [`AggregateQueryPlanner::plan`] takes a [`AggregateQueryAst`] and a
-//! [`ScanIterator`] and returns an [`AggregateRowStream`]. Everything
+//! [`ScanIterator`] and returns an [`AggregateRowStream`]. Callback sources use
+//! `new`/`push`/`finish` to fold rows immediately under a group ceiling. Everything
 //! else (accumulator state, key hashing, slot dispatch) is private.
 //!
 //! ## Scope (first cut)

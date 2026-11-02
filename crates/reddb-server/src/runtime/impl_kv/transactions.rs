@@ -15,11 +15,14 @@ impl KvAtomicOps<'_> {
         }
     }
 
-    pub(super) fn pending_vault_entries(
+    /// Callbacks run under the pending-write read guard and must not re-enter
+    /// transaction writes. Selectors retain one payload instead of cloning a Vec.
+    pub(super) fn visit_pending_vault_entries(
         &self,
         collection: &str,
         key: Option<&str>,
-    ) -> Vec<VaultEntry> {
+        mut visit: impl FnMut(VaultEntry),
+    ) {
         let connection_id = current_connection_id();
         if !self
             .runtime
@@ -27,9 +30,10 @@ impl KvAtomicOps<'_> {
             .transaction_state
             .in_transaction(connection_id)
         {
-            return Vec::new();
+            return;
         }
-        self.runtime
+        for entry in self
+            .runtime
             .inner
             .pending_vault_writes
             .read()
@@ -42,7 +46,9 @@ impl KvAtomicOps<'_> {
                     && key.is_none_or(|key| write.key == key)
             })
             .filter_map(PendingVaultWrite::entry)
-            .collect()
+        {
+            visit(entry);
+        }
     }
 
     pub(super) fn stage_or_store_vault_version(

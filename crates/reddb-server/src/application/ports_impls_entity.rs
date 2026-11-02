@@ -2423,7 +2423,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         let resolver = crate::runtime::kv_read::KvReadResolver::for_rest_kv(self, collection)?;
         Ok(resolver
-            .record(key)
+            .record(key)?
             .map(|record| (record.value.unwrap_or(Value::Null), record.id)))
     }
 

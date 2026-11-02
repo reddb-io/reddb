@@ -81,6 +81,12 @@ pub trait Row {
     /// [`EvalError::UnknownColumn`]) or `Some(Value::Null)` when the
     /// column exists but the row's value is null.
     fn get(&self, field: &FieldRef) -> Option<Value>;
+
+    /// Hosts which decode stored values can report operating failures instead
+    /// of treating a denied read as an unknown or NULL column.
+    fn try_get(&self, field: &FieldRef) -> Result<Option<Value>, EvalError> {
+        Ok(self.get(field))
+    }
 }
 
 /// Trivial `Row` impl over a flat `(table, column) -> Value` closure
@@ -143,6 +149,11 @@ pub enum EvalError {
     InvalidNumericResult { function: String, reason: String },
     /// JSON_PARSE input was not valid JSON text.
     JsonParseFailed { reason: String },
+    /// Decoding an expression input would exceed the host's read allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     /// `IN (...)` against an empty value list — preserves the legacy
     /// "always false" semantic but recorded explicitly so the
     /// optimiser can fold it.
@@ -181,6 +192,13 @@ impl std::fmt::Display for EvalError {
             EvalError::JsonParseFailed { reason } => {
                 write!(f, "JSON_PARSE failed to parse JSON: {reason}")
             }
+            EvalError::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "read memory limit exceeded: requires {required_bytes} bytes, limit {limit_bytes} bytes"
+            ),
             EvalError::EmptyInList => write!(f, "IN list is empty"),
         }
     }
@@ -193,23 +211,33 @@ impl std::error::Error for EvalError {}
 /// folds back through this function so the resolution surface stays
 /// uniform.
 pub fn evaluate(expr: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
+    evaluate_with_literal_decoder(expr, row, &|value| Ok(value.clone()))
+}
+
+/// Decode only literals reached by the typed walk. Hosts retain resource and
+/// secret policy without cloning the AST or eagerly expanding unused branches.
+pub fn evaluate_with_literal_decoder(
+    expr: &Expr,
+    row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
     match expr {
-        Expr::Literal { value, .. } => Ok(value.clone()),
+        Expr::Literal { value, .. } => decode_literal(value),
         Expr::Column { field, .. } => row
-            .get(field)
+            .try_get(field)?
             .ok_or_else(|| EvalError::UnknownColumn(field.clone())),
         Expr::Parameter { index, .. } => Err(EvalError::UnboundParameter(*index)),
-        Expr::UnaryOp { op, operand, .. } => eval_unary(*op, operand, row),
-        Expr::BinaryOp { op, lhs, rhs, .. } => eval_binary(*op, lhs, rhs, row),
-        Expr::Cast { inner, target, .. } => eval_cast(inner, *target, row),
-        Expr::FunctionCall { name, args, .. } => eval_function(name, args, row),
+        Expr::UnaryOp { op, operand, .. } => eval_unary(*op, operand, row, decode_literal),
+        Expr::BinaryOp { op, lhs, rhs, .. } => eval_binary(*op, lhs, rhs, row, decode_literal),
+        Expr::Cast { inner, target, .. } => eval_cast(inner, *target, row, decode_literal),
+        Expr::FunctionCall { name, args, .. } => eval_function(name, args, row, decode_literal),
         Expr::Case {
             branches, else_, ..
-        } => eval_case(branches, else_.as_deref(), row),
+        } => eval_case(branches, else_.as_deref(), row, decode_literal),
         Expr::IsNull {
             operand, negated, ..
         } => {
-            let v = evaluate(operand, row)?;
+            let v = evaluate_with_literal_decoder(operand, row, decode_literal)?;
             let is_null = v.is_null();
             Ok(Value::Boolean(if *negated { !is_null } else { is_null }))
         }
@@ -218,14 +246,14 @@ pub fn evaluate(expr: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
             values,
             negated,
             ..
-        } => eval_in_list(target, values, *negated, row),
+        } => eval_in_list(target, values, *negated, row, decode_literal),
         Expr::Between {
             target,
             low,
             high,
             negated,
             ..
-        } => eval_between(target, low, high, *negated, row),
+        } => eval_between(target, low, high, *negated, row, decode_literal),
         Expr::Subquery { .. } => Err(EvalError::UnknownFunction {
             name: "SUBQUERY".to_string(),
             args: Vec::new(),
@@ -237,8 +265,13 @@ pub fn evaluate(expr: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
     }
 }
 
-fn eval_unary(op: UnaryOp, operand: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
-    let v = evaluate(operand, row)?;
+fn eval_unary(
+    op: UnaryOp,
+    operand: &Expr,
+    row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
+    let v = evaluate_with_literal_decoder(operand, row, decode_literal)?;
     if v.is_null() {
         return Ok(Value::Null);
     }
@@ -272,12 +305,18 @@ fn eval_unary(op: UnaryOp, operand: &Expr, row: &dyn Row) -> Result<Value, EvalE
     }
 }
 
-fn eval_binary(op: BinOp, lhs: &Expr, rhs: &Expr, row: &dyn Row) -> Result<Value, EvalError> {
+fn eval_binary(
+    op: BinOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
     // Logical ops use SQL three-valued logic so we eval both sides
     // and short-circuit on Null *after* type-checking; arithmetic /
     // comparison / concat short-circuit before dispatch.
-    let l = evaluate(lhs, row)?;
-    let r = evaluate(rhs, row)?;
+    let l = evaluate_with_literal_decoder(lhs, row, decode_literal)?;
+    let r = evaluate_with_literal_decoder(rhs, row, decode_literal)?;
 
     match op {
         BinOp::And => return three_valued_and(&l, &r),
@@ -626,8 +665,13 @@ fn apply_implicit_cast(value: &Value, src: DataType, target: DataType) -> Result
     })
 }
 
-fn eval_cast(inner: &Expr, target: DataType, row: &dyn Row) -> Result<Value, EvalError> {
-    let v = evaluate(inner, row)?;
+fn eval_cast(
+    inner: &Expr,
+    target: DataType,
+    row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
+    let v = evaluate_with_literal_decoder(inner, row, decode_literal)?;
     if v.is_null() {
         return Ok(Value::Null);
     }
@@ -642,7 +686,12 @@ fn eval_cast(inner: &Expr, target: DataType, row: &dyn Row) -> Result<Value, Eva
     })
 }
 
-fn eval_function(name: &str, args: &[Expr], row: &dyn Row) -> Result<Value, EvalError> {
+fn eval_function(
+    name: &str,
+    args: &[Expr],
+    row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
+) -> Result<Value, EvalError> {
     // COALESCE has SQL-special semantics that the catalog can't
     // express (variadic + uniform arg type unifies poorly with
     // first-non-null). Handle it before catalog dispatch so we
@@ -650,7 +699,7 @@ fn eval_function(name: &str, args: &[Expr], row: &dyn Row) -> Result<Value, Eval
     // every argument to Text.
     if name.eq_ignore_ascii_case("COALESCE") {
         for arg in args {
-            let v = evaluate(arg, row)?;
+            let v = evaluate_with_literal_decoder(arg, row, decode_literal)?;
             if !v.is_null() {
                 return Ok(v);
             }
@@ -660,7 +709,7 @@ fn eval_function(name: &str, args: &[Expr], row: &dyn Row) -> Result<Value, Eval
 
     let arg_values: Vec<Value> = args
         .iter()
-        .map(|a| evaluate(a, row))
+        .map(|a| evaluate_with_literal_decoder(a, row, decode_literal))
         .collect::<Result<Vec<_>, _>>()?;
     let arg_types: Vec<DataType> = arg_values.iter().map(|v| v.data_type()).collect();
 
@@ -1095,15 +1144,16 @@ fn eval_case(
     branches: &[(Expr, Expr)],
     else_: Option<&Expr>,
     row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
 ) -> Result<Value, EvalError> {
     for (cond, value) in branches {
-        let c = evaluate(cond, row)?;
+        let c = evaluate_with_literal_decoder(cond, row, decode_literal)?;
         if matches!(c, Value::Boolean(true)) {
-            return evaluate(value, row);
+            return evaluate_with_literal_decoder(value, row, decode_literal);
         }
     }
     match else_ {
-        Some(e) => evaluate(e, row),
+        Some(e) => evaluate_with_literal_decoder(e, row, decode_literal),
         None => Ok(Value::Null),
     }
 }
@@ -1113,17 +1163,18 @@ fn eval_in_list(
     values: &[Expr],
     negated: bool,
     row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
 ) -> Result<Value, EvalError> {
     if values.is_empty() {
         return Err(EvalError::EmptyInList);
     }
-    let needle = evaluate(target, row)?;
+    let needle = evaluate_with_literal_decoder(target, row, decode_literal)?;
     if needle.is_null() {
         return Ok(Value::Null);
     }
     let mut saw_null = false;
     for v in values {
-        let candidate = evaluate(v, row)?;
+        let candidate = evaluate_with_literal_decoder(v, row, decode_literal)?;
         if candidate.is_null() {
             saw_null = true;
             continue;
@@ -1144,10 +1195,11 @@ fn eval_between(
     high: &Expr,
     negated: bool,
     row: &dyn Row,
+    decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
 ) -> Result<Value, EvalError> {
-    let v = evaluate(target, row)?;
-    let lo = evaluate(low, row)?;
-    let hi = evaluate(high, row)?;
+    let v = evaluate_with_literal_decoder(target, row, decode_literal)?;
+    let lo = evaluate_with_literal_decoder(low, row, decode_literal)?;
+    let hi = evaluate_with_literal_decoder(high, row, decode_literal)?;
     if v.is_null() || lo.is_null() || hi.is_null() {
         return Ok(Value::Null);
     }

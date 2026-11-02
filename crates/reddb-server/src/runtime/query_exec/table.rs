@@ -77,10 +77,125 @@ fn compiled_entity_filter_matches(
     filter: &Filter,
     table_name: &str,
     table_alias: &str,
-) -> bool {
-    compiled.evaluate(entity).resolve_with_fallback(|| {
-        evaluate_entity_filter_with_db(Some(db), entity, filter, table_name, table_alias)
-    })
+) -> RedDBResult<bool> {
+    compiled
+        .try_evaluate(entity)?
+        .try_resolve_with_fallback(|| {
+            evaluate_entity_filter_result_with_db(Some(db), entity, filter, table_name, table_alias)
+        })
+}
+
+fn optional_compiled_entity_filter_matches(
+    db: &RedDB,
+    compiled: Option<&super::filter_compiled::CompiledEntityFilter>,
+    entity: &UnifiedEntity,
+    filter: Option<&Filter>,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<bool> {
+    match (compiled, filter) {
+        (None, _) => Ok(true),
+        (Some(compiled), Some(filter)) => {
+            compiled_entity_filter_matches(db, compiled, entity, filter, table_name, table_alias)
+        }
+        (Some(_), None) => Ok(false),
+    }
+}
+
+/// Filter borrowed index candidates before copying their projected fields.
+/// Batch visitors may visit growing rows before sealed rows, so restore the
+/// index's order explicitly. A finite window uses ordered single-ID visits to
+/// avoid copying or evaluating candidates beyond the accepted prefix.
+fn indexed_table_records(
+    db: &RedDB,
+    table: &str,
+    entity_ids: &[EntityId],
+    columns: &[String],
+    limit: usize,
+    mut matches: impl FnMut(&UnifiedEntity) -> RedDBResult<bool>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let store = db.store();
+    let Some(manager) = store.get_collection(table) else {
+        return Ok(Vec::new());
+    };
+    let schema = manager.column_schema();
+    let resolver = TableRowMvccReadResolver::current_statement();
+    let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+    let mut failure = None;
+    let mut consume = |position, entity: &UnifiedEntity| {
+        if failure.is_some() {
+            return false;
+        }
+        let result = (|| -> RedDBResult<bool> {
+            crate::runtime::function_budget::charge(1)?;
+            if resolver.resolve_read_candidate(entity).is_none()
+                || !db.replica_allows_entity_at_read(table, entity)
+                || !matches(entity)?
+            {
+                return Ok(true);
+            }
+            let record = match &entity.data {
+                EntityData::Row(row)
+                    if !columns.is_empty() && (row.named.is_some() || row.schema.is_some()) =>
+                {
+                    super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                        entity, columns,
+                    )
+                }
+                _ => {
+                    // Keep the owned materializer's model-specific behavior.
+                    // Compact recovered rows also need their collection schema.
+                    // At most one accepted entity is copied at a time.
+                    let mut owned = entity.clone();
+                    if let EntityData::Row(row) = &mut owned.data {
+                        if row.schema.is_none() {
+                            row.schema = schema.clone();
+                        }
+                    }
+                    if columns.is_empty() {
+                        super::super::record_search::runtime_table_record_lean_in_collection(
+                            owned, table,
+                        )
+                    } else {
+                        runtime_table_record_from_entity_projected(owned, columns)
+                    }
+                }
+            };
+            if let Some(record) = record {
+                records.push((position, record));
+            }
+            Ok(records.len() < limit)
+        })();
+        match result {
+            Ok(keep_scanning) => keep_scanning,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        }
+    };
+    if limit < entity_ids.len() {
+        for (position, id) in entity_ids.iter().enumerate() {
+            let mut keep_scanning = true;
+            manager.try_for_each_id(std::slice::from_ref(id), usize::MAX, |_, entity| {
+                keep_scanning = consume(position, entity);
+                keep_scanning
+            })?;
+            if !keep_scanning {
+                break;
+            }
+        }
+    } else {
+        manager.try_for_each_id(entity_ids, usize::MAX, &mut consume)?;
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    records.sort_unstable_by_key(|(position, _)| *position);
+    Ok(records.into_iter().map(|(_, record)| record).collect())
 }
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
@@ -150,13 +265,13 @@ fn finish_ordered_index_records(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
 
     if let Some(offset) = query.offset {
@@ -225,8 +340,8 @@ fn execute_geo_candidate_scan(
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let hydrate_store = db.store();
     let mut records = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if !candidate_ids.contains(&entity.id.raw()) {
                 return true;
@@ -279,13 +394,13 @@ fn execute_geo_candidate_scan(
 
     if !query.order_by.is_empty() {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-        super::super::join_filter::sort_records_by_order_by_with_db(
+        super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
             &mut records,
             &query.order_by,
             Some(table_name),
             Some(table_alias),
-        );
+        )?;
     }
     if let Some(offset) = query.offset {
         let offset = offset as usize;
@@ -582,7 +697,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     // Issue #769 — the ORDER BY buffer is materialized in
                     // full before sorting; cap it.
                     crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                    super::super::join_filter::sort_or_top_k_records_with_db(
+                    super::super::join_filter::try_sort_or_top_k_records_with_db(
                         Some(db),
                         &mut records,
                         &query.order_by,
@@ -590,7 +705,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         query.limit,
                         outer_alias,
                         outer_alias,
-                    );
+                    )?;
                 }
 
                 // Outer OFFSET / LIMIT.
@@ -717,8 +832,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         } else {
             None
         };
-        let sorted_res =
-            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit);
+        let paged_result = idx_store.paged_btree_lookup(&query.table, filter)?;
+        let uses_paged_range = paged_result.is_some();
+        let sorted_res = paged_result.or_else(|| {
+            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit)
+                .map(crate::storage::unified::hash_index::HashCandidates::from)
+        });
         if trace {
             eprintln!(
                 "sorted_index_lookup table={} filter={:?} result={:?}",
@@ -745,12 +864,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // scans on `SELECT * WHERE age BETWEEN X AND Y`.
             let table_name = query.table.as_str();
             let table_alias = query.alias.as_deref().unwrap_or(table_name);
-            let filter_fully_covered = matches!(
-                filter,
-                reddb_rql::ast::Filter::Between { .. }
-                    | reddb_rql::ast::Filter::Compare { .. }
-                    | reddb_rql::ast::Filter::In { .. }
-            );
+            let filter_fully_covered = !uses_paged_range
+                && matches!(
+                    filter,
+                    reddb_rql::ast::Filter::Between { .. }
+                        | reddb_rql::ast::Filter::Compare { .. }
+                        | reddb_rql::ast::Filter::In { .. }
+                );
             let compiled_filter = if filter_fully_covered {
                 None
             } else {
@@ -790,9 +910,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
             // combination to skip the `UnifiedEntity::clone` inside
             // `get_batch` (~20% of scan CPU on `select_range`/`filtered`).
-            // Projection paths keep the old owned-entity flow because
-            // `runtime_table_record_from_entity_projected` consumes the
-            // entity.
+            // Explicit projections borrow only their selected fields below.
             if lean {
                 let manager = match store.get_collection(&query.table) {
                     Some(m) => m,
@@ -800,41 +918,44 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 };
                 let mut records: Vec<UnifiedRecord> =
                     Vec::with_capacity(entity_ids.len().min(limit));
-                let mut stop = false;
                 let table_row_resolver = TableRowMvccReadResolver::current_statement();
                 crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
-                manager.for_each_id(&entity_ids, |_idx, entity| {
-                    if stop {
-                        return;
-                    }
-                    if records.len() >= limit {
-                        stop = true;
-                        return;
-                    }
-                    if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                        return;
-                    }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return;
-                    }
-                    if let Some(cf) = compiled_filter.as_ref() {
-                        if !compiled_entity_filter_matches(
-                            db,
-                            cf,
-                            entity,
-                            filter,
-                            table_name,
-                            table_alias,
-                        ) {
-                            return;
+                crate::runtime::function_budget::visit_result(
+                    |visit| {
+                        manager
+                            .try_for_each_id(&entity_ids, usize::MAX, |_idx, entity| visit(entity))
+                            .map_err(RedDBError::from)
+                    },
+                    |entity| {
+                        if records.len() >= limit {
+                            return Ok(false);
                         }
-                    }
-                    if let Some(record) =
-                        super::super::record_search::runtime_table_record_lean_ref(entity)
-                    {
-                        records.push(record);
-                    }
-                });
+                        if table_row_resolver.resolve_read_candidate(entity).is_none() {
+                            return Ok(true);
+                        }
+                        if !db.replica_allows_entity_at_read(&query.table, entity) {
+                            return Ok(true);
+                        }
+                        if let Some(cf) = compiled_filter.as_ref() {
+                            if !compiled_entity_filter_matches(
+                                db,
+                                cf,
+                                entity,
+                                filter,
+                                table_name,
+                                table_alias,
+                            )? {
+                                return Ok(true);
+                            }
+                        }
+                        if let Some(record) =
+                            super::super::record_search::runtime_table_record_lean_ref(entity)
+                        {
+                            records.push(record);
+                        }
+                        Ok(true)
+                    },
+                )?;
                 return finish_ordered_index_records(
                     db,
                     query,
@@ -846,42 +967,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 );
             }
 
-            // Projection path (explicit columns): keep owned-entity flow.
-            let entities = store.get_batch(&query.table, &entity_ids);
-            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
-                    break;
-                }
-                if table_row_resolver
-                    .resolve_read_candidate(&entity_opt)
-                    .is_none()
-                {
-                    continue;
-                }
-                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                    continue;
-                }
-                if let Some(cf) = compiled_filter.as_ref() {
-                    if !compiled_entity_filter_matches(
+            let records = indexed_table_records(
+                db,
+                &query.table,
+                &entity_ids,
+                &explicit_cols,
+                limit,
+                |entity| {
+                    optional_compiled_entity_filter_matches(
                         db,
-                        cf,
-                        &entity_opt,
-                        filter,
+                        compiled_filter.as_ref(),
+                        entity,
+                        Some(filter),
                         table_name,
                         table_alias,
-                    ) {
-                        continue;
-                    }
-                }
-                let record_opt =
-                    runtime_table_record_from_entity_projected(entity_opt, &explicit_cols);
-                if let Some(record) = record_opt {
-                    records.push(record);
-                }
-            }
+                    )
+                },
+            )?;
             return finish_ordered_index_records(
                 db,
                 query,
@@ -915,9 +1017,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if let Some((eq_col, eq_bytes, range_filter)) =
             extract_cross_index_predicates(filter, &query.table, idx_store)
         {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, &eq_col) {
-                if let Ok(hash_ids) =
-                    idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &eq_bytes)
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &eq_col) {
+                // Unowned bitmap/set intersections remain resident-only.
+                if let Some(hash_ids) = idx_store
+                    .hash
+                    .lookup_resident(&query.table, &idx.hash_lookup_name(), &eq_bytes)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     if !hash_ids.is_empty() {
                         let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
@@ -956,51 +1061,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 });
                             let explicit_cols = extract_select_column_names(&effective_projections);
 
-                            let store = db.store();
-                            let entities = store.get_batch(&query.table, &intersection_ids);
-                            let lean = explicit_cols.is_empty();
-                            let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
-                            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                            for entity_opt in entities.into_iter().flatten() {
-                                crate::runtime::function_budget::charge(1)?;
-                                if records.len() >= limit {
-                                    break;
-                                }
-                                if table_row_resolver
-                                    .resolve_read_candidate(&entity_opt)
-                                    .is_none()
-                                {
-                                    continue;
-                                }
-                                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                                    continue;
-                                }
-                                if compiled_filter.as_ref().is_none_or(|cf| {
-                                    compiled_entity_filter_matches(
+                            let records = indexed_table_records(
+                                db,
+                                &query.table,
+                                &intersection_ids,
+                                &explicit_cols,
+                                limit,
+                                |entity| {
+                                    optional_compiled_entity_filter_matches(
                                         db,
-                                        cf,
-                                        &entity_opt,
-                                        filter,
+                                        compiled_filter.as_ref(),
+                                        entity,
+                                        Some(filter),
                                         table_name,
                                         table_alias,
                                     )
-                                }) {
-                                    let record_opt = if lean {
-                                        super::super::record_search::runtime_table_record_lean_in_collection(
-                                            entity_opt,
-                                            &query.table,
-                                        )
-                                    } else {
-                                        runtime_table_record_from_entity_projected(
-                                            entity_opt,
-                                            &explicit_cols,
-                                        )
-                                    };
-                                    if let Some(record) = record_opt {
-                                        records.push(record);
-                                    }
-                                }
-                            }
+                                },
+                            )?;
                             return Ok(records);
                         }
                     }
@@ -1033,9 +1110,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Entity IDs are cast to u32; safe for any reasonable in-memory DB size (< 4 B).
         let mut bitmaps: Vec<crate::storage::index::tid_bitmap::TidBitmap> = Vec::new();
         for (col, val_bytes, _val) in &eq_candidates {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, col) {
-                if let Ok(ids) =
-                    idx_store.hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), val_bytes)
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, col) {
+                if let Some(ids) = idx_store
+                    .hash
+                    .lookup_resident(&query.table, &idx.hash_lookup_name(), val_bytes)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     let mut bmp = crate::storage::index::tid_bitmap::TidBitmap::with_cap_bytes(0);
                     let _ = bmp.extend_from_iter(ids.iter().map(|e| e.raw() as u32));
@@ -1084,8 +1163,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let explicit_cols = extract_select_column_names(&effective_projections);
-            let lean = explicit_cols.is_empty();
-
             // Optional: narrow via sorted range index filtered by the eq-intersection set.
             // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
             // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
@@ -1115,45 +1192,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 sorted.into_iter().map(EntityId::new).collect()
             };
 
-            let store = db.store();
-            let entities = store.get_batch(&query.table, &entity_ids);
-            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-            let table_row_resolver = TableRowMvccReadResolver::current_statement();
-            for entity_opt in entities.into_iter().flatten() {
-                crate::runtime::function_budget::charge(1)?;
-                if records.len() >= limit {
-                    break;
-                }
-                if table_row_resolver
-                    .resolve_read_candidate(&entity_opt)
-                    .is_none()
-                {
-                    continue;
-                }
-                if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                    continue;
-                }
-                if compiled_entity_filter_matches(
-                    db,
-                    &compiled_filter,
-                    &entity_opt,
-                    filter,
-                    table_name,
-                    table_alias,
-                ) {
-                    let record_opt = if lean {
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            entity_opt,
-                            &query.table,
-                        )
-                    } else {
-                        runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
-                    };
-                    if let Some(record) = record_opt {
-                        records.push(record);
-                    }
-                }
-            }
+            let records = indexed_table_records(
+                db,
+                &query.table,
+                &entity_ids,
+                &explicit_cols,
+                limit,
+                |entity| {
+                    compiled_entity_filter_matches(
+                        db,
+                        &compiled_filter,
+                        entity,
+                        filter,
+                        table_name,
+                        table_alias,
+                    )
+                },
+            )?;
             return Ok(records);
         }
     }
@@ -1167,7 +1222,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         uses_document_projection,
     ) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
-            if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
+            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &column) {
                 let mut entity_ids = idx_store
                     .hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &value_bytes)
                     .map_err(|err| {
@@ -1238,55 +1293,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         ),
                     }
                         });
-                        let store = db.store();
-                        // Batch fetch: single lock acquisition for the entire candidate set
-                        let entities = store.get_batch(&query.table, &entity_ids);
                         let explicit_cols = extract_select_column_names(&effective_projections);
-                        let lean = explicit_cols.is_empty();
-                        let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-                        let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                        for entity_opt in entities.into_iter().flatten() {
-                            crate::runtime::function_budget::charge(1)?;
-                            if records.len() >= limit {
-                                break;
-                            }
-                            if table_row_resolver
-                                .resolve_read_candidate(&entity_opt)
-                                .is_none()
-                            {
-                                continue;
-                            }
-                            if !db.replica_allows_entity_at_read(&query.table, &entity_opt) {
-                                continue;
-                            }
-                            if compiled_filter.as_ref().is_none_or(|cf| {
-                                effective_filter.as_ref().is_some_and(|filter| {
-                                    compiled_entity_filter_matches(
-                                        db,
-                                        cf,
-                                        &entity_opt,
-                                        filter,
-                                        table_name,
-                                        table_alias,
-                                    )
-                                })
-                            }) {
-                                let record_opt = if lean {
-                                    super::super::record_search::runtime_table_record_lean_in_collection(
-                                        entity_opt,
-                                        &query.table,
-                                    )
-                                } else {
-                                    runtime_table_record_from_entity_projected(
-                                        entity_opt,
-                                        &explicit_cols,
-                                    )
-                                };
-                                if let Some(record) = record_opt {
-                                    records.push(record);
-                                }
-                            }
-                        }
+                        let records = indexed_table_records(
+                            db,
+                            &query.table,
+                            &entity_ids,
+                            &explicit_cols,
+                            limit,
+                            |entity| {
+                                optional_compiled_entity_filter_matches(
+                                    db,
+                                    compiled_filter.as_ref(),
+                                    entity,
+                                    effective_filter.as_ref(),
+                                    table_name,
+                                    table_alias,
+                                )
+                            },
+                        )?;
                         return Ok(records);
                     } // end else (hash batch path)
                 }
@@ -1341,13 +1365,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             if !query.order_by.is_empty() {
                 crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-                super::super::join_filter::sort_records_by_order_by_with_db(
+                super::super::join_filter::try_sort_records_by_order_by_with_db(
                     Some(db),
                     &mut records,
                     &query.order_by,
                     Some(table_name),
                     Some(table_alias),
-                );
+                )?;
             }
 
             if let Some(offset) = query.offset {
@@ -1581,39 +1605,32 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let hydrate_store = store;
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         if use_parallel {
+            let predicate_error = parking_lot::Mutex::new(None);
             let (matching, scan_stats) =
-                manager.scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, |entity| {
+                manager.try_scan_project_zoned_with_stats(snapshot.as_ref(), &zone_preds, usize::MAX, |entity| {
+                    (|| -> RedDBResult<Option<UnifiedRecord>> {
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
-                            return None;
+                            return Ok(None);
                         };
                         if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
-                            return None;
+                            return Ok(None);
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
                     if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return None;
+                        return Ok(None);
                     }
                     let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    if !compiled.as_ref().is_none_or(|compiled| {
-                        residual_filter.as_ref().is_some_and(|filter| {
-                            compiled_entity_filter_matches(
-                                db,
-                                compiled,
-                                &hydrated,
-                                filter,
-                                table_name,
-                                table_alias,
-                            )
-                        })
-                    }) {
-                        return None;
+                    if !optional_compiled_entity_filter_matches(
+                        db, compiled.as_ref(), &hydrated, residual_filter.as_ref(), table_name, table_alias,
+                    )? {
+                        return Ok(None);
                     }
-                    if !select_cols.is_empty() {
+                    let record = if !select_cols.is_empty() {
                         if let Some(ref idx_map) = schema_col_indices {
                             super::super::record_search::runtime_table_record_with_col_indices(
                                 &hydrated,
@@ -1647,28 +1664,44 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         )
                     } else {
                         runtime_table_record_from_entity(hydrated.as_ref().clone())
-                    }
-                });
+                    };
+                    Ok(record)
+                    })().unwrap_or_else(|error| {
+                        let mut failure = predicate_error.lock();
+                        if failure.is_none() {
+                            *failure = Some(error);
+                        }
+                        None
+                    })
+                })?;
+            if let Some(error) = predicate_error.into_inner() {
+                return Err(error);
+            }
             record_segment_scan_stats(scan_stats);
             records = matching;
         } else {
-            let scan_stats = crate::runtime::function_budget::scan(
+            let scan_stats = crate::runtime::function_budget::try_scan_result(
                 |visit| {
-                    manager.scan_for_each_zoned_with_stats(snapshot.as_ref(), &zone_preds, visit)
+                    manager.try_scan_for_each_zoned_with_stats(
+                        snapshot.as_ref(),
+                        &zone_preds,
+                        usize::MAX,
+                        visit,
+                    )
                 },
                 |entity| {
                     if records.len() >= limit {
-                        return false; // stop iteration
+                        return Ok(false); // stop iteration
                     }
                     if !db.replica_allows_entity_at_read(&query.table, entity) {
-                        return true;
+                        return Ok(true);
                     }
                     if let Some(candidates) = tag_series_candidates.as_ref() {
                         let EntityData::TimeSeries(point) = &entity.data else {
-                            return true;
+                            return Ok(true);
                         };
                         if !point.series_id.is_some_and(|id| candidates.contains(&id)) {
-                            return true;
+                            return Ok(true);
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
@@ -1676,18 +1709,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         hydrate_store.as_ref(),
                         entity,
                     );
-                    if compiled.as_ref().is_none_or(|compiled| {
-                        residual_filter.as_ref().is_some_and(|filter| {
-                            compiled_entity_filter_matches(
-                                db,
-                                compiled,
-                                &hydrated,
-                                filter,
-                                table_name,
-                                table_alias,
-                            )
-                        })
-                    }) {
+                    if optional_compiled_entity_filter_matches(
+                        db,
+                        compiled.as_ref(),
+                        &hydrated,
+                        residual_filter.as_ref(),
+                        table_name,
+                        table_alias,
+                    )? {
                         let record = if !select_cols.is_empty() {
                             // Fast columnar path: use pre-computed schema indices when available.
                             if let Some(ref idx_map) = schema_col_indices {
@@ -1725,7 +1754,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             records.push(record);
                         }
                     }
-                    true // continue
+                    Ok(true) // continue
                 },
             )?;
             record_segment_scan_stats(scan_stats);
@@ -1736,13 +1765,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         // Apply OFFSET, then LIMIT. Order matters: SQL semantics drop the
@@ -1801,7 +1830,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::sort_or_top_k_records_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
@@ -1809,7 +1838,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 query.limit,
                 Some(table_name),
                 Some(table_alias),
-            );
+            )?;
         }
 
         if pushed_window.is_none() {
@@ -2085,14 +2114,14 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-                crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+                crate::runtime::function_budget::try_scan_result(
+            |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |entity| {
                     if records.len() >= limit {
-                        return false;
+                        return Ok(false);
                     }
                     if !db.replica_allows_entity_at_read(&context.query.table, entity) {
-                        return true;
+                        return Ok(true);
                     }
                     if compiled_entity_filter_matches(
                         db,
@@ -2101,7 +2130,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                         filter,
                         table_name,
                         table_alias,
-                    ) {
+                    )? {
                         let record = if !select_cols.is_empty() {
                             if let Some(ref idx_map) = schema_col_indices {
                                 super::super::record_search::runtime_table_record_with_col_indices(
@@ -2137,7 +2166,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                             records.push(record);
                         }
                     }
-                    true
+                    Ok(true)
                 })?;
                 return Ok(records);
             }
@@ -2233,13 +2262,13 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 document_projection,
                 entity_projection,
             );
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_records_by_order_by_with_db(
                 Some(db),
                 records,
                 &context.query.order_by,
                 Some(context.table_name),
                 Some(context.table_alias),
-            );
+            )?;
         } else if node.operator == "entity_sort" {
             records.sort_by(compare_runtime_ranked_records);
         }
@@ -2786,6 +2815,145 @@ mod tests {
     }
 
     #[test]
+    fn cold_published_table_reads_match_resident_sql_results() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::PagedCollection;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().expect("SQL fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cold-sql.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = RedDBRuntime::with_options(options).expect("paged runtime");
+        exec(
+            &runtime,
+            "CREATE TABLE cold_rows (id INTEGER, cohort INTEGER, payload TEXT)",
+        );
+        let fields = vec![
+            "id".to_string(),
+            "cohort".to_string(),
+            "payload".to_string(),
+        ];
+        runtime
+            .db()
+            .store()
+            .bulk_insert(
+                "cold_rows",
+                (1..=4096)
+                    .map(|id| {
+                        let values = vec![
+                            Value::Integer(id),
+                            Value::Integer(1),
+                            Value::text(if id == 4096 {
+                                "x".repeat(32 * 1024)
+                            } else {
+                                "preserved".to_string()
+                            }),
+                        ];
+                        let mut entity = crate::storage::UnifiedEntity::table_row(
+                            EntityId::new(0),
+                            "cold_rows",
+                            0,
+                            vec![],
+                        );
+                        entity.data = crate::storage::EntityData::Row(
+                            crate::storage::unified::entity::RowData::with_names(
+                                values,
+                                fields.clone(),
+                            ),
+                        );
+                        entity
+                    })
+                    .collect(),
+            )
+            .expect("bulk SQL fixture");
+        exec(
+            &runtime,
+            "CREATE INDEX cold_rows_id ON cold_rows (id) USING HASH",
+        );
+        let queries = [
+            "SELECT id FROM cold_rows ORDER BY id",
+            "SELECT id FROM cold_rows WHERE cohort >= 0 ORDER BY id",
+            "SELECT id FROM cold_rows WHERE id = 5",
+            "SELECT COUNT(*) AS n FROM cold_rows",
+        ];
+        let observe = |sql: &str| {
+            runtime.invalidate_result_cache();
+            runtime
+                .execute_query(sql)
+                .expect("SQL read")
+                .result
+                .records
+                .iter()
+                .map(|row| {
+                    row.iter_fields()
+                        .map(|(key, value)| (key.to_string(), value.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected: Vec<_> = queries.iter().map(|sql| observe(sql)).collect();
+        assert_eq!(
+            expected.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![4096, 4096, 1, 1]
+        );
+        let store = runtime.db().store();
+        store.persist().expect("durable base");
+        let manager = store.get_collection("cold_rows").expect("rows");
+        let root = store
+            .collection_root_page("cold_rows")
+            .expect("published root");
+        let tree = Arc::new(BTree::with_root(
+            Arc::clone(store.pager().expect("pager")),
+            root,
+        ));
+        // Install the real storage read seam without enabling the unfinished
+        // runtime profile or changing any managed deployment configuration.
+        manager.install_backing(
+            Arc::new(PagedCollection::new(tree)),
+            root,
+            store.format_version(),
+            128 * 1024,
+            manager.count() as u64,
+        );
+        let mut mismatches = Vec::new();
+        for (sql, expected) in queries.iter().zip(expected) {
+            let actual = observe(sql);
+            if actual != expected {
+                mismatches.push(format!(
+                    "{sql}: expected {} rows, got {}; expected prefix {:?}, actual prefix {:?}",
+                    expected.len(),
+                    actual.len(),
+                    expected.iter().take(3).collect::<Vec<_>>(),
+                    actual.iter().take(3).collect::<Vec<_>>()
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "cold SQL paths differ: {mismatches:#?}"
+        );
+        let (base, _) = manager.current_backing_overlay().expect("cold generation");
+        manager.install_backing(
+            base,
+            root,
+            store.format_version(),
+            4096,
+            manager.count() as u64,
+        );
+        runtime.invalidate_result_cache();
+        assert!(
+            runtime
+                .execute_query("SELECT id FROM cold_rows WHERE cohort >= 0 ORDER BY id")
+                .is_err(),
+            "a late disk decode error must not publish the successful prefix"
+        );
+    }
+
+    #[test]
     fn projected_filtered_scans_do_not_clone_unreturned_payloads() {
         use crate::storage::no_malloc_hot_paths::measure_allocations;
         use crate::storage::unified::entity::RowData;
@@ -2877,6 +3045,269 @@ mod tests {
             );
             assert!(measured.allocated_bytes <= baseline.allocated_bytes + 1024 * 1024,
                 "unreturned payloads must not be cloned before projection: {baseline:?} -> {measured:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_projections_do_not_clone_unreturned_payloads() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+
+        let cases = [
+            (
+                "sorted",
+                vec!["cohort USING BTREE"],
+                "WHERE cohort >= 0 ORDER BY id DESC LIMIT 2 OFFSET 1",
+            ),
+            ("hash", vec!["cohort USING HASH"], "WHERE cohort = 0"),
+            (
+                "cross",
+                vec!["cohort USING HASH", "id USING BTREE"],
+                "WHERE cohort = 0 AND id >= 1",
+            ),
+            (
+                "bitmap",
+                vec!["cohort USING HASH", "bucket USING HASH"],
+                "WHERE cohort = 0 AND bucket = 0",
+            ),
+        ];
+        let mut regressions = Vec::new();
+        for (name, indexes, predicate) in cases {
+            for columnar in [false, true] {
+                let observe = |payload_bytes| {
+                    let runtime = rt();
+                    exec(&runtime, "CREATE TABLE indexed_projection (id INTEGER, cohort INTEGER, bucket INTEGER, payload BLOB)");
+                    let manager = runtime
+                        .db()
+                        .store()
+                        .get_collection("indexed_projection")
+                        .expect("manager");
+                    let schema = std::sync::Arc::new(vec![
+                        "id".into(),
+                        "cohort".into(),
+                        "bucket".into(),
+                        "payload".into(),
+                    ]);
+                    for id in 1..=256 {
+                        let mut entity = UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "indexed_projection",
+                            id,
+                            vec![],
+                        );
+                        let values = vec![
+                            Value::Integer(id as i64),
+                            Value::Integer(0),
+                            Value::Integer(0),
+                            Value::Blob(vec![7; payload_bytes]),
+                        ];
+                        entity.data = EntityData::Row(if columnar {
+                            RowData {
+                                columns: values,
+                                named: None,
+                                schema: Some(schema.clone()),
+                            }
+                        } else {
+                            RowData::with_names(values, schema.as_ref().clone())
+                        });
+                        manager.insert(entity).expect("row");
+                    }
+                    for (number, definition) in indexes.iter().enumerate() {
+                        let (column, method) =
+                            definition.split_once(" USING ").expect("index definition");
+                        exec(&runtime, &format!("CREATE INDEX projection_{number} ON indexed_projection ({column}) USING {method}"));
+                        assert!(runtime
+                            .index_store_ref()
+                            .find_index_for_column("indexed_projection", column)
+                            .is_some());
+                    }
+                    let sql = format!("SELECT id FROM indexed_projection {predicate}");
+                    runtime.execute_query(&sql).expect("warm planner");
+                    runtime.invalidate_result_cache();
+                    let (result, allocations) = measure_allocations(|| runtime.execute_query(&sql));
+                    let result = result.expect("indexed projection");
+                    let actual: Vec<_> = result
+                        .result
+                        .records
+                        .iter()
+                        .map(|row| {
+                            assert!(row.get("payload").is_none());
+                            match row.get("id") {
+                                Some(Value::Integer(id)) => *id,
+                                other => panic!("integer id: {other:?}"),
+                            }
+                        })
+                        .collect();
+                    if name == "sorted" {
+                        assert_eq!(actual, vec![255, 254]);
+                    } else {
+                        assert_eq!(
+                            actual
+                                .into_iter()
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            (1..=256).collect()
+                        );
+                    }
+                    allocations
+                };
+                let baseline = observe(0);
+                let measured = observe(16 * 1024);
+                eprintln!(
+                    "indexed {name} allocation bytes (columnar={columnar}): {} -> {}",
+                    baseline.allocated_bytes, measured.allocated_bytes
+                );
+                if measured.allocated_bytes > baseline.allocated_bytes + 1024 * 1024 {
+                    regressions.push(format!(
+                        "{name}, columnar={columnar}: {baseline:?} -> {measured:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            regressions.is_empty(),
+            "unreturned indexed payloads were cloned: {regressions:#?}"
+        );
+    }
+
+    #[test]
+    fn indexed_candidates_preserve_order_windows_and_errors_across_segments() {
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE index_window (id INTEGER, payload BLOB)",
+        );
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("index_window")
+            .expect("manager");
+        for id in 1..=4 {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "index_window", id, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::Integer(id as i64), Value::Blob(vec![7; 8192])],
+                vec!["id".into(), "payload".into()],
+            ));
+            manager.insert(entity).expect("row");
+            if id == 2 {
+                manager.force_seal().expect("sealed prefix");
+            }
+        }
+        assert_eq!(manager.stats().sealed_count, 1);
+        let candidates = [2, 4, 1, 99, 3].map(|id| EntityId::new(1_000_000 + id));
+        let columns = vec!["id".to_string()];
+        let ids = |records: Vec<crate::storage::query::unified::UnifiedRecord>| {
+            records
+                .into_iter()
+                .map(|record| record.get("id").cloned().expect("id"))
+                .collect::<Vec<_>>()
+        };
+        let records = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            usize::MAX,
+            |_| Ok(true),
+        )
+        .expect("all candidates");
+        assert_eq!(ids(records), [2, 4, 1, 3].map(Value::Integer));
+        let mut visited = Vec::new();
+        let records = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            1,
+            |entity| {
+                visited.push(entity.id.raw());
+                Ok(entity.id.raw() % 2 == 1)
+            },
+        )
+        .expect("filtered prefix");
+        assert_eq!(ids(records), vec![Value::Integer(1)]);
+        assert_eq!(visited, vec![1_000_002, 1_000_004, 1_000_001]);
+        let result = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            usize::MAX,
+            |entity| {
+                if entity.id.raw() == 1_000_003 {
+                    Err(crate::RedDBError::Internal(
+                        "injected indexed predicate failure".into(),
+                    ))
+                } else {
+                    Ok(true)
+                }
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a predicate failure must reject the accepted prefix"
+        );
+        let zero = super::indexed_table_records(
+            &runtime.db(),
+            "index_window",
+            &candidates,
+            &columns,
+            0,
+            |_| panic!("LIMIT 0 must not evaluate candidates"),
+        )
+        .expect("zero window");
+        assert!(zero.is_empty());
+    }
+
+    #[test]
+    fn indexed_compact_rows_restore_schema_and_selected_payloads() {
+        use crate::storage::unified::entity::RowData;
+        use crate::storage::{EntityData, UnifiedEntity};
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE compact_index (id INTEGER, tenant_id TEXT, payload BLOB)",
+        );
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("compact_index")
+            .expect("manager");
+        manager.set_column_schema_if_empty(vec!["id".into(), "tenant_id".into(), "payload".into()]);
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1_000_001), "compact_index", 1, vec![]);
+        entity.data = EntityData::Row(RowData::new(vec![
+            Value::Integer(1),
+            Value::text("tenant-a"),
+            Value::Blob(vec![7; 8192]),
+        ]));
+        manager.insert(entity).expect("compact row");
+        manager
+            .get_with(EntityId::new(1_000_001), |entity| {
+                let EntityData::Row(row) = &entity.data else {
+                    panic!("row")
+                };
+                assert!(row.named.is_none() && row.schema.is_none());
+            })
+            .expect("resident raw row");
+        let candidates = [EntityId::new(1_000_001)];
+        for columns in [vec![], vec!["id".into(), "tenant".into(), "payload".into()]] {
+            let records = super::indexed_table_records(
+                &runtime.db(),
+                "compact_index",
+                &candidates,
+                &columns,
+                usize::MAX,
+                |_| Ok(true),
+            )
+            .expect("schema-restored projection");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].get("id"), Some(&Value::Integer(1)));
+            assert_eq!(records[0].get("tenant"), Some(&Value::text("tenant-a")));
+            assert_eq!(records[0].get("payload"), Some(&Value::Blob(vec![7; 8192])));
         }
     }
 

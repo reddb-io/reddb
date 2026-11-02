@@ -369,6 +369,20 @@ impl UnifiedStore {
         previous: Option<&Arc<BTree>>,
         mut encode: impl FnMut(&UnifiedEntity, Option<Metadata>) -> Option<Vec<u8>>,
     ) -> Result<Arc<BTree>, StoreError> {
+        if let Some((base, overlay)) = manager.backing_overlay(&mut encode) {
+            use reddb_engine::storage::collection_read::{CollectionRead, MergedCollection};
+            let merged = MergedCollection::new(base.as_ref(), overlay);
+            let mut cursor = merged.cursor()?;
+            let mut builder = CheckpointTreeBuilder::new(pager);
+            while let Some(record) = cursor.next_record(
+                usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(u64::MAX))
+                    .unwrap_or(usize::MAX),
+            )? {
+                builder.push((record.id.raw().to_be_bytes().to_vec(), record.bytes))?;
+            }
+            builder.flush()?;
+            return Ok(builder.tree);
+        }
         let mut cursor = previous
             .map(|tree| tree.cursor_first())
             .transpose()
@@ -443,13 +457,19 @@ impl UnifiedStore {
         pager: &Pager,
         metadata: &mut Vec<u8>,
         live: &HashMap<String, Arc<BTree>>,
+        keys: &HashMap<String, PublishedKeyIndex>,
     ) -> Result<(), StoreError> {
+        let mut next_xid_summary = None;
         let mut retired = self.retired_btrees.lock();
         let mut roots = Vec::new();
         let mut reclaim = Vec::new();
         let mut remove = std::collections::HashSet::new();
         for (index, entry) in retired.iter().enumerate() {
-            if live.values().any(|tree| Arc::ptr_eq(tree, &entry.tree)) {
+            if live
+                .values()
+                .chain(keys.values().flat_map(PublishedKeyIndex::trees))
+                .any(|tree| Arc::ptr_eq(tree, &entry.tree))
+            {
                 remove.insert(index);
                 continue;
             }
@@ -482,7 +502,10 @@ impl UnifiedStore {
         let (pending_pages, published_pages) = pager
             .deferred_reclamation_pages()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        let readers = live.values().any(|tree| tree.has_retirement_readers())
+        let readers = live
+            .values()
+            .chain(keys.values().flat_map(PublishedKeyIndex::trees))
+            .any(|tree| tree.has_retirement_readers())
             || retired
                 .iter()
                 .any(|entry| entry.tree.has_retirement_readers());
@@ -504,6 +527,116 @@ impl UnifiedStore {
             reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
                 .map_err(|e| StoreError::Serialization(e.to_string()))?;
         }
+        if self.config.resident_memory_bytes_max.is_some() {
+            use reddb_file::native_resume::{
+                encode_catalog_resume, CatalogResume, CollectionResume,
+            };
+            let mut states = std::collections::BTreeMap::new();
+            let mut entity_id_next = self.resident.next_entity_id.load(Ordering::SeqCst);
+            let collections = self.resident.collections.read();
+            let publishes_rows = {
+                let summary = self.recovery_xid_summary.read();
+                live.iter().any(|(name, tree)| {
+                    let root = tree.root_page_id();
+                    root != 0
+                        && summary.as_ref().and_then(|state| state.roots.get(name)) != Some(&root)
+                })
+            };
+            let xid_high_water_mark =
+                self.base_xid_high_water_mark(&collections).map(|mut high| {
+                    // Ordinary metadata flushes retain the old immutable-base
+                    // bound; WAL overlays are observed at boot. Only replacement
+                    // data roots require a borrowed visit over resident headers.
+                    // The publication fence excludes concurrent header mutations.
+                    if publishes_rows {
+                        for manager in collections.values() {
+                            manager.for_each_entity(|entity| {
+                                high = high.max(entity.xmin).max(entity.xmax);
+                                true
+                            });
+                        }
+                    }
+                    if let Some(snapshots) = self.snapshot_manager.get() {
+                        high = high.max(snapshots.peek_next_xid().saturating_sub(1));
+                    }
+                    high
+                });
+            for (name, manager) in collections.iter() {
+                let tree = live.get(name);
+                let (entity_next, row_id_next) = manager.identity_counters();
+                entity_id_next = entity_id_next.max(entity_next);
+                let root_page = tree.map_or(0, |tree| tree.root_page_id());
+                let entities = if root_page == 0 {
+                    0
+                } else if let Some(count) = manager.backing_count_at_root(root_page) {
+                    count
+                } else {
+                    // Changed projections may exclude pending/aborted rows. Count
+                    // published physical keys, not the live manager's cardinality.
+                    let mut cursor = tree
+                        .expect("invariant: nonzero root has a tree")
+                        .cursor_first()
+                        .map_err(|error| {
+                            StoreError::Io(std::io::Error::other(error.to_string()))
+                        })?;
+                    let mut count = 0_u64;
+                    while cursor
+                        .skip_next()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                    {
+                        count += 1;
+                    }
+                    count
+                };
+                states.insert(
+                    name.clone(),
+                    CollectionResume {
+                        root_page,
+                        entities,
+                        entity_id_next: entity_next,
+                        row_id_next,
+                        sequence_id_next: manager.sequence_id_next(),
+                        key_index_root: tree.and_then(|tree| {
+                            keys.get(name)
+                                .filter(|index| {
+                                    index.indexed && index.source.ptr_eq(&Arc::downgrade(tree))
+                                })
+                                .map(|index| index.tree.root_page_id())
+                        }),
+                        secondary_indices: tree
+                            .and_then(|tree| {
+                                keys.get(name)
+                                    .filter(|index| index.source.ptr_eq(&Arc::downgrade(tree)))
+                            })
+                            .map(|index| {
+                                index
+                                    .secondary
+                                    .iter()
+                                    .map(|(name, index)| (name.clone(), index.resume()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                );
+            }
+            let resume = CatalogResume {
+                entity_id_next,
+                xid_high_water_mark,
+                collections: states,
+            };
+            encode_catalog_resume(metadata, &resume)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?;
+            next_xid_summary = xid_high_water_mark.map(|high_water_mark| {
+                super::recovery_xid::RecoveryXidSummary {
+                    high_water_mark,
+                    roots: resume
+                        .collections
+                        .into_iter()
+                        .map(|(name, state)| (name, state.root_page))
+                        .collect(),
+                }
+            });
+        }
         // Record the exact pages before the catalog can forget their owners.
         // Recovery resolves this intent against the durable catalog epoch.
         let mut retirement_intent = reclaim.clone();
@@ -517,6 +650,7 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        *self.recovery_xid_summary.write() = next_xid_summary;
         self.ownership_catalog_epoch
             .store(catalog_epoch, Ordering::Release);
         #[cfg(test)]
@@ -799,7 +933,12 @@ impl UnifiedStore {
             }
         }
 
-        self.publish_reclaimable_trees(pager, &mut meta_data, &self.btree_indices.read())?;
+        self.publish_reclaimable_trees(
+            pager,
+            &mut meta_data,
+            &self.btree_indices.read(),
+            &self.key_indices.read(),
+        )?;
 
         Ok(())
     }
@@ -859,6 +998,9 @@ impl UnifiedStore {
             pager: None,
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
+            key_indices: RwLock::new(HashMap::new()),
+            secondary_index_specs: RwLock::new(HashMap::new()),
+            recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -870,6 +1012,10 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         }
@@ -901,7 +1047,10 @@ impl UnifiedStore {
         config: UnifiedStoreConfig,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let mut pager_config = PagerConfig::default();
+        let mut pager_config = PagerConfig {
+            disk_residency: config.resident_memory_bytes_max.is_some(),
+            ..PagerConfig::default()
+        };
         // ADR 0073 §2 — the page cache is pre-sized from its budget share.
         // The pager's own `cache_size` default survives only for direct
         // library callers who never resolved a budget.
@@ -927,6 +1076,17 @@ impl UnifiedStore {
             .enable_deferred_reclamation()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
+        if config.resident_memory_bytes_max.is_none()
+            && pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version
+                >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        {
+            return Err(StoreError::Io(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                "this database was prepared for disk residency; reopen with the disk-resident storage profile")));
+        }
+
         let wal_path = reddb_file::layout::unified_wal_path(path);
         // Explicit transactions and WAL-only vault versions need committed
         // batches in every durability mode, including Strict's inline fsync.
@@ -942,6 +1102,9 @@ impl UnifiedStore {
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
+            key_indices: RwLock::new(HashMap::new()),
+            secondary_index_specs: RwLock::new(HashMap::new()),
+            recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             retired_btrees: parking_lot::Mutex::new(Vec::new()),
@@ -953,6 +1116,10 @@ impl UnifiedStore {
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };
@@ -970,6 +1137,20 @@ impl UnifiedStore {
             commit.replay_into(&store).map_err(StoreError::Io)?;
         }
         store.recover_operational_manifest()?;
+        if store.config.resident_memory_bytes_max.is_some() {
+            let missing_key_index = {
+                let trees = store.btree_indices.read();
+                let keys = store.key_indices.read();
+                trees.iter().any(|(name, tree)| {
+                    !keys
+                        .get(name)
+                        .is_some_and(|index| index.source.ptr_eq(&Arc::downgrade(tree)))
+                })
+            };
+            if missing_key_index {
+                store.persist()?;
+            }
+        }
 
         Ok(store)
     }
@@ -1179,6 +1360,63 @@ impl UnifiedStore {
         // `<data>-meta` shadow when page 1 itself is corrupted.
         if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
+            let file_version = pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version;
+            let prepared =
+                file_version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION;
+            let resume = if prepared {
+                reddb_file::native_resume::decode_catalog_resume(content)
+                    .map_err(|error| StoreError::Serialization(error.to_string()))?
+            } else {
+                None
+            };
+            if let Some(resume) = &resume {
+                for state in resume.collections.values() {
+                    if !state.secondary_indices.is_empty()
+                        && file_version < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+                    {
+                        return Err(page_integrity(
+                            1,
+                            None,
+                            "secondary roots require the file format fence",
+                        ));
+                    }
+                    for root in std::iter::once(state.root_page)
+                        .chain(state.key_index_root)
+                        .chain(
+                            state
+                                .secondary_indices
+                                .values()
+                                .map(|index| index.root_page),
+                        )
+                    {
+                        if root >= page_count {
+                            return Err(page_integrity(
+                                root,
+                                None,
+                                "published root exceeds the database page count",
+                            ));
+                        }
+                    }
+                }
+                self.resident
+                    .next_entity_id
+                    .fetch_max(resume.entity_id_next, Ordering::SeqCst);
+            }
+            *self.recovery_xid_summary.write() = resume.as_ref().and_then(|resume| {
+                resume.xid_high_water_mark.map(|high_water_mark| {
+                    super::recovery_xid::RecoveryXidSummary {
+                        high_water_mark,
+                        roots: resume
+                            .collections
+                            .iter()
+                            .map(|(name, state)| (name.clone(), state.root_page))
+                            .collect(),
+                    }
+                })
+            });
             if content.len() >= 4 {
                 let mut pos = 0;
                 let mut format_version = STORE_VERSION_V1;
@@ -1220,8 +1458,19 @@ impl UnifiedStore {
                     // before the existing B-tree roots are attached.
                     let _ = self.create_collection_in_memory(&name);
 
+                    let counters = resume
+                        .as_ref()
+                        .and_then(|resume| resume.collections.get(&name));
+                    if let (Some(counters), Some(manager)) = (counters, self.get_collection(&name))
+                    {
+                        manager.restore_identity_counters(
+                            counters.entity_id_next,
+                            counters.row_id_next,
+                        );
+                        manager.restore_sequence_id_next(counters.sequence_id_next);
+                    }
                     // Load B-tree with root page if it exists
-                    if root_page > 0 {
+                    if root_page > 0 || counters.is_some() {
                         let btree = BTree::with_root(Arc::clone(pager), root_page);
 
                         // Load all entities from B-tree into the collection
@@ -1229,27 +1478,61 @@ impl UnifiedStore {
                             page_integrity(root_page, Some(name.clone()), err.to_string())
                         })?;
                         let manager = self.get_collection(&name);
-                        loop {
-                            let next = cursor.next().map_err(|err| {
-                                page_integrity(root_page, Some(name.clone()), err.to_string())
-                            })?;
+                        let mut persisted_entities = counters.map_or(0, |state| state.entities);
+                        while counters.is_none() {
+                            let next = cursor
+                                .next_with_budget(
+                                    self.config
+                                        .resident_memory_bytes_max
+                                        .and_then(|limit| usize::try_from(limit).ok())
+                                        .unwrap_or(usize::MAX),
+                                )
+                                .map_err(|err| {
+                                    page_integrity(root_page, Some(name.clone()), err.to_string())
+                                })?;
                             let Some((key, value)) = next else {
                                 break;
                             };
+                            persisted_entities += 1;
                             // Deserialize entity from value bytes
-                            let (entity, metadata) =
-                                Self::deserialize_entity_record(&value, self.format_version())
-                                    .map_err(|err| {
-                                        page_integrity(
-                                            root_page,
-                                            Some(name.clone()),
-                                            err.to_string(),
-                                        )
-                                    })?;
+                            let key_bytes: [u8; 8] = key.as_slice().try_into().map_err(|_| {
+                                page_integrity(
+                                    root_page,
+                                    Some(name.clone()),
+                                    "physical entity key must contain eight bytes",
+                                )
+                            })?;
+                            let record = reddb_engine::storage::collection_read::EncodedRecord {
+                                id: EntityId::new(u64::from_be_bytes(key_bytes)),
+                                bytes: value,
+                            };
+                            let decoded = if let Some(limit) = self.config.resident_memory_bytes_max
+                            {
+                                record.decode_with_budget(
+                                    self.format_version(),
+                                    usize::try_from(limit).unwrap_or(usize::MAX),
+                                )
+                            } else {
+                                record.decode(self.format_version())
+                            };
+                            let (entity, metadata) = decoded.map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?;
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
                                     m.register_row_id(*row_id);
+                                }
+                                if self.config.resident_memory_bytes_max.is_some() {
+                                    self.register_entity_id(id);
+                                    m.restore_sequence_id_next(
+                                        entity.sequence_id.saturating_add(1),
+                                    );
+                                    m.restore_identity_counters(
+                                        id.raw().saturating_add(1),
+                                        m.identity_counters().1,
+                                    );
+                                    continue;
                                 }
                                 self.resident.context_index.index_entity(&name, &entity);
                                 m.restore_snapshot_entity(entity.clone())?;
@@ -1264,9 +1547,48 @@ impl UnifiedStore {
                         }
 
                         // Store the B-tree for future lookups
-                        self.btree_indices
-                            .write()
-                            .insert(name.clone(), Arc::new(btree));
+                        let btree = Arc::new(btree);
+                        let key_tree = counters
+                            .and_then(|state| state.key_index_root)
+                            .map(|root| Arc::new(BTree::with_root(Arc::clone(pager), root)));
+                        if let Some(counters) = counters {
+                            self.key_indices.write().insert(
+                                name.clone(),
+                                PublishedKeyIndex {
+                                    indexed: key_tree.is_some(),
+                                    secondary: counters.secondary_indices.iter().map(|(name, index)| {
+                                        (name.clone(), super::secondary_index::PublishedSecondaryIndex {
+                                            identity: super::secondary_index::SecondaryIndexIdentity {
+                                                codec_version: index.codec_version,
+                                                definition: index.definition,
+                                            },
+                                            tree: Arc::new(BTree::with_root(Arc::clone(pager), index.root_page)),
+                                        })
+                                    }).collect(),
+                                    source: Arc::downgrade(&btree),
+                                    tree: key_tree.clone().unwrap_or_else(|| {
+                                        Arc::new(BTree::with_root(Arc::clone(pager), 0))
+                                    }),
+                                },
+                            );
+                        }
+                        if let (Some(manager), Some(limit)) =
+                            (&manager, self.config.resident_memory_bytes_max)
+                        {
+                            manager.install_backing(
+                                Arc::new(
+                                    match key_tree {
+                                        Some(keys) => reddb_engine::storage::collection_read::PagedCollection::with_key_index(Arc::clone(&btree), keys),
+                                        None => reddb_engine::storage::collection_read::PagedCollection::new(Arc::clone(&btree)),
+                                    },
+                                ),
+                                btree.root_page_id(),
+                                format_version,
+                                usize::try_from(limit).unwrap_or(usize::MAX),
+                                persisted_entities,
+                            );
+                        }
+                        self.btree_indices.write().insert(name.clone(), btree);
                         if format_version == STORE_VERSION_V11 {
                             if let Some(manager) = &manager {
                                 self.checkpoint_versions.write().insert(
@@ -1337,12 +1659,19 @@ impl UnifiedStore {
                 }
                 let retired = reddb_file::decode_native_paged_retired_trees(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
-                let live_roots: std::collections::HashSet<_> = self
+                let mut live_roots: std::collections::HashSet<_> = self
                     .btree_indices
                     .read()
                     .values()
                     .map(|tree| tree.root_page_id())
                     .collect();
+                live_roots.extend(
+                    self.key_indices
+                        .read()
+                        .values()
+                        .flat_map(PublishedKeyIndex::trees)
+                        .map(|tree| tree.root_page_id()),
+                );
                 for root in retired {
                     if live_roots.contains(&root)
                         || root
@@ -1568,10 +1897,16 @@ impl UnifiedStore {
                     #[cfg(test)]
                     CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                     let hidden = pending_vault_versions.contains(&entity.id)
-                        || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                            && excluded.contains(&entity.xmin));
-                    let normalize_xmax = matches!(entity.data, EntityData::Row(_))
-                        && excluded.contains(&entity.xmax);
+                        || (matches!(
+                            entity.data,
+                            EntityData::Row(_)
+                                | EntityData::Vector(_)
+                                | EntityData::QueueMessage(_)
+                        ) && excluded.contains(&entity.xmin));
+                    let normalize_xmax = matches!(
+                        entity.data,
+                        EntityData::Row(_) | EntityData::QueueMessage(_)
+                    ) && excluded.contains(&entity.xmax);
                     if hidden || normalize_xmax {
                         version.remember_deferred_row(entity.id);
                     }
@@ -1646,7 +1981,15 @@ impl UnifiedStore {
             eprintln!("experimental checkpoint exit before manifest");
             std::process::exit(183);
         }
-        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices)?;
+        let rebuilt_keys = self.checkpoint_key_indices(pager, &rebuilt_indices)?;
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD").is_some() {
+            pager
+                .sync()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            std::process::exit(196);
+        }
+        self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
 
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
@@ -1656,6 +1999,7 @@ impl UnifiedStore {
         // Only the now-durable catalog may replace the live tree handles. The
         // previous generation is retained in the manifest retirement ledger.
         *btree_indices = rebuilt_indices;
+        *self.key_indices.write() = rebuilt_keys;
         drop(previous_versions);
         *self.checkpoint_versions.write() = checkpoint_versions;
 
@@ -1667,6 +2011,39 @@ impl UnifiedStore {
             commit.truncate().map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
+
+        if let Some(limit) = self.config.resident_memory_bytes_max {
+            let mut versions = self.checkpoint_versions.write();
+            for (name, manager) in collections.iter() {
+                if versions
+                    .get(name)
+                    .is_some_and(|version| !version.has_unprojected_rows)
+                {
+                    if let Some(tree) = btree_indices.get(name) {
+                        manager.install_backing(
+                            Arc::new(
+                                {
+                                    let keys = self.key_indices.read();
+                                    let index = keys.get(name).expect("invariant: prepared checkpoint classifies its key index");
+                                    if index.indexed {
+                                        reddb_engine::storage::collection_read::PagedCollection::with_key_index(Arc::clone(tree), Arc::clone(&index.tree))
+                                    } else {
+                                        reddb_engine::storage::collection_read::PagedCollection::new(Arc::clone(tree))
+                                    }
+                                },
+                            ),
+                            tree.root_page_id(),
+                            self.format_version(),
+                            usize::try_from(limit).unwrap_or(usize::MAX),
+                            manager.count() as u64,
+                        );
+                        if let Some(version) = versions.get_mut(name) {
+                            version.segments = manager.checkpoint_revisions();
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

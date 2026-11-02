@@ -146,10 +146,14 @@ test("Test Suite shards on free runners and reports one failure-propagating requ
   const aggregate = jobs.get("tests");
 
   assert.ok(shards, "ci.yml must define the test-shards matrix job");
-  assert.match(shards, /^ {4}name: Test Suite shard \(\$\{\{ matrix\.shard \}\}\/4\)$/m);
+  assert.ok(shards.includes(
+    "name: Test Suite ${{ matrix.shard == 'unit' && 'unit' || format('shard ({0}/4)', matrix.shard) }}",
+  ));
   assert.match(shards, /^ {4}runs-on: ubuntu-24\.04$/m,
     "test shards must use free GitHub-hosted public runners");
-  assert.match(shards, /shard: \[1, 2, 3, 4\]/);
+  assert.match(shards, /shard: \[unit, 1, 2, 3, 4\]/);
+  assert.match(shards, /name: Run non-integration test layer\n\s+if: matrix\.shard == 'unit'/);
+  assert.match(shards, /name: Run integration-test shard\n\s+if: matrix\.shard != 'unit'/);
   assert.match(shards, /scripts\/nextest-e2e-shard\.sh "\$\{\{ matrix\.shard \}\}" 4/);
 
   assert.ok(aggregate, "ci.yml must preserve a Test Suite aggregate job");

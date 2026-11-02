@@ -61,6 +61,7 @@ impl UnifiedStore {
         entities: &[&UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -83,7 +84,10 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -143,6 +147,7 @@ impl UnifiedStore {
         entities: &[UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -168,7 +173,10 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -326,6 +334,17 @@ impl UnifiedStore {
     /// key's earlier rows. Appending instead grew the store on every boot,
     /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
+        // Historical best-effort adapter. Authoritative callers propagate the
+        // result of try_set_config_tree instead of ignoring failed persistence.
+        self.try_set_config_tree(prefix, json).unwrap_or_default()
+    }
+
+    pub fn try_set_config_tree(
+        &self,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection("red_config");
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
@@ -334,17 +353,22 @@ impl UnifiedStore {
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
-        for entity in manager.query_all(|_| true) {
+        let mut capture = |entity: &UnifiedEntity| {
             if let EntityData::Row(row) = &entity.data {
-                let Some(named) = row.named.as_ref() else {
-                    continue;
-                };
-                if let Some(reddb_types::Value::Text(key)) = named.get("key") {
+                if let Some(reddb_types::Value::Text(key)) = row.get_field("key") {
                     if let Some(rows) = previous.get_mut(key.as_ref()) {
-                        rows.push((entity.id, named.get("value").cloned()));
+                        rows.push((entity.id, row.get_field("value").cloned()));
                     }
                 }
             }
+            true
+        };
+        if manager.has_backing() {
+            for (key, _) in &pairs {
+                manager.try_for_each_key_entity(key, &mut capture)?;
+            }
+        } else {
+            manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
         let mut saved = 0;
         for (key, value) in pairs {
@@ -381,41 +405,44 @@ impl UnifiedStore {
                     schema: None,
                 }),
             );
-            if self.insert_auto("red_config", entity).is_ok() {
-                saved += 1;
-                if !stale.is_empty() {
-                    let _ = self.delete_batch("red_config", &stale);
-                }
+            self.insert_auto("red_config", entity)?;
+            saved += 1;
+            if !stale.is_empty() {
+                self.delete_batch("red_config", &stale)?;
             }
         }
-        saved
+        Ok(saved)
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
     /// When a key has several rows the newest one wins, like every other
     /// `red_config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
-        let manager = self.get_collection("red_config")?;
+        // Historical best-effort adapter; bootstrap and authoritative runtime
+        // callers use try_get_config so a fault cannot become a default value.
+        self.try_get_config(key).ok().flatten()
+    }
+
+    pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
+        let Some(manager) = self.get_collection("red_config") else {
+            return Ok(None);
+        };
+        let _publication = manager
+            .has_backing()
+            .then(|| self.vault_publication_lock.lock());
         let mut latest: Option<(u64, reddb_types::Value)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_key_entity(key, |entity| {
             if let EntityData::Row(row) = &entity.data {
-                if let Some(named) = &row.named {
-                    let key_matches = named
-                        .get("key")
-                        .and_then(|v| match v {
-                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                    if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
-                        if let Some(value) = named.get("value") {
-                            latest = Some((entity.id.raw(), value.clone()));
-                        }
+                let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
+                if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
+                    if let Some(value) = row.get_field("value") {
+                        latest = Some((entity.id.raw(), value.clone()));
                     }
                 }
             }
-        }
-        latest.map(|(_, value)| value)
+            true
+        })?;
+        Ok(latest.map(|(_, value)| value))
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted
@@ -470,6 +497,12 @@ impl UnifiedStore {
         if let Some(tree) = self.btree_indices.write().remove(name) {
             self.retire_btree(tree);
         }
+        if let Some(index) = self.key_indices.write().remove(name) {
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
+        }
+        self.secondary_index_specs.write().remove(name);
 
         self.resident
             .entity_cache
@@ -545,11 +578,10 @@ impl UnifiedStore {
         // Captured transactions stay WAL-only until commit; pager flushes must
         // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| !Self::deferred_store_wal_capture_active())
-        {
+        if let Some(pager) = self.pager.as_ref().filter(|_| {
+            !Self::deferred_store_wal_capture_active()
+                && self.config.resident_memory_bytes_max.is_none()
+        }) {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -778,7 +810,10 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -886,7 +921,10 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if persist_record && !Self::deferred_store_wal_capture_active() {
+        let paged_btree = if persist_record
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             self.get_or_create_btree(collection)
         } else {
             None
@@ -970,30 +1008,21 @@ impl UnifiedStore {
     /// the current in-memory state even when the paged B-tree image has not been
     /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Prefer the live manager state to avoid stale reads after manager.update().
-        if let Some(entity) = self
-            .get_collection(collection)
-            .and_then(|manager| manager.get(id))
-        {
-            return Some(entity);
-        }
+        // Historical best-effort adapter. Authoritative host reads use try_get
+        // so a failed cold read cannot become a successful "missing" result.
+        self.try_get(collection, id, usize::MAX).ok().flatten()
+    }
 
-        // Fall back to the paged B-tree image if the manager does not currently hold the row.
-        if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let key = id.raw().to_be_bytes();
-                if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok((entity, _)) =
-                        Self::deserialize_entity_record(&value, self.format_version())
-                    {
-                        return Some(entity);
-                    }
-                }
-            }
-        }
-
-        None
+    pub fn try_get(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get(id, limit_bytes)
     }
 
     /// Resolve a table row by stable logical identity.
@@ -1033,6 +1062,49 @@ impl UnifiedStore {
     ) -> Vec<UnifiedEntity> {
         self.resident
             .table_row_versions_by_logical_id(collection, logical_id)
+    }
+
+    pub(crate) fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(());
+        };
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            !matches!(entity.kind, EntityKind::TableRow { .. })
+                || entity.logical_id() != logical_id
+                || visit(entity)
+        })
+    }
+
+    pub(crate) fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        if let Some(entity) = manager.try_get(logical_id, usize::MAX)? {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+                && entity.xmax == 0
+            {
+                return Ok(Some(entity));
+            }
+        }
+        // Preserve the current-row policy: first live version, otherwise the
+        // last matching physical version. Retain only one owned candidate.
+        let mut selected = None;
+        self.try_for_each_table_row_version(collection, logical_id, |entity| {
+            selected = Some(entity.clone());
+            entity.xmax != 0
+        })?;
+        manager.restore_owned_row_schemas(selected.iter_mut());
+        Ok(selected)
     }
 
     pub fn vacuum_mvcc_history(
@@ -1173,6 +1245,19 @@ impl UnifiedStore {
         }
     }
 
+    /// Preserve I/O failures when fetching indexed query candidates.
+    pub fn try_get_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match self.get_collection(collection) {
+            Some(manager) => manager.try_get_many(ids, read_bytes_max),
+            None => Ok(vec![None; ids.len()]),
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
         self.resident.get_any(id)
@@ -1208,7 +1293,7 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some() {
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1273,7 +1358,7 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         let mut updated_tree = false;
-        if self.pager.is_some() {
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 updated_tree = true;
@@ -1336,6 +1421,19 @@ impl UnifiedStore {
     /// Get metadata for an entity
     pub fn get_metadata(&self, collection: &str, id: EntityId) -> Option<Metadata> {
         self.get_collection(collection)?.get_metadata(id)
+    }
+
+    /// Fallible metadata access for authoritative reads and mutation preimages.
+    pub fn try_get_metadata(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<Metadata>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get_metadata(id, limit_bytes)
     }
 
     /// Add a cross-reference between entities

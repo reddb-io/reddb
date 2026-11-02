@@ -34,49 +34,16 @@ pub(super) fn evaluate_typed_expr_with_secret_literals(
     if !expression_contains_secret_literal(expression) {
         return crate::storage::query::evaluator::evaluate(expression, row);
     }
-    let mut expression = expression.clone();
-    let mut pending = vec![&mut expression];
-    while let Some(expression) = pending.pop() {
-        match expression {
-            Expr::Literal {
-                value: value @ Value::Secret(_),
-                ..
-            } => {
-                *value = super::execution_context::secret_query_input(value.clone())
-                    .unwrap_or(Value::Null);
-            }
-            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
-            Expr::Cast { inner, .. } => pending.push(inner),
-            Expr::BinaryOp { lhs, rhs, .. } => pending.extend([lhs.as_mut(), rhs.as_mut()]),
-            Expr::FunctionCall { args, .. } => pending.extend(args),
-            Expr::WindowFunctionCall { args, window, .. } => {
-                pending.extend(args);
-                pending.extend(&mut window.partition_by);
-                pending.extend(window.order_by.iter_mut().map(|clause| &mut clause.expr));
-            }
-            Expr::Case {
-                branches, else_, ..
-            } => {
-                for (condition, value) in branches {
-                    pending.extend([condition, value]);
-                }
-                if let Some(value) = else_ {
-                    pending.push(value);
-                }
-            }
-            Expr::InList { target, values, .. } => {
-                pending.push(target);
-                pending.extend(values);
-            }
-            Expr::Between {
-                target, low, high, ..
-            } => {
-                pending.extend([target.as_mut(), low.as_mut(), high.as_mut()]);
-            }
-            _ => {}
-        }
-    }
-    crate::storage::query::evaluator::evaluate(&expression, row)
+    crate::storage::query::evaluator::evaluate_with_literal_decoder(expression, row, &|value| {
+        super::execution_context::try_secret_query_input(value.clone())
+            .map(|value| value.unwrap_or(Value::Null))
+            .map_err(
+                |limit| crate::storage::query::evaluator::EvalError::ReadLimitExceeded {
+                    required_bytes: limit.required_bytes,
+                    limit_bytes: limit.limit_bytes,
+                },
+            )
+    })
 }
 
 fn expression_contains_secret_literal(expression: &Expr) -> bool {
@@ -149,6 +116,198 @@ pub(super) fn evaluate_runtime_expr_with_db(
         },
         expr,
     )
+}
+
+pub(super) fn try_evaluate_projection_function(
+    db: Option<&RedDB>,
+    name: &str,
+    arguments: &[reddb_rql::ast::Projection],
+    source: &UnifiedRecord,
+) -> crate::RedDBResult<Option<Value>> {
+    let projection = reddb_rql::ast::Projection::Function(
+        name.split(':').next().unwrap_or(name).to_string(),
+        arguments.to_vec(),
+    );
+    if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(&projection) {
+        if expression_reads_context(&expression) {
+            return try_evaluate_runtime_expr_with_db(db, &expression, source, None, None);
+        }
+    }
+    Ok(super::join_filter::evaluate_scalar_function_with_db(
+        db, name, arguments, source,
+    ))
+}
+
+fn expression_reads_context(expression: &Expr) -> bool {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expr::FunctionCall { name, args, .. } => {
+                if matches!(
+                    name.to_ascii_uppercase().as_str(),
+                    "CONFIG" | "KV" | "__SECRET_REF" | "__KV_REF"
+                ) {
+                    return true;
+                }
+                pending.extend(args);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => pending.push(operand),
+            Expr::Cast { inner, .. } => pending.push(inner),
+            Expr::BinaryOp { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
+            Expr::Case {
+                branches, else_, ..
+            } => {
+                for (condition, value) in branches {
+                    pending.extend([condition, value]);
+                }
+                if let Some(value) = else_ {
+                    pending.push(value);
+                }
+            }
+            Expr::InList { target, values, .. } => {
+                pending.push(target);
+                pending.extend(values);
+            }
+            Expr::Between {
+                target, low, high, ..
+            } => pending.extend([target.as_ref(), low.as_ref(), high.as_ref()]),
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(super) fn try_evaluate_runtime_expr_with_db(
+    db: Option<&RedDB>,
+    expr: &Expr,
+    record: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> crate::RedDBResult<Option<Value>> {
+    reddb_engine::query::runtime::expression::try_evaluate_runtime_expr_with_host(
+        &NativeExpressionHost {
+            db,
+            record,
+            table_name,
+            table_alias,
+        },
+        expr,
+    )
+}
+
+impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost
+    for NativeExpressionHost<'_>
+{
+    type Error = crate::RedDBError;
+    fn secret_query_input(&self, value: Value) -> crate::RedDBResult<Option<Value>> {
+        super::execution_context::try_secret_query_input(value).map_err(Into::into)
+    }
+    fn resolve_field(&self, field: &FieldRef) -> crate::RedDBResult<Option<Value>> {
+        Ok(resolve_runtime_field(
+            self.record,
+            field,
+            self.table_name,
+            self.table_alias,
+        ))
+    }
+    fn evaluate_special_function(
+        &self,
+        name: &str,
+        args: &[Expr],
+        evaluate: &dyn Fn(&Expr) -> crate::RedDBResult<Option<Value>>,
+    ) -> crate::RedDBResult<Option<Value>> {
+        match name {
+            "CONFIG" => try_evaluate_runtime_config_function(self.db, args, evaluate),
+            "KV" => try_evaluate_runtime_kv_function(self.db, args, evaluate),
+            "__SECRET_REF" => {
+                let Some(key) = args.first().and_then(expr_path_text) else {
+                    return Ok(None);
+                };
+                Ok(super::execution_context::try_current_secret_value(&key)?.or(Some(Value::Null)))
+            }
+            "__KV_REF" => {
+                let Some(key) = args.first().and_then(expr_path_text) else {
+                    return Ok(None);
+                };
+                Ok(super::execution_context::current_kv_value(&key)
+                    .map(Value::text)
+                    .or(Some(Value::Null)))
+            }
+            _ => Ok(None),
+        }
+    }
+    fn evaluate_function(&self, name: &str, args: &[Value]) -> crate::RedDBResult<Option<Value>> {
+        Ok(
+            reddb_engine::query::runtime::expression::RuntimeExpressionHost::evaluate_function(
+                self, name, args,
+            ),
+        )
+    }
+}
+
+fn try_evaluate_runtime_config_function(
+    db: Option<&RedDB>,
+    args: &[Expr],
+    evaluate: &dyn Fn(&Expr) -> crate::RedDBResult<Option<Value>>,
+) -> crate::RedDBResult<Option<Value>> {
+    let Some(key) = args.first().and_then(expr_path_text) else {
+        return Ok(None);
+    };
+    if let Some(value) = super::execution_context::try_current_config_value(&key)? {
+        return Ok(Some(value));
+    }
+    if let Some(db) = db {
+        if super::execution_context::config_read_permitted(&key) {
+            let bare = key.strip_prefix("red.config/").unwrap_or(&key);
+            for candidate in [key.as_str(), bare] {
+                if let Some(value) = try_lookup_latest_kv_value(db, "red_config", candidate)? {
+                    return Ok(Some(value));
+                }
+            }
+        }
+    }
+    match args.get(1) {
+        Some(expression) => {
+            Ok(try_special_default_expr_value(expression, evaluate)?.or(Some(Value::Null)))
+        }
+        None => Ok(Some(Value::Null)),
+    }
+}
+
+fn try_evaluate_runtime_kv_function(
+    db: Option<&RedDB>,
+    args: &[Expr],
+    evaluate: &dyn Fn(&Expr) -> crate::RedDBResult<Option<Value>>,
+) -> crate::RedDBResult<Option<Value>> {
+    let Some(collection) = args.first().and_then(expr_path_text) else {
+        return Ok(None);
+    };
+    let Some(key) = args.get(1).and_then(expr_path_text) else {
+        return Ok(None);
+    };
+    if let Some(db) = db {
+        if super::execution_context::kv_read_permitted(&collection, &key) {
+            if let Some(value) = try_lookup_latest_kv_value(db, &collection, &key)? {
+                return Ok(Some(value));
+            }
+        }
+    }
+    match args.get(2) {
+        Some(expression) => {
+            Ok(try_special_default_expr_value(expression, evaluate)?.or(Some(Value::Null)))
+        }
+        None => Ok(Some(Value::Null)),
+    }
+}
+
+fn try_special_default_expr_value(
+    expr: &Expr,
+    evaluate: &dyn Fn(&Expr) -> crate::RedDBResult<Option<Value>>,
+) -> crate::RedDBResult<Option<Value>> {
+    match expr {
+        Expr::Column { field, .. } => Ok(field_ref_path_text(field).map(Value::text)),
+        _ => evaluate(expr),
+    }
 }
 
 struct NativeExpressionHost<'a> {
@@ -261,13 +420,25 @@ impl reddb_engine::query::runtime::expression::RuntimeExpressionHost for NativeE
 }
 
 pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) -> Option<Value> {
+    try_lookup_latest_kv_value(db, collection, key)
+        .ok()
+        .flatten()
+}
+
+pub(super) fn try_lookup_latest_kv_value(
+    db: &RedDB,
+    collection: &str,
+    key: &str,
+) -> crate::RedDBResult<Option<Value>> {
     if db
         .collection_contract(collection)
         .is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Vault)
     {
-        return None;
+        return Ok(None);
     }
-    let manager = db.store().get_collection(collection)?;
+    let Some(manager) = db.store().get_collection(collection) else {
+        return Ok(None);
+    };
     let mut latest_id: u64 = 0;
     let mut latest_value: Option<Value> = None;
     // The parser rebuilds dotted paths by concatenating token display
@@ -276,21 +447,24 @@ pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) ->
     // lowercase. Normalise here so CONFIG(red.ai.default.provider)
     // matches the key persisted by SET CONFIG.
     let key_lc = key.to_ascii_lowercase();
-    manager.for_each_entity(|entity| {
-        let Some(row) = entity.data.as_row() else {
-            return true;
-        };
-        let entry_key = row.get_field("key").and_then(|value| match value {
-            Value::Text(text) => Some(text.as_ref()),
-            _ => None,
-        });
-        if entry_key == Some(key_lc.as_str()) && entity.id.raw() >= latest_id {
-            latest_id = entity.id.raw();
-            latest_value = Some(row.get_field("value").cloned().unwrap_or(Value::Null));
-        }
-        true
-    });
-    latest_value
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_key_entity(&key_lc, visit),
+        |entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            let entry_key = row.get_field("key").and_then(|value| match value {
+                Value::Text(text) => Some(text.as_ref()),
+                _ => None,
+            });
+            if entry_key == Some(key_lc.as_str()) && entity.id.raw() >= latest_id {
+                latest_id = entity.id.raw();
+                latest_value = Some(row.get_field("value").cloned().unwrap_or(Value::Null));
+            }
+            true
+        },
+    )?;
+    Ok(latest_value)
 }
 
 fn evaluate_runtime_config_function(

@@ -491,7 +491,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""invalidated":true"#), "{body}");
@@ -513,7 +513,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""role":"primary""#), "{body}");
@@ -540,7 +540,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""failover_profile":{"#), "{body}");
@@ -585,7 +585,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""wal_oldest_required_lsn":0"#), "{body}");
@@ -630,7 +630,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""replicas":["#), "{body}");
@@ -648,7 +648,7 @@ mod tests {
         let server = RedDBServer::new(runtime);
 
         let response = server.handle_replication_status();
-        let body = String::from_utf8(response.body).expect("status body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("status body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""role":"replica""#), "{body}");
@@ -680,7 +680,7 @@ mod tests {
             }
             .encode_json(),
         );
-        let body = String::from_utf8(response.body).expect("confirm body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("confirm body is utf8");
 
         assert_eq!(response.status, 200);
         assert!(body.contains(r#""ok":true"#), "{body}");
@@ -716,7 +716,7 @@ mod tests {
             }
             .encode_json(),
         );
-        let body = String::from_utf8(response.body).expect("confirm body is utf8");
+        let body = String::from_utf8(response.body.to_vec()).expect("confirm body is utf8");
 
         assert_eq!(response.status, 409);
         assert!(body.contains("does not match current plan"), "{body}");

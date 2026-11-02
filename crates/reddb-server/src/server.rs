@@ -1099,7 +1099,7 @@ impl RedDBServer {
             return Ok(());
         }
 
-        stream.write_all(&response.to_http_bytes())?;
+        response.write_to(&mut stream)?;
         stream.flush()?;
         Ok(())
     }

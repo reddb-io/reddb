@@ -15,7 +15,22 @@ pub trait AggregateResultHost: AggregateHost {
     type Error;
     fn guard_materialization(&self, groups: usize) -> Result<(), Self::Error>;
     fn having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> bool;
+    fn try_having_matches(
+        &self,
+        filter: &Filter,
+        record: &UnifiedRecord,
+    ) -> Result<bool, Self::Error> {
+        Ok(self.having_matches(filter, record))
+    }
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]);
+    fn try_sort_records(
+        &self,
+        records: &mut Vec<UnifiedRecord>,
+        clauses: &[OrderByClause],
+    ) -> Result<(), Self::Error> {
+        self.sort_records(records, clauses);
+        Ok(())
+    }
     fn secret_query_output(&self, value: Value) -> Result<Value, Self::Error>;
 }
 
@@ -97,7 +112,9 @@ pub fn finish_aggregate_results_with_host<'a, H: AggregateResultHost>(
         if runtime_plan
             .having
             .as_ref()
-            .is_none_or(|filter| host.having_matches(filter, &record))
+            .map(|filter| host.try_having_matches(filter, &record))
+            .transpose()?
+            .unwrap_or(true)
         {
             records.push(record);
         }
@@ -127,14 +144,16 @@ pub fn finish_aggregate_results_with_host<'a, H: AggregateResultHost>(
         if runtime_plan
             .having
             .as_ref()
-            .is_none_or(|filter| host.having_matches(filter, &record))
+            .map(|filter| host.try_having_matches(filter, &record))
+            .transpose()?
+            .unwrap_or(true)
         {
             records.push(record);
         }
     }
 
     if !runtime_plan.order_by.is_empty() {
-        host.sort_records(&mut records, &runtime_plan.order_by);
+        host.try_sort_records(&mut records, &runtime_plan.order_by)?;
     }
 
     if let Some(offset) = query.offset {

@@ -45,6 +45,10 @@ pub const CASES: &[(&str, fn())] = &[
         aggregate_result_cases::empty_input_semantics,
     ),
     (
+        "aggregate_results_fallible_having_and_retry",
+        aggregate_result_cases::having_failure_rejects_the_complete_result_and_allows_retry,
+    ),
+    (
         "aggregate_results_wide_pagination",
         aggregate_result_cases::wide_pagination,
     ),

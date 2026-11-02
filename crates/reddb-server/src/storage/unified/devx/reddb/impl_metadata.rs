@@ -1,6 +1,16 @@
 use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
+#[cfg(test)]
+fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_metadata name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 impl RedDB {
     pub fn is_replica_role(&self) -> bool {
         matches!(
@@ -100,6 +110,14 @@ impl RedDB {
             return false;
         };
 
+        Self::entity_metadata_expired_at(entity, &metadata, now_ms)
+    }
+
+    pub(crate) fn entity_metadata_expired_at(
+        entity: &crate::storage::UnifiedEntity,
+        metadata: &crate::storage::unified::metadata::Metadata,
+        now_ms: u64,
+    ) -> bool {
         if metadata
             .get("_expires_at")
             .and_then(Self::metadata_u64)
@@ -477,11 +495,21 @@ impl RedDB {
             return Ok(());
         };
 
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
         let _publication = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "publication-lock");
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "previous-metadata");
         let collection_roots = self.physical_collection_roots();
-        let mut indexes = self
-            .native_physical_state()
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "collection-roots");
+        let native_state = self.native_physical_state();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-state");
+        let mut indexes = native_state
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
         if let Some(previous) = previous.as_ref() {
@@ -518,6 +546,8 @@ impl RedDB {
                     .is_some_and(|collection| removed.contains(collection))
             });
         }
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "index-state");
         let mut metadata = PhysicalMetadataFile::from_state(
             self.options.clone(),
             self.catalog_snapshot(),
@@ -530,8 +560,14 @@ impl RedDB {
         // chunk bounds / routing / TTL) onto the same metadata path as
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "metadata-assembled");
         metadata.save_for_data_path(path)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "sidecar-save");
         self.persist_native_physical_header(&metadata)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-header");
         Ok(())
     }
 

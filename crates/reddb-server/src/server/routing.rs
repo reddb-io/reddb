@@ -120,13 +120,13 @@ impl RedDBServer {
         }
 
         if !self.surface_allows(&request.method, &request_path) {
-            writer.write_all(&json_error(404, "not found on this listener").to_http_bytes())?;
+            json_error(404, "not found on this listener").write_to(writer)?;
             writer.flush()?;
             return Ok(true);
         }
 
         if !self.is_authorized(&request.method, &request_path, &request.headers) {
-            writer.write_all(&json_error(401, "unauthorized").to_http_bytes())?;
+            json_error(401, "unauthorized").write_to(writer)?;
             writer.flush()?;
             return Ok(true);
         }
@@ -146,10 +146,11 @@ impl RedDBServer {
                     status: 429,
                     content_type: "application/json",
                     body: format!("{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}")
-                        .into_bytes(),
+                        .into_bytes()
+                        .into(),
                     extra_headers: Vec::new(),
                 };
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 writer.flush()?;
                 Ok(true)
             }
@@ -187,7 +188,17 @@ impl RedDBServer {
                 } else if is_sse {
                     self.handle_query_sse_stream(request.body.clone(), writer)?;
                 } else if is_input_stream_post {
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            json_error_code(status, "stream_config_unavailable", message)
+                                .write_to(writer)?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,
@@ -203,7 +214,7 @@ impl RedDBServer {
                         Err(err) => {
                             emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
-                            writer.write_all(&response.to_http_bytes())?;
+                            response.write_to(writer)?;
                             writer.flush()?;
                         }
                     }
@@ -215,7 +226,17 @@ impl RedDBServer {
                     // handler call so success / mid-stream error /
                     // snapshot expiry / panic unwind all release the
                     // slot through Drop.
-                    let cfg = crate::server::output_stream::StreamConfig::load(&self.runtime);
+                    let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
+                    {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let (status, message) = map_runtime_error(&error);
+                            json_error_code(status, "stream_config_unavailable", message)
+                                .write_to(writer)?;
+                            writer.flush()?;
+                            return Ok(true);
+                        }
+                    };
                     match self.stream_capacity.try_acquire(
                         &principal,
                         cfg.max_global_streams,
@@ -231,7 +252,7 @@ impl RedDBServer {
                         Err(err) => {
                             emit_capacity_refused_audit(&self.runtime, &principal, &err);
                             let response = stream_capacity_refusal_response(&err);
-                            writer.write_all(&response.to_http_bytes())?;
+                            response.write_to(writer)?;
                             writer.flush()?;
                         }
                     }
@@ -353,12 +374,12 @@ impl RedDBServer {
         // before a cross-origin request; it must be answered *before*
         // auth/surface checks (a 401/404 on preflight would block the
         // real request). 204 + the permissive `Access-Control-*` headers
-        // that ride on every response (see `HttpResponse::to_http_bytes`).
+        // that ride on every response (see `HttpResponse::write_to`).
         if method == "OPTIONS" {
             return HttpResponse {
                 status: 204,
                 content_type: "application/json",
-                body: Vec::new(),
+                body: Vec::new().into(),
                 extra_headers: Vec::new(),
             };
         }
@@ -401,7 +422,8 @@ impl RedDBServer {
                         body: format!(
                             "{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}"
                         )
-                        .into_bytes(),
+                        .into_bytes()
+                        .into(),
                         extra_headers: Vec::new(),
                     };
                 }
@@ -986,7 +1008,14 @@ pub(crate) fn handle_chain_tip(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(tip) = runtime.chain_tip_for_collection(collection) else {
+    let value = match runtime.try_chain_tip_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(tip) = value else {
         return json_error(
             404,
             format!("chain-tip: collection '{collection}' is not a blockchain or has no rows"),
@@ -1033,7 +1062,14 @@ pub(crate) fn handle_verify_chain(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    let Some(outcome) = runtime.verify_chain_for_collection(collection) else {
+    let value = match runtime.try_verify_chain_for_collection(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    let Some(outcome) = value else {
         return json_error(
             404,
             format!(
@@ -1062,7 +1098,14 @@ pub(crate) fn handle_clear_integrity_flag(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
 ) -> HttpResponse {
-    if !runtime.clear_chain_integrity_flag(collection) {
+    let cleared = match runtime.try_clear_chain_integrity_flag(collection) {
+        Ok(value) => value,
+        Err(error) => {
+            let (status, message) = map_runtime_error(&error);
+            return json_error(status, message);
+        }
+    };
+    if !cleared {
         return json_error(
             404,
             format!(
