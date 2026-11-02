@@ -180,6 +180,27 @@ base payloads. It uses the existing publication fence through base/overlay merge
 concurrent-write latency still needs qualification. This slice does not establish
 global admission, HTTP behavior, boot p95 or a release performance result.
 
+## Paged BTREE restoration and composite ranges (2026-11-01)
+
+The opt-in runtime restores scalar and fixed-arity composite BTREE indexes as
+generation-bound native roots. Initial preparation scans source rows to build
+prefix-free ordered tuples; compatible reopen retains index descriptors without
+rebuilding resident posting maps. UNIQUE and scalar equality use paged equality
+projections and preserve snapshot-aware conflict checks.
+
+Integral and text ranges support equality on every preceding composite column.
+Planning prefers the applicable index with the longest constrained prefix. Each
+component's canonical family is checked within its prefix; mixed families,
+unsupported predicates and oversized tuples fall back to the authoritative scan.
+Native page errors propagate. Candidate IDs retain their shared-budget reservation
+while source-key rechecks and SQL visibility checks reconcile resident mutations.
+
+Regression tests deny source-wide scans during prepared restoration and queries,
+including two-, three- and five-column indexes, prefix changes, rollback and
+UNIQUE after reopen. These tests establish behavior, not historical boot latency.
+Bitmap/H3 restoration and explicit CREATE INDEX still use resident construction;
+full-server admission and the acceptance gates below remain required.
+
 ## Required acceptance gates
 
 - Platform total process/container memory <=1 GiB, with a 768 MiB engine budget,
