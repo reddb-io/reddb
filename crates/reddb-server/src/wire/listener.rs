@@ -938,6 +938,45 @@ fn handle_close_cursor(
 mod tests {
     use super::*;
 
+    #[test]
+    fn binary_encoder_releases_allocations_after_large_then_small_responses() {
+        use crate::runtime::RuntimeQueryResult;
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        fn fixture(size: usize) -> RuntimeQueryResult {
+            RuntimeQueryResult::ok_records(
+                "SELECT payload".into(),
+                vec!["payload".into()],
+                vec![vec![("payload".into(), Value::text("x".repeat(size)))]],
+                "select",
+            )
+        }
+        let large = fixture(192 * 1024);
+        let small = fixture(16);
+        for workers in [1, 4, 16] {
+            let counts = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..workers)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            measure_allocations(|| {
+                                drop(encode_result(&large));
+                                drop(encode_result(&small));
+                            })
+                            .1
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|thread| thread.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            for count in counts {
+                assert_eq!(count.allocated_bytes, count.deallocated_bytes,
+                    "encoder retains requested allocation bytes after responses drop ({workers} workers): {count:?}");
+            }
+        }
+    }
+
     fn create_runtime() -> RedDBRuntime {
         RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
     }
