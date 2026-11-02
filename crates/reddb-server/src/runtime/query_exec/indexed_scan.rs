@@ -13,179 +13,168 @@
 use super::super::index_store::IndexStore;
 use super::*;
 
-/// Attempt to resolve a range/between filter to a list of entity ids via
-/// the sorted numeric index. Returns `None` when the filter is not
-/// applicable (different shape, unsupported type, missing index, or too
-/// many results) — the caller is expected to fall through to a full
-/// scan in that case.
-///
-/// When `limit` is `Some(n)`, the scan stops after collecting `n` IDs
-/// (matching PG's sorted-index + LIMIT pushdown behaviour). The 5 000-row
-/// break-even cap is only enforced when `limit` is `None`.
+use crate::storage::unified::hash_index::HashCandidates;
+use std::ops::Bound::{Excluded, Included, Unbounded};
+type CandidateResult = crate::RedDBResult<Option<HashCandidates>>;
+
+/// None permits a source scan for an unsupported shape. Admission failures are
+/// authoritative: callers must not turn them into a second, unbudgeted attempt.
 pub(crate) fn try_sorted_index_lookup(
     filter: &Filter,
     table: &str,
     idx_store: &IndexStore,
     limit: Option<usize>,
-) -> Option<Vec<EntityId>> {
+) -> CandidateResult {
     match filter {
-        Filter::Between { field, low, high } => {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            if !idx_store.sorted.has_index(table, col) {
-                return None;
-            }
-            // Use the effective cap: query LIMIT if present, otherwise a static break-even
-            // cap. For BETWEEN on a 1M-row table with ~16% selectivity (~160K matches),
-            // the sorted-index path (160K BTree traversal + 160K HashMap lookups) outperforms
-            // a full scan of 1M rows. The cap is set to 200_001 (one above the threshold)
-            // so we can detect "too many" without collecting the entire result set.
-            // At >200K matches the parallel full-scan wins on cache locality.
+        Filter::Between { .. }
+        | Filter::Compare {
+            op: CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge,
+            ..
+        } => {
             const BREAK_EVEN_CAP: usize = 200_000;
-            let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
-            let ids = if let (Some(lo), Some(hi)) = (
-                super::super::index_store::value_to_sorted_key(low),
-                super::super::index_store::value_to_sorted_key(high),
-            ) {
-                idx_store
-                    .sorted
-                    .range_lookup_limited(table, col, lo, hi, cap)
-                    .or_else(|| {
-                        try_mixed_integral_between_lookup(table, col, low, high, idx_store, cap)
-                    })?
-            } else {
-                try_mixed_integral_between_lookup(table, col, low, high, idx_store, cap)?
-            };
-            if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
-                return None; // Full scan cheaper for very large result sets without LIMIT
-            }
-            Some(ids)
+            let result = range_filter_candidates(
+                filter,
+                table,
+                idx_store,
+                limit.unwrap_or(BREAK_EVEN_CAP + 1),
+                None,
+            )?;
+            Ok(result.filter(|ids| limit.is_some() || ids.len() <= BREAK_EVEN_CAP))
         }
-        Filter::Compare { field, op, value }
-            if matches!(
-                *op,
-                CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
-            ) =>
-        {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            if !idx_store.sorted.has_index(table, col) {
-                return None;
-            }
-            // Same cap logic as BETWEEN above.
-            const BREAK_EVEN_CAP: usize = 200_000;
-            let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
-            let ids = if let Some(threshold) = super::super::index_store::value_to_sorted_key(value)
-            {
-                let direct = match *op {
-                    CompareOp::Lt => idx_store
-                        .sorted
-                        .lt_lookup_limited(table, col, threshold, cap),
-                    CompareOp::Le => idx_store
-                        .sorted
-                        .le_lookup_limited(table, col, threshold, cap),
-                    CompareOp::Gt => idx_store
-                        .sorted
-                        .gt_lookup_limited(table, col, threshold, cap),
-                    CompareOp::Ge => idx_store
-                        .sorted
-                        .ge_lookup_limited(table, col, threshold, cap),
-                    _ => unreachable!("non-range compare op guarded above"),
-                };
-                direct.or_else(|| {
-                    try_mixed_integral_compare_lookup(table, col, *op, value, idx_store, cap)
-                })?
-            } else {
-                try_mixed_integral_compare_lookup(table, col, *op, value, idx_store, cap)?
-            };
-            if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
-                return None; // Full scan cheaper for very large result sets without LIMIT
-            }
-            Some(ids)
-        }
-        // IN-list: one BTree point-lookup per value (O(k log n)) instead of
-        // a range scan that covers all gaps between values.
-        // Enabled by Phase 1's OR→IN rewrite: OR(city='A', city='B') is now
-        // Filter::In which lands here.
-        Filter::In { field, values } => {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            if !idx_store.sorted.has_index(table, col) {
-                return None;
-            }
-            // Convert Value → CanonicalKey (skip unsupported values)
-            let keys: Vec<reddb_types::CanonicalKey> = values
+        Filter::In {
+            field: FieldRef::TableColumn { column, .. },
+            values,
+        } => {
+            let keys: Vec<_> = values
                 .iter()
                 .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
             if keys.is_empty() {
-                return None; // No comparable values — can't use sorted index
+                return Ok(None);
             }
-            let effective_limit = limit.unwrap_or(usize::MAX);
-            idx_store
-                .sorted
-                .in_lookup_limited(table, col, &keys, effective_limit)
+            idx_store.sorted_in_candidates(table, column, keys, limit.unwrap_or(usize::MAX), None)
         }
         Filter::And(left, right) => {
-            // Composite sorted index path — when AND reduces to
-            // `Eq(col_a) AND Range(col_b)` and a composite index on
-            // `(col_a, col_b)` exists, do a single prefix+range seek.
-            // Matches PG's multi-column B-tree behaviour and is
-            // typically 2-5× faster than intersecting two single-col
-            // id sets because the scan touches exactly the matching
-            // range instead of unioning and post-filtering.
-            if let Some(ids) = try_composite_and_lookup(left, right, table, idx_store, limit) {
-                return Some(ids);
+            if let Some(ids) = try_composite_and_lookup(left, right, table, idx_store, limit)? {
+                return Ok(Some(ids));
             }
-
-            // Phase 6: if BOTH sides have sorted indexes, intersect their ID sets.
-            // Eliminates the gap-scanning problem for compound range queries like
-            // `WHERE age > 30 AND score > 0.5` when both columns are indexed.
-            //
-            // Pass `None` to the leaf lookups instead of the caller's limit:
-            // each side must return its full candidate set so the intersection
-            // doesn't drop matches that happen to sort past the first `limit`
-            // ids on only one of the axes. The intersection itself still
-            // honours `limit` via its early-stop below.
-            let ids_left = try_sorted_index_lookup_leaf(left, table, idx_store, None);
-            let ids_right = try_sorted_index_lookup_leaf(right, table, idx_store, None);
-            match (ids_left, ids_right) {
-                (Some(a), Some(b)) => {
-                    // Intersect: build HashSet from smaller, filter larger.
-                    // Returns a subset — safe because caller re-applies full filter.
-                    let effective_limit = limit.unwrap_or(usize::MAX);
-                    Some(intersect_sorted_id_sets(a, b, effective_limit))
+            // Both complete leaf sets are required before applying the final
+            // LIMIT; truncating either side can lose valid intersections.
+            let left_ids = try_sorted_index_lookup_leaf(left, table, idx_store, None)?;
+            let right_ids = try_sorted_index_lookup_leaf(right, table, idx_store, None)?;
+            match (left_ids, right_ids) {
+                (Some(left), Some(right)) => {
+                    intersect_sorted_id_sets(idx_store, left, right, limit.unwrap_or(usize::MAX))
+                        .map(Some)
                 }
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => {
-                    // Fall through to nested AND extraction (for deeply nested filters)
-                    try_sorted_index_lookup(left, table, idx_store, limit)
-                        .or_else(|| try_sorted_index_lookup(right, table, idx_store, limit))
-                }
+                (Some(ids), None) | (None, Some(ids)) => Ok(Some(ids)),
+                (None, None) => match try_sorted_index_lookup(left, table, idx_store, limit)? {
+                    Some(ids) => Ok(Some(ids)),
+                    None => try_sorted_index_lookup(right, table, idx_store, limit),
+                },
             }
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
-/// Detect `And(Eq(col_a), Range(col_b))` / `And(Range(col_b), Eq(col_a))`
-/// and resolve via a composite sorted index on `(col_a, col_b)` when one
-/// is registered. Returns `None` if the shape doesn't fit or no composite
-/// covers both columns in order.
+fn range_filter_candidates(
+    filter: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+    limit: usize,
+    filter_set: Option<&std::collections::HashSet<u64>>,
+) -> CandidateResult {
+    use super::super::index_store::value_to_sorted_key;
+    match filter {
+        Filter::Between {
+            field: FieldRef::TableColumn { column, .. },
+            low,
+            high,
+        } => {
+            if let (Some(low_key), Some(high_key)) =
+                (value_to_sorted_key(low), value_to_sorted_key(high))
+            {
+                if let Some(ids) = idx_store.sorted_range_candidates(
+                    table,
+                    column,
+                    (Included(low_key), Included(high_key)),
+                    limit,
+                    false,
+                    filter_set,
+                )? {
+                    return Ok(Some(ids));
+                }
+            }
+            if filter_set.is_some() {
+                return Ok(None);
+            }
+            try_mixed_integral_between_lookup(table, column, low, high, idx_store, limit)
+        }
+        Filter::Compare {
+            field: FieldRef::TableColumn { column, .. },
+            op,
+            value,
+        } => {
+            if let Some(key) = value_to_sorted_key(value) {
+                let bounds = match op {
+                    CompareOp::Lt => (Unbounded, Excluded(key)),
+                    CompareOp::Le => (Unbounded, Included(key)),
+                    CompareOp::Gt => (Excluded(key), Unbounded),
+                    CompareOp::Ge => (Included(key), Unbounded),
+                    _ => return Ok(None),
+                };
+                if let Some(ids) = idx_store
+                    .sorted_range_candidates(table, column, bounds, limit, false, filter_set)?
+                {
+                    return Ok(Some(ids));
+                }
+            }
+            if filter_set.is_some() {
+                return Ok(None);
+            }
+            try_mixed_integral_compare_lookup(table, column, *op, value, idx_store, limit)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn try_composite_and_lookup(
     left: &Filter,
     right: &Filter,
     table: &str,
     idx_store: &IndexStore,
     limit: Option<usize>,
-) -> Option<Vec<EntityId>> {
+) -> CandidateResult {
+    let Some((columns, prefix, low, high)) = composite_lookup_parts(left, right, table, idx_store)
+    else {
+        return Ok(None);
+    };
+    idx_store.composite_range_candidates(
+        table,
+        &columns,
+        &[prefix],
+        low,
+        high,
+        limit.unwrap_or(200_000),
+    )
+}
+
+/// Detect `And(Eq(col_a), Range(col_b))` / `And(Range(col_b), Eq(col_a))`
+/// and resolve via a composite sorted index on `(col_a, col_b)` when one
+/// is registered. Returns `None` if the shape doesn't fit or no composite
+/// covers both columns in order.
+fn composite_lookup_parts(
+    left: &Filter,
+    right: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+) -> Option<(
+    Vec<String>,
+    reddb_types::CanonicalKey,
+    reddb_types::CanonicalKey,
+    reddb_types::CanonicalKey,
+)> {
     use reddb_rql::ast::FieldRef;
     use reddb_types::CanonicalKey;
 
@@ -278,15 +267,7 @@ fn try_composite_and_lookup(
     if !idx_store.sorted.has_composite_index(table, &cols) {
         return None;
     }
-    let limit_cap = limit.unwrap_or(200_000);
-    idx_store.sorted.composite_prefix_range_lookup(
-        table,
-        &cols,
-        &[eq_key],
-        rng_low,
-        rng_high,
-        limit_cap,
-    )
+    Some((cols, eq_key, rng_low, rng_high))
 }
 
 /// Like `try_sorted_index_lookup` but only matches leaf predicates (not AND/OR wrappers).
@@ -303,41 +284,40 @@ fn try_sorted_index_lookup_leaf(
     table: &str,
     idx_store: &IndexStore,
     limit: Option<usize>,
-) -> Option<Vec<EntityId>> {
+) -> CandidateResult {
     match filter {
-        Filter::And(_, _) | Filter::Or(_, _) | Filter::Not(_) => None,
+        Filter::And(_, _) | Filter::Or(_, _) | Filter::Not(_) => Ok(None),
         Filter::Compare {
             op: CompareOp::Eq, ..
         }
-        | Filter::In { .. } => try_sorted_index_lookup(filter, table, idx_store, limit)
-            .or_else(|| super::helpers::resident_hash_eq_lookup(filter, table, idx_store)),
+        | Filter::In { .. } => match try_sorted_index_lookup(filter, table, idx_store, limit)? {
+            Some(ids) => Ok(Some(ids)),
+            None => super::helpers::try_resident_hash_eq_lookup(filter, table, idx_store),
+        },
         other => try_sorted_index_lookup(other, table, idx_store, limit),
     }
 }
 
-/// Intersect two EntityId sets. Builds a HashSet from the smaller and filters
-/// the larger. Returns up to `limit` IDs. O(min(|a|,|b|) + max(|a|,|b|)).
+/// Preserve the larger side's order and the existing hash-set fast path.
+/// Both candidate owners stay charged while the set and final output coexist.
 pub(crate) fn intersect_sorted_id_sets(
-    a: Vec<EntityId>,
-    b: Vec<EntityId>,
+    idx_store: &IndexStore,
+    a: HashCandidates,
+    b: HashCandidates,
     limit: usize,
-) -> Vec<EntityId> {
-    if a.is_empty() || b.is_empty() {
-        return Vec::new();
+) -> crate::RedDBResult<HashCandidates> {
+    if a.is_empty() || b.is_empty() || limit == 0 {
+        return Ok(Vec::new().into());
     }
-    // Build HashSet from smaller side
     let (larger, smaller) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-    let set: std::collections::HashSet<u64> = smaller.iter().map(|id| id.raw()).collect();
-    let mut result = Vec::with_capacity(limit.min(set.len()));
-    for id in larger {
-        if set.contains(&id.raw()) {
-            result.push(id);
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    result
+    let set = idx_store.candidate_set(smaller.iter().map(|id| id.raw()))?;
+    idx_store.collect_candidates(
+        larger
+            .iter()
+            .copied()
+            .filter(|id| set.contains(&id.raw()))
+            .take(limit),
+    )
 }
 
 type IntegralBoundsResult<T> = Result<Option<(T, T)>, ()>;
@@ -349,16 +329,20 @@ fn try_mixed_integral_between_lookup(
     high: &Value,
     idx_store: &IndexStore,
     limit: usize,
-) -> Option<Vec<EntityId>> {
+) -> CandidateResult {
     if !idx_store
         .sorted
         .supports_mixed_integral_ranges(table, column)
     {
-        return None;
+        return Ok(None);
     }
 
-    let signed_bounds = signed_between_bounds(low, high).ok()?;
-    let unsigned_bounds = unsigned_between_bounds(low, high).ok()?;
+    let (Ok(signed_bounds), Ok(unsigned_bounds)) = (
+        signed_between_bounds(low, high),
+        unsigned_between_bounds(low, high),
+    ) else {
+        return Ok(None);
+    };
     collect_integral_family_ranges(
         table,
         column,
@@ -376,16 +360,20 @@ fn try_mixed_integral_compare_lookup(
     value: &Value,
     idx_store: &IndexStore,
     limit: usize,
-) -> Option<Vec<EntityId>> {
+) -> CandidateResult {
     if !idx_store
         .sorted
         .supports_mixed_integral_ranges(table, column)
     {
-        return None;
+        return Ok(None);
     }
 
-    let signed_bounds = signed_compare_bounds(op, value).ok()?;
-    let unsigned_bounds = unsigned_compare_bounds(op, value).ok()?;
+    let (Ok(signed_bounds), Ok(unsigned_bounds)) = (
+        signed_compare_bounds(op, value),
+        unsigned_compare_bounds(op, value),
+    ) else {
+        return Ok(None);
+    };
     collect_integral_family_ranges(
         table,
         column,
@@ -403,37 +391,65 @@ fn collect_integral_family_ranges(
     unsigned_bounds: Option<(u64, u64)>,
     idx_store: &IndexStore,
     limit: usize,
-) -> Option<Vec<EntityId>> {
-    let mut ids = Vec::new();
-
-    if let Some((low, high)) = signed_bounds {
-        let remaining = limit.saturating_sub(ids.len());
-        if remaining > 0 {
-            let low = super::super::index_store::value_to_sorted_key(&Value::Integer(low))?;
-            let high = super::super::index_store::value_to_sorted_key(&Value::Integer(high))?;
-            ids.extend(
-                idx_store
-                    .sorted
-                    .range_lookup_limited_same_family(table, column, low, high, remaining)?,
-            );
-        }
+) -> CandidateResult {
+    let signed = if let Some((low, high)) = signed_bounds {
+        idx_store.sorted_range_candidates(
+            table,
+            column,
+            (
+                Included(reddb_types::CanonicalKey::Signed(
+                    reddb_types::CanonicalKeyFamily::Integer,
+                    low,
+                )),
+                Included(reddb_types::CanonicalKey::Signed(
+                    reddb_types::CanonicalKeyFamily::Integer,
+                    high,
+                )),
+            ),
+            limit,
+            true,
+            None,
+        )?
+    } else {
+        Some(Vec::new().into())
+    };
+    let Some(signed) = signed else {
+        return Ok(None);
+    };
+    let remaining = limit.saturating_sub(signed.len());
+    let unsigned = if let Some((low, high)) = unsigned_bounds.filter(|_| remaining > 0) {
+        idx_store.sorted_range_candidates(
+            table,
+            column,
+            (
+                Included(reddb_types::CanonicalKey::Unsigned(
+                    reddb_types::CanonicalKeyFamily::UnsignedInteger,
+                    low,
+                )),
+                Included(reddb_types::CanonicalKey::Unsigned(
+                    reddb_types::CanonicalKeyFamily::UnsignedInteger,
+                    high,
+                )),
+            ),
+            remaining,
+            true,
+            None,
+        )?
+    } else {
+        Some(Vec::new().into())
+    };
+    let Some(unsigned) = unsigned else {
+        return Ok(None);
+    };
+    if unsigned.is_empty() {
+        return Ok(Some(signed));
     }
-
-    if let Some((low, high)) = unsigned_bounds {
-        let remaining = limit.saturating_sub(ids.len());
-        if remaining > 0 {
-            let low = super::super::index_store::value_to_sorted_key(&Value::UnsignedInteger(low))?;
-            let high =
-                super::super::index_store::value_to_sorted_key(&Value::UnsignedInteger(high))?;
-            ids.extend(
-                idx_store
-                    .sorted
-                    .range_lookup_limited_same_family(table, column, low, high, remaining)?,
-            );
-        }
+    if signed.is_empty() {
+        return Ok(Some(unsigned));
     }
-
-    Some(ids)
+    idx_store
+        .collect_candidates(signed.iter().chain(unsigned.iter()).copied())
+        .map(Some)
 }
 
 fn signed_between_bounds(low: &Value, high: &Value) -> IntegralBoundsResult<i64> {
@@ -734,71 +750,29 @@ pub(crate) fn try_sorted_index_filtered_by_set(
     idx_store: &IndexStore,
     filter_set: &std::collections::HashSet<u64>,
     limit: usize,
-) -> Option<Vec<EntityId>> {
-    match range_filter {
-        Filter::Between { field, low, high } => {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            let lo = super::super::index_store::value_to_sorted_key(low)?;
-            let hi = super::super::index_store::value_to_sorted_key(high)?;
-            idx_store
-                .sorted
-                .range_filtered_by_set(table, col, lo, hi, filter_set, limit)
+) -> CandidateResult {
+    if let Filter::In {
+        field: FieldRef::TableColumn { column, .. },
+        values,
+    } = range_filter
+    {
+        let keys: Vec<_> = values
+            .iter()
+            .filter_map(super::super::index_store::value_to_sorted_key)
+            .collect();
+        if keys.is_empty() {
+            return Ok(None);
         }
-        Filter::Compare { field, op, value }
-            if matches!(
-                *op,
-                CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le
-            ) =>
-        {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            let threshold = super::super::index_store::value_to_sorted_key(value)?;
-            match *op {
-                CompareOp::Gt => idx_store
-                    .sorted
-                    .gt_filtered_by_set(table, col, threshold, filter_set, limit),
-                CompareOp::Ge => idx_store
-                    .sorted
-                    .ge_filtered_by_set(table, col, threshold, filter_set, limit),
-                CompareOp::Lt => idx_store
-                    .sorted
-                    .lt_filtered_by_set(table, col, threshold, filter_set, limit),
-                CompareOp::Le => idx_store
-                    .sorted
-                    .le_filtered_by_set(table, col, threshold, filter_set, limit),
-                _ => unreachable!(),
-            }
-        }
-        Filter::In { field, values } => {
-            let col = match field {
-                FieldRef::TableColumn { column, .. } => column.as_str(),
-                _ => return None,
-            };
-            let keys: Vec<reddb_types::CanonicalKey> = values
-                .iter()
-                .filter_map(super::super::index_store::value_to_sorted_key)
-                .collect();
-            if keys.is_empty() {
-                return None;
-            }
-            idx_store
-                .sorted
-                .in_lookup_limited_filtered_by_set(table, col, &keys, filter_set, limit)
-        }
-        _ => None,
+        return idx_store.sorted_in_candidates(table, column, keys, limit, Some(filter_set));
     }
+    range_filter_candidates(range_filter, table, idx_store, limit, Some(filter_set))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sort_ids(ids: Vec<EntityId>) -> Vec<u64> {
+    fn sort_ids(ids: impl IntoIterator<Item = EntityId>) -> Vec<u64> {
         let mut ids: Vec<u64> = ids.into_iter().map(|id| id.raw()).collect();
         ids.sort_unstable();
         ids
@@ -892,6 +866,7 @@ mod tests {
 
         for filter in filters {
             let indexed = try_sorted_index_lookup(&filter, "numbers", &idx_store, None)
+                .expect("candidate admission")
                 .expect("lookup should use sorted index");
             let expected = expected_ids(&entities, &filter, "n");
             assert_eq!(sort_ids(indexed), sort_ids(expected), "filter={filter:?}");
@@ -919,7 +894,11 @@ mod tests {
             value: Value::Integer(10),
         };
 
-        assert!(try_sorted_index_lookup(&filter, "metrics", &idx_store, None).is_none());
+        assert!(
+            try_sorted_index_lookup(&filter, "metrics", &idx_store, None)
+                .expect("candidate admission")
+                .is_none()
+        );
     }
 
     #[test]
@@ -980,11 +959,13 @@ mod tests {
 
         let filter = Filter::And(Box::new(city_eq.clone()), Box::new(age_gt.clone()));
         let ids = try_sorted_index_lookup(&filter, "users", &idx_store, None)
+            .expect("candidate admission")
             .expect("composite index should resolve city equality + age range");
         assert_eq!(sort_ids(ids), vec![3, 4]);
 
         let reversed = Filter::And(Box::new(age_gt), Box::new(city_eq));
         let ids = try_sorted_index_lookup(&reversed, "users", &idx_store, None)
+            .expect("candidate admission")
             .expect("composite lookup should accept either AND order");
         assert_eq!(sort_ids(ids), vec![3, 4]);
     }
@@ -1011,17 +992,19 @@ mod tests {
 
         // Without limit: all 1000 results fit under the 5000 cap
         let all = try_sorted_index_lookup(&filter, "t", &idx_store, None)
+            .expect("candidate admission")
             .expect("should use sorted index");
         assert_eq!(all.len(), 1000);
 
         // With limit=10: should return exactly 10 IDs (the lowest-valued ones)
         let limited = try_sorted_index_lookup(&filter, "t", &idx_store, Some(10))
+            .expect("candidate admission")
             .expect("should use sorted index with limit");
         assert_eq!(limited.len(), 10);
 
         // Returned IDs must be a subset of valid IDs
         let all_set: std::collections::HashSet<u64> = all.iter().map(|id| id.raw()).collect();
-        for id in &limited {
+        for id in limited.iter() {
             assert!(
                 all_set.contains(&id.raw()),
                 "limited ID {id:?} not in full result"
@@ -1051,12 +1034,15 @@ mod tests {
 
         // Without limit: > 200K results → None (falls back to full scan)
         assert!(
-            try_sorted_index_lookup(&filter, "t", &idx_store, None).is_none(),
+            try_sorted_index_lookup(&filter, "t", &idx_store, None)
+                .expect("candidate admission")
+                .is_none(),
             "should fall back to full scan when > 200K results and no limit"
         );
 
         // With limit=100: should succeed and return exactly 100 IDs
         let limited = try_sorted_index_lookup(&filter, "t", &idx_store, Some(100))
+            .expect("candidate admission")
             .expect("should use sorted index with limit even when total > 200K");
         assert_eq!(limited.len(), 100);
     }
@@ -1081,6 +1067,7 @@ mod tests {
         };
 
         let limited = try_sorted_index_lookup(&filter, "t", &idx_store, Some(50))
+            .expect("candidate admission")
             .expect("should use sorted index with limit");
         assert_eq!(limited.len(), 50);
     }

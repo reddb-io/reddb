@@ -29,13 +29,12 @@ impl HashCandidates {
         }
     }
 
-    pub fn truncate(&mut self, len: usize) {
-        self.ids.truncate(len);
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [EntityId] {
+        &mut self.ids
     }
 
-    /// Only unowned providers may enter legacy unaccounted vector paths.
-    pub(crate) fn into_resident(self) -> Option<Vec<EntityId>> {
-        self.owner.is_none().then_some(self.ids)
+    pub fn truncate(&mut self, len: usize) {
+        self.ids.truncate(len);
     }
 }
 
@@ -404,6 +403,27 @@ impl HashIndexManager {
         self.lookup_resident(collection, name, key)?.ok_or_else(|| {
             HashIndexError::Read("paged HASH requires an owned candidate result".into())
         })
+    }
+
+    pub(crate) fn sample_candidate_memory(&self) -> Result<(), HashIndexError> {
+        if let Some(admission) = self.candidate_admission.get() {
+            admission.sample()?;
+        }
+        Ok(())
+    }
+
+    /// Ledger only: safe while resident index postings are frozen by a read lock.
+    pub(crate) fn reserve_candidate_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<Box<dyn Send + Sync>>, HashIndexError> {
+        if bytes == 0 {
+            return Ok(None);
+        }
+        self.candidate_admission
+            .get()
+            .map(|admission| admission.reserve(bytes))
+            .transpose()
     }
 
     pub(crate) fn install_candidate_admission(&self, admission: Arc<dyn HashCandidateAdmission>) {

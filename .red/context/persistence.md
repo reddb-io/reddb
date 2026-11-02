@@ -51,8 +51,11 @@ row owners; admission failure discards any accepted prefix. Resident HASH point
 candidates and owned IN unions reserve the complete posting allocation before
 copying, keeping the charge through their consuming iterator.
 Sampling runs outside index locks; empty lookups allocate and sample nothing.
-Parser, legacy sorted/bitmap intersections, backing-read and predicate workspaces
-remain separate admission gaps.
+Resident sorted range/IN/composite candidate vectors, intersection hash sets and
+64-bit Roaring bitmaps also reserve before allocation, retaining input and output
+owners while they coexist. Admission denial propagates instead of falling back.
+Parser, predicate/canonical-key metadata, legacy H3/graph raw candidates and
+backing-read workspaces remain separate admission gaps.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
 execution workspaces, command payload construction, handshake buffers and other
 non-HTTP outputs still require their own owned admission; this accounting alone

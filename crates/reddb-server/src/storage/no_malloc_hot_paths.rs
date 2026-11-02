@@ -61,6 +61,7 @@ pub(crate) struct AllocationCount {
     pub(crate) allocs: usize,
     pub(crate) allocated_bytes: usize,
     pub(crate) largest_allocation_bytes: usize,
+    pub(crate) peak_live_bytes: usize,
     pub(crate) deallocated_bytes: usize,
     deallocs: usize,
 }
@@ -70,6 +71,8 @@ struct AllocationCounter {
     allocs: Cell<usize>,
     allocated_bytes: Cell<usize>,
     largest_allocation_bytes: Cell<usize>,
+    live_bytes: Cell<usize>,
+    peak_live_bytes: Cell<usize>,
     deallocated_bytes: Cell<usize>,
     deallocs: Cell<usize>,
 }
@@ -81,6 +84,8 @@ impl AllocationCounter {
             allocs: Cell::new(0),
             allocated_bytes: Cell::new(0),
             largest_allocation_bytes: Cell::new(0),
+            live_bytes: Cell::new(0),
+            peak_live_bytes: Cell::new(0),
             deallocated_bytes: Cell::new(0),
             deallocs: Cell::new(0),
         }
@@ -89,6 +94,10 @@ impl AllocationCounter {
     fn record_alloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.allocs.set(self.allocs.get() + 1);
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_add(bytes));
+            self.peak_live_bytes
+                .set(self.peak_live_bytes.get().max(self.live_bytes.get()));
             self.largest_allocation_bytes
                 .set(self.largest_allocation_bytes.get().max(bytes));
             self.allocated_bytes
@@ -107,6 +116,8 @@ impl AllocationCounter {
         if self.enabled.get() {
             self.deallocated_bytes
                 .set(self.deallocated_bytes.get().saturating_add(bytes));
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_sub(bytes));
         }
     }
 
@@ -118,6 +129,8 @@ impl AllocationCounter {
         self.allocs.set(0);
         self.allocated_bytes.set(0);
         self.largest_allocation_bytes.set(0);
+        self.live_bytes.set(0);
+        self.peak_live_bytes.set(0);
         self.deallocated_bytes.set(0);
         self.deallocs.set(0);
     }
@@ -127,6 +140,7 @@ impl AllocationCounter {
             allocs: self.allocs.get(),
             allocated_bytes: self.allocated_bytes.get(),
             largest_allocation_bytes: self.largest_allocation_bytes.get(),
+            peak_live_bytes: self.peak_live_bytes.get(),
             deallocated_bytes: self.deallocated_bytes.get(),
             deallocs: self.deallocs.get(),
         };
@@ -282,6 +296,7 @@ fn counting_allocator_measures_a_known_allocating_fixture() {
         "dropping the Box inside the measured closure should register exactly one deallocation"
     );
     assert_eq!(count.allocated_bytes, count.deallocated_bytes);
+    assert_eq!(count.peak_live_bytes, 8);
 }
 
 #[test]
@@ -293,6 +308,7 @@ fn counting_allocator_accounts_for_released_bytes_during_resize() {
         assert_eq!(value.capacity(), 32);
     });
     assert_eq!(count.allocated_bytes, 40);
+    assert_eq!(count.peak_live_bytes, 40);
     assert_eq!(count.deallocated_bytes, 40);
 }
 

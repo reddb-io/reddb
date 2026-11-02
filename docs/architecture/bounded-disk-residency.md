@@ -138,9 +138,9 @@ Candidate vectors are bounded and admitted before allocation. Their reservation
 travels with the result and its consuming iterator. Exhaustion produces an error,
 never an incomplete successful list. Missing/incompatible roots use a fallible
 source scan until checkpoint publication. I/O failures in the selected HASH path
-propagate through SELECT, DML, UNIQUE and the binary wire response. Legacy IN
-unions and sorted/bitmap intersections that cannot retain an owned allocation
-skip the paged optimization; these paths still need an admitted streaming design.
+propagate through SELECT, DML, UNIQUE and the binary wire response. IN unions
+and sorted/bitmap intersections retain resident owned allocations, but still
+skip paged HASH providers; their disk integration needs an admitted streaming design.
 Catalog entry counts are NULL for paged HASH until exact cardinality is persisted;
 an unknown count is not reported as zero.
 
@@ -295,8 +295,8 @@ envelope in place, without another allocation.
 Cost sketch: geometric growth copies less than twice the final capacity across
 resizes, uses one ledger lock per growth, and performs no storage resampling per
 row; ordered row buffers allocate their exact encoded length. This is an algorithmic
-bound, not a measured latency or whole-process RSS qualification. Parser, legacy
-index intersections, backing-read and predicate workspaces still need admission;
+bound, not a measured latency or whole-process RSS qualification. Parser,
+backing-read and predicate workspaces still need admission;
 charging the response does not account for those earlier allocations.
 
 Resident HASH point lookups and owned `IN` unions reserve their entire candidate
@@ -306,13 +306,47 @@ use the storage-independent ledger for admission. Candidate owners retain the
 reservation through consuming iterators; failure discards the whole operation.
 Empty lookups do not allocate or sample, preserving the cheap UNIQUE-miss path.
 Paged point providers keep their existing admission; paged unions retain the
-bounded source-scan fallback. Legacy raw sorted/bitmap intersections remain an
-explicit gap and never strip an owned reservation to enter their raw-vector API.
+bounded source-scan fallback. Resident sorted/bitmap intersections now retain
+owned candidates as described below; no raw-vector conversion strips a reservation.
 
 Cost sketch: N candidate IDs require N × 8 bytes plus one reservation owner;
 a resident union counts and copies K posting lists without per-key temporary
 allocations or an intermediate union copy. Nonempty lookups add one sample and
 one admission-ledger reservation; no latency claim is made without benchmarks.
+
+## Resident index intersections (2026-11-02)
+
+Sorted range, IN and composite lookups count and reserve their exact candidate
+allocation before copying. They sample outside index locks and reselect/freeze the
+current posting generation before counting, admission and copying. Memory refusal
+is an error through table, DML and direct binary callers, never a silent scan retry.
+The existing range break-even fallback and leaf LIMIT semantics remain in place.
+Intersections retain both candidate owners while admitting the smaller-side
+HashSet and final output, including the consuming iterator's lifetime.
+
+Resident multi-equality bitmap intersections retain full u64 EntityIds through
+RoaringTreemap; the former u32 narrowing could alias unrelated rows. Bitmap
+metadata, container growth/conversion and AND scratch are reserved before building
+the bitmap. Candidates sort in place; intermediate bitmap owners are released
+before the final set/output when their data is no longer needed. Paged HASH union
+and paged BTREE fallback behavior is unchanged.
+
+Cost sketch: an N-ID vector uses 8N bytes plus its reservation owner; the
+intersection set reserves 32N + 64 bytes (bucket rounding/control-byte headroom).
+Each bitmap high-32 partition reserves 1024 bytes; each high-16 container reserves
+128 bytes plus three u16 payload capacities (next power of two, clamped to
+4..4096 IDs), covering array growth, bitmap conversion and AND scratch for roaring
+0.11.4. Counting adds an index traversal and bitmap preparation sorts in place;
+the Roaring intersection fast path is retained. These are allocation bounds,
+not measured latency or RSS claims.
+
+Regressions cover the public LIMIT-1 direct query under pressure, denial at leaf,
+set and final-output admission, DML refusal without row changes, shared admission
+with 1/4/16 owners, dense/sparse/full-width bitmaps and allocation peaks, plus
+sampling outside locks and selection of the current index generation. Canonical
+predicate keys, composite/name metadata, legacy H3/graph raw candidates and covered
+values remain separate workspaces; this slice does not establish full-server or
+STG qualification.
 
 ## Remaining implementation before activation
 

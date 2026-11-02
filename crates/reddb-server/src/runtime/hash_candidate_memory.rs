@@ -1,4 +1,4 @@
-//! Owned admission for resident HASH candidate allocations.
+//! Shared owned admission for resident index candidates and intersection workspaces.
 
 use super::memory_admission::QueryBufferReservation;
 use super::{RedDBRuntime, RuntimeInner};
@@ -32,12 +32,12 @@ impl HashCandidateAdmission for RuntimeHashCandidateAdmission {
         let bytes = bytes
             .checked_add(std::mem::size_of::<QueryBufferReservation>())
             .ok_or_else(|| {
-                HashIndexError::Read("HASH candidate allocation size overflow".into())
+                HashIndexError::Read("index candidate allocation size overflow".into())
             })?;
         let guard = runtime.try_reserve_query_buffer_from_sample(bytes).ok_or_else(|| {
             runtime.memory_accounting().record_admission_denied();
             HashIndexError::Read(format!(
-                "resident HASH candidate memory budget exceeded: requested {bytes} bytes, used {} bytes, budget {} bytes",
+                "index candidate memory budget exceeded: requested {bytes} bytes, used {} bytes, budget {} bytes",
                 runtime.memory_accounting().total_used_bytes(),
                 runtime.memory_budget().resolved_bytes,
             ))
@@ -347,7 +347,7 @@ mod tests {
             let expected = if sql.starts_with("UPDATE") {
                 "budget"
             } else {
-                "resident HASH candidate memory budget"
+                "index candidate memory budget"
             };
             assert!(error.to_string().contains(expected), "{sql}: {error}");
             assert_eq!(query_bytes(&runtime), baseline);
@@ -359,8 +359,9 @@ mod tests {
             let response = try_handle_query_binary_direct(&runtime, sql)
                 .expect("direct path must not fall back");
             assert_eq!(response[4], reddb_wire::legacy::MSG_ERROR);
-            assert!(String::from_utf8_lossy(&response[5..])
-                .contains("resident HASH candidate memory budget"));
+            assert!(
+                String::from_utf8_lossy(&response[5..]).contains("index candidate memory budget")
+            );
             drop(response);
             assert_eq!(query_bytes(&runtime), baseline);
         }

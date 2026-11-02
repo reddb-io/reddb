@@ -147,7 +147,7 @@ fn hash_candidate_unmanaged_union_preserves_each_key_and_legacy_ownership() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        result.into_resident().unwrap(),
+        result.into_iter().collect::<Vec<_>>(),
         vec![EntityId::new(2), EntityId::new(1)]
     );
 }
