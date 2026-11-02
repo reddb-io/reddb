@@ -615,6 +615,7 @@ impl RedDBRuntime {
             .resident_memory_bytes_max
             .is_some()
         {
+            super::control_event_index::prepare(&runtime)?;
             runtime
                 .db()
                 .store()

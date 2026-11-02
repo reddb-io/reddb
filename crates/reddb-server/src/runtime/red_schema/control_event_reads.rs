@@ -145,59 +145,70 @@ pub(super) fn read(
         .unwrap_or(usize::MAX);
     let cap = crate::runtime::materialization_limit::max_materialized_rows(db.as_ref())?;
     let mut skipped = 0;
-    crate::runtime::function_budget::try_scan_result(
-        |visit| manager.try_scan_for_each(None, read_bytes, visit),
-        |entity| {
-            let Some(row) = entity.data.as_row() else {
-                return Ok(true);
-            };
-            if let Some(tenant) = tenant {
-                if !matches!(row.get_field("scope"), Some(Value::Text(scope)) if scope.as_ref() == tenant)
-                {
-                    return Ok(true);
+    let mut accept = |entity: &crate::storage::UnifiedEntity| -> RedDBResult<bool> {
+        let Some(row) = entity.data.as_row() else {
+            return Ok(false);
+        };
+        if let Some(tenant) = tenant {
+            if !matches!(row.get_field("scope"), Some(Value::Text(scope)) if scope.as_ref() == tenant)
+            {
+                return Ok(false);
+            }
+        }
+        let record = UnifiedRecord::with_schema(
+            Arc::clone(&schema),
+            CONTROL_EVENT_COLUMNS
+                .iter()
+                .map(|column| row.get_field(column).cloned().unwrap_or(Value::Null))
+                .collect(),
+        );
+        if let Some(filter) = &filter {
+            if !super::super::join_filter::evaluate_runtime_filter_result_with_db(
+                Some(db.as_ref()),
+                &record,
+                filter,
+                Some(&query.table),
+                query.alias.as_deref(),
+            )? {
+                return Ok(false);
+            }
+        }
+        if !ordered && skipped < offset {
+            skipped += 1;
+            return Ok(false);
+        }
+        if result.records.len() >= cap {
+            return Err(RedDBError::MaterializationLimitExceeded {
+                executor: "control_events",
+                limit: cap,
+                current: result.records.len().saturating_add(1),
+            });
+        }
+        result.push(runtime, record)?;
+        // Keep at most two windows (or a small batch), independent of the
+        // total ledger length. Stable sorting preserves ties across batches.
+        if ordered && result.records.len() >= keep.saturating_mul(2).max(64).min(cap) {
+            result.prune(query, db.as_ref(), keep)?;
+        }
+        Ok(true)
+    };
+    if !super::super::control_event_index::try_visit_ordered(
+        runtime,
+        query,
+        read_bytes,
+        &mut accept,
+    )? {
+        let mut accepted = 0usize;
+        crate::runtime::function_budget::try_scan_result(
+            |visit| manager.try_scan_for_each(None, read_bytes, visit),
+            |entity| {
+                if accept(entity)? {
+                    accepted += 1;
                 }
-            }
-            let record = UnifiedRecord::with_schema(
-                Arc::clone(&schema),
-                CONTROL_EVENT_COLUMNS
-                    .iter()
-                    .map(|column| row.get_field(column).cloned().unwrap_or(Value::Null))
-                    .collect(),
-            );
-            if let Some(filter) = &filter {
-                if !super::super::join_filter::evaluate_runtime_filter_result_with_db(
-                    Some(db.as_ref()),
-                    &record,
-                    filter,
-                    Some(&query.table),
-                    query.alias.as_deref(),
-                )? {
-                    return Ok(true);
-                }
-            }
-            if !ordered && skipped < offset {
-                skipped += 1;
-                return Ok(true);
-            }
-            if result.records.len() >= cap {
-                return Err(RedDBError::MaterializationLimitExceeded {
-                    executor: "control_events",
-                    limit: cap,
-                    current: result.records.len().saturating_add(1),
-                });
-            }
-            result.push(runtime, record)?;
-            if !ordered {
-                return Ok(limit.is_none_or(|limit| result.records.len() < limit));
-            }
-            // Keep at most two windows (or a small batch), independent of the
-            // total ledger length. Stable sorting preserves ties across batches.
-            if result.records.len() >= keep.saturating_mul(2).max(64).min(cap) {
-                result.prune(query, db.as_ref(), keep)?;
-            }
-            Ok(true)
-        },
-    )?;
+                Ok(ordered || limit.is_none_or(|limit| accepted < limit))
+            },
+        )?;
+    }
     if ordered {
         result.prune(query, db.as_ref(), keep)?;
         let skipped = offset.min(result.records.len());

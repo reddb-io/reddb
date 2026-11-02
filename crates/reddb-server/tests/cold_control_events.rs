@@ -311,3 +311,229 @@ fn cold_audit_shares_admission_with_other_queries() {
     );
     assert_no_query_buffers(&runtime);
 }
+
+#[test]
+fn newest_audit_page_reads_only_its_index_candidates() {
+    use reddb_engine::storage::collection_read::{
+        CollectionCursor, CollectionRead, EncodedRecord, PagedCollection,
+    };
+    use reddb_server::storage::{EntityId, StoreError};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct NoScan {
+        inner: Arc<dyn CollectionRead + Send + Sync>,
+        reads: Arc<AtomicUsize>,
+    }
+    impl CollectionRead for NoScan {
+        fn get_record(
+            &self,
+            id: EntityId,
+            limit: usize,
+        ) -> Result<Option<EncodedRecord>, StoreError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_record(id, limit)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+            Err(StoreError::Serialization(
+                "audit page must not scan the whole ledger".into(),
+            ))
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+            Err(StoreError::Serialization(
+                "audit page must not scan the whole ledger".into(),
+            ))
+        }
+    }
+    let (_directory, runtime) = cold_fixture(128, 128);
+    // Extra unique-key tie breaker forces the generic scan for the reference.
+    let reference = runtime.execute_query("SELECT id, ts, action FROM red.control_events ORDER BY ts DESC, id DESC, action DESC LIMIT 7 OFFSET 3").expect("reference scan");
+    let store = runtime.db().store();
+    let root = store
+        .get_collection("red.control_events")
+        .expect("ledger")
+        .backing_root_page()
+        .expect("root");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let manager = store.get_collection("red.control_events").expect("ledger");
+    manager.install_backing(
+        Arc::new(NoScan {
+            inner: Arc::new(PagedCollection::new(Arc::new(
+                reddb_server::storage::engine::BTree::with_root(
+                    Arc::clone(store.pager().expect("pager")),
+                    root,
+                ),
+            ))),
+            reads: Arc::clone(&reads),
+        }),
+        root,
+        store.format_version(),
+        2 * 1024 * 1024,
+        130,
+    );
+    let result = runtime.execute_query("SELECT id, ts, action FROM red.control_events ORDER BY ts DESC, id DESC LIMIT 7 OFFSET 3").expect("bounded index read instead of a complete scan");
+    assert_eq!(result.result.records.len(), reference.result.records.len());
+    for (actual, expected) in result.result.records.iter().zip(&reference.result.records) {
+        for column in ["id", "ts", "action"] {
+            assert_eq!(actual.get(column), expected.get(column));
+        }
+    }
+    assert!(
+        reads.load(Ordering::Relaxed) <= 10,
+        "read only the requested base window"
+    );
+    emit(&runtime, "hot.after-reopen".into(), Some("tenant-a"), 128);
+    reads.store(0, Ordering::Relaxed);
+    let hot = runtime
+        .execute_query(
+            "SELECT e.action AS action FROM red.control_events AS e ORDER BY e.ts DESC, e.id DESC LIMIT 1",
+        )
+        .expect("merge new overlay without scanning base");
+    assert_eq!(
+        hot.result.records[0].get("action"),
+        Some(&Value::text("hot.after-reopen"))
+    );
+    assert!(reads.load(Ordering::Relaxed) <= 1);
+    assert_no_query_buffers(&runtime);
+}
+
+fn assert_latest_matches_scan(runtime: &RedDBRuntime) {
+    use reddb_server::runtime::mvcc::{clear_current_tenant, set_current_tenant};
+    struct Scope;
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            clear_current_tenant();
+        }
+    }
+    let _scope = Scope;
+    for tenant in [None, Some("tenant-a"), Some("tenant-b"), Some("empty")] {
+        clear_current_tenant();
+        if let Some(tenant) = tenant {
+            set_current_tenant(tenant.into());
+        }
+        for filter in [
+            "",
+            "WHERE action LIKE 'cold.%'",
+            "WHERE ts > 0 AND action = 'other-tenant'",
+        ] {
+            let prefix = format!(
+                "SELECT id, ts, action FROM red.control_events {filter} ORDER BY ts DESC, id DESC"
+            );
+            let expected = runtime
+                .execute_query(&format!("{prefix}, action DESC LIMIT 7 OFFSET 1"))
+                .expect("full-scan reference");
+            let actual = runtime
+                .execute_query(&format!("{prefix} LIMIT 7 OFFSET 1"))
+                .expect("indexed page");
+            assert_eq!(actual.result.records.len(), expected.result.records.len());
+            for (actual, expected) in actual.result.records.iter().zip(&expected.result.records) {
+                for key in ["id", "ts", "action"] {
+                    assert_eq!(actual.get(key), expected.get(key));
+                }
+            }
+        }
+    }
+    assert_no_query_buffers(runtime);
+}
+
+#[test]
+fn audit_index_keeps_overlay_deletes_filters_and_checkpoint_reopens() {
+    let (directory, runtime) = cold_fixture(96, 128);
+    let options = RedDBOptions::persistent(directory.path().join("audit.rdb"))
+        .with_memory_budget(32 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    let store = runtime.db().store();
+    let manager = store.get_collection("red.control_events").expect("ledger");
+    let mut removed = None;
+    manager
+        .try_scan_for_each(None, 2 * 1024 * 1024, |row| {
+            removed = Some(row.id);
+            false
+        })
+        .expect("source row");
+    store
+        .delete("red.control_events", removed.expect("row"))
+        .expect("delete base row");
+    emit(
+        &runtime,
+        "cold.new-after-delete".into(),
+        Some("tenant-a"),
+        128,
+    );
+    assert_latest_matches_scan(&runtime);
+    runtime.checkpoint().expect("publish deletion and overlay");
+    drop(manager);
+    drop(store);
+    drop(runtime);
+    for round in 0..3 {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("prepared reopen");
+        assert_latest_matches_scan(&runtime);
+        emit(
+            &runtime,
+            format!("cold.sparse-{round}"),
+            Some("tenant-b"),
+            128,
+        );
+        assert_latest_matches_scan(&runtime);
+        runtime
+            .checkpoint()
+            .expect("sparse append maintains native postings");
+    }
+}
+
+#[test]
+fn audit_index_falls_back_for_legacy_ids_in_overlay_and_on_disk() {
+    use reddb_server::storage::{EntityData, EntityId};
+    let (directory, runtime) = cold_fixture(8, 128);
+    let store = runtime.db().store();
+    let manager = store.get_collection("red.control_events").expect("ledger");
+    let mut legacy = None;
+    manager
+        .try_scan_for_each(None, 2 * 1024 * 1024, |row| {
+            legacy = Some(row.clone());
+            false
+        })
+        .expect("fixture row");
+    let mut legacy = legacy.expect("row");
+    legacy.id = EntityId::new(0);
+    let EntityData::Row(row) = &mut legacy.data else {
+        panic!("row")
+    };
+    let fields = row.named.as_mut().expect("named ledger fields");
+    fields.insert("id".into(), Value::text("legacy-short-id"));
+    fields.insert("ts".into(), Value::Integer(i64::MAX));
+    store
+        .insert_auto("red.control_events", legacy)
+        .expect("legacy row");
+    let sql = "SELECT id FROM red.control_events ORDER BY ts DESC, id DESC LIMIT 1";
+    assert_eq!(
+        runtime
+            .execute_query(sql)
+            .expect("overlay fallback")
+            .result
+            .records[0]
+            .get("id"),
+        Some(&Value::text("legacy-short-id"))
+    );
+    runtime.checkpoint().expect("publish fallback marker");
+    drop(manager);
+    drop(store);
+    drop(runtime);
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("audit.rdb"))
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .expect("reopen marker");
+    assert_eq!(
+        runtime
+            .execute_query(sql)
+            .expect("persisted fallback")
+            .result
+            .records[0]
+            .get("id"),
+        Some(&Value::text("legacy-short-id"))
+    );
+    assert_no_query_buffers(&runtime);
+}
