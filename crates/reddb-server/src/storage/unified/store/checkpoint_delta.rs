@@ -160,9 +160,23 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
-        if manager.has_backing() || Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
+        if manager.has_backing() {
+            return self.sparse_cold_append_tree(collection, manager, tree, previous, current);
+        }
+        if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
+        self.apply_sparse_checkpoint_tree(collection, manager, tree, previous, current)
+    }
+
+    pub(super) fn apply_sparse_checkpoint_tree(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        tree: &Arc<BTree>,
+        previous: &CheckpointVersion,
+        current: &mut CheckpointVersion,
+    ) -> Result<Option<Arc<BTree>>, StoreError> {
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
             return Ok(None);
         }
