@@ -440,7 +440,7 @@ impl<'a> Parser<'a> {
         } else if self.consume(&Token::All)? {
             Ok("all".to_string())
         } else {
-            self.expect_ident()
+            self.parse_collection_name()
         }
     }
 

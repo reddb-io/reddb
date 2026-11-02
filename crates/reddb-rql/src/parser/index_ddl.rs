@@ -23,7 +23,7 @@ impl<'a> Parser<'a> {
 
         self.expect(Token::On)?;
 
-        let table = self.expect_ident()?;
+        let table = self.parse_collection_name()?;
 
         // Parse column list: (col1, col2, ...)
         self.expect(Token::LParen)?;
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
 
         self.expect(Token::On)?;
 
-        let table = self.expect_ident()?;
+        let table = self.parse_collection_name()?;
 
         Ok(QueryExpr::DropIndex(DropIndexQuery {
             name,

@@ -73,6 +73,9 @@ impl RedDBRuntime {
             return self.execute_create_keyed_collection(raw_query, query);
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         // Reject an AI policy that wires a provider/model to a modality it

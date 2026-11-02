@@ -1997,11 +1997,11 @@ impl<'a> Parser<'a> {
         }
 
         if self.consume_ident_ci("STATUS")? {
-            let collection = self.expect_ident()?;
+            let collection = self.parse_collection_name()?;
             return Ok(QueryExpr::EventsBackfillStatus { collection });
         }
 
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
         let where_filter = if self.consume(&Token::Where)? {
             let mut parts = Vec::new();
             while !self.check(&Token::Eof) && !self.check(&Token::To) {
@@ -2021,7 +2021,7 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(Token::To)?;
-        let target_queue = self.expect_ident()?;
+        let target_queue = self.parse_collection_name()?;
         let limit = if self.consume(&Token::Limit)? {
             Some(self.parse_positive_integer("LIMIT")? as u64)
         } else {
@@ -2907,11 +2907,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_dotted_admin_path(&mut self, lowercase: bool) -> Result<String, ParseError> {
-        let mut path = self.expect_ident()?;
-        while self.consume(&Token::Dot)? {
-            let next = self.expect_ident_or_keyword()?;
-            path = format!("{path}.{next}");
-        }
+        let path = self.parse_collection_name()?;
         Ok(if lowercase {
             path.to_ascii_lowercase()
         } else {
@@ -3247,10 +3243,10 @@ impl<'a> Parser<'a> {
                 if let Some(k) = kind {
                     self.advance()?;
                     self.expect(Token::Of)?;
-                    let coll = self.expect_ident()?;
+                    let coll = self.parse_collection_name()?;
                     (k, coll)
                 } else {
-                    let coll = self.expect_ident()?;
+                    let coll = self.parse_collection_name()?;
                     (PolicyTargetKind::Table, coll)
                 }
             };
@@ -3835,7 +3831,7 @@ impl<'a> Parser<'a> {
                     let if_exists = self.match_if_exists()?;
                     let name = self.expect_ident()?;
                     self.expect(Token::On)?;
-                    let table = self.expect_ident()?;
+                    let table = self.parse_collection_name()?;
                     Ok(SqlCommand::DropPolicy(DropPolicyQuery {
                         name,
                         table,
@@ -4337,7 +4333,7 @@ impl<'a> Parser<'a> {
                 } else if self.consume_ident_ci("INDICES")? || self.consume_ident_ci("INDEXES")? {
                     let mut query = TableQuery::new("red.show_indexes");
                     if self.consume(&Token::On)? {
-                        let collection = self.expect_ident_or_keyword()?;
+                        let collection = self.parse_collection_name()?;
                         let filter = Filter::Compare {
                             field: FieldRef::column("", "table"),
                             op: CompareOp::Eq,
@@ -4611,7 +4607,7 @@ impl<'a> Parser<'a> {
             // today is CSV.
             Token::Copy => {
                 self.advance()?;
-                let table = self.expect_ident()?;
+                let table = self.parse_collection_name()?;
                 self.expect(Token::From)?;
                 let path = self.parse_string()?;
 
