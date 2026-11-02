@@ -58,7 +58,7 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> LegacyQuer
         && crate::runtime::execution_context::current_auth_identity_for_audit().is_none()
     {
         if let Some(resp) = super::query_direct::try_handle_query_binary_direct(runtime, sql) {
-            return resp.into();
+            return resp;
         }
     }
 
@@ -593,7 +593,7 @@ pub(crate) fn handle_execute_prepared(
         if let Some(reddb_rql::ast::QueryExpr::Table(tq)) = bound.prepared_expr() {
             if super::query_direct::is_shape_direct_eligible(tq) {
                 if let Some(resp) = super::query_direct::execute_direct_scan(runtime, tq) {
-                    return resp.into();
+                    return resp;
                 }
             }
         }

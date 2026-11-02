@@ -12,6 +12,7 @@
 //! None. Shape constraints are deliberately tight — only eligible
 //! cases go direct; everything else returns None unchanged.
 
+use super::protocol::encode_value;
 use std::sync::Arc;
 
 use crate::runtime::mvcc::entity_visible_under_current_snapshot;
@@ -25,10 +26,12 @@ use reddb_rql::ast::{Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, 
 use reddb_rql::sql_lowering::effective_table_filter;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
-use super::protocol::encode_value;
+use crate::runtime::memory_buffers::BinaryQueryResponse;
+mod buffer;
+use buffer::{buffer_error, named_columns_bytes, query_columns_bytes, DirectResultBuffer};
 use reddb_wire::legacy::{
-    build_legacy_error_frame, build_legacy_result_frame, encode_result_payload_header,
-    set_result_payload_row_count, WireValue,
+    build_legacy_error_frame, build_legacy_result_frame_in_place, encode_result_payload_header,
+    set_result_payload_row_count,
 };
 
 /// Try to serve a binary SELECT via the zero-copy scan path.
@@ -36,7 +39,10 @@ use reddb_wire::legacy::{
 /// Returns `Some(wire_response)` when the query matches the fast-path
 /// shape and was executed; returns `None` to signal the caller should
 /// fall back to the standard `execute_query` + `encode_result` path.
-pub(crate) fn try_handle_query_binary_direct(runtime: &RedDBRuntime, sql: &str) -> Option<Vec<u8>> {
+pub(crate) fn try_handle_query_binary_direct(
+    runtime: &RedDBRuntime,
+    sql: &str,
+) -> Option<BinaryQueryResponse> {
     // Cheap prefix gate. Avoid parse for anything not a plain SELECT
     // (WITHIN, EXPLAIN, SET, BEGIN, …).
     let trimmed = sql.trim_start();
@@ -140,7 +146,10 @@ pub(super) fn is_shape_direct_eligible(tq: &TableQuery) -> bool {
     true
 }
 
-pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Option<Vec<u8>> {
+pub(super) fn execute_direct_scan(
+    runtime: &RedDBRuntime,
+    tq: &TableQuery,
+) -> Option<BinaryQueryResponse> {
     let effective_filter = effective_table_filter(tq);
 
     // Defer to execute_query's point-lookup path when WHERE reduces
@@ -157,15 +166,8 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
     let hard_limit = limit.unwrap_or(usize::MAX);
     let schema_columns = manager.column_schema();
     let schema_slice = schema_columns.as_ref().map(|schema| schema.as_slice());
-    let pre_resolved_cols =
-        schema_slice.map(|schema| resolve_wire_columns_from_query_schema(tq, schema));
-
-    let mut body: Vec<u8> = Vec::with_capacity(estimate_direct_response_capacity(
-        tq,
-        schema_slice,
-        limit.unwrap_or(0),
-    ));
-    let mut header_nrows_pos: usize = 0;
+    let mut body = DirectResultBuffer::new(runtime);
+    let mut _columns_charge = None;
     let mut cols: Option<Vec<WireColumn>> = None;
     let mut row_count: u32 = 0;
 
@@ -180,21 +182,27 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
                 // skip
             } else if let EntityData::Row(ref row) = entity.data {
                 if cols.is_none() {
-                    let resolved = pre_resolved_cols
-                        .clone()
-                        .unwrap_or_else(|| resolve_wire_columns(tq, row));
-                    header_nrows_pos = encode_result_payload_header(
-                        &mut body,
-                        resolved.iter().map(|col| col.name.as_ref()),
-                        0,
-                    );
-                    cols = Some(resolved);
+                    _columns_charge =
+                        match body.workspace(query_columns_bytes(tq, schema_slice, Some(row))) {
+                            Ok(charge) => Some(charge),
+                            Err(error) => {
+                                body.fail(error);
+                                None
+                            }
+                        };
+                    if !body.failed() {
+                        let resolved = match schema_slice {
+                            Some(schema) => resolve_wire_columns_from_query_schema(tq, schema),
+                            None => resolve_wire_columns(tq, row),
+                        };
+                        body.header(resolved.iter().map(|col| col.name.as_ref()));
+                        cols = Some(resolved);
+                    }
                 }
                 if let Some(cols_ref) = cols.as_ref() {
-                    for c in cols_ref {
-                        encode_entity_wire_value(&mut body, entity, row, c);
+                    if body.row(entity, row, cols_ref) {
+                        row_count += 1;
                     }
-                    row_count += 1;
                 }
             }
         }};
@@ -222,16 +230,13 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
         } else {
             match try_hash_eq_lookup(filter, tq.table.as_str(), idx_store) {
                 Ok(ids) => ids?,
-                Err(error) => return Some(build_legacy_error_frame(error.to_string().as_bytes())),
+                Err(error) => {
+                    return Some(build_legacy_error_frame(error.to_string().as_bytes()).into())
+                }
             }
         };
         if ids.is_empty() {
-            return encode_empty_direct_select(tq, schema_slice);
-        }
-        let target_capacity =
-            estimate_direct_response_capacity(tq, schema_slice, ids.len().min(hard_limit));
-        if target_capacity > body.capacity() {
-            body.reserve(target_capacity - body.capacity());
+            return encode_empty_direct_select(runtime, tq, schema_slice);
         }
         let table_name = tq.table.as_str();
         let table_alias = tq.alias.as_deref().unwrap_or(table_name);
@@ -243,7 +248,7 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
         };
         let mut predicate_error = None;
         let scan = manager.try_for_each_id(&ids, usize::MAX, |_, entity| {
-            if (row_count as usize) >= hard_limit {
+            if body.failed() || (row_count as usize) >= hard_limit {
                 return false;
             }
             let matches = compiled_filter.try_evaluate(entity).and_then(|decision| {
@@ -265,12 +270,12 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
                     return false;
                 }
             }
-            (row_count as usize) < hard_limit
+            !body.failed() && (row_count as usize) < hard_limit
         });
         // A frame already contains any accepted prefix. Publish only an error
         // on a rejected predicate/read, never that partial result or a retry.
         if let Some(error) = predicate_error.or_else(|| scan.err().map(crate::RedDBError::from)) {
-            return Some(build_legacy_error_frame(error.to_string().as_bytes()));
+            return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
         }
     } else {
         // ── Unfiltered LIMIT path ─────────────────────────────────
@@ -278,22 +283,25 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
         // unbounded scan here (the runtime's canonical path has the
         // parallel-scan branch for that).
         limit?;
-        manager.for_each_entity(|entity| {
-            if (row_count as usize) >= hard_limit {
+        let scan = manager.try_for_each_entity(usize::MAX, |entity| {
+            if body.failed() || (row_count as usize) >= hard_limit {
                 return false;
             }
             emit_one!(entity);
-            (row_count as usize) < hard_limit
+            !body.failed() && (row_count as usize) < hard_limit
         });
+        if let Err(error) = scan {
+            return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
+        }
     }
 
-    cols.as_ref()?;
-
-    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
-
-    let _ = db;
-    let _ = store;
-    Some(build_legacy_result_frame(&body))
+    if body.failed() {
+        return Some(body.finish(row_count));
+    }
+    if cols.is_none() {
+        return encode_empty_direct_select(runtime, tq, schema_slice);
+    }
+    Some(body.finish(row_count))
 }
 
 struct SimpleHashEqSelect {
@@ -618,16 +626,16 @@ fn parse_sql_single_quoted_text(text: &str) -> Option<String> {
 fn execute_simple_hash_eq_select(
     runtime: &RedDBRuntime,
     parsed: &SimpleHashEqSelect,
-) -> Option<Vec<u8>> {
+) -> Option<BinaryQueryResponse> {
     let idx_store = runtime.index_store_ref();
     let idx = idx_store.find_hash_index_for_column(&parsed.table, &parsed.filter_column)?;
     let key = parsed.value.to_le_bytes();
     let ids = match idx_store.hash_lookup(&parsed.table, idx.hash_lookup_name().as_ref(), &key) {
         Ok(ids) => ids,
-        Err(error) => return Some(build_legacy_error_frame(error.as_bytes())),
+        Err(error) => return Some(build_legacy_error_frame(error.as_bytes()).into()),
     };
     if ids.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
 
     execute_simple_indexed_select(runtime, &parsed.table, &parsed.columns, &ids, |schema| {
@@ -641,7 +649,7 @@ fn execute_simple_hash_eq_select(
 fn execute_simple_between_select(
     runtime: &RedDBRuntime,
     parsed: &SimpleBetweenSelect,
-) -> Option<Vec<u8>> {
+) -> Option<BinaryQueryResponse> {
     let idx_store = runtime.index_store_ref();
     if !idx_store
         .sorted
@@ -661,7 +669,7 @@ fn execute_simple_between_select(
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
     )?;
     if ids.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
     if ids.len() > SIMPLE_INDEX_BREAK_EVEN_CAP {
         return None;
@@ -679,7 +687,7 @@ fn execute_simple_between_select(
 fn execute_simple_text_eq_int_gt_select(
     runtime: &RedDBRuntime,
     parsed: &SimpleTextEqIntGtSelect,
-) -> Option<Vec<u8>> {
+) -> Option<BinaryQueryResponse> {
     let idx_store = runtime.index_store_ref();
     let index_columns = vec![parsed.eq_column.clone(), parsed.range_column.clone()];
     if !idx_store
@@ -706,7 +714,7 @@ fn execute_simple_text_eq_int_gt_select(
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
     )?;
     if ids.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
     if ids.len() > SIMPLE_INDEX_BREAK_EVEN_CAP {
         return None;
@@ -742,7 +750,7 @@ fn compare_ordered_candidate(
 fn execute_simple_ordered_complex_select(
     runtime: &RedDBRuntime,
     parsed: &SimpleOrderedComplexSelect,
-) -> Option<Vec<u8>> {
+) -> Option<BinaryQueryResponse> {
     let idx_store = runtime.index_store_ref();
     let index_columns = vec![parsed.eq_column.clone(), parsed.range_column.clone()];
     if !idx_store
@@ -766,7 +774,7 @@ fn execute_simple_ordered_complex_select(
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
     )?;
     if ids.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
     if ids.len() > SIMPLE_INDEX_BREAK_EVEN_CAP {
         return None;
@@ -781,26 +789,37 @@ fn execute_simple_ordered_complex_select(
     let age_field = RowFieldAccessor::for_column(&parsed.range_column, schema_slice);
     let score_field = RowFieldAccessor::for_column(&parsed.float_column, schema_slice);
     let id_field = RowFieldAccessor::for_column("id", schema_slice);
-    let mut candidates: Vec<OrderedCandidate> = Vec::new();
+    let mut body = DirectResultBuffer::new(runtime);
+    if body.failed() {
+        return Some(body.finish(0));
+    }
+    let _candidates_charge = match body.workspace(
+        ids.len()
+            .saturating_mul(std::mem::size_of::<OrderedCandidate>()),
+    ) {
+        Ok(charge) => charge,
+        Err(error) => return Some(buffer_error(error)),
+    };
+    let mut candidates: Vec<OrderedCandidate> = Vec::with_capacity(ids.len());
 
-    manager.for_each_id(&ids, |_, entity| {
+    let scan = manager.try_for_each_id(&ids, usize::MAX, |_, entity| {
         if !entity.data.is_row() || !entity_visible_under_current_snapshot(entity) {
-            return;
+            return true;
         }
         let EntityData::Row(ref row) = entity.data else {
-            return;
+            return true;
         };
         if !value_text_eq(city_field.value(row), parsed.eq_value.as_str()) {
-            return;
+            return true;
         }
         if !value_between_i64(age_field.value(row), parsed.low, parsed.high) {
-            return;
+            return true;
         }
         let Some(score) = value_as_f64(score_field.value(row)) else {
-            return;
+            return true;
         };
         if score <= parsed.threshold {
-            return;
+            return true;
         }
 
         candidates.push(OrderedCandidate {
@@ -808,10 +827,14 @@ fn execute_simple_ordered_complex_select(
             tie_id: value_as_u64(id_field.value(row)).unwrap_or_else(|| entity.id.raw()),
             entity_id: entity.id,
         });
+        true
     });
+    if let Err(error) = scan {
+        return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
+    }
 
     if candidates.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
     if let Some(limit) = parsed.limit {
         if candidates.len() > limit {
@@ -820,22 +843,32 @@ fn execute_simple_ordered_complex_select(
         }
     }
     if candidates.is_empty() {
-        return Some(encode_empty_simple_select(&parsed.columns));
+        return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
-    candidates.sort_by(compare_ordered_candidate);
+    candidates.sort_unstable_by(compare_ordered_candidate);
 
+    let _columns_charge = match body.workspace(named_columns_bytes(&parsed.columns)) {
+        Ok(charge) => charge,
+        Err(error) => return Some(buffer_error(error)),
+    };
     let cols = match schema_columns.as_ref() {
         Some(schema) => resolve_wire_columns_from_schema(&parsed.columns, schema.as_slice()),
         None => {
             let mut first_row_cols: Option<Vec<WireColumn>> = None;
-            manager.for_each_id(&[candidates[0].entity_id], |_, entity| {
-                if first_row_cols.is_some() {
-                    return;
-                }
-                if let EntityData::Row(ref row) = entity.data {
-                    first_row_cols = Some(resolve_wire_columns_from_names(&parsed.columns, row));
-                }
-            });
+            let scan =
+                manager.try_for_each_id(&[candidates[0].entity_id], usize::MAX, |_, entity| {
+                    if first_row_cols.is_some() {
+                        return false;
+                    }
+                    if let EntityData::Row(ref row) = entity.data {
+                        first_row_cols =
+                            Some(resolve_wire_columns_from_names(&parsed.columns, row));
+                    }
+                    false
+                });
+            if let Err(error) = scan {
+                return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
+            }
             first_row_cols.unwrap_or_else(|| {
                 parsed
                     .columns
@@ -846,40 +879,48 @@ fn execute_simple_ordered_complex_select(
         }
     };
 
-    let mut body = Vec::with_capacity(estimate_wire_columns_response_capacity(
-        &cols,
-        candidates.len(),
-    ));
-    let header_nrows_pos =
-        encode_result_payload_header(&mut body, cols.iter().map(|col| col.name.as_ref()), 0);
+    body.header(cols.iter().map(|col| col.name.as_ref()));
     let mut row_count: u32 = 0;
+    let slots_bytes = candidates.len().saturating_mul(
+        std::mem::size_of::<EntityId>() + std::mem::size_of::<Option<bytes::Bytes>>(),
+    );
+    let _slots_charge = match body.workspace(slots_bytes) {
+        Ok(charge) => charge,
+        Err(error) => return Some(buffer_error(error)),
+    };
     let candidate_ids: Vec<EntityId> = candidates
         .iter()
         .map(|candidate| candidate.entity_id)
         .collect();
-    let row_capacity = estimate_wire_columns_response_capacity(&cols, 1);
-    let mut encoded_rows: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidate_ids.len());
-    encoded_rows.resize_with(candidate_ids.len(), || None);
-    manager.for_each_id(&candidate_ids, |candidate_idx, entity| {
+    let mut encoded_rows: Vec<Option<bytes::Bytes>> = vec![None; candidate_ids.len()];
+    // Segment traversal need not match candidate order. Retain each admitted row
+    // in its input slot, then append in the sorted order, charging both owners.
+    let scan = manager.try_for_each_id(&candidate_ids, usize::MAX, |candidate_idx, entity| {
+        if body.failed() {
+            return false;
+        }
         let EntityData::Row(ref row) = entity.data else {
-            return;
+            return true;
         };
         if !entity_visible_under_current_snapshot(entity) {
-            return;
+            return true;
         }
-        let mut row_bytes = Vec::with_capacity(row_capacity);
-        for col in &cols {
-            encode_entity_wire_value(&mut row_bytes, entity, row, col);
+        match body.encoded_row(entity, row, &cols) {
+            Ok(bytes) => encoded_rows[candidate_idx] = Some(bytes),
+            Err(error) => body.fail(error),
         }
-        encoded_rows[candidate_idx] = Some(row_bytes);
+        !body.failed()
     });
+    if let Err(error) = scan {
+        return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
+    }
     for row_bytes in encoded_rows.into_iter().flatten() {
-        body.extend_from_slice(&row_bytes);
+        if !body.append_encoded(&row_bytes) {
+            break;
+        }
         row_count += 1;
     }
-    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
-
-    Some(build_legacy_result_frame(&body))
+    Some(body.finish(row_count))
 }
 
 fn execute_simple_indexed_select<FBuild>(
@@ -888,7 +929,7 @@ fn execute_simple_indexed_select<FBuild>(
     columns: &[String],
     ids: &[EntityId],
     build_predicate: FBuild,
-) -> Option<Vec<u8>>
+) -> Option<BinaryQueryResponse>
 where
     FBuild: FnOnce(Option<&[String]>) -> SimpleRowPredicate,
 {
@@ -898,136 +939,74 @@ where
     let schema_columns = manager.column_schema();
     let schema_slice = schema_columns.as_ref().map(|schema| schema.as_slice());
     let row_predicate = build_predicate(schema_slice);
-    let pre_resolved_cols = schema_columns
-        .as_ref()
-        .map(|schema| resolve_wire_columns_from_schema(columns, schema.as_slice()));
-    let mut body: Vec<u8> =
-        Vec::with_capacity(estimate_simple_response_capacity(columns, ids.len()));
-    let mut header_nrows_pos: usize = 0;
+    let mut body = DirectResultBuffer::new(runtime);
+    let _columns_charge = match body.workspace(named_columns_bytes(columns)) {
+        Ok(charge) => charge,
+        Err(error) => return Some(buffer_error(error)),
+    };
     let mut cols: Option<Vec<WireColumn>> = None;
     let mut row_count: u32 = 0;
-
-    manager.for_each_id(ids, |_, entity| {
-        if !entity.data.is_row() || !entity_visible_under_current_snapshot(entity) {
-            return;
+    let scan = manager.try_for_each_id(ids, usize::MAX, |_, entity| {
+        if body.failed() {
+            return false;
+        }
+        if !entity_visible_under_current_snapshot(entity) {
+            return true;
         }
         let EntityData::Row(ref row) = entity.data else {
-            return;
+            return true;
         };
         if !row_predicate.matches(row) {
-            return;
+            return true;
         }
-
         if cols.is_none() {
-            let resolved = pre_resolved_cols
-                .clone()
-                .unwrap_or_else(|| resolve_wire_columns_from_names(columns, row));
-            header_nrows_pos = encode_result_payload_header(
-                &mut body,
-                resolved.iter().map(|col| col.name.as_ref()),
-                0,
-            );
+            let resolved = match schema_slice {
+                Some(schema) => resolve_wire_columns_from_schema(columns, schema),
+                None => resolve_wire_columns_from_names(columns, row),
+            };
+            body.header(resolved.iter().map(|col| col.name.as_ref()));
             cols = Some(resolved);
         }
-
-        if let Some(cols_ref) = cols.as_ref() {
-            for c in cols_ref {
-                encode_entity_wire_value(&mut body, entity, row, c);
-            }
+        if body.row(
+            entity,
+            row,
+            cols.as_ref().expect("columns resolved before encoding"),
+        ) {
             row_count += 1;
         }
+        !body.failed()
     });
-
-    cols.as_ref()?;
-
-    set_result_payload_row_count(&mut body, header_nrows_pos, row_count).ok()?;
-    Some(build_legacy_result_frame(&body))
+    if let Err(error) = scan {
+        return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
+    }
+    if cols.is_none() && !body.failed() {
+        body.header(columns.iter().map(String::as_str));
+    }
+    Some(body.finish(row_count))
 }
 
-fn encode_empty_simple_select(columns: &[String]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(estimate_simple_response_capacity(columns, 0));
-    encode_result_payload_header(&mut body, columns.iter().map(String::as_str), 0);
-
-    build_legacy_result_frame(&body)
+fn encode_empty_simple_select(runtime: &RedDBRuntime, columns: &[String]) -> BinaryQueryResponse {
+    let mut body = DirectResultBuffer::new(runtime);
+    body.header(columns.iter().map(String::as_str));
+    body.finish(0)
 }
 
-fn encode_empty_direct_select(tq: &TableQuery, schema: Option<&[String]>) -> Option<Vec<u8>> {
+fn encode_empty_direct_select(
+    runtime: &RedDBRuntime,
+    tq: &TableQuery,
+    schema: Option<&[String]>,
+) -> Option<BinaryQueryResponse> {
+    let mut body = DirectResultBuffer::new(runtime);
+    let _columns_charge = match body.workspace(query_columns_bytes(tq, schema, None)) {
+        Ok(charge) => charge,
+        Err(error) => return Some(buffer_error(error)),
+    };
     let cols = match schema {
         Some(schema) => resolve_wire_columns_from_query_schema(tq, schema),
         None => resolve_wire_columns_for_empty_projection(tq)?,
     };
-    let mut body = Vec::with_capacity(estimate_wire_columns_response_capacity(&cols, 0));
-    encode_result_payload_header(&mut body, cols.iter().map(|col| col.name.as_ref()), 0);
-
-    Some(build_legacy_result_frame(&body))
-}
-
-fn estimate_simple_response_capacity(columns: &[String], row_hint: usize) -> usize {
-    let header = 2usize
-        + columns
-            .iter()
-            .map(|name| 2usize.saturating_add(name.len()))
-            .sum::<usize>()
-        + 4;
-    let row_bytes = columns
-        .iter()
-        .map(|name| estimated_wire_value_bytes(name.as_str()))
-        .sum::<usize>()
-        .max(1);
-    header
-        .saturating_add(row_hint.saturating_mul(row_bytes))
-        .clamp(256, 4 * 1024 * 1024)
-}
-
-fn estimate_direct_response_capacity(
-    tq: &TableQuery,
-    schema: Option<&[String]>,
-    row_hint: usize,
-) -> usize {
-    match schema {
-        Some(schema) => {
-            let cols = resolve_wire_columns_from_query_schema(tq, schema);
-            estimate_wire_columns_response_capacity(&cols, row_hint)
-        }
-        None => resolve_wire_columns_for_empty_projection(tq)
-            .map(|cols| estimate_wire_columns_response_capacity(&cols, row_hint))
-            .unwrap_or(2048),
-    }
-}
-
-fn estimate_wire_columns_response_capacity(cols: &[WireColumn], row_hint: usize) -> usize {
-    let header = 2usize
-        + cols
-            .iter()
-            .map(|col| 2usize.saturating_add(col.name.len()))
-            .sum::<usize>()
-        + 4;
-    let row_bytes = cols
-        .iter()
-        .map(estimated_wire_column_value_bytes)
-        .sum::<usize>()
-        .max(1);
-    header
-        .saturating_add(row_hint.saturating_mul(row_bytes))
-        .clamp(256, 4 * 1024 * 1024)
-}
-
-fn estimated_wire_column_value_bytes(col: &WireColumn) -> usize {
-    match &col.source {
-        WireColumnSource::Rid | WireColumnSource::CreatedAt | WireColumnSource::UpdatedAt => 9,
-        _ => estimated_wire_value_bytes(col.name.as_ref()),
-    }
-}
-
-fn estimated_wire_value_bytes(column: &str) -> usize {
-    match column {
-        "id" | "age" | "score" | "rid" | "created_at_ms" | "updated_at_ms" => 9,
-        "city" => 16,
-        "name" => 32,
-        "email" => 48,
-        "created_at" | "updated_at" => 40,
-        _ => 24,
-    }
+    body.header(cols.iter().map(|column| column.name.as_ref()));
+    Some(body.finish(0))
 }
 
 enum RowFieldAccessor {
@@ -1229,7 +1208,11 @@ fn resolve_wire_columns(tq: &TableQuery, row: &RowData) -> Vec<WireColumn> {
         .any(|it| matches!(it, SelectItem::Wildcard));
 
     if wildcard {
-        let mut out = Vec::with_capacity(3 + row.columns.len());
+        let fields = row.schema.as_ref().map_or_else(
+            || row.named.as_ref().map_or(0, |named| named.len()),
+            |schema| schema.len(),
+        );
+        let mut out = Vec::with_capacity(3 + fields);
         out.push(WireColumn::system("rid", WireColumnSource::Rid));
         out.push(WireColumn::system(
             "created_at",
@@ -1431,63 +1414,58 @@ fn resolve_named_wire_column(name: &str, source_column: &str, row: &RowData) -> 
 }
 
 #[inline]
+fn entity_wire_value<'a>(
+    entity: &'a UnifiedEntity,
+    row: &'a RowData,
+    col: &WireColumn,
+) -> std::borrow::Cow<'a, Value> {
+    use std::borrow::Cow;
+    let value = match &col.source {
+        WireColumnSource::Rid => {
+            return Cow::Owned(Value::UnsignedInteger(entity.logical_id().raw()))
+        }
+        WireColumnSource::CreatedAt => {
+            return Cow::Owned(Value::UnsignedInteger(entity.created_at))
+        }
+        WireColumnSource::UpdatedAt => {
+            return Cow::Owned(Value::UnsignedInteger(entity.updated_at))
+        }
+        WireColumnSource::RowIndexTrusted { index, name } => {
+            if row.named.is_none()
+                && row.schema.as_ref().is_none_or(|schema| {
+                    schema
+                        .get(*index)
+                        .is_some_and(|column| column.as_str() == name.as_ref())
+                })
+            {
+                row.columns.get(*index)
+            } else {
+                row.get_field(name.as_ref())
+            }
+        }
+        WireColumnSource::RowIndex { index, name } => row
+            .schema
+            .as_ref()
+            .and_then(|schema| {
+                schema
+                    .get(*index)
+                    .filter(|column| column.as_str() == name.as_ref())
+            })
+            .and_then(|_| row.columns.get(*index))
+            .or_else(|| row.get_field(name.as_ref())),
+        WireColumnSource::RowName(name) => row.get_field(name.as_ref()),
+    };
+    Cow::Borrowed(value.unwrap_or(&Value::Null))
+}
+
+#[inline]
 fn encode_entity_wire_value(
     body: &mut Vec<u8>,
     entity: &UnifiedEntity,
     row: &RowData,
     col: &WireColumn,
 ) {
-    match &col.source {
-        WireColumnSource::Rid => encode_wire_u64(body, entity.logical_id().raw()),
-        WireColumnSource::CreatedAt => encode_wire_u64(body, entity.created_at),
-        WireColumnSource::UpdatedAt => encode_wire_u64(body, entity.updated_at),
-        WireColumnSource::RowIndexTrusted { index, name } => {
-            let value = if row.named.is_none()
-                && row.schema.as_ref().is_none_or(|schema| {
-                    schema
-                        .get(*index)
-                        .is_some_and(|column| column.as_str() == name.as_ref())
-                }) {
-                row.columns.get(*index)
-            } else {
-                row.get_field(name.as_ref())
-            };
-            match value {
-                Some(value) => encode_value(body, value),
-                None => encode_wire_null(body),
-            }
-        }
-        WireColumnSource::RowIndex { index, name } => {
-            match row
-                .schema
-                .as_ref()
-                .and_then(|schema| {
-                    schema
-                        .get(*index)
-                        .filter(|col| col.as_str() == name.as_ref())
-                })
-                .and_then(|_| row.columns.get(*index))
-                .or_else(|| row.get_field(name.as_ref()))
-            {
-                Some(v) => encode_value(body, v),
-                None => encode_wire_null(body),
-            }
-        }
-        WireColumnSource::RowName(name) => match row.get_field(name.as_ref()) {
-            Some(v) => encode_value(body, v),
-            None => encode_wire_null(body),
-        },
-    }
-}
-
-#[inline]
-fn encode_wire_null(body: &mut Vec<u8>) {
-    reddb_wire::legacy::encode_value(body, &WireValue::Null);
-}
-
-#[inline]
-fn encode_wire_u64(body: &mut Vec<u8>, value: u64) {
-    reddb_wire::legacy::encode_value(body, &WireValue::U64(value));
+    encode_value(body, &entity_wire_value(entity, row, col));
 }
 
 #[cfg(test)]

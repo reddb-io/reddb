@@ -153,6 +153,18 @@ pub fn build_legacy_result_frame_with(
     out
 }
 
+/// Finish a result in caller-owned, already admitted capacity. The first five
+/// bytes are reserved for the legacy envelope; no payload copy or growth occurs.
+pub fn build_legacy_result_frame_in_place(out: &mut [u8]) -> Result<(), &'static str> {
+    if out.len() < 5 {
+        return Err("truncated legacy result buffer");
+    }
+    let total = u32::try_from(out.len() - 4).map_err(|_| "legacy result exceeds frame length")?;
+    out[..4].copy_from_slice(&total.to_le_bytes());
+    out[4] = MSG_RESULT;
+    Ok(())
+}
+
 pub fn build_legacy_error_frame(message: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_ERROR, message)
 }
@@ -348,6 +360,21 @@ pub fn set_result_payload_row_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_in_place_result_matches_canonical_envelope() {
+        for payload in [b"".as_slice(), b"hello", &[0, 255, 1, 2]] {
+            let expected = build_legacy_result_frame(payload);
+            let mut actual = vec![0; 5 + payload.len()];
+            actual[5..].copy_from_slice(payload);
+            build_legacy_result_frame_in_place(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+        }
+        for length in 0..5 {
+            let mut truncated = vec![0; length];
+            assert!(build_legacy_result_frame_in_place(&mut truncated).is_err());
+        }
+    }
 
     #[test]
     fn borrowed_native_encoding_matches_owned_conversion_and_exact_length() {
