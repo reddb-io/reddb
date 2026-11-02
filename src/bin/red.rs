@@ -1721,6 +1721,10 @@ fn main() {
             std::process::exit(run_migrate_pager_zone_command(&result.flags));
         }
 
+        "compact" => {
+            std::process::exit(run_compact_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -3196,6 +3200,41 @@ fn run_migrate_from_redis_command(flags: &HashMap<String, FlagValue>) -> i32 {
     0
 }
 
+fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::compact_paged(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("compact", &report.machine_json());
+            } else {
+                println!("Compacted {} -> {} bytes; verified {} records across {} trees. Source preserved.",
+                    report.source_bytes, report.destination_bytes, report.records, report.trees);
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("compact", &error.to_string());
+            } else {
+                eprintln!("compact: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -3825,6 +3864,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
+        ("compact".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),

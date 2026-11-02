@@ -129,6 +129,15 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: migrate_pager_zone_flags(),
     },
     CommandDef {
+      name: "compact",
+      summary: "Rewrite a closed checkpointed native paged database into a fresh directory",
+      usage: "red compact --source data.rdb --destination-dir compacted [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -991,6 +1000,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("inspect".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
+        ("compact".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),

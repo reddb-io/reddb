@@ -942,6 +942,17 @@ impl<P: PageStore> BTree<P> {
         new_page.update_checksum();
         let new_page_id = new_page.page_id();
         self.pager.write_page(new_page_id, new_page.clone())?;
+        if old_next != 0 {
+            // Splitting a non-rightmost leaf inserts a new predecessor for the
+            // old successor. Keep its backlink coherent with the forward chain.
+            let mut successor = self.pager.read_page(old_next)?;
+            if successor.page_type()? != PageType::BTreeLeaf {
+                return Err(BTreeError::Corrupted("invalid split successor type".into()));
+            }
+            set_prev_leaf(&mut successor, new_page_id);
+            successor.update_checksum();
+            self.pager.write_page(old_next, successor)?;
+        }
 
         Ok((new_page, separator))
     }
