@@ -452,8 +452,11 @@ fn non_rightmost_splits_preserve_bidirectional_links_after_reopen() {
     let pager = Arc::new(Pager::open_default(&source).expect("pager"));
     let tree = BTree::new(Arc::clone(&pager));
     for id in (0u64..256).rev() {
-        tree.insert(&id.to_be_bytes(), &vec![id as u8; 800])
-            .expect("descending insert");
+        tree.insert(
+            &id.to_be_bytes(),
+            &vec![u8::try_from(id).expect("fixture byte"); 800],
+        )
+        .expect("descending insert");
     }
     assert_leaf_links(&pager, &tree);
     for id in (0u64..256).step_by(3) {
@@ -471,7 +474,7 @@ fn non_rightmost_splits_preserve_bidirectional_links_after_reopen() {
     for id in 0u64..256 {
         assert_eq!(
             tree.get(&id.to_be_bytes()).expect("lookup"),
-            (!id.is_multiple_of(3)).then(|| vec![id as u8; 800])
+            (!id.is_multiple_of(3)).then(|| vec![u8::try_from(id).expect("fixture byte"); 800])
         );
     }
 }
