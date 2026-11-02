@@ -30,8 +30,8 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::application::OperationContext;
 use crate::auth::Role;
+use crate::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
 use crate::runtime::RedDBRuntime;
-use crate::serde_json::Value as JsonValue;
 use crate::server::output_stream::{
     self as outs, Clock, OpenStreamError, StreamConfig, SystemClock,
 };
@@ -166,7 +166,7 @@ pub fn build_stream_error_frame(
 /// → StreamEnd via the supplied `send` closure, observing the
 /// `cancel_rx` between rows to honour `StreamCancel` (AC #3).
 ///
-/// The function materialises `execute_query`'s result first
+/// The function materialises an admitted request result first
 /// (matching the S1 HTTP behaviour — pull-based scan executors
 /// are PRD #759 phase 3) and then dribbles rows out as
 /// `StreamChunk` envelopes via the same byte/row/latency
@@ -234,9 +234,11 @@ pub async fn run_output_stream(
         return;
     }
 
-    // Materialise.
+    // Keep the completed result's shared admission until the stream finishes
+    // or its worker is cancelled, including while a slow peer blocks sending.
     let result = super::session::execute_with_redwire_context(&operation_context, role, || {
-        runtime.execute_query(&request.sql)
+        QueryRequestExecutor::new(&runtime, &PreparedRegistry::new())
+            .execute(QueryRequest::sql(request.sql, Vec::new()))
     });
 
     // Stream rows out as StreamChunk envelopes.
@@ -247,14 +249,6 @@ pub async fn run_output_stream(
 
     match result {
         Ok(qr) => {
-            let columns = qr.result.columns.clone();
-            let rows: Vec<JsonValue> = qr
-                .result
-                .records
-                .iter()
-                .map(|r| crate::presentation::query_result_json::unified_record_json(r, &columns))
-                .collect();
-
             // One `StreamChunk` envelope per row. The page-aligned
             // batcher used by the HTTP NDJSON path (S1) is byte-
             // oriented; on the wire path each row already ships as
@@ -262,7 +256,7 @@ pub async fn run_output_stream(
             // handles the batching for us. Keeping one row per
             // envelope keeps `StreamCancel` latency bounded to
             // "between two adjacent rows".
-            for row in rows {
+            for record in &qr.result.records {
                 // Check cancel between rows (AC #3).
                 if let Ok(()) = cancel_rx.try_recv() {
                     cancelled = true;
@@ -275,7 +269,14 @@ pub async fn run_output_stream(
                     ));
                     break;
                 }
-                let row_bytes = row.to_string_compact().into_bytes();
+                // Render only the next row. Retaining a second complete JSON
+                // result beside the admitted records doubles stream residency.
+                let row_bytes = crate::presentation::query_result_json::unified_record_json(
+                    record,
+                    &qr.result.columns,
+                )
+                .to_string_compact()
+                .into_bytes();
                 let frame =
                     match reddb_wire::redwire::stream::build_stream_chunk_frame_from_json_bytes(
                         correlation_id,
@@ -285,7 +286,13 @@ pub async fn run_output_stream(
                         false,
                     ) {
                         Ok(f) => f,
-                        Err(_) => break,
+                        Err(error) => {
+                            had_error = Some((
+                                "stream_chunk_encoding_failed".to_string(),
+                                error.to_string(),
+                            ));
+                            break;
+                        }
                     };
                 if send.send_frame(frame).await.is_err() {
                     return;

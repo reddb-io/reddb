@@ -1,4 +1,5 @@
 use super::*;
+use crate::serde_json::Value as JsonValue;
 use crate::storage::memory_pools::MemoryPool;
 use reddb_wire::redwire::{decode_frame, Flags, MessageKind, FRAME_HEADER_SIZE};
 use std::future::Future;
@@ -24,6 +25,110 @@ fn charged(runtime: &RedDBRuntime) -> u64 {
 fn reply(size: usize) -> Frame {
     reddb_wire::redwire::build_reply_frame(17, MessageKind::Result, vec![b'x'; size])
         .expect("reply fixture")
+}
+
+#[tokio::test]
+async fn blocked_output_stream_retains_result_admission_until_cancelled() {
+    let runtime = runtime();
+    runtime
+        .execute_query("CREATE TABLE stream_owners (payload TEXT)")
+        .unwrap();
+    for _ in 0..16 {
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO stream_owners (payload) VALUES ($1)",
+                &[reddb_types::Value::text("x".repeat(8192))],
+            )
+            .unwrap();
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        let stream = run_output_stream(
+            Arc::clone(&runtime),
+            17,
+            7,
+            parse_open_stream(br#"{"sql":"SELECT payload FROM stream_owners"}"#).unwrap(),
+            false,
+            cancel_rx,
+            sender,
+            OperationContext::read_only("stream-memory-fixture"),
+            Role::Read,
+        );
+        tokio::pin!(stream);
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(stream.as_mut().poll(cx).is_pending())
+            })
+            .await
+        );
+        let ack = rx.recv().await.expect("OpenAck before rows");
+        assert_eq!(decode_frame(&ack).unwrap().0.kind, MessageKind::OpenAck);
+        drop(ack);
+        assert!(charged(&runtime) >= 16 * 8192,
+            "the blocked producer must retain admission for all materialized rows, not just its encoded chunk");
+        // A disconnected session cancels its worker future. The retained
+        // result and not-yet-queued response must both return their budget.
+    }
+    assert_eq!(charged(&runtime), 0);
+    assert!(rx.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn oversized_stream_row_reports_error_instead_of_empty_success() {
+    let runtime = Arc::new(
+        RedDBRuntime::with_options(
+            crate::RedDBOptions::in_memory().with_memory_budget(128 * 1024 * 1024),
+        )
+        .unwrap(),
+    );
+    runtime
+        .execute_query("CREATE TABLE stream_oversize (payload TEXT)")
+        .unwrap();
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO stream_oversize (payload) VALUES ($1)",
+            &[reddb_types::Value::text(
+                "x".repeat(reddb_wire::redwire::MAX_FRAME_SIZE as usize),
+            )],
+        )
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+    run_output_stream(
+        Arc::clone(&runtime),
+        17,
+        7,
+        parse_open_stream(br#"{"sql":"SELECT payload FROM stream_oversize"}"#).unwrap(),
+        false,
+        cancel_rx,
+        FrameTx::new(tx, Arc::clone(&runtime)),
+        OperationContext::read_only("stream-oversize-fixture"),
+        Role::Read,
+    )
+    .await;
+    let ack = rx.recv().await.unwrap();
+    assert_eq!(decode_frame(&ack).unwrap().0.kind, MessageKind::OpenAck);
+    drop(ack);
+    let error = rx.recv().await.unwrap();
+    let frame = decode_frame(&error).unwrap().0;
+    assert_eq!(
+        frame.kind,
+        MessageKind::StreamError,
+        "an unencodable row must not disappear into a successful StreamEnd"
+    );
+    let payload = crate::serde_json::from_slice::<JsonValue>(&frame.payload).unwrap();
+    assert_eq!(
+        payload["code"].as_str(),
+        Some("stream_chunk_encoding_failed")
+    );
+    drop(error);
+    let end = rx.recv().await.unwrap();
+    assert_eq!(decode_frame(&end).unwrap().0.kind, MessageKind::StreamEnd);
+    drop(end);
+    assert!(rx.recv().await.is_none());
+    assert_eq!(charged(&runtime), 0);
 }
 
 #[tokio::test]

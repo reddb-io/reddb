@@ -247,10 +247,23 @@ Regression tests cover shared ownership, pre-copy refusal, encoder unwinding,
 full-queue cancellation, a blocked duplex socket, failure cleanup and recovery,
 and 1/4/16 transmitters sharing one budget. These are transport ownership tests,
 not the authenticated-server workload/latency qualification above. Payloads are
-still built before transmitter admission. Raw stream results, their presentation
-trees, legacy binary thread-local encoder scratch, gRPC/protobuf, handshake and
-executor workspaces remain outside this change. It does not establish a total
+still built before transmitter admission. Per-row presentation trees, legacy
+binary thread-local encoder scratch, gRPC/protobuf, handshake and executor
+workspaces remain outside this change. It does not establish a total
 RSS bound, storage plateau, or permission to activate managed disk residency.
+
+RedWire output streams now execute through the request seam and keep the
+materialized-read owner while streaming, including when a slow peer blocks a
+chunk. Cancellation or failure releases the result and pending encoded owner.
+Rows render into JSON individually rather than retaining a second complete
+JSON row vector. Query execution itself still materializes all records, and
+single-row presentation/serialization allocations precede frame admission;
+this is not a pull-based scan or complete stream peak-memory bound.
+
+An unencodable row now emits `stream_chunk_encoding_failed` before the terminal
+frame. Previously a frame-builder refusal broke the loop and reported StreamEnd
+without an error, silently dropping the row. Regressions exercise an actual
+blocked stream worker and a row larger than the wire frame limit.
 
 ## Remaining implementation before activation
 
