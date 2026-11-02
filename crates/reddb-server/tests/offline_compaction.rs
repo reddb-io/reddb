@@ -408,3 +408,129 @@ fn compact_preserves_empty_support_scaffolding_but_refuses_hidden_wal() {
         .contains("non-empty support layout"));
     assert!(!rejected.exists());
 }
+
+fn structural_leaves(pager: &Arc<Pager>, tree: &BTree) -> Vec<u32> {
+    tree.retired_pages()
+        .expect("structural inventory")
+        .into_iter()
+        .rev()
+        .filter(|id| {
+            pager
+                .read_page(*id)
+                .expect("page")
+                .page_type()
+                .expect("type")
+                == PageType::BTreeLeaf
+        })
+        .collect()
+}
+
+fn assert_leaf_links(pager: &Arc<Pager>, tree: &BTree) {
+    let leaves = structural_leaves(pager, tree);
+    assert!(leaves.len() > 3, "exercise non-rightmost splits");
+    for (index, id) in leaves.iter().enumerate() {
+        let page = pager.read_page(*id).expect("leaf");
+        let previous = u32::from_le_bytes(page.content()[..4].try_into().expect("previous"));
+        let next = u32::from_le_bytes(page.content()[4..8].try_into().expect("next"));
+        assert_eq!(
+            previous,
+            index.checked_sub(1).map_or(0, |i| leaves[i]),
+            "previous link at {id}"
+        );
+        assert_eq!(
+            next,
+            leaves.get(index + 1).copied().unwrap_or(0),
+            "next link at {id}"
+        );
+    }
+}
+
+#[test]
+fn non_rightmost_splits_preserve_bidirectional_links_after_reopen() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let pager = Arc::new(Pager::open_default(&source).expect("pager"));
+    let tree = BTree::new(Arc::clone(&pager));
+    for id in (0u64..256).rev() {
+        tree.insert(&id.to_be_bytes(), &vec![id as u8; 800])
+            .expect("descending insert");
+    }
+    assert_leaf_links(&pager, &tree);
+    for id in (0u64..256).step_by(3) {
+        tree.delete(&id.to_be_bytes())
+            .expect("delete and rebalance");
+    }
+    assert_leaf_links(&pager, &tree);
+    let root = tree.root_page_id();
+    pager.sync().expect("sync");
+    drop(tree);
+    drop(pager);
+    let pager = Arc::new(Pager::open_default(&source).expect("reopen"));
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    assert_leaf_links(&pager, &tree);
+    for id in 0u64..256 {
+        assert_eq!(
+            tree.get(&id.to_be_bytes()).expect("lookup"),
+            (!id.is_multiple_of(3)).then(|| vec![id as u8; 800])
+        );
+    }
+}
+
+#[test]
+fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
+    for forward in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let source = directory.path().join("source.rdb");
+        fixture(&source);
+        {
+            let pager = Arc::new(Pager::open_default(&source).expect("pager"));
+            let page = pager.read_page(1).expect("catalog");
+            let mut offset = reddb_file::METADATA_HEADER_BYTES;
+            let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
+                .expect("root");
+            let tree = BTree::with_root(Arc::clone(&pager), root.root_page);
+            let leaves = structural_leaves(&pager, &tree);
+            assert!(leaves.len() > 3);
+            // Historical split: A -> B -> C is intact, but C still points to A.
+            // A forward skip must instead fail, even if the leaf checksums pass.
+            let (id, offset, link) = if forward {
+                (leaves[0], 4, leaves[2])
+            } else {
+                (leaves[2], 0, leaves[0])
+            };
+            let mut page = pager.read_page(id).expect("leaf");
+            page.content_mut()[offset..offset + 4].copy_from_slice(&link.to_le_bytes());
+            pager.write_page(id, page).expect("historical link");
+            pager.sync().expect("sync");
+        }
+        let before = std::fs::read(&source).expect("source bytes");
+        let destination = directory.path().join("compacted");
+        if forward {
+            let error = compact_paged(&source, &destination).expect_err("forward omission");
+            assert!(error.to_string().contains("leaf chain"));
+            assert!(!destination.join("source.rdb").exists());
+        } else {
+            let report = compact_paged(&source, &destination)
+                .expect("repair independently verified backlink");
+            assert_eq!(report.records, 1000);
+            assert!(report
+                .machine_json()
+                .contains("\"repaired_leaf_backlinks\":1"));
+            let pager =
+                Arc::new(Pager::open_default(destination.join("source.rdb")).expect("reopen"));
+            let page = pager.read_page(1).expect("catalog");
+            let mut offset = reddb_file::METADATA_HEADER_BYTES;
+            let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
+                .expect("root");
+            let tree = BTree::with_root(Arc::clone(&pager), root.root_page);
+            assert_leaf_links(&pager, &tree);
+            for id in 0u64..1000 {
+                assert_eq!(
+                    tree.get(&id.to_be_bytes()).expect("lookup"),
+                    Some(payload(id))
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&source).expect("unchanged source"), before);
+    }
+}

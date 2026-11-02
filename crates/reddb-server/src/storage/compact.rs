@@ -30,16 +30,19 @@ pub struct CompactionReport {
     /// Includes exact persisted key and secondary-index records.
     pub records: u64,
     pub trees: usize,
+    /// Historical stale backlinks reconstructed from validated forward/owner order.
+    pub repaired_leaf_backlinks: u64,
 }
 
 impl CompactionReport {
     pub fn machine_json(&self) -> String {
         format!(
-            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
+            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"repaired_leaf_backlinks":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
             self.source_bytes,
             self.destination_bytes,
             self.records,
             self.trees,
+            self.repaired_leaf_backlinks,
             self.source_allocated_bytes
                 .map_or_else(|| "null".into(), |n| n.to_string()),
             self.destination_allocated_bytes
@@ -84,8 +87,15 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
     )?);
     let mut roots = BTreeMap::new();
     let mut records = 0;
+    let mut repaired_leaf_backlinks = 0;
     for collection in &catalog.roots {
-        let count = rewrite_tree(&source, &target, collection.root_page, &mut roots)?;
+        let count = rewrite_tree(
+            &source,
+            &target,
+            collection.root_page,
+            &mut roots,
+            &mut repaired_leaf_backlinks,
+        )?;
         if let Some(resume) = &catalog.resume {
             ensure(
                 resume.collections[&collection.collection].entities == count,
@@ -97,10 +107,22 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
     if let Some(resume) = &catalog.resume {
         for state in resume.collections.values() {
             if let Some(root) = state.key_index_root {
-                records += rewrite_tree(&source, &target, root, &mut roots)?;
+                records += rewrite_tree(
+                    &source,
+                    &target,
+                    root,
+                    &mut roots,
+                    &mut repaired_leaf_backlinks,
+                )?;
             }
             for index in state.secondary_indices.values() {
-                records += rewrite_tree(&source, &target, index.root_page, &mut roots)?;
+                records += rewrite_tree(
+                    &source,
+                    &target,
+                    index.root_page,
+                    &mut roots,
+                    &mut repaired_leaf_backlinks,
+                )?;
             }
         }
     }
@@ -157,6 +179,7 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
         destination_allocated_bytes: allocated_bytes(&temporary)?,
         records,
         trees: roots.len(),
+        repaired_leaf_backlinks,
     };
     drop(reopened);
     copy_sidecars(&source_path, &output)?;
@@ -184,33 +207,15 @@ fn rewrite_tree(
     target: &Arc<Pager>,
     root: u32,
     roots: &mut BTreeMap<u32, u32>,
+    repaired_leaf_backlinks: &mut u64,
 ) -> Result<u64> {
     if root == 0 {
         return Ok(0);
     }
     ensure(!roots.contains_key(&root), "duplicate live tree owner")?;
     let tree = BTree::with_root(Arc::clone(source), root);
-    let pages = tree.retired_pages()?;
-    let mut leaves = Vec::new();
-    let mut expected = 0u64;
-    for id in pages {
-        source.claim(id)?;
-        let page = source.raw_page(id, true)?;
-        if page.page_type()? == PageType::BTreeLeaf {
-            leaves.push((id, number(page.content(), 0)?, number(page.content(), 4)?));
-            expected += u64::from(page.cell_count());
-        }
-    }
-    // Ownership traversal is right-to-left. A cursor follows the independent
-    // leaf chain; prove it visits exactly the structurally owned leaves.
-    leaves.reverse();
-    for (index, &(id, previous, next)) in leaves.iter().enumerate() {
-        ensure(
-            previous == index.checked_sub(1).map_or(0, |i| leaves[i].0)
-                && next == leaves.get(index + 1).map_or(0, |leaf| leaf.0),
-            &format!("broken leaf chain at page {id}"),
-        )?;
-    }
+    let (expected, repairs) = inventory_tree(source, &tree, true)?;
+    *repaired_leaf_backlinks += repairs;
     let destination = BTree::new(Arc::clone(target));
     let mut cursor = tree.cursor_first()?;
     let mut count = 0;
@@ -241,12 +246,51 @@ fn rewrite_tree(
     roots.insert(root, destination.root_page_id());
     Ok(count)
 }
+// Interior ownership and forward traversal must agree exactly. Old split code
+// omitted the successor backlink update; that redundant edge can be rebuilt
+// without guessing any ownership or key/value. Never repair forward omissions.
+fn inventory_tree(
+    source: &Source,
+    tree: &BTree<Source>,
+    allow_backlinks: bool,
+) -> Result<(u64, u64)> {
+    let pages = tree.retired_pages()?;
+    let mut leaves = Vec::new();
+    let mut expected = 0u64;
+    for id in pages {
+        source.claim(id)?;
+        let page = source.raw_page(id, true)?;
+        if page.page_type()? == PageType::BTreeLeaf {
+            leaves.push((id, number(page.content(), 0)?, number(page.content(), 4)?));
+            expected += u64::from(page.cell_count());
+        }
+    }
+    // Ownership traversal is right-to-left. A cursor follows the independent
+    // leaf chain; prove it visits exactly the structurally owned leaves.
+    leaves.reverse();
+    let mut repaired = 0;
+    for (index, &(id, previous, next)) in leaves.iter().enumerate() {
+        ensure(
+            next == leaves.get(index + 1).map_or(0, |leaf| leaf.0),
+            &format!(
+                "broken forward leaf chain at page {id}, root {}",
+                tree.root_page_id()
+            ),
+        )?;
+        if previous != index.checked_sub(1).map_or(0, |i| leaves[i].0) {
+            ensure(
+                allow_backlinks,
+                &format!("broken backward leaf chain at page {id}"),
+            )?;
+            repaired += 1;
+        }
+    }
+    Ok((expected, repaired))
+}
 fn verify_tree(source: &Arc<Source>, destination: &Arc<Source>, old: u32, new: u32) -> Result<()> {
     let old = BTree::with_root(Arc::clone(source), old);
     let new = BTree::with_root(Arc::clone(destination), new);
-    for page in new.retired_pages()? {
-        destination.claim(page)?;
-    }
+    inventory_tree(destination, &new, false)?;
     let mut left = old.cursor_first()?;
     let mut right = new.cursor_first()?;
     loop {

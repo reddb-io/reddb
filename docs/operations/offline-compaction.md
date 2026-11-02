@@ -21,13 +21,19 @@ and encrypted Vault contents. Metadata page addresses and artifact descriptors a
 relocated. Retired generations, free pages and allocations unreachable from the
 supported durable roots are not copied. This is not a retention-policy change.
 
+Interior ownership and the complete forward leaf chain must agree. Historical
+stale backward links from non-rightmost splits are reconstructed in the new file
+and counted as `repaired_leaf_backlinks`; forward skips, cycles, overlapping owners,
+invalid checksums and unordered records still fail. The source is never repaired
+in place. Both directions are verified in the destination.
+
 The new file is reopened and all tree records compared in order. Native auxiliary
 payloads and copied logical/operational files are verified on readback. Output
 remains named `.compacting.rdb` until checks and durability barriers succeed. A
 failure leaves diagnostic output and the untouched source; use another fresh
 output directory for retry. Never start a server on the incomplete filename.
 `compaction.json` reports main-file apparent bytes, allocated bytes on Unix, and
-verified tree-record counts;
+verified tree-record counts and reconstructed historical leaf backlinks;
 record counts include derived indexes and are not SQL row counts. Measure allocated
 bytes separately (for example, `du -B1`) and account for retained recovery copies.
 
