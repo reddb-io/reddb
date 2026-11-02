@@ -1,9 +1,22 @@
 # Bounded disk residency implementation
 
 This implements the server disk-residency work in ADR 0038 phase 4 under the
-shared memory governance of ADR 0073. It is development work, disabled in the
-runtime factory. `UnifiedStoreConfig::resident_memory_bytes_max` is an internal
-opt-in for storage acceptance tests, not a qualified server memory ceiling.
+shared memory governance of ADR 0073. It is development work, disabled by default.
+The real server can opt in with `red server --bounded-disk-residency`; library
+hosts use `RedDBOptions::with_bounded_disk_residency(true)`. Both select the same
+factory and derive the resident segment cap from the `SegmentArena` share of the
+resolved memory budget (`REDDB_MEMORY_BUDGET` for the server). This is not yet a
+qualified server memory ceiling: the remaining admission gaps below still apply.
+
+The explicit option supports standalone, embedded/single-file, local storage.
+Other profiles, replication roles and remote backends fail before opening the
+store. Managed/default activation remains disabled pending qualification.
+New databases use the native pager from first boot. Existing native paged files
+can be prepared; legacy snapshot containers are rejected without conversion and
+must first be restored into an independent paged copy.
+Preparing a database upgrades its writer format; older and non-opted-in writers
+reject prepared files. Retain an independent, unconverted copy for rollback.
+Preparation scans legacy data and must be measured separately from prepared boot.
 
 The motivating Platform measurement retained 2,366,465,376 bytes in segments for
 805,776 physical records, in addition to 644,055,040 page-cache bytes and

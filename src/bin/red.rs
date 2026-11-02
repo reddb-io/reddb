@@ -4067,6 +4067,7 @@ fn build_server_config(
         wire_tls_key,
         pg_bind_addr,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
+        bounded_disk_residency: flag_bool(flags, "bounded-disk-residency"),
         read_only: flag_bool(flags, "read-only"),
         role,
         primary_addr: flag_string(flags, "primary-addr")
@@ -6917,6 +6918,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 .expect("telemetry config")
                 .log_file_disabled
         );
+    }
+
+    #[test]
+    fn parser_threads_explicit_disk_residency_into_server_config() {
+        let _lock = env_lock().lock().unwrap();
+        for enabled in [false, true] {
+            let mut args = vec!["server".to_string()];
+            if enabled {
+                args.push("--bounded-disk-residency".to_string());
+            }
+            let tokens = cli::token::tokenize(&args);
+            let parser =
+                cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
+            let result = parser.parse(&tokens);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(
+                build_server_config(&result.flags, None)
+                    .unwrap()
+                    .bounded_disk_residency,
+                enabled
+            );
+        }
     }
 
     #[test]

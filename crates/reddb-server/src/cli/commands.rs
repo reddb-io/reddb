@@ -408,6 +408,9 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_description("Declare WAL retention for storage profile validation"),
         FlagSchema::new("primary-addr").with_description("Primary gRPC address for replica mode"),
         FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
+        FlagSchema::boolean("bounded-disk-residency").with_description(
+            "Opt into bounded disk residency for standalone single-file databases; upgrades the writer format",
+        ),
         FlagSchema::boolean("no-create-if-missing")
             .with_description("Fail instead of creating the database file"),
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
