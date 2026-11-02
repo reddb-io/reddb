@@ -1029,7 +1029,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     if !hash_ids.is_empty() {
-                        let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                        // The range index orders candidates by its own key, not
+                        // by ORDER BY. Keep the full set until the SQL window is
+                        // applied, including when OFFSET appears without a sort.
+                        let limit = if query.order_by.is_empty() && query.offset.is_none() {
+                            query.limit.map(|l| l as usize).unwrap_or(usize::MAX)
+                        } else {
+                            usize::MAX
+                        };
                         // Build HashSet from the smaller (hash) candidate set
                         let hash_set =
                             idx_store.candidate_set(hash_ids.iter().map(|id| id.raw()))?;
@@ -1063,7 +1070,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                         table_alias,
                                     ),
                                 });
-                            let explicit_cols = extract_select_column_names(&effective_projections);
+                            let mut explicit_cols =
+                                extract_select_column_names(&effective_projections);
+                            let has_added_order_by_columns =
+                                append_order_by_columns(&mut explicit_cols, query);
 
                             let records = indexed_table_records(
                                 db,
@@ -1082,7 +1092,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                     )
                                 },
                             )?;
-                            return Ok(records);
+                            return finish_ordered_index_records(
+                                db,
+                                query,
+                                &effective_projections,
+                                records,
+                                table_name,
+                                table_alias,
+                                has_added_order_by_columns,
+                            );
                         }
                     }
                 }
@@ -1192,8 +1210,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     ),
                 };
 
-                let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-                let explicit_cols = extract_select_column_names(&effective_projections);
+                let limit = if query.order_by.is_empty() && query.offset.is_none() {
+                    query.limit.map(|l| l as usize).unwrap_or(usize::MAX)
+                } else {
+                    usize::MAX
+                };
+                let mut explicit_cols = extract_select_column_names(&effective_projections);
+                let has_added_order_by_columns = append_order_by_columns(&mut explicit_cols, query);
                 // Optional: narrow via sorted range index filtered by the eq-intersection set.
                 // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
                 // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
@@ -1251,7 +1274,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         )
                     },
                 )?;
-                return Ok(records);
+                return finish_ordered_index_records(
+                    db,
+                    query,
+                    &effective_projections,
+                    records,
+                    table_name,
+                    table_alias,
+                    has_added_order_by_columns,
+                );
             }
         }
     }
