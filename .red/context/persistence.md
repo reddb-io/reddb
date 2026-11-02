@@ -36,8 +36,12 @@ payload capacity before the encoding copy. Shared byte owners retain that charge
 through queued responses, blocked sends, clones and socket writes. A refused
 response terminates the connection and releases its pending output, including
 when the socket is blocked. Clean Bye/half-close drains accepted replies.
+RedWire output streams retain the request executor's shared materialized-read
+owner until completion or worker cancellation and render JSON one row at a time.
+A row that cannot fit a stream frame emits StreamError before StreamEnd instead
+of silently disappearing from an apparently successful response.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
-materialization, pre-encoding payload construction, handshake buffers and other
+execution workspaces, pre-encoding payload construction, handshake buffers and other
 non-HTTP outputs still require their own owned admission; this accounting alone
 does not establish a process-wide memory ceiling.
 
