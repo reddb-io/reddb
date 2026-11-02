@@ -1,4 +1,4 @@
-//! Ordered secondary pages for single-column BTREE indexes.
+//! Ordered secondary pages for scalar and fixed-arity composite BTREE indexes.
 
 use super::index_store::{index_field_value, IndexMethodKind, IndexStore, RegisteredIndex};
 use super::{RedDBRuntime, RuntimeInner};
@@ -20,7 +20,7 @@ use std::sync::{Arc, Weak};
 const SCAN_REQUIRED: u8 = 255;
 
 struct BtreeProjection {
-    column: String,
+    columns: Vec<String>,
     schema: Option<Arc<Vec<String>>>,
 }
 
@@ -37,7 +37,11 @@ impl SecondaryIndexProjector for BtreeProjection {
             return Ok(None);
         };
         let selected = |name: &str| {
-            name == "body" || name == self.column || self.column.split('.').next() == Some(name)
+            name == "body"
+                || self
+                    .columns
+                    .iter()
+                    .any(|column| name == column || column.split('.').next() == Some(name))
         };
         let fields: Vec<_> = if let Some(named) = &row.named {
             named
@@ -55,18 +59,25 @@ impl SecondaryIndexProjector for BtreeProjection {
         } else {
             Vec::new()
         };
-        let Some(value) = index_field_value(&fields, &self.column) else {
-            return Ok(None);
-        };
-        if let Some(key) = value_to_canonical_key(value.as_ref()) {
-            match encode_ordered_key(&key, output) {
-                Ok(length) => return Ok(Some(length)),
-                Err(StoreError::ReadLimitExceeded { .. }) => {}
+        let mut length = 0;
+        for column in &self.columns {
+            let Some(value) = index_field_value(&fields, column) else {
+                return Ok(None);
+            };
+            let Some(key) = value_to_canonical_key(value.as_ref()) else {
+                output[0] = SCAN_REQUIRED;
+                return Ok(Some(1));
+            };
+            match encode_ordered_key(&key, &mut output[length..]) {
+                Ok(written) => length += written,
+                Err(StoreError::ReadLimitExceeded { .. }) => {
+                    output[0] = SCAN_REQUIRED;
+                    return Ok(Some(1));
+                }
                 Err(error) => return Err(error),
             }
         }
-        output[0] = SCAN_REQUIRED;
-        Ok(Some(1))
+        Ok(Some(length))
     }
 }
 
@@ -81,7 +92,41 @@ pub(super) struct RuntimeBtreeIndex {
 struct Range {
     lower: Bound<Vec<u8>>,
     upper: Bound<Vec<u8>>,
+    families: Vec<ScopedFamily>,
+}
+
+struct ScopedFamily {
+    prefix: Vec<u8>,
     family: u8,
+}
+
+// The shortest byte prefix strictly following a complete ordered key (or an
+// entire tuple-prefix block). None means the byte range has no finite upper end.
+fn successor(mut key: Vec<u8>) -> Option<Vec<u8>> {
+    let position = key.iter().rposition(|byte| *byte != u8::MAX)?;
+    key[position] += 1;
+    key.truncate(position + 1);
+    Some(key)
+}
+
+// A bounded, iterative AND walk. Unsupported predicates remain residual SQL
+// checks; never extract a candidate restriction from inside an OR.
+fn conjuncts(filter: &Filter) -> Option<Vec<&Filter>> {
+    let mut pending = vec![filter];
+    let mut leaves = Vec::new();
+    while let Some(filter) = pending.pop() {
+        match filter {
+            Filter::And(left, right) => {
+                if pending.len() + leaves.len() + 2 > 64 {
+                    return None;
+                }
+                pending.push(right);
+                pending.push(left);
+            }
+            other => leaves.push(other),
+        }
+    }
+    Some(leaves)
 }
 
 fn encode_bound(value: &reddb_types::Value) -> Option<Vec<u8>> {
@@ -109,7 +154,7 @@ impl Range {
                 let (lower, upper) = match op {
                     CompareOp::Lt => (Unbounded, Excluded(key)),
                     CompareOp::Le => (Unbounded, Included(key)),
-                    CompareOp::Gt => (Excluded(key), Unbounded),
+                    CompareOp::Gt => (Included(successor(key)?), Unbounded),
                     CompareOp::Ge => (Included(key), Unbounded),
                     _ => return None,
                 };
@@ -130,9 +175,75 @@ impl Range {
             Self {
                 lower,
                 upper,
-                family,
+                families: vec![ScopedFamily {
+                    prefix: Vec::new(),
+                    family,
+                }],
             },
         ))
+    }
+
+    fn for_index(columns: &[String], filter: &Filter) -> Option<Self> {
+        let (last, prefix_columns) = columns.split_last()?;
+        let leaves = conjuncts(filter)?;
+        let mut range = leaves.iter().find_map(|filter| {
+            let (column, range) = Self::from_filter(filter)?;
+            (column == last).then_some(range)
+        })?;
+        let mut prefix = Vec::new();
+        let mut families = Vec::new();
+        for column in prefix_columns {
+            let key = leaves.iter().find_map(|filter| {
+                let Filter::Compare {
+                    field:
+                        FieldRef::TableColumn {
+                            column: candidate, ..
+                        },
+                    op: CompareOp::Eq,
+                    value,
+                } = filter
+                else {
+                    return None;
+                };
+                (candidate == column).then(|| encode_bound(value)).flatten()
+            })?;
+            if !matches!(key[0], 2 | 3 | 4 | 6)
+                || prefix.len() + key.len() > SECONDARY_KEY_BYTES_MAX
+            {
+                return None;
+            }
+            families.push(ScopedFamily {
+                prefix: prefix.clone(),
+                family: key[0],
+            });
+            prefix.extend_from_slice(&key);
+        }
+        let family = range.families[0].family;
+        families.push(ScopedFamily {
+            prefix: prefix.clone(),
+            family,
+        });
+        let with_prefix = |key: Vec<u8>| -> Option<Vec<u8>> {
+            if prefix.len() + key.len() > SECONDARY_KEY_BYTES_MAX {
+                return None;
+            }
+            let mut joined = prefix.clone();
+            joined.extend_from_slice(&key);
+            Some(joined)
+        };
+        range.lower = match range.lower {
+            Included(key) => Included(with_prefix(key)?),
+            Excluded(key) => Excluded(with_prefix(key)?),
+            Unbounded if !prefix.is_empty() => Included(prefix.clone()),
+            Unbounded => Unbounded,
+        };
+        range.upper = match range.upper {
+            Included(key) => Included(with_prefix(key)?),
+            Excluded(key) => Excluded(with_prefix(key)?),
+            Unbounded => successor(prefix).map(Excluded).unwrap_or(Unbounded),
+        };
+        range.families = families;
+        Some(range)
     }
 
     fn contains(&self, key: &[u8]) -> bool {
@@ -157,7 +268,12 @@ impl RuntimeBtreeIndex {
             + 64
             + self.collection.len()
             + self.name.len()
-            + self.projection.column.len()
+            + self
+                .projection
+                .columns
+                .iter()
+                .map(|column| column.len() + 24)
+                .sum::<usize>()
             + self
                 .projection
                 .schema
@@ -221,18 +337,29 @@ impl RuntimeBtreeIndex {
         };
         let mut key = [0; SECONDARY_KEY_BYTES_MAX];
         // Existing SQL range semantics require a homogeneous canonical family.
-        // Two seeks detect mixed families and overflow markers without reading
-        // row payloads or hydrating the complete posting map.
-        for (lower, upper) in [
-            (Unbounded, Excluded([range.family].as_slice())),
-            (Included([range.family + 1].as_slice()), Unbounded),
-        ] {
-            if index
-                .ordered_range(lower, upper)?
-                .next_posting(&mut key)?
-                .is_some()
-            {
-                return Ok(None);
+        // Two seeks per bound component detect mixed families and overflow
+        // markers within the matching prefix, without hydrating posting maps.
+        for scope in &range.families {
+            let mut family_start = scope.prefix.clone();
+            family_start.push(scope.family);
+            let mut family_end = scope.prefix.clone();
+            family_end.push(scope.family + 1);
+            let prefix_end = successor(scope.prefix.clone());
+            let upper = prefix_end.as_deref().map(Excluded).unwrap_or(Unbounded);
+            for (lower, upper) in [
+                (
+                    Included(scope.prefix.as_slice()),
+                    Excluded(family_start.as_slice()),
+                ),
+                (Included(family_end.as_slice()), upper),
+            ] {
+                if index
+                    .ordered_range(lower, upper)?
+                    .next_posting(&mut key)?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
             }
         }
         let mut needs_scan = false;
@@ -247,9 +374,14 @@ impl RuntimeBtreeIndex {
             let Some(length) = self.projection.project(entity, &mut key)? else {
                 return Ok(());
             };
-            if key[0] != range.family {
-                needs_scan = true;
-                return Ok(());
+            for scope in &range.families {
+                if !key[..length].starts_with(&scope.prefix) {
+                    return Ok(());
+                }
+                if key.get(scope.prefix.len()) != Some(&scope.family) {
+                    needs_scan = true;
+                    return Ok(());
+                }
             }
             if range.contains(&key[..length]) {
                 if ids.len() == ids_max {
@@ -302,20 +434,19 @@ impl IndexStore {
         if self.paged_btrees.read().is_empty() {
             return Ok(None);
         }
-        let Some((column, range)) = Range::from_filter(filter) else {
-            return Ok(None);
-        };
-        // Release the descriptor map before admission samples memory pools.
-        let provider = self
+        // Release descriptor guards before admission samples memory pools.
+        let selected = self
             .paged_btrees
             .read()
             .values()
-            .find(|provider| {
-                provider.collection == collection && provider.projection.column == column
+            .filter(|provider| provider.collection == collection)
+            .filter_map(|provider| {
+                Range::for_index(&provider.projection.columns, filter)
+                    .map(|range| (Arc::clone(provider), range))
             })
-            .cloned();
-        match provider {
-            Some(provider) => provider.lookup(&range),
+            .max_by_key(|(provider, _)| provider.projection.columns.len());
+        match selected {
+            Some((provider, range)) => provider.lookup(&range),
             None => Ok(None),
         }
     }
@@ -328,14 +459,14 @@ impl RedDBRuntime {
         prepared: &IndexStore,
     ) -> crate::RedDBResult<()> {
         assert_eq!(index.method, IndexMethodKind::BTree);
-        assert_eq!(index.columns.len(), 1);
+        assert!(!index.columns.is_empty());
         let schema = self
             .db()
             .store()
             .get_collection(&index.collection)
             .and_then(|manager| manager.column_schema());
         let projection = Arc::new(BtreeProjection {
-            column: index.columns[0].clone(),
+            columns: index.columns.clone(),
             schema,
         });
         let mut digest = Sha256::new();
@@ -368,9 +499,15 @@ impl RedDBRuntime {
             identity.clone(),
             projection.clone(),
         )?;
-        let mut equality = index.clone();
-        equality.name = index.hash_lookup_name().into_owned();
-        self.prepare_paged_hash_named(&equality, prepared, &equality_storage_name(&index.name))?;
+        if index.columns.len() == 1 || index.unique {
+            let mut equality = index.clone();
+            equality.name = index.hash_lookup_name().into_owned();
+            self.prepare_paged_hash_named(
+                &equality,
+                prepared,
+                &equality_storage_name(&index.name),
+            )?;
+        }
         prepared.paged_btrees.write().insert(
             (index.collection.clone(), index.name.clone()),
             Arc::new(RuntimeBtreeIndex {
@@ -463,8 +600,12 @@ mod tests {
     }
 
     fn deny_scan(runtime: &RedDBRuntime) {
+        deny_scan_table(runtime, "ordered_rows");
+    }
+
+    fn deny_scan_table(runtime: &RedDBRuntime, table: &str) {
         let store = runtime.db().store();
-        let manager = store.get_collection("ordered_rows").expect("collection");
+        let manager = store.get_collection(table).expect("collection");
         let root = manager.backing_root_page().expect("root");
         let count = manager.backing_count_at_root(root).expect("count");
         manager.install_backing(
@@ -845,6 +986,229 @@ mod tests {
                 "SELECT id FROM ordered_rows WHERE id >= 29.0 ORDER BY id"
             ),
             [29, 30, 31, 80]
+        );
+    }
+
+    fn composite_fixture() -> (tempfile::TempDir, RedDBRuntime, RedDBOptions) {
+        let (directory, runtime, options) = fixture();
+        for (arity, columns) in [
+            (2, "account, id"),
+            (3, "account, bucket, id"),
+            (5, "account, bucket, category, shard, id"),
+        ] {
+            runtime.execute_query(&format!("CREATE TABLE compound_{arity} (account TEXT, bucket INTEGER, category TEXT, shard TEXT, id INTEGER)")).expect("compound table");
+            let uniqueness = if arity == 2 { "UNIQUE " } else { "" };
+            runtime
+                .execute_query(&format!(
+                    "CREATE {uniqueness}INDEX compound_key ON compound_{arity} ({columns}) USING BTREE"
+                ))
+                .expect("compound index");
+            for account in ["alpha", "alpha-prefix", "beta"] {
+                for id in 0..16 {
+                    runtime.execute_query_with_params(&format!("INSERT INTO compound_{arity} (account, bucket, category, shard, id) VALUES ($1, 1, 'events', 'west', $2)"), &[Value::text(account), Value::Integer(id)]).expect("compound row");
+                }
+            }
+        }
+        runtime
+            .execute_query("CREATE INDEX range_only ON compound_3 (id) USING BTREE")
+            .expect("competing scalar range");
+        runtime.flush().expect("persist");
+        drop(runtime);
+        let runtime = open(&options);
+        runtime.flush().expect("prepared roots");
+        drop(runtime);
+        let runtime = open(&options);
+        (directory, runtime, options)
+    }
+
+    #[test]
+    fn paged_composite_btree_restore_and_prefix_ranges_do_not_scan_source() {
+        let (_directory, runtime, _options) = composite_fixture();
+        for (arity, prefix) in [
+            (2, "account = 'alpha'"),
+            (3, "account = 'alpha' AND bucket = 1"),
+            (
+                5,
+                "account = 'alpha' AND bucket = 1 AND category = 'events' AND shard = 'west'",
+            ),
+        ] {
+            let table = format!("compound_{arity}");
+            deny_scan_table(&runtime, &table);
+            runtime
+                .rebuild_runtime_indexes_for_table(&table)
+                .expect("prepared compound metadata-only restore");
+            for (predicate, expected) in [
+                ("id BETWEEN 9 AND 12", vec![9, 10, 11, 12]),
+                ("id > 13", vec![14, 15]),
+                ("id >= 15", vec![15]),
+                ("id < 2", vec![0, 1]),
+                ("id <= 1", vec![0, 1]),
+                ("id > 15", vec![]),
+            ] {
+                assert_eq!(
+                    ids(
+                        &runtime,
+                        &format!(
+                            "SELECT id FROM {table} WHERE {prefix} AND {predicate} ORDER BY id"
+                        )
+                    ),
+                    expected,
+                    "arity={arity} {predicate}"
+                );
+                assert_eq!(
+                    ids(
+                        &runtime,
+                        &format!(
+                            "SELECT id FROM {table} WHERE {predicate} AND {prefix} ORDER BY id"
+                        )
+                    ),
+                    expected,
+                    "reversed arity={arity}"
+                );
+            }
+        }
+        assert_eq!(runtime.index_store_ref().sorted.memory_bytes(), 0);
+    }
+
+    fn compound_filter(bucket: Value) -> reddb_rql::ast::Filter {
+        use reddb_rql::ast::{CompareOp, FieldRef, Filter};
+        Filter::And(
+            Box::new(Filter::Compare {
+                field: FieldRef::column("compound_3", "account"),
+                op: CompareOp::Eq,
+                value: Value::text("alpha"),
+            }),
+            Box::new(Filter::And(
+                Box::new(Filter::Compare {
+                    field: FieldRef::column("compound_3", "bucket"),
+                    op: CompareOp::Eq,
+                    value: bucket,
+                }),
+                Box::new(Filter::Between {
+                    field: FieldRef::column("compound_3", "id"),
+                    low: Value::Integer(9),
+                    high: Value::Integer(12),
+                }),
+            )),
+        )
+    }
+
+    #[test]
+    fn paged_composite_btree_prefix_families_and_candidate_scope_are_exact() {
+        let (_directory, runtime, options) = composite_fixture();
+        let filter = compound_filter(Value::Integer(1));
+        // Prefer the complete compound prefix over the competing id-only
+        // range, which would return twelve candidates from three accounts.
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("compound_3", &filter)
+                .expect("lookup")
+                .expect("compound provider")
+                .len(),
+            4
+        );
+        runtime
+            .execute_query("INSERT INTO compound_3 (account, bucket, id) VALUES ('beta', NULL, 80)")
+            .expect("other prefix");
+        runtime.flush().expect("publish other prefix family");
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("compound_3", &filter)
+                .expect("scoped family")
+                .expect("unrelated NULL does not disable alpha prefix")
+                .len(),
+            4
+        );
+        runtime
+            .execute_query(
+                "INSERT INTO compound_3 (account, bucket, id) VALUES ('alpha', NULL, 80)",
+            )
+            .expect("mixed target prefix");
+        // The mixed prefix requires SQL comparison; it must not silently lose
+        // a coerced candidate or treat NULL as an ordinary ordered value.
+        assert!(runtime
+            .index_store_ref()
+            .paged_btree_lookup("compound_3", &filter)
+            .expect("mixed overlay")
+            .is_none());
+        runtime.flush().expect("publish mixed target prefix");
+        drop(runtime);
+        let runtime = open(&options);
+        assert!(runtime
+            .index_store_ref()
+            .paged_btree_lookup("compound_3", &filter)
+            .expect("mixed base")
+            .is_none());
+        assert_eq!(ids(&runtime, "SELECT id FROM compound_3 WHERE account = 'alpha' AND bucket = 1 AND id BETWEEN 9 AND 12 ORDER BY id"), [9,10,11,12]);
+        assert_eq!(ids(&runtime, "SELECT id FROM compound_3 WHERE account = 'alpha' AND bucket = 1.0 AND id BETWEEN 9 AND 12 ORDER BY id"), [9,10,11,12]);
+    }
+
+    #[test]
+    fn paged_composite_btree_unique_overlay_and_rollback_survive_reopen() {
+        let (_directory, runtime, options) = composite_fixture();
+        runtime
+            .execute_query(
+                "UPDATE compound_2 SET account = 'moved' WHERE account = 'alpha' AND id = 1",
+            )
+            .expect("move prefix");
+        assert_eq!(ids(&runtime, "SELECT id FROM compound_2 WHERE account = 'alpha' AND id BETWEEN 0 AND 2 ORDER BY id"), [0,2]);
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM compound_2 WHERE account = 'moved' AND id >= 0 ORDER BY id"
+            ),
+            [1]
+        );
+        assert!(runtime
+            .execute_query("INSERT INTO compound_2 (account, id) VALUES ('moved', 1)")
+            .is_err());
+        runtime
+            .execute_query("INSERT INTO compound_2 (account, id) VALUES ('different', 1)")
+            .expect("same suffix, different prefix");
+        runtime.execute_query("BEGIN").expect("begin");
+        runtime
+            .execute_query("UPDATE compound_2 SET id = 9 WHERE account = 'moved' AND id = 1")
+            .expect("own write");
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM compound_2 WHERE account = 'moved' AND id >= 0 ORDER BY id"
+            ),
+            [9]
+        );
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        runtime.flush().expect("publish");
+        drop(runtime);
+        let runtime = open(&options);
+        deny_scan_table(&runtime, "compound_2");
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM compound_2 WHERE account = 'moved' AND id >= 0 ORDER BY id"
+            ),
+            [1]
+        );
+        assert_eq!(ids(&runtime, "SELECT id FROM compound_2 WHERE account = 'alpha' AND id BETWEEN 0 AND 2 ORDER BY id"), [0,2]);
+        assert!(runtime
+            .execute_query("INSERT INTO compound_2 (account, id) VALUES ('moved', 1)")
+            .is_err());
+    }
+
+    #[test]
+    fn paged_composite_btree_oversized_tuple_keeps_scan_fallback() {
+        let (_directory, runtime, options) = composite_fixture();
+        let text = Value::text("z".repeat(600));
+        runtime.execute_query_with_params("INSERT INTO compound_5 (account, bucket, category, shard, id) VALUES ('alpha', 1, $1, $2, 80)", &[text.clone(),text.clone()]).expect("combined key larger than native slot");
+        runtime.flush().expect("overflow marker");
+        drop(runtime);
+        let runtime = open(&options);
+        let result = runtime.execute_query_with_params("SELECT id FROM compound_5 WHERE account = 'alpha' AND bucket = 1 AND category = $1 AND shard = $2 AND id >= 0", &[text.clone(), text]).expect("overflow fallback");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("id"),
+            Some(&Value::Integer(80))
         );
     }
 }

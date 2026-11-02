@@ -341,7 +341,7 @@ impl RedDBRuntime {
         }
     }
 
-    /// Install paged HASH and single-column BTREE descriptors without hydrating
+    /// Install paged HASH and BTREE descriptors without hydrating
     /// postings. Remaining
     /// resident providers use two bounded passes: estimate/admit, then build
     /// privately. Failure never publishes an incomplete runtime collection.
@@ -361,7 +361,7 @@ impl RedDBRuntime {
         let mut resident = false;
         for index in registered {
             if index.method == super::index_store::IndexMethodKind::BTree
-                && index.columns.len() == 1
+                && !index.columns.is_empty()
                 && self
                     .db()
                     .store()
