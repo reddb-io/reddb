@@ -9,7 +9,7 @@ use reddb_engine::storage::page::{Page, PageType};
 use reddb_engine::storage::page_store::PageStore;
 use reddb_engine::storage::pager::PagerError;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -18,11 +18,17 @@ struct Pages {
     pages: Mutex<HashMap<u32, Page>>,
     overflow_reads: AtomicUsize,
     reads: AtomicUsize,
+    fail_reads: AtomicBool,
 }
 
 impl PageStore for Pages {
     fn read_page(&self, id: u32) -> Result<Page, PagerError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
+        if self.fail_reads.load(Ordering::Relaxed) {
+            return Err(PagerError::Io(std::io::Error::other(
+                "injected page read failure",
+            )));
+        }
         let page = self.pages.lock().expect("fixture lock")[&id].clone();
         if page.page_type().expect("fixture page type") == PageType::Overflow {
             self.overflow_reads.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +142,197 @@ fn secondary_exact_lookup_separates_prefix_keys_and_bounds_input() {
         pages.reads.load(Ordering::Relaxed),
         before,
         "reject oversized input before I/O"
+    );
+}
+
+#[test]
+fn secondary_ordered_ranges_match_all_bound_combinations_and_physical_ids() {
+    use reddb_engine::storage::ordered_secondary_key::encode_ordered_key;
+    use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
+    use reddb_types::{CanonicalKey, CanonicalKeyFamily};
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(pages));
+    let mut expected = Vec::new();
+    for text in ["", "\0", "a", "a\0", "aa", "b", "é"] {
+        let mut buffer = [0; 1016];
+        let length = encode_ordered_key(
+            &CanonicalKey::Text(CanonicalKeyFamily::Text, text.into()),
+            &mut buffer,
+        )
+        .expect("encode");
+        for id in [0, 1, u64::MAX] {
+            let key = buffer[..length].to_vec();
+            let mut posting = key.clone();
+            posting.extend_from_slice(&id.to_be_bytes());
+            tree.insert(&posting, &[]).expect("posting");
+            expected.push((key, EntityId::new(id)));
+        }
+    }
+    expected.sort();
+    let index = SecondaryIndexRead::new(tree);
+    let bounds: Vec<_> = std::iter::once(Unbounded)
+        .chain(
+            expected
+                .iter()
+                .step_by(3)
+                .flat_map(|(key, _)| [Included(key.as_slice()), Excluded(key.as_slice())]),
+        )
+        .collect();
+    for lower in &bounds {
+        for upper in &bounds {
+            let matches: Vec<_> = expected
+                .iter()
+                .filter(|(key, _)| {
+                    let above = match lower {
+                        Included(low) => key.as_slice() >= *low,
+                        Excluded(low) => key.as_slice() > *low,
+                        Unbounded => true,
+                    };
+                    let below = match upper {
+                        Included(high) => key.as_slice() <= *high,
+                        Excluded(high) => key.as_slice() < *high,
+                        Unbounded => true,
+                    };
+                    above && below
+                })
+                .cloned()
+                .collect();
+            let mut cursor = index.ordered_range(*lower, *upper).expect("seek");
+            let mut buffer = [0; 1016];
+            let mut actual = Vec::new();
+            while let Some((length, id)) = cursor.next_posting(&mut buffer).expect("posting") {
+                actual.push((buffer[..length].to_vec(), id));
+            }
+            assert_eq!(actual, matches, "{lower:?}..{upper:?}");
+            assert_eq!(cursor.next_posting(&mut buffer).expect("fused end"), None);
+        }
+    }
+}
+
+#[test]
+fn secondary_ordered_range_is_lazy_pins_generation_and_rejects_invalid_bounds_before_io() {
+    use reddb_engine::storage::secondary_index_read::{
+        SecondaryIndexRead, SECONDARY_KEY_BYTES_MAX,
+    };
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    for key in 0..5000u64 {
+        let mut posting = key.to_be_bytes().to_vec();
+        posting.extend_from_slice(&key.to_be_bytes());
+        tree.insert(&posting, &[]).expect("posting");
+    }
+    let source = Arc::new(BTree::new(Arc::clone(&pages)));
+    let index = SecondaryIndexRead::with_source(Arc::clone(&tree), Arc::clone(&source));
+    pages.reads.store(0, Ordering::Relaxed);
+    let oversized = [0; SECONDARY_KEY_BYTES_MAX + 1];
+    assert!(matches!(
+        index.ordered_range(Included(&oversized), Unbounded),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    assert!(matches!(
+        index.ordered_range(Unbounded, Excluded(&oversized)),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    let key = 2000u64.to_be_bytes();
+    let mut buffer = [0; SECONDARY_KEY_BYTES_MAX];
+    let mut empty = index
+        .ordered_range(Excluded(&key), Included(&key))
+        .expect("empty");
+    assert!(empty.next_posting(&mut buffer).expect("empty").is_none());
+    drop(empty);
+    assert_eq!(pages.reads.load(Ordering::Relaxed), 0);
+    let mut cursor = index
+        .ordered_range(Included(&key), Unbounded)
+        .expect("range");
+    drop(index);
+    assert!(tree.has_retirement_readers());
+    assert_eq!(Arc::strong_count(&source), 2);
+    assert_eq!(
+        cursor.next_posting(&mut buffer).expect("first"),
+        Some((8, EntityId::new(2000)))
+    );
+    assert_eq!(&buffer[..8], &key);
+    assert!(
+        pages.reads.load(Ordering::Relaxed) <= 8,
+        "seek must not scan the preceding 2000 keys"
+    );
+    for id in 2001..5000u64 {
+        assert_eq!(
+            cursor.next_posting(&mut buffer).expect("next"),
+            Some((8, EntityId::new(id)))
+        );
+    }
+    assert_eq!(cursor.next_posting(&mut buffer).expect("end"), None);
+    assert!(
+        pages.reads.load(Ordering::Relaxed) < 100,
+        "one retained leaf, not a read per posting"
+    );
+    drop(cursor);
+    assert!(!tree.has_retirement_readers());
+    assert_eq!(Arc::strong_count(&source), 1);
+}
+
+#[test]
+fn secondary_ordered_range_reports_corrupt_postings_and_pages() {
+    use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
+    use std::ops::Bound::Unbounded;
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    tree.insert(b"bad", &[]).expect("short posting");
+    let index = SecondaryIndexRead::new(Arc::clone(&tree));
+    let mut buffer = [0; 1016];
+    let mut cursor = index.ordered_range(Unbounded, Unbounded).expect("seek");
+    assert!(
+        cursor.next_posting(&mut buffer).is_err(),
+        "corruption must not become an empty range"
+    );
+    drop(cursor);
+    let root = tree.root_page_id();
+    pages
+        .write_page(root, Page::new(PageType::Overflow, root))
+        .expect("corrupt page");
+    assert!(index.ordered_range(Unbounded, Unbounded).is_err());
+}
+
+#[test]
+fn secondary_ordered_range_reports_io_failure_after_delivering_a_leaf() {
+    use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
+    use std::ops::Bound::Unbounded;
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(Arc::clone(&pages)));
+    for id in 0..5000u64 {
+        let mut posting = id.to_be_bytes().to_vec();
+        posting.extend_from_slice(&id.to_be_bytes());
+        tree.insert(&posting, &[]).expect("posting");
+    }
+    let index = SecondaryIndexRead::new(tree);
+    let mut cursor = index.ordered_range(Unbounded, Unbounded).expect("seek");
+    let mut output = [0; 1016];
+    assert_eq!(
+        cursor.next_posting(&mut output).expect("first"),
+        Some((8, EntityId::new(0)))
+    );
+    pages.fail_reads.store(true, Ordering::Relaxed);
+    let mut delivered = 1;
+    loop {
+        match cursor.next_posting(&mut output) {
+            Ok(Some(_)) => delivered += 1,
+            Ok(None) => panic!("partial range must not become a successful end"),
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("injected page read failure"),
+                    "{error}"
+                );
+                break;
+            }
+        }
+    }
+    assert!(
+        delivered < 5000,
+        "the cursor must not prefetch the full range"
     );
 }
 

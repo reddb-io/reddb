@@ -41,6 +41,7 @@ pub mod tokenization;
 mod collection_key_read;
 #[doc(hidden)]
 pub mod collection_read;
+pub mod ordered_secondary_key;
 #[doc(hidden)]
 pub mod resident_store;
 pub mod secondary_index_read;

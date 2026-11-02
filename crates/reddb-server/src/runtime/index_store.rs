@@ -1281,11 +1281,15 @@ pub(crate) enum MutationTestPhase {
     BeforeEvents,
 }
 
+type PagedBtreeProviders =
+    HashMap<(String, String), std::sync::Arc<super::paged_btree_index::RuntimeBtreeIndex>>;
+
 /// Unified index store aggregating all secondary index managers.
 pub struct IndexStore {
     pub hash: HashIndexManager,
     pub bitmap: BitmapIndexManager,
     pub sorted: SortedIndexManager,
+    pub(super) paged_btrees: RwLock<PagedBtreeProviders>,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
     // Keep identities stable across DROP/recreate, including queued writers.
@@ -1303,6 +1307,7 @@ impl IndexStore {
             hash: HashIndexManager::new(),
             bitmap: BitmapIndexManager::new(),
             sorted: SortedIndexManager::new(),
+            paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
             topology: RwLock::new(HashMap::new()),
             #[cfg(test)]
@@ -1325,6 +1330,9 @@ impl IndexStore {
         let mut composite = self.sorted.composite.write();
         composite.retain(|(table, _), _| table != collection);
         composite.extend(prepared.sorted.composite.into_inner());
+        let mut paged = self.paged_btrees.write();
+        paged.retain(|(table, _), _| table != collection);
+        paged.extend(prepared.paged_btrees.into_inner());
         registry.retain(|(table, _), _| table != collection);
         registry.extend(prepared.registry.into_inner());
     }
@@ -1377,6 +1385,22 @@ impl IndexStore {
             .memory_bytes()
             .saturating_add(self.bitmap.memory_bytes())
             .saturating_add(self.sorted.memory_bytes())
+            .saturating_add(
+                self.paged_btrees
+                    .read()
+                    .values()
+                    .map(|provider| provider.memory_bytes())
+                    .sum::<u64>(),
+            )
+    }
+
+    fn index_is_paged(&self, index: &RegisteredIndex) -> bool {
+        self.hash.is_paged(&index.collection, &index.name)
+            || self
+                .paged_btrees
+                .read()
+                .keys()
+                .any(|(collection, name)| collection == &index.collection && name == &index.name)
     }
 
     /// Estimate resident index growth before row mutation, without cloning
@@ -1414,7 +1438,7 @@ impl IndexStore {
             }
         }
         for index in indexes {
-            if self.hash.is_paged(collection, &index.name) {
+            if self.index_is_paged(index) {
                 continue;
             }
             for fields in rows.clone() {
@@ -1450,7 +1474,7 @@ impl IndexStore {
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         indexes
-            .filter(|index| !self.hash.is_paged(collection, &index.name))
+            .filter(|index| !self.index_is_paged(index))
             .filter(|index| {
                 versioned
                     || index.columns.iter().any(|column| {
@@ -1603,6 +1627,7 @@ impl IndexStore {
         let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
+            self.paged_btrees.write().remove(&key);
             match info.method {
                 IndexMethodKind::Hash => self.hash.drop_index(collection, name),
                 IndexMethodKind::Bitmap => {
@@ -1745,7 +1770,7 @@ impl IndexStore {
     }
 
     pub fn entries_indexed(&self, index: &RegisteredIndex) -> Option<u64> {
-        if self.hash.is_paged(&index.collection, &index.name) {
+        if self.index_is_paged(index) {
             return None;
         }
         Some(match index.method {
@@ -1852,6 +1877,9 @@ impl IndexStore {
         // OLTP schema), because the inner `break` keeps string
         // compares short and amortised.
         for idx in &relevant {
+            if self.index_is_paged(idx) {
+                continue;
+            }
             let composite_btree =
                 matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1;
             if composite_btree {
@@ -1936,7 +1964,7 @@ impl IndexStore {
     ) -> Result<(), String> {
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection {
+            if idx.collection != collection || self.index_is_paged(idx) {
                 continue;
             }
 
@@ -2019,7 +2047,7 @@ impl IndexStore {
     ) -> Result<(), String> {
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection {
+            if idx.collection != collection || self.index_is_paged(idx) {
                 continue;
             }
 

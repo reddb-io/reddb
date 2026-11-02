@@ -269,6 +269,15 @@ impl RedDBRuntime {
         index: &RegisteredIndex,
         prepared: &super::index_store::IndexStore,
     ) -> crate::RedDBResult<()> {
+        self.prepare_paged_hash_named(index, prepared, &index.name)
+    }
+
+    pub(super) fn prepare_paged_hash_named(
+        &self,
+        index: &RegisteredIndex,
+        prepared: &super::index_store::IndexStore,
+        storage_name: &str,
+    ) -> crate::RedDBResult<()> {
         let store = self.db().store();
         let schema = store
             .get_collection(&index.collection)
@@ -286,7 +295,7 @@ impl RedDBRuntime {
         });
         store.register_secondary_index(
             &index.collection,
-            &index.name,
+            storage_name,
             identity.clone(),
             projection.clone(),
         )?;
@@ -296,7 +305,7 @@ impl RedDBRuntime {
             Arc::new(RuntimeHashIndex {
                 runtime: Arc::downgrade(&self.inner),
                 collection: index.collection.clone(),
-                name: index.name.clone(),
+                name: storage_name.to_string(),
                 identity,
                 projection,
             }),

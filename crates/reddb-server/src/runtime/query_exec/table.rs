@@ -832,8 +832,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         } else {
             None
         };
-        let sorted_res =
-            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit);
+        let paged_result = idx_store.paged_btree_lookup(&query.table, filter)?;
+        let uses_paged_range = paged_result.is_some();
+        let sorted_res = paged_result.or_else(|| {
+            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit)
+                .map(crate::storage::unified::hash_index::HashCandidates::from)
+        });
         if trace {
             eprintln!(
                 "sorted_index_lookup table={} filter={:?} result={:?}",
@@ -860,12 +864,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // scans on `SELECT * WHERE age BETWEEN X AND Y`.
             let table_name = query.table.as_str();
             let table_alias = query.alias.as_deref().unwrap_or(table_name);
-            let filter_fully_covered = matches!(
-                filter,
-                reddb_rql::ast::Filter::Between { .. }
-                    | reddb_rql::ast::Filter::Compare { .. }
-                    | reddb_rql::ast::Filter::In { .. }
-            );
+            let filter_fully_covered = !uses_paged_range
+                && matches!(
+                    filter,
+                    reddb_rql::ast::Filter::Between { .. }
+                        | reddb_rql::ast::Filter::Compare { .. }
+                        | reddb_rql::ast::Filter::In { .. }
+                );
             let compiled_filter = if filter_fully_covered {
                 None
             } else {

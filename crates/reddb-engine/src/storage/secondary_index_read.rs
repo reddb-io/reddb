@@ -5,6 +5,7 @@ use super::collection_read::read_error;
 use super::entity::EntityId;
 use super::error::{StorageIntegrityError, StoreError};
 use super::page_store::PageStore;
+use std::ops::Bound;
 use std::sync::Arc;
 
 pub const SECONDARY_KEY_BYTES_MAX: usize = 1016;
@@ -104,6 +105,128 @@ impl<P: PageStore> SecondaryIndexRead<P> {
             finished: false,
             _source: self.source.clone(),
         })
+    }
+
+    /// Seek a range over prefix-free, order-preserving projected keys (see
+    /// `ordered_secondary_key`). Arbitrary variable-width raw keys are NOT
+    /// valid here: appending IDs to those can interleave their key order.
+    /// Bounds may also be byte prefixes delimiting a family or fixed-arity
+    /// tuple prefix. The host merges the live overlay and checks visibility.
+    pub fn ordered_range(
+        &self,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<SecondaryRangeCursor<P>, StoreError> {
+        for bound in [lower, upper] {
+            if let Bound::Included(key) | Bound::Excluded(key) = bound {
+                if key.len() > SECONDARY_KEY_BYTES_MAX {
+                    return Err(StoreError::ReadLimitExceeded {
+                        required_bytes: key.len(),
+                        limit_bytes: SECONDARY_KEY_BYTES_MAX,
+                    });
+                }
+            }
+        }
+        let empty = match (lower, upper) {
+            (Bound::Included(low), Bound::Included(high)) => low > high,
+            (
+                Bound::Included(low) | Bound::Excluded(low),
+                Bound::Included(high) | Bound::Excluded(high),
+            ) => low >= high,
+            _ => false,
+        };
+        let start = match lower {
+            Bound::Included(key) | Bound::Excluded(key) => key,
+            Bound::Unbounded => &[],
+        };
+        let cursor = if empty {
+            None
+        } else {
+            Some(
+                self.tree
+                    .cursor_seek(start)
+                    .map_err(read_error)?
+                    .with_immutable_leaves(),
+            )
+        };
+        Ok(SecondaryRangeCursor {
+            cursor,
+            lower: lower.map(<[u8]>::to_vec),
+            upper: upper.map(<[u8]>::to_vec),
+            _source: self.source.clone(),
+        })
+    }
+}
+
+/// Bounded range traversal: one immutable leaf and two bounded seek keys.
+/// Copy projected bytes into caller-owned scratch; never allocate per posting.
+pub struct SecondaryRangeCursor<P: PageStore> {
+    cursor: Option<BTreeCursor<P>>,
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+    _source: Option<Arc<BTree<P>>>,
+}
+
+impl<P: PageStore> SecondaryRangeCursor<P> {
+    pub fn next_posting(
+        &mut self,
+        output: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+    ) -> Result<Option<(usize, EntityId)>, StoreError> {
+        let Some(cursor) = self.cursor.as_mut() else {
+            return Ok(None);
+        };
+        loop {
+            let mut above_upper = false;
+            let next = cursor
+                .peek_key_with(|posting| {
+                    if !(8..=SECONDARY_KEY_BYTES_MAX + 8).contains(&posting.len()) {
+                        return Err(StoreError::StorageIntegrity(StorageIntegrityError::new(
+                            "secondary-index",
+                            "ordered posting",
+                            None,
+                            "invalid projected key length",
+                        )));
+                    }
+                    let split = posting.len() - 8;
+                    let key = &posting[..split];
+                    above_upper = match &self.upper {
+                        Bound::Included(high) => key > high.as_slice(),
+                        Bound::Excluded(high) => key >= high.as_slice(),
+                        Bound::Unbounded => false,
+                    };
+                    let below_lower = match &self.lower {
+                        Bound::Included(low) => key < low.as_slice(),
+                        Bound::Excluded(low) => key <= low.as_slice(),
+                        Bound::Unbounded => false,
+                    };
+                    if above_upper || below_lower {
+                        return Ok(None);
+                    }
+                    output[..split].copy_from_slice(key);
+                    let id = EntityId::new(u64::from_be_bytes(
+                        posting[split..]
+                            .try_into()
+                            .expect("invariant: eight-byte identity"),
+                    ));
+                    Ok(Some((split, id)))
+                })
+                .map_err(read_error)?;
+            let next = match next {
+                Some(result) => result?,
+                None => {
+                    self.cursor = None;
+                    return Ok(None);
+                }
+            };
+            if above_upper {
+                self.cursor = None;
+                return Ok(None);
+            }
+            cursor.skip_next().map_err(read_error)?;
+            if next.is_some() {
+                return Ok(next);
+            }
+        }
     }
 }
 

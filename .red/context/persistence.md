@@ -103,9 +103,19 @@ reduces append-only history by durable entity ID, including DROP/recreate.
 Backfill projects one row at a time, admits its estimated resident growth against
 the shared budget and publishes a complete replacement under the collection
 index-topology fence. Read failures and budget denial preserve the prior indexes
-and permit retry. These secondary-index providers still retain keys in RAM and
-reconstruction still scans the source; this does not establish lazy persisted
-indexing or constant-time startup.
+and permit retry. In the opt-in disk-residency qualifier, HASH and single-column
+BTREE restoration retain generation-bound native root descriptors instead of
+rebuilding resident posting maps. Initial projection preparation scans the source;
+compatible prepared restoration does not. BTREE projections use prefix-free,
+type-ordered bytes; integral and text range queries merge physical candidates
+with live changes, retain their memory reservation through result assembly and
+recheck visibility and predicates. Unsupported query shapes, coercions, mixed
+families and oversized keys retain the authoritative scan. An overflow marker
+prevents a partial index from reporting complete results; unreadable pages fail.
+UNIQUE keeps a paged equality pocket and the existing snapshot-aware admission.
+Composite BTREE, bitmap and H3 providers, and explicit CREATE INDEX construction,
+still retain resident state. Managed activation remains disabled; these changes
+do not establish whole-server RAM bounds or qualify historical startup latency.
 
 Paged checkpoints reuse unchanged collection trees using volatile segment mutation
 revisions and manager identity. Active and aborted transaction visibility, pending vault
