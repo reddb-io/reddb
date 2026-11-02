@@ -378,6 +378,7 @@ struct RetiredBTree {
 }
 
 mod builder;
+mod checkpoint_cold_append;
 mod checkpoint_delta;
 mod checkpoint_wal;
 mod commit;

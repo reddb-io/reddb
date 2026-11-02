@@ -70,6 +70,77 @@ fn postings(tree: &SecondaryIndexRead) -> Vec<(u64, u64)> {
 }
 
 #[test]
+fn secondary_sparse_append_projects_only_new_rows_and_preserves_count() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("append.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    store.create_collection("rows").unwrap();
+    for id in 1..=2048 {
+        insert(&store, id);
+    }
+    register(&store, &visits, usize::MAX);
+    store.register_count_index("rows").unwrap();
+    store.persist().unwrap();
+    drop(store);
+    for id in 2049..=2051 {
+        let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+        register(&store, &visits, usize::MAX);
+        store.register_count_index("rows").unwrap();
+        insert(&store, id);
+        let before = visits.load(Ordering::SeqCst);
+        store.persist().unwrap();
+        assert_eq!(visits.load(Ordering::SeqCst) - before, 1);
+        assert_eq!(store.try_count_from_index("rows", None).unwrap(), Some(id));
+        let index = store
+            .secondary_index("rows", "by_remainder", &identity())
+            .unwrap();
+        let mut expected: Vec<_> = (1..=id).map(|id| (id % 3, id)).collect();
+        expected.sort_unstable();
+        assert_eq!(postings(&index), expected);
+    }
+}
+
+#[test]
+fn secondary_sparse_projection_failure_keeps_published_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("append-fail.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    store.create_collection("rows").unwrap();
+    for id in 1..=20 {
+        insert(&store, id);
+    }
+    register(&store, &visits, usize::MAX);
+    store.persist().unwrap();
+    insert(&store, 21);
+    register(&store, &visits, 20);
+    assert!(store.persist().is_err());
+    assert_eq!(
+        postings(
+            &store
+                .secondary_index("rows", "by_remainder", &identity())
+                .unwrap()
+        )
+        .len(),
+        20
+    );
+    drop(store);
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register(&store, &visits, usize::MAX);
+    store.persist().unwrap();
+    assert_eq!(
+        postings(
+            &store
+                .secondary_index("rows", "by_remainder", &identity())
+                .unwrap()
+        )
+        .len(),
+        21
+    );
+}
+
+#[test]
 fn secondary_cold_reopen_keeps_postings_without_backfill() {
     let directory = tempfile::tempdir().expect("fixture");
     let path = directory.path().join("secondary.rdb");
@@ -168,6 +239,11 @@ fn secondary_failed_build_never_publishes_partial_postings() {
     }
     register(&store, &visits, usize::MAX);
     store.persist().expect("first checkpoint");
+    // Keep this failure in the immutable replacement path: an old reader
+    // pins the generation while the new projector fails partway through it.
+    let pinned = store
+        .secondary_index("rows", "by_remainder", &identity())
+        .unwrap();
     insert(&store, 21);
     register(&store, &visits, 25);
     assert!(store.persist().is_err(), "injected failure must surface");
@@ -180,6 +256,7 @@ fn secondary_failed_build_never_publishes_partial_postings() {
         .len(),
         20
     );
+    drop(pinned);
     drop(store);
     let store =
         UnifiedStore::open_with_config(&path, config()).expect("ownership and WAL recovery");
