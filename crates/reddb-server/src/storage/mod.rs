@@ -243,3 +243,6 @@ pub use unified::{
     // Query DSL - Entry point for all queries
     Q as Query,
 };
+
+/// Offline native file rewrite.
+pub mod compact;
