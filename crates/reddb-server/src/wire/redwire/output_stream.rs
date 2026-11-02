@@ -403,6 +403,52 @@ impl FrameTx {
         result
     }
 
+    /// Keep the original result reservation while admitting the RedWire copy.
+    /// Existing direct-scan/error buffers are explicitly charged as scratch;
+    /// already admitted materialized replies must not be charged twice.
+    pub(crate) async fn send_legacy_response(
+        &self,
+        response: crate::wire::listener::LegacyQueryResponse,
+        correlation_id: u64,
+    ) -> std::io::Result<()> {
+        let result = self
+            .send_legacy_response_inner(response, correlation_id)
+            .await;
+        if result.is_err() {
+            self.failure.send_replace(true);
+        }
+        result
+    }
+
+    async fn send_legacy_response_inner(
+        &self,
+        response: crate::wire::listener::LegacyQueryResponse,
+        correlation_id: u64,
+    ) -> std::io::Result<()> {
+        use reddb_wire::redwire::builder::BorrowedLegacyReply;
+        if *self.failure.borrow() {
+            return Err(std::io::Error::other("redwire: write channel failed"));
+        }
+        let capacity = BorrowedLegacyReply::new(&response, correlation_id)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            .encoded_len();
+        let bytes = self
+            .runtime
+            .serialize_query_buffer(capacity, response.unadmitted_capacity(), move |buffer| {
+                BorrowedLegacyReply::new(&response, correlation_id)
+                    .expect("validated immutable legacy response")
+                    .encode_into(buffer);
+                drop(response);
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "redwire: response exceeds shared memory budget",
+                )
+            })?;
+        self.send_bytes(bytes).await
+    }
+
     async fn send_frame_inner(&self, mut frame: Frame) -> std::io::Result<()> {
         use reddb_wire::redwire::{Flags, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
         if *self.failure.borrow() {
@@ -436,6 +482,10 @@ impl FrameTx {
                     "redwire: response exceeds shared memory budget",
                 )
             })?;
+        self.send_bytes(bytes).await
+    }
+
+    async fn send_bytes(&self, bytes: bytes::Bytes) -> std::io::Result<()> {
         tokio::select! {
             biased;
             _ = self.failed() => Err(std::io::Error::other("redwire: write channel failed")),
