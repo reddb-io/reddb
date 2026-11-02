@@ -27,6 +27,106 @@ fn reply(size: usize) -> Frame {
         .expect("reply fixture")
 }
 
+fn binary_response(
+    runtime: &RedDBRuntime,
+    size: usize,
+) -> crate::wire::listener::LegacyQueryResponse {
+    let result = crate::runtime::RuntimeQueryResult::ok_records(
+        "select".into(),
+        vec!["payload".into()],
+        vec![vec![(
+            "payload".into(),
+            reddb_types::Value::text("x".repeat(size)),
+        )]],
+        "select",
+    );
+    runtime.serialize_binary_result(&result).unwrap()
+}
+
+#[tokio::test]
+async fn binary_response_admission_survives_framing_queue_and_clones_without_double_charge() {
+    let runtime = runtime();
+    let response = binary_response(&runtime, 64 * 1024);
+    let expected = reddb_wire::redwire::rewrap_length_prefixed_handler_response(&response, 91);
+    let original_length = response.len();
+    let encoded_length = original_length - 5 + FRAME_HEADER_SIZE;
+    let retained = match &response {
+        crate::wire::listener::LegacyQueryResponse::Admitted(bytes) => bytes.slice(..1),
+        _ => panic!("materialized result is admitted"),
+    };
+    runtime.refresh_memory_accounting();
+    let headroom =
+        runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+    let filler = runtime
+        .serialize_query_buffer(headroom as usize - encoded_length - 8, 0, |_| {})
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    sender
+        .send_legacy_response(response, 91)
+        .await
+        .expect("only one output copy needs new admission");
+    drop(filler);
+    assert_eq!(charged(&runtime), (original_length + encoded_length) as u64);
+    drop(retained);
+    assert_eq!(charged(&runtime), encoded_length as u64);
+    let bytes = rx.recv().await.unwrap();
+    assert_eq!(decode_frame(&bytes).unwrap().0, expected);
+    let slice = bytes.slice(..1);
+    drop(bytes);
+    assert_eq!(charged(&runtime), encoded_length as u64);
+    drop(slice);
+    assert_eq!(charged(&runtime), 0);
+}
+
+#[tokio::test]
+async fn binary_response_blocked_send_and_failed_framing_release_owned_reservations() {
+    let runtime = runtime();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    sender
+        .send_legacy_response(binary_response(&runtime, 4096), 1)
+        .await
+        .unwrap();
+    let queued = charged(&runtime);
+    {
+        let response = binary_response(&runtime, 8192);
+        let encoded = response.len() - 5 + FRAME_HEADER_SIZE;
+        let pending = sender.send_legacy_response(response, 2);
+        tokio::pin!(pending);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                pending.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        assert_eq!(charged(&runtime), queued + encoded as u64);
+    }
+    assert_eq!(charged(&runtime), queued);
+    drop(rx.recv().await.unwrap());
+    let response = binary_response(&runtime, 64 * 1024);
+    runtime.refresh_memory_accounting();
+    let headroom =
+        runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+    let filler = runtime
+        .serialize_query_buffer(headroom as usize - 16 * 1024, 0, |_| {})
+        .unwrap();
+    let error = sender.send_legacy_response(response, 3).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+    timeout(Duration::from_secs(5), sender.failed())
+        .await
+        .unwrap();
+    drop(filler);
+    assert_eq!(charged(&runtime), 0);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    FrameTx::new(tx, Arc::clone(&runtime))
+        .send_legacy_response(binary_response(&runtime, 64 * 1024), 4)
+        .await
+        .unwrap();
+    drop(rx.recv().await.unwrap());
+    assert_eq!(charged(&runtime), 0);
+}
+
 #[tokio::test]
 async fn blocked_output_stream_retains_result_admission_until_cancelled() {
     let runtime = runtime();

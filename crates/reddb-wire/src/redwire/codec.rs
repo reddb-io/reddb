@@ -131,13 +131,18 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
 /// and admit the complete allocation before encoding. Compression has its own
 /// codec workspace and must use `encode_frame` instead.
 pub fn encode_uncompressed_frame_into(frame: &Frame, buf: &mut Vec<u8>) {
+    encode_uncompressed_payload_into(frame, &frame.payload, buf);
+}
+
+pub(crate) fn encode_uncompressed_payload_into(frame: &Frame, payload: &[u8], buf: &mut Vec<u8>) {
     assert!(!frame.flags.contains(Flags::COMPRESSED));
-    buf.extend_from_slice(&frame.encoded_len().to_le_bytes());
+    let length = u32::try_from(FRAME_HEADER_SIZE + payload.len()).expect("validated frame size");
+    buf.extend_from_slice(&length.to_le_bytes());
     buf.push(frame.kind as u8);
     buf.push(frame.flags.bits());
     buf.extend_from_slice(&frame.stream_id.to_le_bytes());
     buf.extend_from_slice(&frame.correlation_id.to_le_bytes());
-    buf.extend_from_slice(&frame.payload);
+    buf.extend_from_slice(payload);
 }
 
 fn encode_compressed(frame: &Frame) -> Vec<u8> {

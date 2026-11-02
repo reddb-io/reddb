@@ -45,6 +45,11 @@ use reddb_wire::redwire::{
     rewrap_length_prefixed_handler_response, Frame, MessageDirection, MessageKind, REDWIRE_MAGIC,
 };
 
+enum QueryResponse {
+    Frame(Frame),
+    Legacy(crate::wire::listener::LegacyQueryResponse, u64),
+}
+
 #[derive(Debug)]
 struct AuthedSession {
     username: String,
@@ -372,29 +377,29 @@ where
                     let _connection = connection;
                     let response = execute_with_redwire_context(&operation_context, role, || {
                         match frame.kind {
-                            MessageKind::Query => {
-                                run_query(&runtime, statements.registry(), &frame)
-                            }
-                            MessageKind::QueryWithParams => {
-                                run_query_with_params(&runtime, statements.registry(), &frame)
-                            }
-                            MessageKind::QueryBinary => rewrap_length_prefixed_handler_response(
-                                &crate::wire::listener::handle_query_binary(
+                            MessageKind::Query => QueryResponse::Frame(run_query(
+                                &runtime,
+                                statements.registry(),
+                                &frame,
+                            )),
+                            MessageKind::QueryWithParams => QueryResponse::Frame(
+                                run_query_with_params(&runtime, statements.registry(), &frame),
+                            ),
+                            MessageKind::QueryBinary => QueryResponse::Legacy(
+                                crate::wire::listener::handle_query_binary(
                                     &runtime,
                                     &frame.payload,
                                 ),
                                 frame.correlation_id,
                             ),
-                            MessageKind::ExecutePrepared => {
-                                rewrap_length_prefixed_handler_response(
-                                    &crate::wire::listener::handle_execute_prepared(
-                                        &runtime,
-                                        &frame.payload,
-                                        &statements,
-                                    ),
-                                    frame.correlation_id,
-                                )
-                            }
+                            MessageKind::ExecutePrepared => QueryResponse::Legacy(
+                                crate::wire::listener::handle_execute_prepared(
+                                    &runtime,
+                                    &frame.payload,
+                                    &statements,
+                                ),
+                                frame.correlation_id,
+                            ),
                             _ => unreachable!("only query frames enter the blocking dispatcher"),
                         }
                     });
@@ -403,7 +408,14 @@ where
                 .await
                 .map_err(io::Error::other)?;
                 prepared_stmts = statements;
-                queue_send(&out_tx, response).await?;
+                match response {
+                    QueryResponse::Frame(frame) => queue_send(&out_tx, frame).await?,
+                    QueryResponse::Legacy(response, correlation_id) => {
+                        out_tx
+                            .send_legacy_response(response, correlation_id)
+                            .await?
+                    }
+                }
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,

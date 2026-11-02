@@ -4,6 +4,9 @@ use super::memory_admission::QueryBufferReservation;
 use super::RedDBRuntime;
 use std::fmt;
 
+mod binary;
+pub(crate) use binary::BinaryQueryResponse;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryBufferError {
     ResultLimit,
@@ -209,6 +212,155 @@ mod tests {
     use crate::storage::memory_pools::MemoryPool;
     use crate::RedDBOptions;
     use std::fmt::Write;
+
+    #[test]
+    fn binary_committed_commands_do_not_receive_late_read_result_refusals() {
+        let runtime = RedDBRuntime::with_pool_and_limits(
+            RedDBOptions::in_memory().with_memory_budget(1024 * 1024),
+            super::super::ConnectionPoolConfig::default(),
+            super::super::resource_limits::ResourceLimits {
+                max_result_bytes: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for sql in [
+            "CREATE TABLE binary_command_budget (id INT)",
+            "INSERT INTO binary_command_budget (id) VALUES (1)",
+        ] {
+            let response = crate::wire::listener::handle_query_binary(&runtime, sql.as_bytes());
+            assert_eq!(
+                response[4],
+                reddb_wire::legacy::MSG_RESULT,
+                "committed command must not become a read-budget error: {}",
+                String::from_utf8_lossy(&response[5..])
+            );
+        }
+        assert!(runtime
+            .db()
+            .store()
+            .get_collection("binary_command_budget")
+            .is_some());
+        let committed =
+            crate::runtime::RuntimeQueryResult::ok_message("INSERT".into(), "ok", "insert");
+        runtime.refresh_memory_accounting();
+        let available =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .try_reserve_query_buffer(available as usize)
+            .unwrap();
+        let response = runtime
+            .serialize_binary_result(&committed)
+            .expect("committed ack has no late read-admission gate");
+        assert!(matches!(response, BinaryQueryResponse::Existing(_)));
+        assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
+        drop(response);
+        drop(held);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+    }
+
+    #[test]
+    fn binary_response_refuses_when_rows_fit_but_serialization_does_not() {
+        use crate::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(1024 * 1024))
+                .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE binary_response_budget (payload TEXT)")
+            .unwrap();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO binary_response_budget (payload) VALUES ($1)",
+                &[reddb_types::Value::text("x".repeat(64 * 1024))],
+            )
+            .unwrap();
+        // OFFSET excludes the separate direct-scan implementation so this
+        // exercises the real materialized query/serialization path.
+        let sql = "SELECT payload FROM binary_response_budget OFFSET 0";
+        assert!(crate::wire::query_direct::try_handle_query_binary_direct(&runtime, sql).is_none());
+        let mut statements = crate::wire::listener::PreparedStatements::default();
+        // The binary PREPARE contract auto-parameterizes literals; it does
+        // not bind SQL $N placeholders. OFFSET remains a shape property.
+        let prepare = reddb_wire::redwire::encode_prepare_payload(7, sql).unwrap();
+        assert_eq!(
+            crate::wire::listener::handle_prepare(&runtime, &prepare, &mut statements)[4],
+            reddb_wire::legacy::MSG_PREPARED_OK
+        );
+        let execute = reddb_wire::redwire::encode_execute_prepared_payload(7, &[]).unwrap();
+        let baseline =
+            crate::wire::listener::handle_execute_prepared(&runtime, &execute, &statements);
+        assert_eq!(
+            baseline[4],
+            reddb_wire::legacy::MSG_RESULT,
+            "prepared baseline: {}",
+            String::from_utf8_lossy(&baseline[5..])
+        );
+        drop(baseline);
+        let prepared = PreparedRegistry::new();
+        let result = QueryRequestExecutor::new(&runtime, &prepared)
+            .execute(QueryRequest::sql(sql, Vec::new()))
+            .unwrap();
+        assert_eq!(result.result.records.len(), 1);
+        assert!(result.result.pre_serialized_json.is_none());
+        let result_charge = runtime
+            .memory_accounting()
+            .used_bytes(MemoryPool::QueryBuffers);
+        assert!(result_charge >= 64 * 1024);
+        drop(result);
+        runtime.refresh_memory_accounting();
+        let available =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .try_reserve_query_buffer((available - result_charge - 16 * 1024) as usize)
+            .expect("leave room for result but not its serialized copy");
+        let response = crate::wire::listener::handle_query_binary(&runtime, sql.as_bytes());
+        assert_eq!(
+            response[4],
+            reddb_wire::legacy::MSG_ERROR,
+            "a successful 64 KiB binary reply must not bypass its remaining 16 KiB encoding budget"
+        );
+        assert!(String::from_utf8_lossy(&response[5..])
+            .to_lowercase()
+            .contains("memory"));
+        drop(response);
+        let prepared_response =
+            crate::wire::listener::handle_execute_prepared(&runtime, &execute, &statements);
+        assert_eq!(prepared_response[4], reddb_wire::legacy::MSG_ERROR);
+        assert!(
+            String::from_utf8_lossy(&prepared_response[5..])
+                .to_lowercase()
+                .contains("memory"),
+            "prepared refusal: {}",
+            String::from_utf8_lossy(&prepared_response[5..])
+        );
+        drop(prepared_response);
+        drop(held);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+        let response = crate::wire::listener::handle_query_binary(&runtime, sql.as_bytes());
+        assert_eq!(
+            response[4],
+            reddb_wire::legacy::MSG_RESULT,
+            "retry after budget release"
+        );
+        drop(response);
+        let prepared_response =
+            crate::wire::listener::handle_execute_prepared(&runtime, &execute, &statements);
+        assert_eq!(
+            prepared_response[4],
+            reddb_wire::legacy::MSG_RESULT,
+            "prepared retry after budget release"
+        );
+    }
 
     #[test]
     fn exact_serialization_admits_copy_and_scratch_before_running_encoder() {

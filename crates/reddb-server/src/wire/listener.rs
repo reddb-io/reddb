@@ -25,11 +25,10 @@ use reddb_types::Value;
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
     build_legacy_cursor_batch_frame, build_legacy_cursor_ok_frame, build_legacy_error_frame,
-    build_legacy_prepared_ok_frame, build_legacy_result_frame, build_legacy_result_frame_with,
-    encode_result_payload_header, MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED,
-    MSG_BULK_OK, MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START,
-    MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY,
-    MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
+    build_legacy_prepared_ok_frame, build_legacy_result_frame, encode_result_payload_header,
+    MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_COMMIT,
+    MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR,
+    MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
 };
 use reddb_wire::redwire::{
     decode_bulk_binary_payload, decode_bulk_json_payload, decode_bulk_ok_count_payload,
@@ -40,10 +39,10 @@ use reddb_wire::redwire::{
     BulkBinaryFlavor,
 };
 
-pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> LegacyQueryResponse {
     let sql = match std::str::from_utf8(payload) {
         Ok(s) => s,
-        Err(_) => return make_error(b"invalid UTF-8 in query"),
+        Err(_) => return make_error(b"invalid UTF-8 in query").into(),
     };
 
     // Zero-copy fast path for simple indexed SELECT. Gated behind
@@ -59,7 +58,7 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         && crate::runtime::execution_context::current_auth_identity_for_audit().is_none()
     {
         if let Some(resp) = super::query_direct::try_handle_query_binary_direct(runtime, sql) {
-            return resp;
+            return resp.into();
         }
     }
 
@@ -70,15 +69,8 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let prepared = PreparedRegistry::new();
     match QueryRequestExecutor::new(runtime, &prepared).execute(QueryRequest::sql(sql, Vec::new()))
     {
-        Ok(result) => {
-            // Fast path: if pre_serialized_json available, send it as text
-            // (avoids gRPC/protobuf overhead while reusing existing JSON turbo path)
-            if let Some(ref json) = result.result.pre_serialized_json {
-                return build_legacy_result_frame(json.as_bytes());
-            }
-            encode_result(&result)
-        }
-        Err(err) => make_error(err.to_string().as_bytes()),
+        Ok(result) => encode_result(runtime, &result),
+        Err(err) => make_error(err.to_string().as_bytes()).into(),
     }
 }
 
@@ -105,7 +97,7 @@ fn direct_scan_disabled() -> bool {
 /// on the wire. The only observable difference between MSG_QUERY
 /// and MSG_QUERY_BINARY is the client-side intent marker — useful
 /// for routing/telemetry, but no longer a functional divergence.
-pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> LegacyQueryResponse {
     handle_query(runtime, payload)
 }
 
@@ -189,112 +181,21 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
     }
 }
 
-/// Per-column resolver built once per `encode_result` call. The row
-/// loop then dispatches via `&[ColumnResolver]` with one cheap
-/// lookup per cell instead of re-scanning the columnar schema for
-/// every (row, column) pair.
-enum ColumnResolver {
-    /// Direct index into every record's `columnar.values[]`. Valid
-    /// when the scan result shares a single `Arc<Vec<Arc<str>>>`
-    /// schema across records.
-    ColumnarIdx(usize),
-    /// HashMap fallback — records built via `set*` or mutated after
-    /// columnar construction.
-    HashMapKey(Arc<str>),
-}
+pub(crate) use crate::runtime::memory_buffers::BinaryQueryResponse as LegacyQueryResponse;
 
-fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
-    let records = &result.result.records;
-
-    // Column name list. Prefer the executor's projected columns when
-    // populated; fall back to the first record's schema so scan rows
-    // with an empty `values` HashMap still surface their fields.
-    let columns: Vec<Arc<str>> = if !result.result.columns.is_empty() {
-        result
-            .result
-            .columns
-            .iter()
-            .map(|s| Arc::from(s.as_str()))
-            .collect()
-    } else if let Some(first) = records.first() {
-        first.column_names()
-    } else {
-        Vec::new()
-    };
-
-    // Pre-resolve each column against the first record's columnar
-    // schema. For scan outputs every record shares the same `Arc`
-    // pointer, so the resolver list is valid for every row; per-row
-    // encoding becomes an O(1) `values[idx]` per cell.
-    //
-    // Records built via `set*` (HashMap path) still resolve via the
-    // `HashMapKey` variant with a single HashMap lookup per cell —
-    // no worse than before the optimisation.
-    let first_schema_ptr = records
-        .first()
-        .and_then(|r| r.columnar_schema())
-        .map(|s| Arc::as_ptr(s) as usize);
-    let first_columnar = records.first().and_then(|r| r.columnar());
-    let resolvers: Vec<ColumnResolver> = columns
-        .iter()
-        .map(|col| {
-            match first_columnar
-                .and_then(|c| c.schema.iter().rposition(|k| k.as_ref() == col.as_ref()))
-            {
-                Some(idx) => ColumnResolver::ColumnarIdx(idx),
-                None => ColumnResolver::HashMapKey(Arc::clone(col)),
-            }
-        })
-        .collect();
-
-    // Encode into the final legacy frame. A thread-local scratch retained the
-    // largest reply indefinitely and copied the entire payload twice.
-    build_legacy_result_frame_with(256 + records.len() * 128, |buf| {
-        encode_result_payload_header(
-            buf,
-            columns.iter().map(|column| column.as_ref()),
-            records.len() as u32,
-        );
-
-        for record in records {
-            // When the schema identity matches the first record's
-            // pointer, `ColumnarIdx(i)` is safe — we just reach
-            // into `record.columnar().unwrap().values[i]`. Otherwise
-            // fall back to the record-level `get` which covers
-            // heterogeneous schemas (happens when the executor
-            // mixes result shapes, e.g. a projection over UNION).
-            let same_schema = record.columnar_schema().map(|s| Arc::as_ptr(s) as usize)
-                == first_schema_ptr
-                && first_schema_ptr.is_some();
-            if same_schema {
-                let col = record.columnar().expect("checked above");
-                for resolver in &resolvers {
-                    let val = match resolver {
-                        ColumnResolver::ColumnarIdx(i) => {
-                            col.values.get(*i).unwrap_or(&Value::Null)
-                        }
-                        ColumnResolver::HashMapKey(k) => {
-                            record.get(k.as_ref()).unwrap_or(&Value::Null)
-                        }
-                    };
-                    encode_value(buf, val);
-                }
-            } else {
-                // Heterogeneous-schema fallback. Walk columns + the
-                // already-built resolver list in lockstep so each
-                // cell pays one `record.get` (same as pre-Phase-B
-                // behaviour) — no O(N²) pointer search.
-                for (col_name, resolver) in columns.iter().zip(resolvers.iter()) {
-                    let key: &str = match resolver {
-                        ColumnResolver::ColumnarIdx(_) => col_name.as_ref(),
-                        ColumnResolver::HashMapKey(k) => k.as_ref(),
-                    };
-                    let val = record.get(key).unwrap_or(&Value::Null);
-                    encode_value(buf, val);
-                }
-            }
+fn encode_result(
+    runtime: &RedDBRuntime,
+    result: &crate::runtime::RuntimeQueryResult,
+) -> LegacyQueryResponse {
+    match runtime.serialize_binary_result(result) {
+        Ok(buffer) => buffer,
+        Err(crate::runtime::memory_buffers::QueryBufferError::MemoryBudget) => {
+            make_error(b"binary response exceeds shared memory budget").into()
         }
-    })
+        Err(crate::runtime::memory_buffers::QueryBufferError::ResultLimit) => {
+            make_error(b"binary response exceeds result size limit").into()
+        }
+    }
 }
 
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
@@ -642,45 +543,45 @@ pub(crate) fn handle_execute_prepared(
     runtime: &RedDBRuntime,
     payload: &[u8],
     stmts: &PreparedStatements,
-) -> Vec<u8> {
+) -> LegacyQueryResponse {
     if !stmts.registry.is_enabled() {
-        return make_error(b"prepared statements disabled");
+        return make_error(b"prepared statements disabled").into();
     }
     let request = match decode_execute_prepared_payload(payload) {
         Ok(request) => request,
-        Err(err) => return make_error(err.to_string().as_bytes()),
+        Err(err) => return make_error(err.to_string().as_bytes()).into(),
     };
 
     let (prepared_id, parameter_count) = match stmts.wire_ids.get(&request.stmt_id).copied() {
         Some(prepared) => prepared,
-        None => return make_error(b"unknown prepared stmt_id"),
+        None => return make_error(b"unknown prepared stmt_id").into(),
     };
     // DDL ran between PREPARE and EXECUTE — the cached shape may bind columns
     // that no longer exist. Force a re-PREPARE rather than executing a stale
     // plan. Checked ahead of arity so a stale client learns to replan first.
     match stmts.registry.ddl_epoch(prepared_id) {
         Some(epoch) if epoch != runtime.ddl_epoch() => {
-            return make_error(b"prepared_needs_replan");
+            return make_error(b"prepared_needs_replan").into();
         }
         Some(_) => {}
-        None => return make_error(b"unknown prepared stmt_id"),
+        None => return make_error(b"unknown prepared stmt_id").into(),
     }
     if request.params.len() != parameter_count {
-        return make_error(b"prepared param count mismatch");
+        return make_error(b"prepared param count mismatch").into();
     }
 
     let mut params = Vec::with_capacity(request.params.len());
     for param in request.params {
         match wire_param_value(param) {
             Ok(value) => params.push(value),
-            Err(err) => return make_error(err.as_bytes()),
+            Err(err) => return make_error(err.as_bytes()).into(),
         }
     }
 
     let executor = QueryRequestExecutor::new(runtime, &stmts.registry);
     let bound = match executor.bind(QueryRequest::prepared(prepared_id, params)) {
         Ok(bound) => bound,
-        Err(err) => return make_error(err.to_string().as_bytes()),
+        Err(err) => return make_error(err.to_string().as_bytes()).into(),
     };
 
     // Zero-copy direct-scan path. The bound expression is already a
@@ -692,20 +593,15 @@ pub(crate) fn handle_execute_prepared(
         if let Some(reddb_rql::ast::QueryExpr::Table(tq)) = bound.prepared_expr() {
             if super::query_direct::is_shape_direct_eligible(tq) {
                 if let Some(resp) = super::query_direct::execute_direct_scan(runtime, tq) {
-                    return resp;
+                    return resp.into();
                 }
             }
         }
     }
 
     match executor.execute_bound(bound) {
-        Ok(result) => {
-            if let Some(ref json) = result.result.pre_serialized_json {
-                return build_legacy_result_frame(json.as_bytes());
-            }
-            encode_result(&result)
-        }
-        Err(err) => make_error(err.to_string().as_bytes()),
+        Ok(result) => encode_result(runtime, &result),
+        Err(err) => make_error(err.to_string().as_bytes()).into(),
     }
 }
 
@@ -942,9 +838,14 @@ mod tests {
                 let threads: Vec<_> = (0..workers)
                     .map(|_| {
                         scope.spawn(|| {
+                            // Isolate encoder retention from shared-runtime lock
+                            // contention and its lazy per-thread parking state.
+                            // Shared-budget concurrency has a separate regression.
+                            let runtime = create_runtime();
+                            runtime.refresh_memory_accounting();
                             measure_allocations(|| {
-                                drop(encode_result(&large));
-                                drop(encode_result(&small));
+                                drop(encode_result(&runtime, &large));
+                                drop(encode_result(&runtime, &small));
                             })
                             .1
                         })
@@ -959,7 +860,7 @@ mod tests {
                 assert_eq!(count.allocated_bytes, count.deallocated_bytes,
                     "encoder retains requested allocation bytes after responses drop ({workers} workers): {count:?}");
                 assert!(
-                    count.allocated_bytes <= 2 * 192 * 1024 + 8192,
+                    count.allocated_bytes <= 192 * 1024 + 8192,
                     "encoding must not clone complete payload/frame buffers: {count:?}"
                 );
             }

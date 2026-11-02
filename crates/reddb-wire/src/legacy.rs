@@ -206,6 +206,36 @@ pub fn encode_value(buf: &mut Vec<u8>, value: &WireValue) {
     }
 }
 
+/// Encode borrowed engine values without constructing owned WireValue text/blob
+/// copies. Unsupported variants (including Blob) retain the legacy Null tag.
+#[inline]
+pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Text(text) => {
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            buf.extend_from_slice(text.as_bytes());
+        }
+        Value::Integer(value) => encode_value(buf, &WireValue::I64(*value)),
+        Value::UnsignedInteger(value) => encode_value(buf, &WireValue::U64(*value)),
+        Value::Float(value) => encode_value(buf, &WireValue::F64(*value)),
+        Value::Boolean(value) => encode_value(buf, &WireValue::Bool(*value)),
+        Value::Timestamp(value) => encode_value(buf, &WireValue::Timestamp(*value as u64)),
+        _ => buf.push(VAL_NULL),
+    }
+}
+
+/// Exact encoded length without allocating or traversing text contents.
+#[inline]
+pub fn native_value_encoded_len(value: &Value) -> usize {
+    match value {
+        Value::Text(text) => 5 + text.len(),
+        Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) | Value::Timestamp(_) => 9,
+        Value::Boolean(_) => 2,
+        _ => 1,
+    }
+}
+
 #[inline]
 pub fn decode_value(data: &[u8], pos: &mut usize) -> WireValue {
     try_decode_value(data, pos).unwrap_or(WireValue::Null)
@@ -318,6 +348,32 @@ pub fn set_result_payload_row_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_native_encoding_matches_owned_conversion_and_exact_length() {
+        let values = [
+            Value::Null,
+            Value::Integer(i64::MIN),
+            Value::UnsignedInteger(u64::MAX),
+            Value::Float(-1.25),
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Timestamp(-1),
+            Value::text(""),
+            Value::text("quotes\"雪\n"),
+            Value::text("x".repeat(192 * 1024)),
+            Value::Blob(vec![1; 192 * 1024]),
+        ];
+        for value in values {
+            let mut expected = Vec::new();
+            encode_value(&mut expected, &WireValue::from(&value));
+            let mut actual = Vec::with_capacity(native_value_encoded_len(&value));
+            encode_native_value(&mut actual, &value);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.len(), native_value_encoded_len(&value));
+            assert_eq!(actual.len(), actual.capacity());
+        }
+    }
 
     // Pins the WireValue<->Value field mapping re-homed here from
     // reddb-server's wire::protocol (ADR 0052, #1061). The conversion is a
