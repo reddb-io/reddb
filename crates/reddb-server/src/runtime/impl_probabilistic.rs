@@ -723,6 +723,14 @@ impl RedDBRuntime {
         if is_mutation {
             self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         }
+        if let ProbabilisticCommand::CreateHll { name, .. }
+        | ProbabilisticCommand::CreateSketch { name, .. }
+        | ProbabilisticCommand::CreateFilter { name, .. } = cmd
+        {
+            if super::impl_ddl::is_system_schema_name(name) {
+                return Err(RedDBError::Query("system schema is read-only".to_string()));
+            }
+        }
         match cmd {
             // ── HyperLogLog ──────────────────────────────────────────
             ProbabilisticCommand::CreateHll {

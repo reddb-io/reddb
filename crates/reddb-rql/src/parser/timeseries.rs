@@ -13,7 +13,7 @@ impl<'a> Parser<'a> {
     /// Parse CREATE TIMESERIES body (after CREATE TIMESERIES consumed)
     pub fn parse_create_timeseries_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut retention_ms = None;
         let mut chunk_size = None;
@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
     /// series registry, and Prometheus adapter slices build on this metadata.
     pub fn parse_create_metrics_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut raw_retention_ms = None;
         let mut tenant_by = None;
@@ -358,7 +358,7 @@ impl<'a> Parser<'a> {
     /// `HypertableRegistry` alongside creating the collection.
     pub fn parse_create_hypertable_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut time_column: Option<String> = None;
         let mut chunk_interval_ns: Option<u64> = None;
