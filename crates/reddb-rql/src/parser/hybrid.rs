@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Vector)?;
         self.expect(Token::Search)?;
 
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
 
         self.expect(Token::Similar)?;
         self.expect(Token::To)?;

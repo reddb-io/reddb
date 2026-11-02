@@ -13,7 +13,7 @@ impl<'a> Parser<'a> {
     /// Parse CREATE QUEUE body (after CREATE QUEUE consumed)
     pub fn parse_create_queue_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut mode = QueueMode::Work;
         let mut priority = false;
@@ -61,7 +61,7 @@ impl<'a> Parser<'a> {
                     let unit = self.parse_queue_duration_unit()?;
                     ttl_ms = Some((value * unit) as u64);
                 } else if self.consume_ident_ci("DLQ")? {
-                    dlq = Some(self.expect_ident()?);
+                    dlq = Some(self.parse_collection_name()?);
                 }
             } else {
                 break;
@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
     ///   `IN_FLIGHT_CAP_PER_GROUP <int>`
     ///   `DLQ <ident>`
     pub fn parse_alter_queue_body(&mut self) -> Result<QueryExpr, ParseError> {
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
         if !self.consume(&Token::Set)? && !self.consume_ident_ci("SET")? {
             return Err(ParseError::expected(
                 vec!["SET"],
@@ -116,7 +116,7 @@ impl<'a> Parser<'a> {
         } else if self.consume_ident_ci("IN_FLIGHT_CAP_PER_GROUP")? {
             alter.in_flight_cap_per_group = Some(self.parse_integer()?.max(1) as u32);
         } else if self.consume_ident_ci("DLQ")? {
-            alter.dlq = Some(self.expect_ident()?);
+            alter.dlq = Some(self.parse_collection_name()?);
         } else if self.consume_ident_ci("RETRY_DELAY")? {
             let value = self.parse_float()?;
             let unit = self.parse_queue_duration_unit()?;
@@ -158,7 +158,7 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Push => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let value = self.parse_value()?;
                 let (priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
@@ -173,7 +173,7 @@ impl<'a> Parser<'a> {
             }
             Token::Pop => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let count = if self.consume(&Token::Count)? {
                     self.parse_integer()? as usize
                 } else {
@@ -188,7 +188,7 @@ impl<'a> Parser<'a> {
             }
             Token::Peek => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 // Accept either `PEEK <q> COUNT <n>` or a bare `PEEK <q> <n>`.
                 // `consume` has a side effect (advances past COUNT), so the
                 // short-circuit order matters: only peek for a bare integer
@@ -204,15 +204,15 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LEN") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Len { queue }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("MOVE") => {
                 self.advance()?;
                 self.expect(Token::From)?;
-                let source = self.expect_ident()?;
+                let source = self.parse_collection_name()?;
                 self.expect(Token::To)?;
-                let destination = self.expect_ident()?;
+                let destination = self.parse_collection_name()?;
                 let filter = if self.consume(&Token::Where)? {
                     Some(self.parse_filter()?)
                 } else {
@@ -238,12 +238,12 @@ impl<'a> Parser<'a> {
             }
             Token::Purge => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Purge { queue }))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LPOP") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Pop {
                     queue,
                     side: QueueSide::Left,
@@ -252,7 +252,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RPOP") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Pop {
                     queue,
                     side: QueueSide::Right,
@@ -261,7 +261,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LPUSH") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let value = self.parse_value()?;
                 let (_priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
@@ -276,7 +276,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RPUSH") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let value = self.parse_value()?;
                 let (priority, key, available, dedup_key) = self.parse_push_tail_clauses()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
@@ -292,7 +292,7 @@ impl<'a> Parser<'a> {
             Token::Group => {
                 self.advance()?;
                 self.expect(Token::Create)?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let group = self.expect_ident()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::GroupCreate {
                     queue,
@@ -301,7 +301,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("READ") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let group = if self.consume(&Token::Group)? {
                     Some(self.expect_ident()?)
                 } else {
@@ -332,7 +332,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("PENDING") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 self.expect(Token::Group)?;
                 let group = self.expect_ident()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Pending {
@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("CLAIM") => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 self.expect(Token::Group)?;
                 let group = self.expect_ident()?;
                 if !self.consume_ident_ci("CONSUMER")? {
@@ -370,7 +370,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ack => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let (group, message_id, delivery_id, _delay_ms) =
                     self.parse_ack_nack_handle(false)?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Ack {
@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
             }
             Token::Nack => {
                 self.advance()?;
-                let queue = self.expect_ident()?;
+                let queue = self.parse_collection_name()?;
                 let (group, message_id, delivery_id, delay_ms) =
                     self.parse_ack_nack_handle(true)?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Nack {

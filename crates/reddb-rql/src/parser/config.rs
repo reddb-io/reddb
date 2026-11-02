@@ -49,11 +49,7 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        let mut collection = self.expect_ident_or_keyword()?.to_ascii_lowercase();
-        if self.consume(&Token::Dot)? {
-            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
-            collection = format!("{collection}.{next}");
-        }
+        let collection = self.parse_config_collection_name()?;
         let key = if operation == "LIST"
             || (operation == "WATCH"
                 && matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("PREFIX")))
@@ -282,12 +278,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_config_collection_name(&mut self) -> Result<String, ParseError> {
-        let mut collection = self.expect_ident_or_keyword()?.to_ascii_lowercase();
-        if self.consume(&Token::Dot)? {
-            let next = self.expect_ident_or_keyword()?.to_ascii_lowercase();
-            collection = format!("{collection}.{next}");
-        }
-        Ok(collection)
+        let name = self.collection_name_segment(true)?;
+        self.finish_collection_name(name, false)
+            .map(|name| name.to_ascii_lowercase())
     }
 
     fn parse_optional_config_tags(&mut self) -> Result<Vec<String>, ParseError> {

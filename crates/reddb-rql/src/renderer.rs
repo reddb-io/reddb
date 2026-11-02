@@ -51,8 +51,8 @@ pub fn render_identifier(identifier: &str) -> String {
     }
 }
 
-// Dotted AST names denote paths; literal dots in delimited names are rejected
-// by the parser because this AST does not retain segment quoting provenance.
+// Dotted collection names normalize to paths, including a quoted whole name.
+// Field paths still require separate segments; their quoting is not retained.
 fn render_identifier_path(path: &str) -> String {
     path.split('.')
         .map(render_identifier)

@@ -687,6 +687,9 @@ impl RedDBRuntime {
         query: &CreateQueueQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if super::impl_ddl::is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         if query.dlq.as_deref() == Some(query.name.as_str()) {
             return Err(RedDBError::Query(
                 "dead-letter queue must be different from the source queue".to_string(),
