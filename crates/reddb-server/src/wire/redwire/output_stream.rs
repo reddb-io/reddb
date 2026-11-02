@@ -456,7 +456,10 @@ mod tests {
         let runtime = Arc::new(runtime);
         let sender = FrameTx::new(tx, Arc::clone(&runtime));
         sender
-            .send_frame(Frame::new(MessageKind::Result, 7, vec![1; 128 * 1024]))
+            .send_frame(
+                reddb_wire::redwire::build_reply_frame(7, MessageKind::Result, vec![1; 128 * 1024])
+                    .expect("reply fixture"),
+            )
             .await
             .expect("admitted response");
         assert!(

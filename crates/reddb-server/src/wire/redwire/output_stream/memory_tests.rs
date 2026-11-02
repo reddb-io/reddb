@@ -22,7 +22,8 @@ fn charged(runtime: &RedDBRuntime) -> u64 {
 }
 
 fn reply(size: usize) -> Frame {
-    Frame::new(MessageKind::Result, 17, vec![b'x'; size])
+    reddb_wire::redwire::build_reply_frame(17, MessageKind::Result, vec![b'x'; size])
+        .expect("reply fixture")
 }
 
 #[tokio::test]
@@ -132,7 +133,10 @@ async fn admission_failure_unblocks_socket_and_full_queue_and_refuses_later_succ
         "queued, blocked producer and socket owners released"
     );
     assert!(sender
-        .send_frame(Frame::new(MessageKind::StreamEnd, 17, vec![]))
+        .send_frame(
+            reddb_wire::redwire::build_reply_frame(17, MessageKind::StreamEnd, vec![])
+                .expect("terminal fixture")
+        )
         .await
         .is_err());
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
