@@ -32,8 +32,8 @@ pub trait SecondaryIndexProjector: Send + Sync {
 
 #[derive(Clone)]
 pub(super) struct SecondaryIndexSpec {
-    identity: SecondaryIndexIdentity,
-    projector: Arc<dyn SecondaryIndexProjector>,
+    pub(super) identity: SecondaryIndexIdentity,
+    pub(super) projector: Arc<dyn SecondaryIndexProjector>,
 }
 
 pub(super) type SecondaryIndexSpecs = HashMap<String, BTreeMap<String, SecondaryIndexSpec>>;

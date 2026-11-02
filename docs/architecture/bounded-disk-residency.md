@@ -43,11 +43,13 @@ A cold collection retains its immutable base and a resident mutation overlay.
 Cold updates materialize their target row; physical deletion masks its base row.
 Checkpoint normally merges into an unpublished replacement using the existing
 ownership, WAL, metadata publication and page-retirement fences. Nontransactional
-row inserts without logical keys or secondary indexes can instead use the existing
-sparse WAL-image projection when the backing has no external strong/weak owners or
-cursor pins. New readers are fenced while verifying and modifying that base. Page
+row inserts without logical keys can instead use the existing sparse WAL-image
+projection when the backing has no external strong/weak owners or cursor pins.
+Compatible unpinned secondary projections, including runtime COUNT visibility
+indexes, append their new postings in the same ownership epoch. Exact projector
+identities must match, and retained posting work is capped at 1 MiB before allocation. New readers are fenced while verifying and modifying that base. Page
 undo protects splits and overflow allocations; exact counts and the unchanged XID
-bound follow a changed root. Captured readers, updates, deletions, keyed/indexed
+bound follow a changed root. Captured readers, changed/missing index definitions, updates, deletions, keyed
 rows, MVCC changes and exhausted mutation/WAL proofs retain the replacement path.
 That fallback still costs O(history + mutations); this optimization does not make
 all collection checkpoints incremental. Captured readers retain their generation. Pending transaction/Vault rows prevent overlay eviction.

@@ -2,6 +2,76 @@
 use reddb_server::storage::{EntityId, RowData, UnifiedEntity, UnifiedStore, UnifiedStoreConfig};
 use reddb_types::Value;
 
+#[test]
+fn runtime_audit_append_after_reopen_has_bounded_checkpoint_cost() {
+    use reddb_server::runtime::control_events::{
+        ActorRef, ControlEvent, ControlEventCtx, ControlEventLedger, EventKind, Outcome,
+        RuntimeLedger,
+    };
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let dir = tempfile::tempdir().unwrap();
+    let options = RedDBOptions::persistent(dir.path().join("runtime.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    let emit = |ledger: &RuntimeLedger| {
+        ledger
+            .emit(
+                &ControlEventCtx {
+                    actor: ActorRef::Anonymous,
+                    scope: None,
+                    request_id: None,
+                    trace_id: None,
+                },
+                ControlEvent {
+                    kind: EventKind::PolicyCreate,
+                    outcome: Outcome::Allowed,
+                    action: "policy.write".into(),
+                    resource: Some("history".repeat(256)),
+                    reason: None,
+                    matched_policy_id: None,
+                    fields: Default::default(),
+                },
+            )
+            .unwrap();
+    };
+    {
+        let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+        let ledger = RuntimeLedger::new(rt.db().store());
+        for _ in 0..2048 {
+            emit(&ledger);
+        }
+        rt.checkpoint().unwrap();
+    }
+    for round in 0..3 {
+        let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+        let ledger = RuntimeLedger::new(rt.db().store());
+        emit(&ledger);
+        let store = rt.db().store();
+        let pager = store.pager().unwrap();
+        let before = pager.cache_stats();
+        rt.checkpoint().unwrap();
+        let after = pager.cache_stats();
+        let reads = after.hits + after.misses - before.hits - before.misses;
+        eprintln!("runtime_audit_checkpoint_page_reads={reads}");
+        assert!(
+            reads < 512,
+            "runtime audit append revisited {reads} historical pages"
+        );
+        let manager = store.get_collection("red.control_events").unwrap();
+        assert_eq!(manager.count(), 2049 + round);
+        assert_eq!(
+            manager
+                .try_paged_physical_cursor()
+                .unwrap()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            2049 + round
+        );
+    }
+}
+
 fn config() -> UnifiedStoreConfig {
     UnifiedStoreConfig {
         page_cache_slots: Some(32),
