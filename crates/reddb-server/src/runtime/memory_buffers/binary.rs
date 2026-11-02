@@ -86,7 +86,9 @@ impl RedDBRuntime {
         let records = &result.result.records;
         let first = records.first();
         let columns_count = if result.result.columns.is_empty() {
-            first.map_or(0, |row| row.field_count())
+            first.map_or(0, |row| {
+                row.columns().len() + row.overflow().map_or(0, |fields| fields.len())
+            })
         } else {
             result.result.columns.len()
         };
@@ -306,6 +308,52 @@ mod tests {
         result.result.records.rotate_right(1);
         let buffer = admitted(&runtime, &result).unwrap();
         assert_eq!(u16::from_le_bytes([buffer[5], buffer[6]]), 2);
+    }
+
+    #[test]
+    fn binary_metadata_admission_counts_schema_names_not_available_values() {
+        let runtime = RedDBRuntime::in_memory().unwrap();
+        let schema = Arc::new(vec![Arc::from("a"), Arc::from("b")]);
+        // UnifiedRecord permits missing values and surplus values. The wire
+        // still emits exactly the schema's columns, filling missing cells with
+        // Null and ignoring surplus cells, as the previous encoder did.
+        for count in [0, 1, 2, 3] {
+            let mut result = fixture();
+            result.result.records = vec![UnifiedRecord::from_columnar(
+                schema.clone(),
+                vec![Value::Integer(7); count],
+            )];
+            let mut expected = Vec::new();
+            encode_result_payload_header(&mut expected, ["a", "b"], 1);
+            for index in 0..2 {
+                reddb_wire::legacy::encode_value(
+                    &mut expected,
+                    &if index < count {
+                        reddb_wire::legacy::WireValue::I64(7)
+                    } else {
+                        reddb_wire::legacy::WireValue::Null
+                    },
+                );
+            }
+            let bytes = admitted(&runtime, &result).unwrap();
+            assert_eq!(
+                bytes.as_ref(),
+                reddb_wire::legacy::build_legacy_result_frame(&expected)
+            );
+            assert_eq!(
+                runtime
+                    .memory_accounting()
+                    .used_bytes(MemoryPool::QueryBuffers),
+                bytes.len() as u64
+            );
+            drop(bytes);
+            assert_eq!(
+                runtime
+                    .memory_accounting()
+                    .used_bytes(MemoryPool::QueryBuffers),
+                0
+            );
+        }
     }
 
     #[test]
