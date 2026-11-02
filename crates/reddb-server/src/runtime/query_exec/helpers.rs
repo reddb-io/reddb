@@ -493,6 +493,31 @@ pub(crate) fn resolve_entity_document_path(
     None
 }
 
+// Integer keys stay inline and text borrows the parsed value; preparing an IN
+// iterator must not allocate an unbudgeted vector of keys.
+enum HashLookupKey<'a> {
+    Borrowed(&'a [u8]),
+    Inline([u8; 8]),
+}
+
+impl AsRef<[u8]> for HashLookupKey<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Inline(bytes) => bytes,
+        }
+    }
+}
+
+fn hash_lookup_key(value: &Value) -> Option<HashLookupKey<'_>> {
+    match value {
+        Value::Text(text) => Some(HashLookupKey::Borrowed(text.as_bytes())),
+        Value::Integer(value) => Some(HashLookupKey::Inline(value.to_le_bytes())),
+        Value::UnsignedInteger(value) => Some(HashLookupKey::Inline(value.to_le_bytes())),
+        _ => None,
+    }
+}
+
 /// Resolve an equality via HASH. Absence permits a scan; read/admission failures
 /// are authoritative and must reach SELECT/UPDATE/DELETE unchanged.
 pub(crate) fn try_hash_eq_lookup(
@@ -518,19 +543,25 @@ fn hash_eq_lookup(
             return Ok(None);
         };
         let name = idx.hash_lookup_name();
-        // The legacy IN union allocates an unowned vector. Paged indexes use
-        // the ordinary bounded source scan until that union has an owned budget.
+        if values.iter().any(|value| hash_lookup_key(value).is_none()) {
+            return Ok(None);
+        }
+        let keys = values
+            .iter()
+            .map(|value| hash_lookup_key(value).expect("invariant: every IN key was validated"));
+        if !resident_only {
+            return idx_store
+                .hash
+                .lookup_union_owned(table, &name, keys)
+                .map_err(|error| crate::RedDBError::Internal(error.to_string()));
+        }
+        // Legacy sorted intersections still return raw vectors. Keep that
+        // boundary explicit; never strip an owned reservation to enter it.
         let mut ids = Vec::new();
-        for value in values {
-            let key = match value {
-                Value::Text(s) => s.as_bytes().to_vec(),
-                Value::Integer(n) => n.to_le_bytes().to_vec(),
-                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
-                _ => return Ok(None),
-            };
+        for key in keys {
             let Some(found) = idx_store
                 .hash
-                .lookup_resident(table, &name, &key)
+                .lookup_resident(table, &name, key.as_ref())
                 .map_err(|error| crate::RedDBError::Internal(error.to_string()))?
             else {
                 return Ok(None);

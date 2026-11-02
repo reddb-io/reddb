@@ -295,9 +295,24 @@ envelope in place, without another allocation.
 Cost sketch: geometric growth copies less than twice the final capacity across
 resizes, uses one ledger lock per growth, and performs no storage resampling per
 row; ordered row buffers allocate their exact encoded length. This is an algorithmic
-bound, not a measured latency or whole-process RSS qualification. Parser, index
-candidate generation, backing-read and predicate workspaces still need admission;
+bound, not a measured latency or whole-process RSS qualification. Parser, legacy
+index intersections, backing-read and predicate workspaces still need admission;
 charging the response does not account for those earlier allocations.
+
+Resident HASH point lookups and owned `IN` unions reserve their entire candidate
+allocation before copying IDs. Sampling happens outside the manager lock, then
+the backing is rechecked for concurrent DROP/replacement. The frozen posting lists
+use the storage-independent ledger for admission. Candidate owners retain the
+reservation through consuming iterators; failure discards the whole operation.
+Empty lookups do not allocate or sample, preserving the cheap UNIQUE-miss path.
+Paged point providers keep their existing admission; paged unions retain the
+bounded source-scan fallback. Legacy raw sorted/bitmap intersections remain an
+explicit gap and never strip an owned reservation to enter their raw-vector API.
+
+Cost sketch: N candidate IDs require N × 8 bytes plus one reservation owner;
+a resident union counts and copies K posting lists without per-key temporary
+allocations or an intermediate union copy. Nonempty lookups add one sample and
+one admission-ledger reservation; no latency claim is made without benchmarks.
 
 ## Remaining implementation before activation
 

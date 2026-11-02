@@ -47,8 +47,12 @@ copies. Materialized binary reads reserve resolver metadata and exact encoded
 capacity first. Direct scans reserve incremental output growth outside storage
 sampling, sharing the mutation ledger, and retain response owners through RedWire
 conversion. Ordered direct scans also reserve candidate/slot vectors and encoded
-row owners; admission failure discards any accepted prefix. Their parser, index
-lookup, backing-read and predicate workspaces remain separate admission gaps.
+row owners; admission failure discards any accepted prefix. Resident HASH point
+candidates and owned IN unions reserve the complete posting allocation before
+copying, keeping the charge through their consuming iterator.
+Sampling runs outside index locks; empty lookups allocate and sample nothing.
+Parser, legacy sorted/bitmap intersections, backing-read and predicate workspaces
+remain separate admission gaps.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
 execution workspaces, command payload construction, handshake buffers and other
 non-HTTP outputs still require their own owned admission; this accounting alone
