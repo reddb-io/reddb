@@ -13,7 +13,7 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::mpsc;
 
 use crate::application::{OperationContext, OperationContextFactory, OperationContextInput};
 use crate::auth::store::AuthStore;
@@ -263,20 +263,11 @@ where
     // S3) — two concurrent output-stream workers can interleave
     // their chunks back to the client without contending on the
     // reader side. All outbound bytes are routed through an
-    // unbounded mpsc; a drain task flushes them to the write half
-    // under a mutex so chunk frames stay byte-atomic on the wire.
+    // bounded, byte-admitted mpsc; one drain task writes complete frames.
     let (mut reader, writer) = tokio::io::split(stream);
-    let writer = Arc::new(TokioMutex::new(writer));
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_FRAMES);
-    let writer_drain = Arc::clone(&writer);
-    tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            let mut w = writer_drain.lock().await;
-            if w.write_all(&bytes).await.is_err() {
-                return;
-            }
-        }
-    });
+    let (out_tx, out_rx) = mpsc::channel::<bytes::Bytes>(OUTBOUND_QUEUE_FRAMES);
+    let out_tx = super::output_stream::FrameTx::new(out_tx, Arc::clone(&runtime));
+    let _writer_task = out_tx.spawn_writer(out_rx, writer);
 
     // Per-connection output-stream registry (issue #762). Tracks
     // active stream workers so a `StreamCancel` for one stream_id
@@ -314,7 +305,11 @@ where
         // already-complete tasks are drained.
         while queue_wait_tasks.try_join_next().is_some() {}
 
-        let frame = match read_frame_async(&mut reader).await {
+        let incoming = tokio::select! {
+            _ = out_tx.failed() => return Err(io::Error::other("redwire: outbound response unavailable")),
+            frame = read_frame_async(&mut reader) => frame,
+        };
+        let frame = match incoming {
             Ok(frame) => frame,
             Err(reddb_wire::redwire::RedWireIoError::Io(err))
                 if err.kind() == io::ErrorKind::UnexpectedEof =>
@@ -332,7 +327,7 @@ where
             &RedWireAuthenticatedSessionPolicy,
         ) {
             let err_frame = build_error_frame_lossy(frame.correlation_id, &error.to_string());
-            queue_send(&out_tx, encode_frame(&err_frame)).await?;
+            queue_send(&out_tx, err_frame).await?;
             continue;
         }
 
@@ -345,26 +340,19 @@ where
                 frame.correlation_id,
                 &format!("redwire: {:?} is server-only", frame.kind),
             );
-            queue_send(&out_tx, encode_frame(&err_frame)).await?;
+            queue_send(&out_tx, err_frame).await?;
             continue;
         }
 
         match frame.kind {
             MessageKind::Bye => {
-                let bye = encode_frame(&reply_frame_or_io_error(
-                    frame.correlation_id,
-                    MessageKind::Bye,
-                    vec![],
-                )?);
-                let _ = out_tx.send(bye).await;
+                let bye = reply_frame_or_io_error(frame.correlation_id, MessageKind::Bye, vec![])?;
+                let _ = out_tx.send_frame(bye).await;
                 return Ok(());
             }
             MessageKind::Ping => {
-                let pong = encode_frame(&reply_frame_or_io_error(
-                    frame.correlation_id,
-                    MessageKind::Pong,
-                    vec![],
-                )?);
+                let pong =
+                    reply_frame_or_io_error(frame.correlation_id, MessageKind::Pong, vec![])?;
                 queue_send(&out_tx, pong).await?;
             }
             MessageKind::Query
@@ -415,7 +403,7 @@ where
                 .await
                 .map_err(io::Error::other)?;
                 prepared_stmts = statements;
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                queue_send(&out_tx, response).await?;
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
@@ -425,7 +413,7 @@ where
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_insert_dispatch(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                queue_send(&out_tx, response).await?;
             }
             MessageKind::BulkInsertBinary => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -433,10 +421,7 @@ where
                 });
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
@@ -449,10 +434,7 @@ where
                 });
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
@@ -462,10 +444,7 @@ where
                     crate::wire::listener::handle_stream_start(&frame.payload, &mut stream_session);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
@@ -480,10 +459,7 @@ where
                 if !raw.is_empty() {
                     queue_send(
                         &out_tx,
-                        encode_frame(&rewrap_length_prefixed_handler_response(
-                            &raw,
-                            frame.correlation_id,
-                        )),
+                        rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                     )
                     .await?;
                 }
@@ -494,10 +470,7 @@ where
                 });
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
@@ -511,10 +484,7 @@ where
                 });
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
@@ -523,14 +493,14 @@ where
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_get(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                queue_send(&out_tx, response).await?;
             }
             MessageKind::Delete => {
                 let response =
                     execute_with_redwire_context(&operation_context, session.role, || {
                         run_delete(&runtime, &frame)
                     });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                queue_send(&out_tx, response).await?;
             }
             // Output-stream lifecycle (issue #762 / PRD #759 S3).
             //
@@ -564,7 +534,7 @@ where
                                 0,
                                 0,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            queue_send(&out_tx, err).await?;
                             continue;
                         }
                     };
@@ -580,7 +550,7 @@ where
                                 0,
                                 runtime.cdc_current_lsn(),
                             )?;
-                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            queue_send(&out_tx, err).await?;
                             continue;
                         }
                     };
@@ -597,7 +567,7 @@ where
                                 0,
                                 snapshot_lsn,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            queue_send(&out_tx, err).await?;
                             continue;
                         }
                     };
@@ -613,13 +583,13 @@ where
                             0,
                             snapshot_lsn,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                     let ack =
                         os::build_open_ack_frame(frame_id, sid, lease_id, lease_snapshot, false)
                             .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&ack)).await?;
+                    queue_send(&out_tx, ack).await?;
                     continue;
                 }
 
@@ -628,7 +598,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
@@ -637,13 +607,13 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
                 let runtime_ref = Arc::clone(&runtime);
                 let registry_ref = Arc::clone(&stream_registry);
-                let send = os::FrameTx::new(out_tx.clone());
+                let send = out_tx.clone();
                 let mut stream_context = operation_context.clone();
                 let stream_role = session.role;
                 let in_tx = runtime.connection_in_transaction(connection.id());
@@ -690,7 +660,7 @@ where
                                 .map_err(|e| {
                                     io::Error::other(format!("build queue-wait error: {e}"))
                                 })?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
@@ -706,7 +676,7 @@ where
                         &msg,
                     )
                     .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
                     continue;
                 }
                 let runtime_ref = Arc::clone(&runtime);
@@ -737,7 +707,7 @@ where
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
-                                        if queue_send(&out, encode_frame(&push)).await.is_err() {
+                                        if queue_send(&out, push).await.is_err() {
                                             return;
                                         }
                                     }
@@ -755,7 +725,7 @@ where
                                 &queue_name,
                                 wait_ms,
                             ) {
-                                let _ = queue_send(&out, encode_frame(&t)).await;
+                                let _ = queue_send(&out, t).await;
                             }
                         }
                         // Server-side cancellation: a StreamError with
@@ -768,7 +738,7 @@ where
                                 qw::WAIT_CANCELLED_CODE,
                                 "queue wait cancelled by server",
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef)).await;
+                                let _ = queue_send(&out, ef).await;
                             }
                         }
                         // A genuine runtime failure. Server-shutdown
@@ -782,7 +752,7 @@ where
                                 qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef)).await;
+                                let _ = queue_send(&out, ef).await;
                             }
                         }
                     }
@@ -812,7 +782,7 @@ where
                         0,
                         0,
                     )?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
                     continue;
                 }
                 // BEGIN may arrive after OpenStream. Never report a chunk as
@@ -828,7 +798,7 @@ where
                         state.chunk_count,
                         state.committed_rid,
                     )?;
-                    queue_send(&out_tx, encode_frame(&frame)).await?;
+                    queue_send(&out_tx, frame).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {
@@ -845,7 +815,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
@@ -877,7 +847,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                     }
                     Ok(()) => {
                         if chunk.terminal {
@@ -893,7 +863,7 @@ where
                                 state.snapshot_lsn,
                                 false,
                             )?;
-                            queue_send(&out_tx, encode_frame(&end)).await?;
+                            queue_send(&out_tx, end).await?;
                         }
                     }
                 }
@@ -920,7 +890,7 @@ where
                         state.snapshot_lsn,
                         true,
                     )?;
-                    queue_send(&out_tx, encode_frame(&end)).await?;
+                    queue_send(&out_tx, end).await?;
                 } else {
                     // AC #6: protocol violation surfaces as a
                     // StreamError envelope, not a connection drop.
@@ -930,7 +900,7 @@ where
                         "unknown_stream",
                         "no active stream for this stream_id",
                     )?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
                 }
             }
             other => {
@@ -938,7 +908,7 @@ where
                     frame.correlation_id,
                     &format!("redwire: cannot dispatch {other:?} yet"),
                 );
-                queue_send(&out_tx, encode_frame(&err_frame)).await?;
+                queue_send(&out_tx, err_frame).await?;
             }
         }
     }
@@ -950,11 +920,8 @@ where
 /// as fast as the socket accepts bytes.
 const OUTBOUND_QUEUE_FRAMES: usize = 256;
 
-async fn queue_send(out_tx: &mpsc::Sender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
-    out_tx
-        .send(bytes)
-        .await
-        .map_err(|_| io::Error::other("redwire: write channel closed"))
+async fn queue_send(out_tx: &super::output_stream::FrameTx, frame: Frame) -> io::Result<()> {
+    out_tx.send_frame(frame).await
 }
 
 /// Run the handshake. Returns `Ok(None)` when the client disconnected

@@ -123,13 +123,21 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     }
     let total = frame.encoded_len() as usize;
     let mut buf = Vec::with_capacity(total);
+    encode_uncompressed_frame_into(frame, &mut buf);
+    buf
+}
+
+/// Append an uncompressed frame to caller-owned capacity. Callers can reserve
+/// and admit the complete allocation before encoding. Compression has its own
+/// codec workspace and must use `encode_frame` instead.
+pub fn encode_uncompressed_frame_into(frame: &Frame, buf: &mut Vec<u8>) {
+    assert!(!frame.flags.contains(Flags::COMPRESSED));
     buf.extend_from_slice(&frame.encoded_len().to_le_bytes());
     buf.push(frame.kind as u8);
     buf.push(frame.flags.bits());
     buf.extend_from_slice(&frame.stream_id.to_le_bytes());
     buf.extend_from_slice(&frame.correlation_id.to_le_bytes());
     buf.extend_from_slice(&frame.payload);
-    buf
 }
 
 fn encode_compressed(frame: &Frame) -> Vec<u8> {
@@ -225,6 +233,47 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caller_owned_encoding_matches_golden_header_and_preserves_prefix() {
+        use super::*;
+        let mut frame = Frame::new(MessageKind::Result, 0x0807060504030201, vec![0xaa, 0xbb]);
+        frame.stream_id = 0x0201;
+        let mut bytes = Vec::with_capacity(21);
+        bytes.extend_from_slice(b"pre");
+        encode_uncompressed_frame_into(&frame, &mut bytes);
+        assert_eq!(&bytes[..3], b"pre");
+        assert_eq!(
+            &bytes[3..],
+            &[
+                18,
+                0,
+                0,
+                0,
+                MessageKind::Result as u8,
+                0,
+                1,
+                2,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                0xaa,
+                0xbb
+            ]
+        );
+        assert_eq!(bytes.capacity(), 21);
+        assert_eq!(&bytes[3..], encode_frame(&frame));
+        let (decoded, used) = decode_frame(&bytes[3..]).unwrap();
+        assert_eq!(used, 18);
+        assert_eq!(decoded.payload, frame.payload);
+        assert_eq!(decoded.stream_id, frame.stream_id);
+        assert_eq!(decoded.correlation_id, frame.correlation_id);
+    }
+
     use super::*;
 
     fn round_trip(frame: Frame) {
