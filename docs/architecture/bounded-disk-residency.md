@@ -248,7 +248,7 @@ full-queue cancellation, a blocked duplex socket, failure cleanup and recovery,
 and 1/4/16 transmitters sharing one budget. These are transport ownership tests,
 not the authenticated-server workload/latency qualification above. Payloads are
 still built before transmitter admission. Per-row presentation trees, legacy
-binary thread-local encoder scratch, gRPC/protobuf, handshake and executor
+binary serialization/conversion workspaces, gRPC/protobuf, handshake and executor
 workspaces remain outside this change. It does not establish a total
 RSS bound, storage plateau, or permission to activate managed disk residency.
 
@@ -264,6 +264,19 @@ An unencodable row now emits `stream_chunk_encoding_failed` before the terminal
 frame. Previously a frame-builder refusal broke the loop and reported StreamEnd
 without an error, silently dropping the row. Regressions exercise an actual
 blocked stream worker and a row larger than the wire frame limit.
+
+The legacy binary result encoder no longer keeps a thread-local scratch vector.
+A 192 KiB response followed by a small response previously left 196,628 requested
+allocation bytes retained by one worker after both responses were dropped. The
+encoder now appends into its final legacy frame through a shared wire helper,
+removing both complete intermediate payload copies. Regression measurements on
+1/4/16 fresh workers require allocated and released bytes to balance after both
+responses drop, and bound cumulative allocation to prevent full-buffer copies
+from returning. The test allocator counts successful resize replacement bytes;
+these are requested allocation measurements, not allocator-resident RSS or
+latency benchmarks. Wire bytes, column resolution and value encoding are unchanged.
+Legacy serialization still allocates before outbound frame admission and needs
+its own budget-aware writer; removing retained scratch does not close that gap.
 
 ## Remaining implementation before activation
 

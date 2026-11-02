@@ -134,6 +134,25 @@ pub fn build_legacy_result_frame(payload: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_RESULT, payload)
 }
 
+/// Encode a result payload directly into its final frame allocation. The
+/// callback must append after the reserved header without modifying it.
+/// Capacity is a hint, not an admission limit.
+pub fn build_legacy_result_frame_with(
+    payload_capacity: usize,
+    encode: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload_capacity.saturating_add(5));
+    write_frame_header(&mut out, MSG_RESULT, 0);
+    encode(&mut out);
+    assert!(
+        out.len() >= 5,
+        "encoder must preserve the legacy frame header"
+    );
+    let total = u32::try_from(out.len() - 4).expect("legacy frame length fits u32");
+    out[..4].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
 pub fn build_legacy_error_frame(message: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_ERROR, message)
 }
@@ -371,6 +390,18 @@ mod tests {
             build_legacy_cursor_batch_frame(b"b"),
             [2, 0, 0, 0, MSG_CURSOR_BATCH, b'b']
         );
+    }
+
+    #[test]
+    fn direct_result_frame_encoder_matches_legacy_bytes_across_growth() {
+        for size in [0, 1, 255, 1024, 192 * 1024] {
+            let payload = vec![0x71; size];
+            let frame = build_legacy_result_frame_with(8, |out| {
+                out.extend_from_slice(&payload[..size / 2]);
+                out.extend_from_slice(&payload[size / 2..]);
+            });
+            assert_eq!(frame, build_legacy_result_frame(&payload));
+        }
     }
 
     #[test]
