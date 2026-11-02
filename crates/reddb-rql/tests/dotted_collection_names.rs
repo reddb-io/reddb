@@ -113,6 +113,7 @@ fn invalid_collection_segments_and_dotted_columns_remain_rejected() {
     ] {
         assert!(Parser::new(sql).expect("lexer").parse().is_err(), "{sql}");
     }
+    parse("SHOW INDEXES ON data");
     parse("DROP COLLECTION app.*");
     parse("SELECT id FROM g.components");
 }

@@ -4333,7 +4333,8 @@ impl<'a> Parser<'a> {
                 } else if self.consume_ident_ci("INDICES")? || self.consume_ident_ci("INDEXES")? {
                     let mut query = TableQuery::new("red.show_indexes");
                     if self.consume(&Token::On)? {
-                        let collection = self.parse_collection_name()?;
+                        let head = self.collection_name_segment(true)?;
+                        let collection = self.finish_collection_name(head, false)?;
                         let filter = Filter::Compare {
                             field: FieldRef::column("", "table"),
                             op: CompareOp::Eq,
