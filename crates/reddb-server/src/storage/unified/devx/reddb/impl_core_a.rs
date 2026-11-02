@@ -44,9 +44,11 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
-    // Exercise the real factory in library qualification builds. Production
-    // has no setter or environment switch for the unfinished managed mode.
-    if cfg!(test) && QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.get()) {
+    // The explicit server/library option and scoped legacy test fixtures select
+    // the same factory. Defaults remain resident until deployment qualification.
+    if options.bounded_disk_residency
+        || (cfg!(test) && QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.get()))
+    {
         config.resident_memory_bytes_max =
             Some(shares.share_bytes(crate::storage::memory_pools::MemoryPool::SegmentArena));
     }
@@ -327,6 +329,16 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        if options.bounded_disk_residency
+            && (!embedded_single_file_selected(options)
+                || options.replication.role != crate::replication::ReplicationRole::Standalone
+                || options.remote_backend.is_some()
+                || options.remote_backend_atomic.is_some())
+        {
+            return Err(
+                "bounded disk residency requires standalone single-file local storage".into(),
+            );
+        }
         // Tier wiring: flip the six tier-flag global toggles from the
         // resolved StorageLayout, then materialise the support
         // directories the layout demands (logs/wal/snapshots/etc).
@@ -466,7 +478,26 @@ impl RedDB {
         } else {
             None
         };
-        let embedded_open = if embedded_single_file_selected(options) {
+        let embedded_open = if options.bounded_disk_residency {
+            // The snapshot-backed embedded factory has no durable page ownership
+            // coordinator. Explicit residency must create/open the native pager,
+            // including on the very first boot, before registering disk indexes.
+            if !path_buf.exists() && !options.create_if_missing {
+                return Err(format!(
+                    "database path does not exist and create_if_missing is false: {}",
+                    path_buf.display()
+                )
+                .into());
+            }
+            if path_buf.exists()
+                && (Self::is_binary_dump(&path_buf)?
+                    || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+            {
+                return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
+            }
+            let store = UnifiedStore::open_with_config(&path_buf, store_config.clone())?;
+            Some((store, Some(path_buf.clone()), true))
+        } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
                     Ok(artifact) => {
