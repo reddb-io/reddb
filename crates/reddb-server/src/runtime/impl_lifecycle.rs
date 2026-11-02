@@ -535,6 +535,8 @@ impl RedDBRuntime {
             }),
         };
 
+        runtime.install_hash_candidate_admission();
+
         // Issue #205 — install the process-wide OperatorEvent sink so
         // emit sites buried in storage / replication / signal handlers
         // can record without threading an `&AuditLogger` through every

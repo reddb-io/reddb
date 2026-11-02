@@ -8,13 +8,13 @@
 //! Unique constraint is enforced at insert time when `unique = true`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 
 use super::entity::EntityId;
 
-/// An owned candidate allocation. A disk provider keeps its memory reservation
+/// An owned candidate allocation. A governed provider keeps its memory reservation
 /// attached until the IDs (or their consuming iterator) have been destroyed.
 pub struct HashCandidates {
     ids: Vec<EntityId>,
@@ -33,7 +33,7 @@ impl HashCandidates {
         self.ids.truncate(len);
     }
 
-    /// Only resident providers may enter legacy unaccounted vector paths.
+    /// Only unowned providers may enter legacy unaccounted vector paths.
     pub(crate) fn into_resident(self) -> Option<Vec<EntityId>> {
         self.owner.is_none().then_some(self.ids)
     }
@@ -276,10 +276,18 @@ pub struct HashIndexConfig {
     pub unique: bool,
 }
 
+/// Runtime admission for owned resident candidates. Sampling may acquire storage
+/// locks; reservation must only touch the short admission ledger.
+pub(crate) trait HashCandidateAdmission: Send + Sync {
+    fn sample(&self) -> Result<(), HashIndexError>;
+    fn reserve(&self, bytes: usize) -> Result<Box<dyn Send + Sync>, HashIndexError>;
+}
+
 /// Manager for all hash indices across collections
 pub struct HashIndexManager {
     /// Collection → index name → backing; borrowed probes allocate no names.
     indices: RwLock<HashMap<String, HashMap<String, HashIndex>>>,
+    candidate_admission: OnceLock<Arc<dyn HashCandidateAdmission>>,
 }
 
 impl HashIndexManager {
@@ -295,6 +303,7 @@ impl HashIndexManager {
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            candidate_admission: OnceLock::new(),
         }
     }
 
@@ -397,15 +406,53 @@ impl HashIndexManager {
         })
     }
 
-    /// Never hold the manager lock across disk I/O or runtime admission:
-    /// mutation/publication and memory sampling acquire these locks in reverse.
+    pub(crate) fn install_candidate_admission(&self, admission: Arc<dyn HashCandidateAdmission>) {
+        assert!(
+            self.candidate_admission.set(admission).is_ok(),
+            "invariant: runtime candidate admission is installed once"
+        );
+    }
+
     pub(crate) fn lookup_owned(
         &self,
         collection: &str,
         index_name: &str,
         key: &[u8],
     ) -> Result<HashCandidates, HashIndexError> {
-        let provider = {
+        self.lookup_candidates(collection, index_name, std::iter::once(key), Some(key))
+            .map(|result| result.expect("invariant: a point lookup admits every backing"))
+    }
+
+    /// Admit the complete resident IN union before copying any posting list.
+    /// Paged unions retain their bounded scan fallback; point providers own
+    /// their separate admission. Duplicate keys preserve concatenation order.
+    pub(crate) fn lookup_union_owned<I, K>(
+        &self,
+        collection: &str,
+        index_name: &str,
+        keys: I,
+    ) -> Result<Option<HashCandidates>, HashIndexError>
+    where
+        I: Iterator<Item = K> + Clone,
+        K: AsRef<[u8]>,
+    {
+        self.lookup_candidates(collection, index_name, keys, None)
+    }
+
+    fn lookup_candidates<I, K>(
+        &self,
+        collection: &str,
+        index_name: &str,
+        keys: I,
+        paged_key: Option<&[u8]>,
+    ) -> Result<Option<HashCandidates>, HashIndexError>
+    where
+        I: Iterator<Item = K> + Clone,
+        K: AsRef<[u8]>,
+    {
+        let admission = self.candidate_admission.get();
+        let mut sampled = false;
+        loop {
             let indices = self.indices.read();
             let index = indices
                 .get(collection)
@@ -414,12 +461,49 @@ impl HashIndexManager {
                     collection: collection.into(),
                     name: index_name.into(),
                 })?;
-            match &index.paged {
-                Some(provider) => Arc::clone(provider),
-                None => return Ok(index.get(key).to_vec().into()),
+            if let Some(provider) = &index.paged {
+                let provider = Arc::clone(provider);
+                drop(indices);
+                return paged_key.map(|key| provider.lookup(key)).transpose();
             }
-        };
-        provider.lookup(key)
+            let count = keys.clone().try_fold(0usize, |count, key| {
+                count
+                    .checked_add(index.get(key.as_ref()).len())
+                    .ok_or_else(|| HashIndexError::Read("HASH candidate count overflow".into()))
+            })?;
+            if count == 0 {
+                // UNIQUE misses must not sample or allocate per inserted row.
+                return Ok(Some(Vec::new().into()));
+            }
+            if let Some(admission) = admission {
+                if !sampled {
+                    // The sampler reads index/storage locks. Re-probe after it:
+                    // concurrent DDL may replace the backing while unlocked.
+                    drop(indices);
+                    admission.sample()?;
+                    sampled = true;
+                    continue;
+                }
+            }
+            let bytes = count
+                .checked_mul(std::mem::size_of::<EntityId>())
+                .ok_or_else(|| {
+                    HashIndexError::Read("HASH candidate allocation size overflow".into())
+                })?;
+            // Only the short, storage-independent ledger is touched under the
+            // read lock, freezing the posting lengths until copying completes.
+            let owner = admission
+                .map(|admission| admission.reserve(bytes))
+                .transpose()?;
+            let mut ids = Vec::new();
+            ids.try_reserve_exact(count).map_err(|error| {
+                HashIndexError::Read(format!("HASH candidate allocation: {error}"))
+            })?;
+            for key in keys {
+                ids.extend_from_slice(index.get(key.as_ref()));
+            }
+            return Ok(Some(HashCandidates { ids, owner }));
+        }
     }
 
     /// Remove from a named index
@@ -499,6 +583,9 @@ pub struct HashIndexStats {
     pub total_entries: usize,
     pub memory_bytes: usize,
 }
+
+#[cfg(test)]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {
