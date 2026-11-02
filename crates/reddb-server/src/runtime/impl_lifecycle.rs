@@ -607,6 +607,9 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
         runtime.prepare_paged_counts()?;
+        // Registry restoration can checkpoint missing projections on any
+        // collection. Register every internal projector before that epoch.
+        super::control_event_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
         if runtime
             .db()

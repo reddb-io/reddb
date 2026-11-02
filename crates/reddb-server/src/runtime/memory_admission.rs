@@ -40,6 +40,22 @@ pub(crate) struct QueryBufferReservation {
 }
 
 impl QueryBufferReservation {
+    /// Grow a live executor workspace using only the shared admission ledger.
+    /// The caller samples outside storage locks and reserves before allocation.
+    pub(super) fn try_grow(&mut self, additional: usize) -> bool {
+        let Ok(additional) = u64::try_from(additional) else {
+            return false;
+        };
+        let Some(total) = self.bytes.checked_add(additional) else {
+            return false;
+        };
+        if !self.accounting.try_charge_query_buffer(additional) {
+            return false;
+        }
+        self.bytes = total;
+        true
+    }
+
     /// Release scratch that has been freed, retaining the charge for live owners.
     pub(super) fn shrink_to(&mut self, retained_bytes: usize) {
         let retained_bytes = u64::try_from(retained_bytes)

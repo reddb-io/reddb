@@ -79,45 +79,6 @@ pub(super) fn managed_policies_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRe
         .collect()
 }
 
-pub(super) fn control_events_snapshot(
-    runtime: &RedDBRuntime,
-    tenant: Option<&str>,
-) -> Vec<UnifiedRecord> {
-    let schema = Arc::new(
-        CONTROL_EVENT_COLUMNS
-            .iter()
-            .map(|name| Arc::<str>::from(*name))
-            .collect::<Vec<_>>(),
-    );
-    let Some(manager) = runtime
-        .db()
-        .store()
-        .get_collection(super::control_events::CONTROL_EVENTS_COLLECTION)
-    else {
-        return Vec::new();
-    };
-    manager
-        .query_all(|_| true)
-        .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            if let Some(tenant) = tenant {
-                match row.get_field("scope") {
-                    Some(Value::Text(scope)) if scope.as_ref() == tenant => {}
-                    _ => return None,
-                }
-            }
-            Some(UnifiedRecord::with_schema(
-                Arc::clone(&schema),
-                CONTROL_EVENT_COLUMNS
-                    .iter()
-                    .map(|column| row.get_field(column).cloned().unwrap_or(Value::Null))
-                    .collect(),
-            ))
-        })
-        .collect()
-}
-
 pub(super) fn users_snapshot(runtime: &RedDBRuntime, tenant: Option<&str>) -> Vec<UnifiedRecord> {
     let schema = Arc::new(
         USER_COLUMNS

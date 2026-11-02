@@ -370,6 +370,55 @@ predicate keys, composite/name metadata, legacy H3/graph raw candidates and cove
 values remain separate workspaces; this slice does not establish full-server or
 STG qualification.
 
+## Cold Control Event Ledger reads
+
+`red.control_events` now scans the authoritative disk base and resident overlay.
+The previous resident-only snapshot returned zero persisted audit events after a
+bounded-residency reopen. Tenant scope and fallible WHERE evaluation precede
+retention; storage corruption and decode-limit errors propagate to the caller.
+Unordered LIMIT/OFFSET reads skip without retaining the prefix and stop early.
+Ordered reads periodically retain only the best OFFSET + LIMIT rows, bounded by
+the materialized-row ceiling and shared query-buffer admission. The candidate
+batch also counts toward that ceiling; a window filling the ceiling can fail
+rather than bypass the configured cap.
+
+The common `ORDER BY ts DESC, id DESC LIMIT ...` page uses an internal native
+secondary tree over descending signed timestamp and fixed-width ledger ID.
+Preparation joins the existing checkpoint epoch; compatible reopen restores the
+root without reading the ledger. All internal projectors are registered before
+runtime-index restoration can checkpoint missing projections. Otherwise recovery
+of a newly created collection can force a full audit-history rewrite and then a
+second index-build checkpoint. A process-exit regression verifies that a new KV
+collection plus an acknowledged audit append retains the prepared audit root.
+Sparse append maintains the posting alongside
+the source row. Reads fence publication, merge visible resident rows with the
+requested qualifying base window, skip shadowed/deleted base identities, and
+verify every posting against its source. Scope and residual predicates still
+apply before counting a row toward the window. Selective predicates can require
+more candidates; this is not an arbitrary-filter latency guarantee.
+
+Unsupported legacy IDs/timestamps retain an explicit fallback marker; missing
+or incompatible trees use the bounded authoritative scan, while unreadable
+postings fail. Other orderings use the existing bounded sort. Initial index
+preparation is migration work, measured separately from prepared boot.
+
+A per-row decode allowance of min(engine budget / 16, 16 MiB), with a second
+reservation for schema projection, prevents arbitrarily large ledger rows from
+being decoded without admission. Retained ordinary values, vector growth and
+sort workspaces are charged before growth and released on pruning or error.
+The workspace owner survives ordinary projection construction. This is not a
+claim that arbitrary expression expansion or every transport is admitted; those
+remain in the activation gates below.
+
+`cold_control_events` covers cold-plus-overlay visibility, aliases/filtering and
+pagination, tenant isolation, a 1,024-event sort under a 32-row ceiling, rejection
+when the byte budget is exhausted, error cleanup, oversized decoding, and a
+wrong-type backing page that must never become an empty successful ledger. It
+also denies source-wide reads to prove an indexed page fetches only its candidate
+window, and compares filtering/tenancy, overlay deletion, sparse checkpoint/reopen
+and legacy fallback against the full scan. It runs in `make test-storage-apocalypse`
+as well as the ordinary integration suite.
+
 ## Remaining implementation before activation
 
 - Connect the remaining persisted secondary trees to runtime providers and

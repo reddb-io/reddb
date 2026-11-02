@@ -1546,6 +1546,7 @@ pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;
 pub mod continuous_materialized_view;
+mod control_event_index;
 pub mod control_events;
 pub(crate) mod ddl;
 mod delete_publication;
