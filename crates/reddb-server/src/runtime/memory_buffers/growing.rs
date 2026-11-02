@@ -47,6 +47,12 @@ impl<'a> GrowingQueryBuffer<'a> {
         self.buffer.as_ref().map_or(0, |buffer| buffer.value.len())
     }
 
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.buffer
+            .as_ref()
+            .map_or(&[], |buffer| buffer.value.as_slice())
+    }
+
     pub(crate) fn append(
         &mut self,
         bytes: usize,

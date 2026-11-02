@@ -95,7 +95,7 @@ impl<'a> DirectResultBuffer<'a> {
         entity: &UnifiedEntity,
         row: &RowData,
         columns: &[WireColumn],
-    ) -> Result<bytes::Bytes, QueryBufferError> {
+    ) -> Result<GrowingQueryBuffer<'a>, QueryBufferError> {
         let length = row_bytes(entity, row, columns)?;
         let mut buffer = self.buffer.sibling(length);
         buffer.append(length, |out| {
@@ -103,7 +103,7 @@ impl<'a> DirectResultBuffer<'a> {
                 encode_entity_wire_value(out, entity, row, column);
             }
         })?;
-        Ok(buffer.finish())
+        Ok(buffer)
     }
 
     pub(super) fn append_encoded(&mut self, bytes: &[u8]) -> bool {

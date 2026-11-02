@@ -26,7 +26,7 @@ use reddb_rql::ast::{Expr, FieldRef, Filter, QueryExpr, SelectItem, TableQuery, 
 use reddb_rql::sql_lowering::effective_table_filter;
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
-use crate::runtime::memory_buffers::BinaryQueryResponse;
+use crate::runtime::memory_buffers::{BinaryQueryResponse, GrowingQueryBuffer};
 mod buffer;
 use buffer::{buffer_error, named_columns_bytes, query_columns_bytes, DirectResultBuffer};
 use reddb_wire::legacy::{
@@ -882,7 +882,7 @@ fn execute_simple_ordered_complex_select(
     body.header(cols.iter().map(|col| col.name.as_ref()));
     let mut row_count: u32 = 0;
     let slots_bytes = candidates.len().saturating_mul(
-        std::mem::size_of::<EntityId>() + std::mem::size_of::<Option<bytes::Bytes>>(),
+        std::mem::size_of::<EntityId>() + std::mem::size_of::<Option<GrowingQueryBuffer<'_>>>(),
     );
     let _slots_charge = match body.workspace(slots_bytes) {
         Ok(charge) => charge,
@@ -892,9 +892,13 @@ fn execute_simple_ordered_complex_select(
         .iter()
         .map(|candidate| candidate.entity_id)
         .collect();
-    let mut encoded_rows: Vec<Option<bytes::Bytes>> = vec![None; candidate_ids.len()];
+    let mut encoded_rows: Vec<Option<GrowingQueryBuffer<'_>>> =
+        Vec::with_capacity(candidate_ids.len());
+    encoded_rows.resize_with(candidate_ids.len(), || None);
     // Segment traversal need not match candidate order. Retain each admitted row
     // in its input slot, then append in the sorted order, charging both owners.
+    // Keep the row owner inline: a shared Bytes owner would add one unaccounted
+    // heap allocation per row even though these rows never need to be cloned.
     let scan = manager.try_for_each_id(&candidate_ids, usize::MAX, |candidate_idx, entity| {
         if body.failed() {
             return false;
@@ -915,7 +919,7 @@ fn execute_simple_ordered_complex_select(
         return Some(build_legacy_error_frame(error.to_string().as_bytes()).into());
     }
     for row_bytes in encoded_rows.into_iter().flatten() {
-        if !body.append_encoded(&row_bytes) {
+        if !body.append_encoded(row_bytes.as_slice()) {
             break;
         }
         row_count += 1;
