@@ -1,0 +1,313 @@
+use reddb_server::runtime::control_events::{
+    ActorRef, ControlEvent, ControlEventCtx, ControlEventLedger, EventKind, Outcome, RuntimeLedger,
+    Sensitivity,
+};
+use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
+use std::{borrow::Cow, collections::HashMap};
+
+fn emit(runtime: &RedDBRuntime, action: String, scope: Option<&str>, payload_bytes: usize) {
+    RuntimeLedger::new(runtime.db().store().clone())
+        .emit(
+            &ControlEventCtx {
+                actor: ActorRef::Anonymous,
+                scope: scope.map(Cow::Borrowed),
+                request_id: None,
+                trace_id: None,
+            },
+            ControlEvent {
+                kind: EventKind::PolicyCreate,
+                outcome: Outcome::Allowed,
+                action: Cow::Owned(action),
+                resource: None,
+                reason: None,
+                matched_policy_id: None,
+                fields: HashMap::from([(
+                    "fixture".into(),
+                    Sensitivity::Raw("x".repeat(payload_bytes)),
+                )]),
+            },
+        )
+        .expect("durable event");
+}
+
+#[test]
+fn audit_view_reads_cold_and_new_events_after_reopen() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let options = RedDBOptions::persistent(directory.path().join("audit.rdb"))
+        .with_memory_budget(32 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        for index in 0..4 {
+            emit(&runtime, format!("cold.{index}"), Some("tenant-a"), 128);
+        }
+        runtime.checkpoint().expect("checkpoint");
+    }
+    let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+    let before = runtime
+        .execute_query(
+            "SELECT action FROM red.control_events WHERE action LIKE 'cold.%' ORDER BY action",
+        )
+        .expect("audit query");
+    assert_eq!(
+        before.result.records.len(),
+        4,
+        "persisted audit rows must remain visible"
+    );
+    emit(&runtime, "cold.4".into(), Some("tenant-a"), 128);
+    let result = runtime.execute_query("SELECT e.action AS event FROM red.control_events AS e WHERE e.action LIKE 'cold.%' ORDER BY e.action DESC LIMIT 2 OFFSET 1").expect("cold and overlay query");
+    assert_eq!(
+        result
+            .result
+            .records
+            .iter()
+            .map(|r| r.get("event").cloned())
+            .collect::<Vec<_>>(),
+        vec![Some(Value::text("cold.3")), Some(Value::text("cold.2"))]
+    );
+}
+
+fn cold_fixture(rows: usize, payload_bytes: usize) -> (tempfile::TempDir, RedDBRuntime) {
+    let directory = tempfile::tempdir().expect("fixture");
+    let options = RedDBOptions::persistent(directory.path().join("audit.rdb"))
+        .with_memory_budget(32 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        for index in 0..rows {
+            emit(
+                &runtime,
+                format!("cold.{index:04}"),
+                Some("tenant-a"),
+                payload_bytes,
+            );
+        }
+        emit(&runtime, "other-tenant".into(), Some("tenant-b"), 0);
+        emit(&runtime, "global".into(), None, 0);
+        runtime.checkpoint().expect("checkpoint");
+    }
+    let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+    (directory, runtime)
+}
+
+fn assert_no_query_buffers(runtime: &RedDBRuntime) {
+    use reddb_server::storage::memory_pools::MemoryPool;
+    assert_eq!(
+        runtime
+            .memory_accounting()
+            .used_bytes(MemoryPool::QueryBuffers),
+        0
+    );
+}
+
+#[test]
+fn cold_audit_scope_filters_before_limit() {
+    use reddb_server::runtime::mvcc::{clear_current_tenant, set_current_tenant};
+    struct Scope;
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            clear_current_tenant();
+        }
+    }
+    let (_directory, runtime) = cold_fixture(3, 128);
+    let _scope = Scope;
+    set_current_tenant("tenant-a".into());
+    let result = runtime
+        .execute_query("SELECT scope, action FROM red.control_events ORDER BY action DESC LIMIT 10")
+        .expect("tenant query");
+    assert_eq!(result.result.records.len(), 3);
+    for row in &result.result.records {
+        assert_eq!(row.get("scope"), Some(&Value::text("tenant-a")));
+    }
+    set_current_tenant("tenant-b".into());
+    let result = runtime
+        .execute_query("SELECT action FROM red.control_events LIMIT 1")
+        .expect("other tenant");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("action"),
+        Some(&Value::text("other-tenant"))
+    );
+    set_current_tenant("tenant-empty".into());
+    assert!(runtime
+        .execute_query("SELECT * FROM red.control_events")
+        .expect("empty scope")
+        .result
+        .records
+        .is_empty());
+    assert_no_query_buffers(&runtime);
+}
+
+#[test]
+fn cold_audit_top_window_is_bounded_and_unlimited_reads_obey_cap() {
+    let (_directory, runtime) = cold_fixture(1024, 16384);
+    runtime
+        .execute_query("SET CONFIG stream.executor.max_materialized_rows = 32")
+        .expect("small sort cap");
+    for _ in 0..3 {
+        let result = runtime.execute_query("SELECT action FROM red.control_events WHERE action LIKE 'cold.%' ORDER BY action DESC LIMIT 5 OFFSET 7").expect("bounded window over a larger history");
+        let actual: Vec<_> = result
+            .result
+            .records
+            .iter()
+            .map(|r| r.get("action").cloned())
+            .collect();
+        let expected: Vec<_> = (1012..=1016)
+            .rev()
+            .map(|i| Some(Value::text(format!("cold.{i:04}"))))
+            .collect();
+        assert_eq!(actual, expected);
+        assert_no_query_buffers(&runtime);
+    }
+    let error = runtime
+        .execute_query("SELECT action FROM red.control_events ORDER BY action")
+        .expect_err("unlimited query must obey cap");
+    assert!(
+        matches!(
+            error,
+            reddb_server::RedDBError::MaterializationLimitExceeded {
+                executor: "control_events",
+                limit: 32,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_no_query_buffers(&runtime);
+    let result = runtime
+        .execute_query(
+            "SELECT action FROM red.control_events WHERE action LIKE 'cold.%' LIMIT 4 OFFSET 1000",
+        )
+        .expect("stream offset without retaining skipped rows");
+    assert_eq!(result.result.records.len(), 4);
+    assert!(runtime
+        .execute_query("SELECT * FROM red.control_events LIMIT 0")
+        .expect("zero limit")
+        .result
+        .records
+        .is_empty());
+    assert!(runtime
+        .execute_query("SELECT * FROM red.control_events LIMIT 1 OFFSET 100000")
+        .expect("past end")
+        .result
+        .records
+        .is_empty());
+    assert_no_query_buffers(&runtime);
+    runtime
+        .execute_query("SET CONFIG stream.executor.max_materialized_rows = 0")
+        .expect("disable row cap only");
+    let error = runtime
+        .execute_query("SELECT * FROM red.control_events ORDER BY action")
+        .expect_err("growing workspace must still obey the shared byte budget");
+    assert!(
+        matches!(
+            error,
+            reddb_server::RedDBError::MaterializationLimitExceeded {
+                executor: "control_events",
+                limit: 33_554_432,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_no_query_buffers(&runtime);
+    assert_eq!(
+        runtime
+            .execute_query("SELECT action FROM red.control_events ORDER BY action LIMIT 1")
+            .expect("failed sort returned its reservation")
+            .result
+            .records
+            .len(),
+        1
+    );
+    assert_no_query_buffers(&runtime);
+}
+
+#[test]
+fn cold_audit_rejects_oversized_decode_and_releases_scratch() {
+    let (_directory, runtime) = cold_fixture(1, 3 * 1024 * 1024);
+    let error = runtime
+        .execute_query("SELECT * FROM red.control_events")
+        .expect_err("row exceeds decode allowance");
+    let message = error.to_string();
+    assert!(
+        message.contains("budget") || message.contains("limit"),
+        "{message}"
+    );
+    assert_no_query_buffers(&runtime);
+    // LIMIT 0 must not decode the oversized row.
+    assert!(runtime
+        .execute_query("SELECT * FROM red.control_events LIMIT 0")
+        .expect("zero limit")
+        .result
+        .records
+        .is_empty());
+}
+
+#[test]
+fn cold_audit_does_not_hide_corrupt_backing_pages() {
+    use reddb_engine::storage::page::{Page, PageType};
+    let (_directory, runtime) = cold_fixture(3, 128);
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("red.control_events")
+        .expect("ledger");
+    let root = manager.backing_root_page().expect("cold root");
+    let pager = runtime.db().store().pager().cloned().expect("pager");
+    let original = pager.read_page(root).expect("original fixture page");
+    pager
+        .write_page(root, Page::new(PageType::Overflow, root))
+        .expect("inject wrong page type in disposable fixture");
+    let result = runtime.execute_query("SELECT * FROM red.control_events");
+    pager
+        .write_page(root, original)
+        .expect("restore fixture before shutdown");
+    let error = result.expect_err("corruption must not look like an empty ledger");
+    assert!(error.to_string().to_lowercase().contains("page"), "{error}");
+    assert_no_query_buffers(&runtime);
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM red.control_events")
+            .expect("restored fixture")
+            .result
+            .records
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn cold_audit_shares_admission_with_other_queries() {
+    use reddb_server::storage::memory_pools::MemoryPool;
+    let (_directory, runtime) = cold_fixture(3, 128);
+    let accounting = runtime.memory_accounting();
+    let occupied = runtime.memory_budget().resolved_bytes;
+    accounting.charge(MemoryPool::QueryBuffers, occupied);
+    let result = runtime.execute_query("SELECT * FROM red.control_events");
+    assert_eq!(
+        accounting.used_bytes(MemoryPool::QueryBuffers),
+        occupied,
+        "failed query must not leak or release another owner"
+    );
+    accounting.release(MemoryPool::QueryBuffers, occupied);
+    let error = result.expect_err("shared pool exhaustion");
+    assert!(
+        matches!(
+            error,
+            reddb_server::RedDBError::MaterializationLimitExceeded { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM red.control_events")
+            .expect("headroom returned")
+            .result
+            .records
+            .len(),
+        5
+    );
+    assert_no_query_buffers(&runtime);
+}

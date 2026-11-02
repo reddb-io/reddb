@@ -370,6 +370,32 @@ predicate keys, composite/name metadata, legacy H3/graph raw candidates and cove
 values remain separate workspaces; this slice does not establish full-server or
 STG qualification.
 
+## Cold Control Event Ledger reads
+
+`red.control_events` now scans the authoritative disk base and resident overlay.
+The previous resident-only snapshot returned zero persisted audit events after a
+bounded-residency reopen. Tenant scope and fallible WHERE evaluation precede
+retention; storage corruption and decode-limit errors propagate to the caller.
+Unordered LIMIT/OFFSET reads skip without retaining the prefix and stop early.
+Ordered reads periodically retain only the best OFFSET + LIMIT rows, bounded by
+the materialized-row ceiling and shared query-buffer admission. The candidate
+batch also counts toward that ceiling; a window filling the ceiling can fail
+rather than bypass the configured cap.
+
+A per-row decode allowance of min(engine budget / 16, 16 MiB), with a second
+reservation for schema projection, prevents arbitrarily large ledger rows from
+being decoded without admission. Retained ordinary values, vector growth and
+sort workspaces are charged before growth and released on pruning or error.
+The workspace owner survives ordinary projection construction. This is not a
+claim that arbitrary expression expansion or every transport is admitted; those
+remain in the activation gates below.
+
+`cold_control_events` covers cold-plus-overlay visibility, aliases/filtering and
+pagination, tenant isolation, a 1,024-event sort under a 32-row ceiling, rejection
+when the byte budget is exhausted, error cleanup, oversized decoding, and a
+wrong-type backing page that must never become an empty successful ledger. It
+runs in `make test-storage-apocalypse` as well as the ordinary integration suite.
+
 ## Remaining implementation before activation
 
 - Connect the remaining persisted secondary trees to runtime providers and

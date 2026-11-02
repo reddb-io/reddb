@@ -856,6 +856,8 @@ pub(super) fn red_query(
         frame.visible_collections()
     };
     let db = runtime.db();
+    let mut _event_snapshot = None;
+    let control_events = matches!(virtual_kind, VirtualTableKind::ControlEvents);
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => {
             catalog_views::collections_snapshot(runtime, tenant, visible_collections)
@@ -903,7 +905,10 @@ pub(super) fn red_query(
         }
         VirtualTableKind::ManagedPolicies => governance_views::managed_policies_snapshot(runtime),
         VirtualTableKind::ControlEvents => {
-            governance_views::control_events_snapshot(runtime, tenant)
+            let mut snapshot = control_event_reads::read(runtime, tenant, query)?;
+            let records = std::mem::take(&mut snapshot.records);
+            _event_snapshot = Some(snapshot);
+            records
         }
         VirtualTableKind::Users => governance_views::users_snapshot(runtime, tenant),
         VirtualTableKind::ApiKeys => governance_views::api_keys_snapshot(runtime, tenant),
@@ -946,7 +951,7 @@ pub(super) fn red_query(
     let table_alias = query.alias.as_deref();
     if !matches!(
         virtual_kind,
-        VirtualTableKind::Describe | VirtualTableKind::ShowCreate
+        VirtualTableKind::Describe | VirtualTableKind::ShowCreate | VirtualTableKind::ControlEvents
     ) {
         if let Some(filter) = effective_table_filter(query) {
             records.retain(|record| {
@@ -961,7 +966,7 @@ pub(super) fn red_query(
         }
     }
 
-    if !query.order_by.is_empty() {
+    if !control_events && !query.order_by.is_empty() {
         // Issue #769 — cap the materialized sort buffer.
         crate::runtime::materialization_limit::guard(db.as_ref(), "sort", records.len())?;
         super::join_filter::try_sort_records_by_order_by_with_db(
@@ -973,7 +978,7 @@ pub(super) fn red_query(
         )?;
     }
 
-    if let Some(offset) = query.offset {
+    if let Some(offset) = query.offset.filter(|_| !control_events) {
         let offset = offset as usize;
         if offset >= records.len() {
             records.clear();
@@ -981,7 +986,7 @@ pub(super) fn red_query(
             records.drain(..offset);
         }
     }
-    if let Some(limit) = query.limit {
+    if let Some(limit) = query.limit.filter(|_| !control_events) {
         records.truncate(limit as usize);
     }
 
@@ -1328,6 +1333,7 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
 }
 
 mod catalog_views;
+mod control_event_reads;
 mod governance_views;
 mod helpers;
 mod model_views;
