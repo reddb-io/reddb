@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Update the transitive build dependency `pulldown-cmark` to 0.13.6 in every Rust lockfile to address RUSTSEC-2026-0433.
+
 - [#2593](https://github.com/reddb-io/reddb/pull/2593) [`53097e7`](https://github.com/reddb-io/reddb/commit/53097e749cb5ba55ce0270399ac12bb604fc10d8) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix inconsistent support for dotted collection names across creation, CRUD, joins, indexes, keyed commands, queues, search, and catalog selectors. Bare paths, separately quoted segments, and whole quoted collection names address the same collection. Keep the red system namespace reserved and preserve existing column and KV key syntax. Storage and wire formats are unchanged.
 
 ## 1.27.8
