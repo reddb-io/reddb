@@ -232,20 +232,23 @@ mod tests {
         let sql = "SELECT payload FROM binary_response_budget OFFSET 0";
         assert!(crate::wire::query_direct::try_handle_query_binary_direct(&runtime, sql).is_none());
         let mut statements = crate::wire::listener::PreparedStatements::default();
-        let prepare = reddb_wire::redwire::encode_prepare_payload(
-            7,
-            "SELECT payload FROM binary_response_budget OFFSET $1",
-        )
-        .unwrap();
+        // The binary PREPARE contract auto-parameterizes literals; it does
+        // not bind SQL $N placeholders. OFFSET remains a shape property.
+        let prepare = reddb_wire::redwire::encode_prepare_payload(7, sql).unwrap();
         assert_eq!(
             crate::wire::listener::handle_prepare(&runtime, &prepare, &mut statements)[4],
             reddb_wire::legacy::MSG_PREPARED_OK
         );
-        let execute = reddb_wire::redwire::encode_execute_prepared_payload(
-            7,
-            &[reddb_wire::legacy::WireValue::I64(0)],
-        )
-        .unwrap();
+        let execute = reddb_wire::redwire::encode_execute_prepared_payload(7, &[]).unwrap();
+        let baseline =
+            crate::wire::listener::handle_execute_prepared(&runtime, &execute, &statements);
+        assert_eq!(
+            baseline[4],
+            reddb_wire::legacy::MSG_RESULT,
+            "prepared baseline: {}",
+            String::from_utf8_lossy(&baseline[5..])
+        );
+        drop(baseline);
         let prepared = PreparedRegistry::new();
         let result = QueryRequestExecutor::new(&runtime, &prepared)
             .execute(QueryRequest::sql(sql, Vec::new()))
@@ -276,9 +279,13 @@ mod tests {
         let prepared_response =
             crate::wire::listener::handle_execute_prepared(&runtime, &execute, &statements);
         assert_eq!(prepared_response[4], reddb_wire::legacy::MSG_ERROR);
-        assert!(String::from_utf8_lossy(&prepared_response[5..])
-            .to_lowercase()
-            .contains("memory"));
+        assert!(
+            String::from_utf8_lossy(&prepared_response[5..])
+                .to_lowercase()
+                .contains("memory"),
+            "prepared refusal: {}",
+            String::from_utf8_lossy(&prepared_response[5..])
+        );
         drop(prepared_response);
         drop(held);
         assert_eq!(
