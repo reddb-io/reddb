@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use reddb_server::auth::{AuthConfig, AuthStore};
+use reddb_server::storage::StorageDeployPreset;
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
@@ -52,14 +53,22 @@ fn dotted_table_names_survive_crud_indexes_and_reopen() {
                 "SELECT e.payload AS payload FROM app p JOIN {name} e ON p.id=e.id"
             ))
             .expect("join with dotted right source");
-        assert_eq!(reverse_join.result.records, joined.result.records);
+        assert_eq!(reverse_join.result.records.len(), 1);
+        assert_eq!(
+            reverse_join.result.records[0].get("payload"),
+            Some(&Value::text("updated"))
+        );
         let indexes = runtime
             .execute_query(&format!("SHOW INDEXES ON {name}"))
             .expect("show indexes");
-        assert!(indexes.result.records.iter().any(|record|
-            record.get("name") == Some(&Value::text("payload_idx"))
-                && record.get("table") == Some(&Value::text("app.audit.events"))
-        ));
+        assert!(indexes
+            .result
+            .records
+            .iter()
+            .any(
+                |record| record.get("name") == Some(&Value::text("payload_idx"))
+                    && record.get("table") == Some(&Value::text("app.audit.events"))
+            ));
         runtime.checkpoint().expect("checkpoint");
         drop(runtime);
         let runtime = open();
@@ -91,9 +100,11 @@ fn dotted_table_names_survive_crud_indexes_and_reopen() {
 #[test]
 fn dotted_names_are_shared_by_collection_models_and_reserve_red() {
     let directory = tempfile::tempdir().expect("fixture directory");
-    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(
-        directory.path().join("models.rdb"),
-    ))
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("models.rdb"))
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged fixture"),
+    )
     .expect("runtime");
     let auth = Arc::new(
         AuthStore::with_vault_certificate(
