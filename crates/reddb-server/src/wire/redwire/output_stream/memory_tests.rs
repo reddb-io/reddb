@@ -40,9 +40,7 @@ fn binary_response(
         )]],
         "select",
     );
-    crate::wire::listener::LegacyQueryResponse::Admitted(
-        runtime.serialize_binary_result(&result).unwrap(),
-    )
+    runtime.serialize_binary_result(&result).unwrap()
 }
 
 #[tokio::test]

@@ -181,53 +181,14 @@ pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<
     }
 }
 
-/// Materialized replies own their budget through framing and transport. Direct
-/// scans and error builders still return an existing allocation; the transport
-/// charges that scratch alongside its final encoded buffer. Direct-scan
-/// construction itself is a separate, not-yet-admitted workspace.
-#[derive(Debug)]
-pub(crate) enum LegacyQueryResponse {
-    Admitted(bytes::Bytes),
-    Existing(Vec<u8>),
-}
-
-impl LegacyQueryResponse {
-    pub(crate) fn unadmitted_capacity(&self) -> usize {
-        match self {
-            Self::Admitted(_) => 0,
-            Self::Existing(buffer) => buffer.capacity(),
-        }
-    }
-}
-
-impl std::ops::Deref for LegacyQueryResponse {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            Self::Admitted(buffer) => buffer,
-            Self::Existing(buffer) => buffer,
-        }
-    }
-}
-
-impl PartialEq for LegacyQueryResponse {
-    fn eq(&self, other: &Self) -> bool {
-        **self == **other
-    }
-}
-
-impl From<Vec<u8>> for LegacyQueryResponse {
-    fn from(buffer: Vec<u8>) -> Self {
-        Self::Existing(buffer)
-    }
-}
+pub(crate) use crate::runtime::memory_buffers::BinaryQueryResponse as LegacyQueryResponse;
 
 fn encode_result(
     runtime: &RedDBRuntime,
     result: &crate::runtime::RuntimeQueryResult,
 ) -> LegacyQueryResponse {
     match runtime.serialize_binary_result(result) {
-        Ok(buffer) => LegacyQueryResponse::Admitted(buffer),
+        Ok(buffer) => buffer,
         Err(crate::runtime::memory_buffers::QueryBufferError::MemoryBudget) => {
             make_error(b"binary response exceeds shared memory budget").into()
         }

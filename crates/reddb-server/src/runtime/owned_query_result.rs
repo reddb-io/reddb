@@ -62,11 +62,7 @@ impl RedDBRuntime {
         // These are the same pure materialized plan families as query_budget.
         // Command results (e.g. queue consumption / ASK / sequence functions)
         // must not receive a late refusal after an acknowledged side effect.
-        let is_read = value.statement_type == "select"
-            && matches!(
-                value.statement,
-                "table" | "graph" | "join" | "path" | "vector" | "hybrid" | "select"
-            );
+        let is_read = value.is_materialized_read();
         let reservation = if is_read {
             let owner_bytes = std::alloc::Layout::new::<[usize; 2]>()
                 .extend(std::alloc::Layout::new::<ResultOwner>())

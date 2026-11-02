@@ -499,6 +499,16 @@ pub struct RuntimeQueryResult {
 }
 
 impl RuntimeQueryResult {
+    /// Pure materialized results can receive late read-budget admission.
+    /// Command acknowledgements must preserve already committed side effects.
+    pub(crate) fn is_materialized_read(&self) -> bool {
+        self.statement_type == "select"
+            && matches!(
+                self.statement,
+                "table" | "graph" | "join" | "path" | "vector" | "hybrid" | "select"
+            )
+    }
+
     /// Construct a result representing a DML operation (insert/update/delete).
     pub fn dml_result(
         query: String,

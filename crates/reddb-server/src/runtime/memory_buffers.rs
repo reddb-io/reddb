@@ -5,6 +5,7 @@ use super::RedDBRuntime;
 use std::fmt;
 
 mod binary;
+pub(crate) use binary::BinaryQueryResponse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryBufferError {
@@ -211,6 +212,57 @@ mod tests {
     use crate::storage::memory_pools::MemoryPool;
     use crate::RedDBOptions;
     use std::fmt::Write;
+
+    #[test]
+    fn binary_committed_commands_do_not_receive_late_read_result_refusals() {
+        let runtime = RedDBRuntime::with_pool_and_limits(
+            RedDBOptions::in_memory().with_memory_budget(1024 * 1024),
+            super::super::ConnectionPoolConfig::default(),
+            super::super::resource_limits::ResourceLimits {
+                max_result_bytes: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for sql in [
+            "CREATE TABLE binary_command_budget (id INT)",
+            "INSERT INTO binary_command_budget (id) VALUES (1)",
+        ] {
+            let response = crate::wire::listener::handle_query_binary(&runtime, sql.as_bytes());
+            assert_eq!(
+                response[4],
+                reddb_wire::legacy::MSG_RESULT,
+                "committed command must not become a read-budget error: {}",
+                String::from_utf8_lossy(&response[5..])
+            );
+        }
+        assert!(runtime
+            .db()
+            .store()
+            .get_collection("binary_command_budget")
+            .is_some());
+        let committed =
+            crate::runtime::RuntimeQueryResult::ok_message("INSERT".into(), "ok", "insert");
+        runtime.refresh_memory_accounting();
+        let available =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .try_reserve_query_buffer(available as usize)
+            .unwrap();
+        let response = runtime
+            .serialize_binary_result(&committed)
+            .expect("committed ack has no late read-admission gate");
+        assert!(matches!(response, BinaryQueryResponse::Existing(_)));
+        assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
+        drop(response);
+        drop(held);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+    }
 
     #[test]
     fn binary_response_refuses_when_rows_fit_but_serialization_does_not() {
