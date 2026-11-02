@@ -25,10 +25,11 @@ use reddb_types::Value;
 use reddb_wire::legacy::{
     build_legacy_bulk_ok_frame, build_legacy_bulk_stream_ack_frame,
     build_legacy_cursor_batch_frame, build_legacy_cursor_ok_frame, build_legacy_error_frame,
-    build_legacy_prepared_ok_frame, build_legacy_result_frame, encode_result_payload_header,
-    MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED, MSG_BULK_OK, MSG_BULK_STREAM_COMMIT,
-    MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START, MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR,
-    MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY, MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
+    build_legacy_prepared_ok_frame, build_legacy_result_frame, build_legacy_result_frame_with,
+    encode_result_payload_header, MSG_BULK_INSERT_BINARY, MSG_BULK_INSERT_PREVALIDATED,
+    MSG_BULK_OK, MSG_BULK_STREAM_COMMIT, MSG_BULK_STREAM_ROWS, MSG_BULK_STREAM_START,
+    MSG_CURSOR_BATCH, MSG_CURSOR_OK, MSG_ERROR, MSG_PREPARED_OK, MSG_QUERY, MSG_QUERY_BINARY,
+    MSG_RESULT, VAL_F64, VAL_I64, VAL_TEXT, VAL_U64,
 };
 use reddb_wire::redwire::{
     decode_bulk_binary_payload, decode_bulk_json_payload, decode_bulk_ok_count_payload,
@@ -202,13 +203,6 @@ enum ColumnResolver {
     HashMapKey(Arc<str>),
 }
 
-thread_local! {
-    /// Scratch buffer reused across `encode_result` calls on the same
-    /// task. Avoids a ~500 kB alloc + dealloc for every SELECT scan.
-    static ENCODE_SCRATCH: std::cell::RefCell<Vec<u8>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
 fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
     let records = &result.result.records;
 
@@ -253,16 +247,11 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
         })
         .collect();
 
-    // Scratch-buffer reuse. Size hint is a rough estimate (~130 B
-    // per row for typical 9-column integer+text rows); actual growth
-    // amortises over sustained query streams on the same worker.
-    let payload = ENCODE_SCRATCH.with(|cell| {
-        let mut buf = cell.borrow_mut();
-        buf.clear();
-        buf.reserve(256 + records.len() * 128);
-
+    // Encode into the final legacy frame. A thread-local scratch retained the
+    // largest reply indefinitely and copied the entire payload twice.
+    build_legacy_result_frame_with(256 + records.len() * 128, |buf| {
         encode_result_payload_header(
-            &mut buf,
+            buf,
             columns.iter().map(|column| column.as_ref()),
             records.len() as u32,
         );
@@ -288,7 +277,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
                             record.get(k.as_ref()).unwrap_or(&Value::Null)
                         }
                     };
-                    encode_value(&mut buf, val);
+                    encode_value(buf, val);
                 }
             } else {
                 // Heterogeneous-schema fallback. Walk columns + the
@@ -301,15 +290,11 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
                         ColumnResolver::HashMapKey(k) => k.as_ref(),
                     };
                     let val = record.get(key).unwrap_or(&Value::Null);
-                    encode_value(&mut buf, val);
+                    encode_value(buf, val);
                 }
             }
         }
-
-        buf.clone()
-    });
-
-    build_legacy_result_frame(&payload)
+    })
 }
 
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
@@ -973,6 +958,10 @@ mod tests {
             for count in counts {
                 assert_eq!(count.allocated_bytes, count.deallocated_bytes,
                     "encoder retains requested allocation bytes after responses drop ({workers} workers): {count:?}");
+                assert!(
+                    count.allocated_bytes <= 2 * 192 * 1024 + 8192,
+                    "encoding must not clone complete payload/frame buffers: {count:?}"
+                );
             }
         }
     }

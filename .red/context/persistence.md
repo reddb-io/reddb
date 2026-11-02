@@ -40,6 +40,10 @@ RedWire output streams retain the request executor's shared materialized-read
 owner until completion or worker cancellation and render JSON one row at a time.
 A row that cannot fit a stream frame emits StreamError before StreamEnd instead
 of silently disappearing from an apparently successful response.
+The legacy binary result encoder writes into its final frame and frees its
+working allocation with the response instead of retaining the largest scratch
+buffer on each worker thread. This removes retained scratch and full-payload
+copies; legacy serialization still precedes transmitter budget admission.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
 execution workspaces, pre-encoding payload construction, handshake buffers and other
 non-HTTP outputs still require their own owned admission; this accounting alone
