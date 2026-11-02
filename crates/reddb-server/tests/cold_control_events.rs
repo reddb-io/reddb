@@ -537,3 +537,82 @@ fn audit_index_falls_back_for_legacy_ids_in_overlay_and_on_disk() {
     );
     assert_no_query_buffers(&runtime);
 }
+
+#[test]
+fn crash_reopen_with_new_collection_keeps_prepared_audit_roots() {
+    const CHILD: &str = "REDDB_AUDIT_NEW_COLLECTION_CRASH_PATH";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(path)
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("child reopen");
+        runtime
+            .execute_query("CREATE KV audit_recovery_pending_count")
+            .expect("acknowledged new collection");
+        runtime
+            .execute_query("KV PUT audit_recovery_pending_count.marker = 'acknowledged'")
+            .expect("acknowledged KV");
+        emit(&runtime, "cold.after-crash".into(), Some("tenant-a"), 128);
+        std::process::exit(71); // No destructor checkpoint after acknowledged writes.
+    }
+    let (directory, runtime) = cold_fixture(2048, 2048);
+    runtime
+        .execute_query("CREATE TABLE audit_boot_catalog (id INT, bucket INT)")
+        .expect("catalog table");
+    runtime
+        .execute_query("CREATE INDEX audit_boot_bucket ON audit_boot_catalog (bucket) USING BTREE")
+        .expect("persisted index registry");
+    runtime
+        .checkpoint()
+        .expect("prepared ledger with a runtime index registry");
+    let root = runtime
+        .db()
+        .store()
+        .get_collection("red.control_events")
+        .expect("ledger")
+        .backing_root_page()
+        .expect("prepared root");
+    drop(runtime);
+    let path = directory.path().join("audit.rdb");
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "crash_reopen_with_new_collection_keeps_prepared_audit_roots",
+            "--nocapture",
+        ])
+        .env(CHILD, &path)
+        .output()
+        .expect("crash fixture process");
+    assert_eq!(
+        child.status.code(),
+        Some(71),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(path)
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .expect("recover pending new collection");
+    let recovered_root = runtime
+        .db()
+        .store()
+        .get_collection("red.control_events")
+        .expect("ledger")
+        .backing_root_page()
+        .expect("recovered root");
+    assert_eq!(recovered_root, root, "a missing projection on a new collection must not rewrite historical audit data before its projector is registered");
+    assert_eq!(
+        runtime
+            .execute_query("KV GET audit_recovery_pending_count.marker")
+            .expect("recovered KV")
+            .result
+            .records[0]
+            .get("value"),
+        Some(&Value::text("acknowledged"))
+    );
+    assert_eq!(runtime.execute_query("SELECT action FROM red.control_events WHERE action = 'cold.after-crash' ORDER BY ts DESC,id DESC LIMIT 1").expect("recovered audit").result.records.len(), 1);
+}

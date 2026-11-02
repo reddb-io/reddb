@@ -385,7 +385,12 @@ rather than bypass the configured cap.
 The common `ORDER BY ts DESC, id DESC LIMIT ...` page uses an internal native
 secondary tree over descending signed timestamp and fixed-width ledger ID.
 Preparation joins the existing checkpoint epoch; compatible reopen restores the
-root without reading the ledger. Sparse append maintains the posting alongside
+root without reading the ledger. All internal projectors are registered before
+runtime-index restoration can checkpoint missing projections. Otherwise recovery
+of a newly created collection can force a full audit-history rewrite and then a
+second index-build checkpoint. A process-exit regression verifies that a new KV
+collection plus an acknowledged audit append retains the prepared audit root.
+Sparse append maintains the posting alongside
 the source row. Reads fence publication, merge visible resident rows with the
 requested qualifying base window, skip shadowed/deleted base identities, and
 verify every posting against its source. Scope and residual predicates still

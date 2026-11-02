@@ -55,7 +55,10 @@ impl SecondaryIndexProjector for Projection {
 
 pub(super) fn prepare(runtime: &RedDBRuntime) -> RedDBResult<()> {
     let store = runtime.db().store();
-    if store.pager().is_some() && store.get_collection(CONTROL_EVENTS_COLLECTION).is_some() {
+    if store.config().resident_memory_bytes_max.is_some()
+        && store.pager().is_some()
+        && store.get_collection(CONTROL_EVENTS_COLLECTION).is_some()
+    {
         store.register_secondary_index(
             CONTROL_EVENTS_COLLECTION,
             NAME,
