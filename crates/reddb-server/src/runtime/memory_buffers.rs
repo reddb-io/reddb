@@ -32,6 +32,39 @@ struct QueryBufferWriter<'runtime> {
 }
 
 impl RedDBRuntime {
+    /// Admit an exact output allocation and its existing encoding scratch.
+    /// The callback must free its scratch before returning; the output's charge
+    /// travels with Bytes through queues, clones and the final socket write.
+    pub(crate) fn serialize_query_buffer(
+        &self,
+        capacity: usize,
+        scratch_bytes: usize,
+        encode: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<bytes::Bytes, QueryBufferError> {
+        let total = capacity
+            .checked_add(scratch_bytes)
+            .ok_or(QueryBufferError::MemoryBudget)?;
+        let mut reservation = self.try_reserve_query_buffer(total).ok_or_else(|| {
+            self.memory_accounting().record_admission_denied();
+            QueryBufferError::MemoryBudget
+        })?;
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(capacity)
+            .map_err(|_| QueryBufferError::MemoryBudget)?;
+        encode(&mut value);
+        assert_eq!(
+            value.capacity(),
+            capacity,
+            "encoder must stay within admitted capacity"
+        );
+        reservation.shrink_to(value.capacity());
+        Ok(bytes::Bytes::from_owner(OwnedQueryBuffer {
+            value,
+            _reservation: reservation,
+        }))
+    }
+
     pub(crate) fn serialize_query_json(
         &self,
         value: &crate::json::Value,
@@ -176,6 +209,77 @@ mod tests {
     use crate::storage::memory_pools::MemoryPool;
     use crate::RedDBOptions;
     use std::fmt::Write;
+
+    #[test]
+    fn exact_serialization_admits_copy_and_scratch_before_running_encoder() {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(1024 * 1024))
+                .expect("runtime");
+        let scratch = vec![b'x'; 4096];
+        let bytes = runtime
+            .serialize_query_buffer(8192, scratch.capacity(), |buffer| {
+                assert_eq!(
+                    runtime
+                        .memory_accounting()
+                        .used_bytes(MemoryPool::QueryBuffers),
+                    12288
+                );
+                buffer.extend_from_slice(&scratch);
+                drop(scratch);
+            })
+            .expect("admitted copy");
+        assert_eq!(bytes.len(), 4096);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            8192
+        );
+        drop(bytes);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+        assert_eq!(
+            runtime.serialize_query_buffer(1024 * 1024, 1, |_| panic!("denied before encoding")),
+            Err(QueryBufferError::MemoryBudget)
+        );
+        assert_eq!(
+            runtime.serialize_query_buffer(usize::MAX, 1, |_| panic!("overflow before encoding")),
+            Err(QueryBufferError::MemoryBudget)
+        );
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+    }
+
+    #[test]
+    fn exact_serialization_unwind_releases_the_admitted_buffer() {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(1024 * 1024))
+                .expect("runtime");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = runtime.serialize_query_buffer(4096, 4096, |buffer| {
+                buffer.extend_from_slice(b"partial");
+                panic!("encoder failed");
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+        runtime
+            .serialize_query_buffer(4096, 0, |buffer| buffer.extend_from_slice(b"retry"))
+            .expect("reservation reusable");
+    }
 
     #[test]
     fn buffer_growth_admits_both_allocations_and_keeps_the_original_on_refusal() {

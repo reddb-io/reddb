@@ -219,6 +219,39 @@ full-server admission and the acceptance gates below remain required.
 - At least 100 constant-live-data churn cycles after warmup, with allocated
   storage growth <=64 MiB, and no skipped/corrupt data or index keys.
 
+## RedWire response ownership
+
+Post-handshake replies previously used a queue bounded by frame count alone.
+An encoded reply could remain queued or blocked in a socket write after query
+result accounting had returned to zero. The transmitter now reserves the exact
+encoded capacity plus the existing payload's capacity against the runtime budget
+before copying. It drops the payload before shrinking the reservation, and sends
+shared byte owners that retain the encoded allocation's charge through clones,
+queueing, blocked sends and socket writes. Cancelled sends release their own
+buffer without releasing other queued responses.
+
+Memory refusal fails the connection. The writer observes the same failure while
+blocked on a slow socket, drops queued and in-flight byte owners, and wakes
+blocked producers. Later StreamEnd frames cannot turn a discarded chunk into
+apparent success. Socket errors also wake the session. Clean Bye/half-close keeps
+the established behavior of draining accepted responses before EOF.
+
+The canonical uncompressed codec accepts caller-owned capacity. Existing server
+builders emit uncompressed replies; an outbound compression request uses the
+wire protocol's plaintext fallback, clearing only COMPRESSED, until compressor
+workspace admission exists. Shared codec compression and incoming compressed
+frames are unchanged. This can increase traffic for future producers that request
+compression. Frames exceeding the wire size limit fail before the encoding copy.
+
+Regression tests cover shared ownership, pre-copy refusal, encoder unwinding,
+full-queue cancellation, a blocked duplex socket, failure cleanup and recovery,
+and 1/4/16 transmitters sharing one budget. These are transport ownership tests,
+not the authenticated-server workload/latency qualification above. Payloads are
+still built before transmitter admission. Raw stream results, their presentation
+trees, legacy binary thread-local encoder scratch, gRPC/protobuf, handshake and
+executor workspaces remain outside this change. It does not establish a total
+RSS bound, storage plateau, or permission to activate managed disk residency.
+
 ## Remaining implementation before activation
 
 - Connect the remaining persisted secondary trees to runtime providers and

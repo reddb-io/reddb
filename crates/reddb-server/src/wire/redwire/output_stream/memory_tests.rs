@@ -1,0 +1,242 @@
+use super::*;
+use crate::storage::memory_pools::MemoryPool;
+use reddb_wire::redwire::{decode_frame, Flags, MessageKind, FRAME_HEADER_SIZE};
+use std::future::Future;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::time::timeout;
+
+fn runtime() -> Arc<RedDBRuntime> {
+    Arc::new(
+        RedDBRuntime::with_options(
+            crate::RedDBOptions::in_memory().with_memory_budget(1024 * 1024),
+        )
+        .expect("bounded runtime"),
+    )
+}
+
+fn charged(runtime: &RedDBRuntime) -> u64 {
+    runtime
+        .memory_accounting()
+        .used_bytes(MemoryPool::QueryBuffers)
+}
+
+fn reply(size: usize) -> Frame {
+    reddb_wire::redwire::build_reply_frame(17, MessageKind::Result, vec![b'x'; size])
+        .expect("reply fixture")
+}
+
+#[tokio::test]
+async fn cancelling_a_full_queue_send_releases_only_its_own_buffer() {
+    let runtime = runtime();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    sender.send_frame(reply(4096)).await.unwrap();
+    let original_charge = charged(&runtime);
+    {
+        let pending = sender.send_frame(reply(8192));
+        tokio::pin!(pending);
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(pending.as_mut().poll(cx).is_pending())
+            })
+            .await
+        );
+        assert_eq!(
+            charged(&runtime),
+            original_charge + 8192 + FRAME_HEADER_SIZE as u64
+        );
+        // Dropping this blocked producer must preserve the first queue owner.
+    }
+    assert_eq!(charged(&runtime), original_charge);
+    drop(rx.recv().await.unwrap());
+    assert_eq!(charged(&runtime), 0);
+    sender
+        .send_frame(reply(8192))
+        .await
+        .expect("retry after cancellation");
+    drop(rx);
+    assert_eq!(charged(&runtime), 0);
+}
+
+#[tokio::test]
+async fn socket_blocked_by_slow_reader_retains_charge_then_drains_on_clean_close() {
+    let runtime = runtime();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    let (writer, mut peer) = tokio::io::duplex(1);
+    let task = sender.spawn_writer(rx, writer);
+    sender.send_frame(reply(128 * 1024)).await.unwrap();
+    let mut received = vec![0; 1];
+    timeout(Duration::from_secs(5), peer.read_exact(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(charged(&runtime), 128 * 1024 + FRAME_HEADER_SIZE as u64);
+    assert!(
+        !task.is_finished(),
+        "socket cannot write the rest until peer reads"
+    );
+    drop(sender);
+    timeout(Duration::from_secs(5), peer.read_to_end(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let (decoded, used) = decode_frame(&received).unwrap();
+    assert_eq!(used, received.len());
+    assert_eq!(decoded.payload, vec![b'x'; 128 * 1024]);
+    assert_eq!(decoded.correlation_id, 17);
+    assert_eq!(charged(&runtime), 0);
+}
+
+#[tokio::test]
+async fn admission_failure_unblocks_socket_and_full_queue_and_refuses_later_success() {
+    let runtime = runtime();
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    let (writer, mut peer) = tokio::io::duplex(1);
+    let task = sender.spawn_writer(rx, writer);
+    sender.send_frame(reply(4096)).await.unwrap();
+    timeout(Duration::from_secs(5), peer.read_exact(&mut [0]))
+        .await
+        .unwrap()
+        .unwrap();
+    sender.send_frame(reply(8192)).await.unwrap();
+    let pending = sender.send_frame(reply(16384));
+    tokio::pin!(pending);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(pending.as_mut().poll(cx).is_pending())
+        })
+        .await
+    );
+    let error = sender.send_frame(reply(1024 * 1024)).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+    timeout(Duration::from_secs(5), sender.failed())
+        .await
+        .unwrap();
+    assert!(timeout(Duration::from_secs(5), &mut pending)
+        .await
+        .unwrap()
+        .is_err());
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        charged(&runtime),
+        0,
+        "queued, blocked producer and socket owners released"
+    );
+    assert!(sender
+        .send_frame(
+            reddb_wire::redwire::build_reply_frame(17, MessageKind::StreamEnd, vec![])
+                .expect("terminal fixture")
+        )
+        .await
+        .is_err());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    FrameTx::new(tx, Arc::clone(&runtime))
+        .send_frame(reply(4096))
+        .await
+        .expect("new connection can retry");
+    drop(rx.recv().await.unwrap());
+    assert_eq!(charged(&runtime), 0);
+}
+
+#[tokio::test]
+async fn socket_error_wakes_session_and_releases_queue() {
+    let runtime = runtime();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    sender.send_frame(reply(4096)).await.unwrap();
+    sender.send_frame(reply(8192)).await.unwrap();
+    let (writer, peer) = tokio::io::duplex(1);
+    drop(peer);
+    let task = sender.spawn_writer(rx, writer);
+    timeout(Duration::from_secs(5), sender.failed())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(charged(&runtime), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_four_and_sixteen_connections_compete_for_one_budget_and_recover() {
+    let runtime = runtime();
+    for connections in [1, 4, 16] {
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..connections {
+            let runtime = Arc::clone(&runtime);
+            tasks.spawn(async move {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let result = FrameTx::new(tx, runtime)
+                    .send_frame(reply(128 * 1024))
+                    .await;
+                (result, rx)
+            });
+        }
+        let mut queues = Vec::new();
+        let mut admitted = 0;
+        let mut denied = 0;
+        while let Some(result) = tasks.join_next().await {
+            let (result, receiver) = result.unwrap();
+            match result {
+                Ok(()) => admitted += 1,
+                Err(error) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+                    denied += 1;
+                }
+            }
+            queues.push(receiver);
+        }
+        assert!(admitted > 0);
+        if connections == 16 {
+            assert!(denied > 0, "held responses cannot exceed the shared budget");
+        }
+        assert_eq!(
+            charged(&runtime),
+            admitted * (128 * 1024 + FRAME_HEADER_SIZE as u64)
+        );
+        assert!(
+            runtime
+                .memory_accounting()
+                .enforcement_snapshot()
+                .high_water_bytes
+                <= runtime.memory_budget().resolved_bytes
+        );
+        drop(queues);
+        assert_eq!(
+            charged(&runtime),
+            0,
+            "all connections return their reservations"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compression_request_uses_valid_plaintext_fallback_and_preserves_metadata() {
+    let runtime = runtime();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sender = FrameTx::new(tx, Arc::clone(&runtime));
+    let mut frame = reply(4096);
+    frame.flags = Flags::COMPRESSED.insert(Flags::MORE_FRAMES);
+    frame.stream_id = 7;
+    sender.send_frame(frame).await.unwrap();
+    let bytes = rx.recv().await.unwrap();
+    let (decoded, used) = decode_frame(&bytes).unwrap();
+    assert_eq!(used, bytes.len());
+    assert_eq!(decoded.flags, Flags::MORE_FRAMES);
+    assert_eq!(decoded.stream_id, 7);
+    assert_eq!(decoded.correlation_id, 17);
+    assert_eq!(decoded.payload, vec![b'x'; 4096]);
+    drop(bytes);
+    assert_eq!(charged(&runtime), 0);
+}

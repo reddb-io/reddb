@@ -1391,14 +1391,15 @@ async fn cold_stream_config_redwire_refuses_before_open_ack() {
     install_indexed_cold(&runtime, "red_config", 1);
     let (send, mut receive) = tokio::sync::mpsc::channel(8);
     let (_cancel, cancel) = tokio::sync::oneshot::channel();
+    let runtime = Arc::new(runtime);
     run_output_stream(
-        Arc::new(runtime),
+        Arc::clone(&runtime),
         37,
         11,
         parse_open_stream(br#"{"sql":"SELECT 1"}"#).expect("open request"),
         false,
         cancel,
-        FrameTx::new(send),
+        FrameTx::new(send, runtime),
         crate::application::OperationContext::read_only("fixture"),
         crate::auth::Role::Read,
     )

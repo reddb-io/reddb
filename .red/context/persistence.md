@@ -31,9 +31,15 @@ Clones and transport bodies share the allocation and retain its charge until
 the last owner drops. The request executor also returns immutable shared owners
 for completed materialized reads, charging retained row/model/metadata capacities
 through the last result clone. PostgreSQL portals retain these owners too.
+RedWire post-handshake replies also admit the encoded allocation and existing
+payload capacity before the encoding copy. Shared byte owners retain that charge
+through queued responses, blocked sends, clones and socket writes. A refused
+response terminates the connection and releases its pending output, including
+when the socket is blocked. Clean Bye/half-close drains accepted replies.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
-responses and encoded non-HTTP outputs still require their own owned admission;
-this accounting alone does not establish a process-wide memory ceiling.
+materialization, pre-encoding payload construction, handshake buffers and other
+non-HTTP outputs still require their own owned admission; this accounting alone
+does not establish a process-wide memory ceiling.
 
 Single-column push-down GROUP BY folds inputs during the physical scan instead
 of retaining an input-row vector. Its materialized-group ceiling is captured
