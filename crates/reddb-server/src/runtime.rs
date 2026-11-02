@@ -1622,6 +1622,8 @@ pub(crate) use index_store::{IndexMethodKind as QualificationIndexMethodKind, Mu
 #[cfg(test)]
 mod cold_keyed_models;
 mod hash_candidate_memory;
+#[cfg(test)]
+mod index_intersection_memory;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;

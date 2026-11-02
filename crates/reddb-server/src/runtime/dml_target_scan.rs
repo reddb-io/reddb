@@ -147,7 +147,7 @@ impl<'a> DmlTargetScan<'a> {
                     self.table,
                     self.runtime.index_store_ref(),
                     None,
-                ) {
+                )? {
                     return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
                 }
             }

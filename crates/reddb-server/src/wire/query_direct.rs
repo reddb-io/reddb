@@ -223,16 +223,16 @@ pub(super) fn execute_direct_scan(
         } else {
             None
         };
-        let ids = if let Some(ids) =
-            try_sorted_index_lookup(filter, tq.table.as_str(), idx_store, index_limit)
-        {
-            crate::storage::unified::hash_index::HashCandidates::from(ids)
-        } else {
-            match try_hash_eq_lookup(filter, tq.table.as_str(), idx_store) {
+        let ids = match try_sorted_index_lookup(filter, tq.table.as_str(), idx_store, index_limit) {
+            Ok(Some(ids)) => ids,
+            Ok(None) => match try_hash_eq_lookup(filter, tq.table.as_str(), idx_store) {
                 Ok(ids) => ids?,
                 Err(error) => {
                     return Some(build_legacy_error_frame(error.to_string().as_bytes()).into())
                 }
+            },
+            Err(error) => {
+                return Some(build_legacy_error_frame(error.to_string().as_bytes()).into())
             }
         };
         if ids.is_empty() {
@@ -661,13 +661,20 @@ fn execute_simple_between_select(
     let high_value = Value::Integer(parsed.high);
     let low = value_to_canonical_key(&low_value)?;
     let high = value_to_canonical_key(&high_value)?;
-    let ids = idx_store.sorted.range_lookup_limited(
+    let ids = match idx_store.sorted_range_candidates(
         &parsed.table,
         &parsed.filter_column,
-        low,
-        high,
+        (
+            std::ops::Bound::Included(low),
+            std::ops::Bound::Included(high),
+        ),
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
-    )?;
+        false,
+        None,
+    ) {
+        Ok(ids) => ids?,
+        Err(error) => return Some(build_legacy_error_frame(error.to_string().as_bytes()).into()),
+    };
     if ids.is_empty() {
         return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
@@ -705,14 +712,17 @@ fn execute_simple_text_eq_int_gt_select(
         CanonicalKey::Signed(family, _) => CanonicalKey::Signed(*family, i64::MAX),
         _ => return None,
     };
-    let ids = idx_store.sorted.composite_prefix_range_lookup(
+    let ids = match idx_store.composite_range_candidates(
         &parsed.table,
         &index_columns,
         &[eq_key],
         low,
         high,
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
-    )?;
+    ) {
+        Ok(ids) => ids?,
+        Err(error) => return Some(build_legacy_error_frame(error.to_string().as_bytes()).into()),
+    };
     if ids.is_empty() {
         return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }
@@ -765,14 +775,17 @@ fn execute_simple_ordered_complex_select(
     let high_value = Value::Integer(parsed.high);
     let low = value_to_canonical_key(&low_value)?;
     let high = value_to_canonical_key(&high_value)?;
-    let ids = idx_store.sorted.composite_prefix_range_lookup(
+    let ids = match idx_store.composite_range_candidates(
         &parsed.table,
         &index_columns,
         &[eq_key],
         low,
         high,
         SIMPLE_INDEX_BREAK_EVEN_CAP + 1,
-    )?;
+    ) {
+        Ok(ids) => ids?,
+        Err(error) => return Some(build_legacy_error_frame(error.to_string().as_bytes()).into()),
+    };
     if ids.is_empty() {
         return Some(encode_empty_simple_select(runtime, &parsed.columns));
     }

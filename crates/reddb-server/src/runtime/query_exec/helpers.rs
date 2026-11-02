@@ -549,26 +549,10 @@ fn hash_eq_lookup(
         let keys = values
             .iter()
             .map(|value| hash_lookup_key(value).expect("invariant: every IN key was validated"));
-        if !resident_only {
-            return idx_store
-                .hash
-                .lookup_union_owned(table, &name, keys)
-                .map_err(|error| crate::RedDBError::Internal(error.to_string()));
-        }
-        // Legacy sorted intersections still return raw vectors. Keep that
-        // boundary explicit; never strip an owned reservation to enter it.
-        let mut ids = Vec::new();
-        for key in keys {
-            let Some(found) = idx_store
-                .hash
-                .lookup_resident(table, &name, key.as_ref())
-                .map_err(|error| crate::RedDBError::Internal(error.to_string()))?
-            else {
-                return Ok(None);
-            };
-            ids.extend(found);
-        }
-        return Ok(Some(ids.into()));
+        return idx_store
+            .hash
+            .lookup_union_owned(table, &name, keys)
+            .map_err(|error| crate::RedDBError::Internal(error.to_string()));
     }
     let Some((column, key)) = extract_index_candidate(filter) else {
         return Ok(None);
@@ -579,8 +563,11 @@ fn hash_eq_lookup(
     if resident_only {
         return idx_store
             .hash
-            .lookup_resident(table, &index.hash_lookup_name(), &key)
-            .map(|ids| ids.map(Into::into))
+            .lookup_union_owned(
+                table,
+                &index.hash_lookup_name(),
+                std::iter::once(key.as_slice()),
+            )
             .map_err(|error| crate::RedDBError::Internal(error.to_string()));
     }
     idx_store
@@ -589,17 +576,13 @@ fn hash_eq_lookup(
         .map_err(crate::RedDBError::Internal)
 }
 
-/// Legacy sorted intersections return unowned Vecs and cannot retain a paged
-/// reservation or propagate I/O. Do not invoke a disk provider in this path.
-pub(crate) fn resident_hash_eq_lookup(
+/// Resident intersections retain candidate owners and propagate admission errors.
+pub(crate) fn try_resident_hash_eq_lookup(
     filter: &reddb_rql::ast::Filter,
     table: &str,
     idx_store: &super::super::index_store::IndexStore,
-) -> Option<Vec<crate::storage::EntityId>> {
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
     hash_eq_lookup(filter, table, idx_store, true)
-        .ok()
-        .flatten()?
-        .into_resident()
 }
 
 /// Evaluate a SQL Filter directly against a UnifiedEntity without creating a

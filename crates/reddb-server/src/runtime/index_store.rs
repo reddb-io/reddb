@@ -16,6 +16,8 @@ use crate::storage::unified::entity::EntityId;
 use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use reddb_types::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
 
+pub(crate) mod candidates;
+
 enum CanonicalizedValue {
     Exact(CanonicalKey),
     Unsupported,
@@ -847,178 +849,6 @@ impl SortedIndexManager {
         }
     }
 
-    /// Range lookup with early stop at `limit` — avoids collecting all IDs
-    /// when only the first N results are needed (LIMIT-bounded queries).
-    pub(crate) fn range_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.range_limited(low, high, limit)
-    }
-
-    pub(crate) fn range_lookup_limited_same_family(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .range_limited_same_family(low, high, limit)
-    }
-
-    pub(crate) fn gt_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.greater_than_limited(threshold, limit)
-    }
-
-    pub(crate) fn ge_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.greater_equal_limited(threshold, limit)
-    }
-
-    pub(crate) fn lt_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.less_than_limited(threshold, limit)
-    }
-
-    pub(crate) fn le_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.less_equal_limited(threshold, limit)
-    }
-
-    /// Bitmap AND: range [low, high] filtered to IDs in `filter_set`.
-    pub(crate) fn range_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        if low > high {
-            return Some(Vec::new());
-        }
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&low) || low.family() != high.family() {
-            return None;
-        }
-        idx.collect_range_filtered_by_set(low..=high, filter_set, limit)
-    }
-
-    /// Bitmap AND: gt filtered to IDs in `filter_set`.
-    pub(crate) fn gt_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Excluded(threshold), Unbounded), filter_set, limit)
-    }
-
-    /// Bitmap AND: ge filtered to IDs in `filter_set`.
-    pub(crate) fn ge_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Included(threshold), Unbounded), filter_set, limit)
-    }
-
-    /// Bitmap AND: lt filtered to IDs in `filter_set`.
-    pub(crate) fn lt_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Unbounded, Excluded(threshold)), filter_set, limit)
-    }
-
-    /// Bitmap AND: le filtered to IDs in `filter_set`.
-    pub(crate) fn le_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Unbounded, Included(threshold)), filter_set, limit)
-    }
-
     /// IN-list multi-point lookup on a sorted index.
     /// Performs one BTree point-lookup per value — O(k log n) for k values
     /// instead of O(n) for a range scan covering all values.
@@ -1033,23 +863,6 @@ impl SortedIndexManager {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         indices.get(&key)?.in_lookup_limited(values, limit)
-    }
-
-    /// IN-list multi-point lookup filtered by a hash-index candidate set.
-    /// Bitmap AND: sorted-index point lookups ∩ hash-index set.
-    pub(crate) fn in_lookup_limited_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        values: &[CanonicalKey],
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .in_lookup_limited_filtered_by_set(values, filter_set, limit)
     }
 
     /// Covered-query range projection: return BTree keys (= column values) for a range.

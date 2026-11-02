@@ -834,10 +834,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         };
         let paged_result = idx_store.paged_btree_lookup(&query.table, filter)?;
         let uses_paged_range = paged_result.is_some();
-        let sorted_res = paged_result.or_else(|| {
-            try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit)
-                .map(crate::storage::unified::hash_index::HashCandidates::from)
-        });
+        let sorted_res = match paged_result {
+            Some(ids) => Some(ids),
+            None => try_sorted_index_lookup(filter, &query.table, idx_store, sorted_lookup_limit)?,
+        };
         if trace {
             eprintln!(
                 "sorted_index_lookup table={} filter={:?} result={:?}",
@@ -1018,17 +1018,21 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             extract_cross_index_predicates(filter, &query.table, idx_store)
         {
             if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &eq_col) {
-                // Unowned bitmap/set intersections remain resident-only.
+                // Keep candidate ownership through the resident intersection.
                 if let Some(hash_ids) = idx_store
                     .hash
-                    .lookup_resident(&query.table, &idx.hash_lookup_name(), &eq_bytes)
+                    .lookup_union_owned(
+                        &query.table,
+                        &idx.hash_lookup_name(),
+                        std::iter::once(eq_bytes.as_slice()),
+                    )
                     .map_err(|error| RedDBError::Internal(error.to_string()))?
                 {
                     if !hash_ids.is_empty() {
                         let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
                         // Build HashSet from the smaller (hash) candidate set
-                        let hash_set: std::collections::HashSet<u64> =
-                            hash_ids.iter().map(|id| id.raw()).collect();
+                        let hash_set =
+                            idx_store.candidate_set(hash_ids.iter().map(|id| id.raw()))?;
                         // Stream sorted range, collect only IDs in hash_set
                         if let Some(intersection_ids) = try_sorted_index_filtered_by_set(
                             range_filter,
@@ -1036,7 +1040,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             idx_store,
                             &hash_set,
                             limit,
-                        ) {
+                        )? {
                             let table_name = query.table.as_str();
                             let table_alias = query.alias.as_deref().unwrap_or(table_name);
                             let schema_arc = db
@@ -1089,8 +1093,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // ── TID BITMAP PATH: AND multiple hash indexes for multi-predicate queries ──
     // `WHERE a = 1 AND b = 2 [AND range_col op val]` with hash indexes on a, b
     // and optional sorted index on range_col:
-    // - Look up each equality index → TidBitmap per column
-    // - AND the bitmaps via word-level RoaringBitmap intersection (smallest-first)
+    // - Look up each equality index → admitted 64-bit candidate bitmap
+    // - AND the Roaring bitmaps within each high-32 partition (smallest-first)
     // - Optionally narrow further via sorted range scan filtered by the intersection set
     // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
@@ -1103,113 +1107,152 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     ) {
         let mut eq_candidates: Vec<(String, Vec<u8>, reddb_types::Value)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
+        // Avoid allocating bitmap metadata for predicates without resident
+        // postings. Each lookup below rechecks the backing after this hint.
+        eq_candidates.retain(|(column, _, _)| {
+            idx_store
+                .find_hash_index_for_column(&query.table, column)
+                .is_some_and(|index| {
+                    !idx_store
+                        .hash
+                        .is_paged(&query.table, &index.hash_lookup_name())
+                })
+        });
 
-        // Collect one TidBitmap per indexed equality column.
-        // TidBitmap uses RoaringBitmap internally — intersection is word-level AND
-        // (~32x faster than HashSet retain for 10K+ IDs, and far more cache-friendly).
-        // Entity IDs are cast to u32; safe for any reasonable in-memory DB size (< 4 B).
-        let mut bitmaps: Vec<crate::storage::index::tid_bitmap::TidBitmap> = Vec::new();
-        for (col, val_bytes, _val) in &eq_candidates {
-            if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, col) {
-                if let Some(ids) = idx_store
-                    .hash
-                    .lookup_resident(&query.table, &idx.hash_lookup_name(), val_bytes)
-                    .map_err(|error| RedDBError::Internal(error.to_string()))?
-                {
-                    let mut bmp = crate::storage::index::tid_bitmap::TidBitmap::with_cap_bytes(0);
-                    let _ = bmp.extend_from_iter(ids.iter().map(|e| e.raw() as u32));
-                    bitmaps.push(bmp);
+        if eq_candidates.len() >= 2 {
+            let metadata_bytes = eq_candidates
+                .len()
+                .checked_mul(std::mem::size_of::<
+                    super::super::index_store::candidates::CandidateBitmap,
+                >())
+                .ok_or_else(|| {
+                    RedDBError::Internal("index bitmap metadata size overflow".into())
+                })?;
+            let _bitmap_metadata = idx_store.candidate_workspace(metadata_bytes)?;
+            let mut bitmaps = Vec::new();
+            bitmaps
+                .try_reserve_exact(eq_candidates.len())
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            for (col, val_bytes, _val) in &eq_candidates {
+                if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, col) {
+                    if let Some(ids) = idx_store
+                        .hash
+                        .lookup_union_owned(
+                            &query.table,
+                            &idx.hash_lookup_name(),
+                            std::iter::once(val_bytes.as_slice()),
+                        )
+                        .map_err(|error| RedDBError::Internal(error.to_string()))?
+                    {
+                        bitmaps.push(idx_store.candidate_bitmap(ids)?);
+                    }
                 }
             }
-        }
 
-        // Only use bitmap AND when we have ≥2 bitmaps (otherwise single-index path below)
-        if bitmaps.len() >= 2 {
-            // Intersect all bitmaps — start from the smallest for best performance
-            bitmaps.sort_by_key(|b| b.len());
-            let mut intersection = bitmaps.remove(0);
-            for other in &bitmaps {
-                intersection.intersect_with(other); // word-level AND — O(n/32)
-            }
-            if intersection.is_empty() {
-                return Ok(Vec::new());
-            }
-            // Convert to HashSet<u64> for compatibility with try_sorted_index_filtered_by_set.
-            // The intersection is already small (post-AND), so this conversion is cheap.
-            let intersection: std::collections::HashSet<u64> =
-                intersection.iter().map(|id| id as u64).collect();
-
-            let table_name = query.table.as_str();
-            let table_alias = query.alias.as_deref().unwrap_or(table_name);
-            let schema_arc = db
-                .store()
-                .get_collection(table_name)
-                .and_then(|m| m.column_schema());
-            // Always re-apply the full filter — residual predicates (range, OR, etc.)
-            // not captured by the eq-bitmap path must still be checked.
-            let compiled_filter = match schema_arc.as_ref() {
-                Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
-                    filter,
-                    table_name,
-                    table_alias,
-                    schema.as_ref(),
-                ),
-                None => super::filter_compiled::CompiledEntityFilter::compile(
-                    filter,
-                    table_name,
-                    table_alias,
-                ),
-            };
-
-            let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-            let explicit_cols = extract_select_column_names(&effective_projections);
-            // Optional: narrow via sorted range index filtered by the eq-intersection set.
-            // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
-            // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
-            // because the eq predicates are already handled by the bitmap intersection above.
-            let entity_ids: Vec<EntityId> = if let Some(range_filter) =
-                find_range_predicate_with_sorted_index(filter, table_name, idx_store)
-            {
-                // Sorted-range scan filtered by the eq-bitmap intersection set
-                if let Some(range_ids) = try_sorted_index_filtered_by_set(
-                    range_filter,
-                    table_name,
-                    idx_store,
-                    &intersection,
-                    limit,
-                ) {
-                    range_ids
-                } else {
-                    // Sorted range not applicable; use eq-intersection directly
-                    let mut sorted: Vec<u64> = intersection.into_iter().collect();
-                    sorted.sort_unstable();
-                    sorted.into_iter().map(EntityId::new).collect()
+            // Only use bitmap AND when we have ≥2 bitmaps (otherwise single-index path below)
+            if bitmaps.len() >= 2 {
+                // Intersect all bitmaps — start from the smallest for best performance
+                bitmaps.sort_unstable_by_key(|b| b.len());
+                let mut intersection = bitmaps.remove(0);
+                for other in &bitmaps {
+                    intersection.intersect_with(other); // word-level AND — O(n/32)
                 }
-            } else {
-                // No range predicate; just sort eq-intersection for sequential access
-                let mut sorted: Vec<u64> = intersection.into_iter().collect();
-                sorted.sort_unstable();
-                sorted.into_iter().map(EntityId::new).collect()
-            };
+                if intersection.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Convert to HashSet<u64> for compatibility with try_sorted_index_filtered_by_set.
+                // The intersection is already small (post-AND), so this conversion is cheap.
+                drop(bitmaps);
+                drop(_bitmap_metadata);
+                let intersection_set = idx_store.candidate_set(intersection.iter())?;
+                drop(intersection);
+                let intersection = intersection_set;
 
-            let records = indexed_table_records(
-                db,
-                &query.table,
-                &entity_ids,
-                &explicit_cols,
-                limit,
-                |entity| {
-                    compiled_entity_filter_matches(
-                        db,
-                        &compiled_filter,
-                        entity,
+                let table_name = query.table.as_str();
+                let table_alias = query.alias.as_deref().unwrap_or(table_name);
+                let schema_arc = db
+                    .store()
+                    .get_collection(table_name)
+                    .and_then(|m| m.column_schema());
+                // Always re-apply the full filter — residual predicates (range, OR, etc.)
+                // not captured by the eq-bitmap path must still be checked.
+                let compiled_filter = match schema_arc.as_ref() {
+                    Some(schema) => {
+                        super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                            filter,
+                            table_name,
+                            table_alias,
+                            schema.as_ref(),
+                        )
+                    }
+                    None => super::filter_compiled::CompiledEntityFilter::compile(
                         filter,
                         table_name,
                         table_alias,
-                    )
-                },
-            )?;
-            return Ok(records);
+                    ),
+                };
+
+                let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                let explicit_cols = extract_select_column_names(&effective_projections);
+                // Optional: narrow via sorted range index filtered by the eq-intersection set.
+                // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
+                // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
+                // because the eq predicates are already handled by the bitmap intersection above.
+                let entity_ids = if let Some(range_filter) =
+                    find_range_predicate_with_sorted_index(filter, table_name, idx_store)
+                {
+                    // Sorted-range scan filtered by the eq-bitmap intersection set
+                    if let Some(range_ids) = try_sorted_index_filtered_by_set(
+                        range_filter,
+                        table_name,
+                        idx_store,
+                        &intersection,
+                        limit,
+                    )? {
+                        range_ids
+                    } else {
+                        // Sorted range not applicable; use eq-intersection directly
+                        {
+                            let mut candidates = idx_store.collect_candidates(
+                                intersection.iter().copied().map(EntityId::new),
+                            )?;
+                            candidates
+                                .as_mut_slice()
+                                .sort_unstable_by_key(|id| id.raw());
+                            candidates
+                        }
+                    }
+                } else {
+                    // No range predicate; just sort eq-intersection for sequential access
+                    {
+                        let mut candidates = idx_store
+                            .collect_candidates(intersection.iter().copied().map(EntityId::new))?;
+                        candidates
+                            .as_mut_slice()
+                            .sort_unstable_by_key(|id| id.raw());
+                        candidates
+                    }
+                };
+
+                let records = indexed_table_records(
+                    db,
+                    &query.table,
+                    &entity_ids,
+                    &explicit_cols,
+                    limit,
+                    |entity| {
+                        compiled_entity_filter_matches(
+                            db,
+                            &compiled_filter,
+                            entity,
+                            filter,
+                            table_name,
+                            table_alias,
+                        )
+                    },
+                )?;
+                return Ok(records);
+            }
         }
     }
 
