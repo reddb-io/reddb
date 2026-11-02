@@ -25,6 +25,9 @@ impl RedDBRuntime {
         query: &CreateTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if super::impl_ddl::is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         for spec in &query.downsample_policies {
             crate::storage::timeseries::retention::DownsamplePolicy::parse(spec).ok_or_else(
                 || RedDBError::Query(format!("invalid downsample policy '{}'", spec)),

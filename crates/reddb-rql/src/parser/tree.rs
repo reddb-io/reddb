@@ -14,7 +14,7 @@ impl<'a> Parser<'a> {
         let if_not_exists = self.match_if_not_exists()?;
         let name = self.expect_ident()?;
         self.expect(Token::In)?;
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
         self.expect_tree_ident("ROOT")?;
         let root = self.parse_tree_node_spec(false)?;
         let default_max_children = self.parse_tree_required_max_children()?;
@@ -32,7 +32,7 @@ impl<'a> Parser<'a> {
         let if_exists = self.match_if_exists()?;
         let name = self.expect_ident()?;
         self.expect(Token::In)?;
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
         Ok(QueryExpr::DropTree(DropTreeQuery {
             collection,
             name,
@@ -118,7 +118,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_tree_target(&mut self) -> Result<(String, String), ParseError> {
-        let collection = self.expect_ident()?;
+        // As in KV key selectors, the next dot separates the collection from
+        // the tree name. Quote a dotted collection as a whole.
+        let collection = self.collection_name_segment(false)?;
         self.expect(Token::Dot)?;
         let tree_name = self.expect_ident()?;
         Ok((collection, tree_name))

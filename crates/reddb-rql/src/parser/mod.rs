@@ -242,6 +242,65 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Collection names are flat catalog keys, including their dots. Keep this
+    /// separate from columns and aliases, where dots qualify field paths.
+    pub(crate) fn parse_collection_name(&mut self) -> Result<String, ParseError> {
+        let head = self.collection_name_segment(false)?;
+        self.finish_collection_name(head, false)
+    }
+
+    pub(crate) fn collection_name_segment(
+        &mut self,
+        allow_keyword: bool,
+    ) -> Result<String, ParseError> {
+        if let Token::QuotedIdent(name) = self.peek() {
+            if name.contains('\0') || name.split('.').any(|part| part.is_empty() || part == "*") {
+                return Err(ParseError::new(
+                    "collection names require nonempty dot-separated segments without NUL or wildcard segments".to_string(),
+                    self.position(),
+                ));
+            }
+            let name = name.clone();
+            self.advance()?;
+            Ok(name)
+        } else if matches!(self.peek(), Token::Ident(_)) || !allow_keyword {
+            self.expect_ident()
+        } else {
+            let spelling = self.peek().to_string();
+            if !spelling.starts_with(|ch: char| ch.is_ascii_alphabetic())
+                || !spelling
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                || matches!(self.peek(), Token::String(_) | Token::JsonLiteral(_))
+            {
+                return Err(ParseError::expected(
+                    vec!["collection name segment"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            self.expect_ident_or_keyword()
+                .map(|name| name.to_ascii_lowercase())
+        }
+    }
+
+    pub(crate) fn finish_collection_name(
+        &mut self,
+        mut name: String,
+        allow_wildcard: bool,
+    ) -> Result<String, ParseError> {
+        while self.consume(&Token::Dot)? {
+            if allow_wildcard && self.consume(&Token::Star)? {
+                name.push_str(".*");
+                break;
+            }
+            let segment = self.collection_name_segment(true)?;
+            name.push('.');
+            name.push_str(&segment);
+        }
+        Ok(name)
+    }
+
     /// Consume an identifier or aggregate keyword when the grammar expects
     /// a user-defined column name.
     pub fn expect_column_ident(&mut self) -> Result<String, ParseError> {

@@ -13,7 +13,7 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Add => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let mut elements = Vec::new();
                 loop {
                     match self.peek() {
@@ -29,8 +29,8 @@ impl<'a> Parser<'a> {
             Token::Count => {
                 self.advance()?;
                 let mut names = Vec::new();
-                while let Token::Ident(_) = self.peek() {
-                    names.push(self.expect_ident()?);
+                while matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_)) {
+                    names.push(self.parse_collection_name()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::HllCount { names },
@@ -38,10 +38,10 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("MERGE") => {
                 self.advance()?;
-                let dest = self.expect_ident()?;
+                let dest = self.parse_collection_name()?;
                 let mut sources = Vec::new();
-                while let Token::Ident(_) = self.peek() {
-                    sources.push(self.expect_ident()?);
+                while matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_)) {
+                    sources.push(self.parse_collection_name()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::HllMerge { dest, sources },
@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("INFO") => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::HllInfo { name },
                 ))
@@ -69,7 +69,7 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Add => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let element = self.parse_string()?;
                 let count = if matches!(self.peek(), Token::Integer(_)) {
                     self.parse_integer()? as u64
@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
             }
             Token::Count => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let element = self.parse_string()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::SketchCount { name, element },
@@ -94,10 +94,10 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("MERGE") => {
                 self.advance()?;
-                let dest = self.expect_ident()?;
+                let dest = self.parse_collection_name()?;
                 let mut sources = Vec::new();
-                while let Token::Ident(_) = self.peek() {
-                    sources.push(self.expect_ident()?);
+                while matches!(self.peek(), Token::Ident(_) | Token::QuotedIdent(_)) {
+                    sources.push(self.parse_collection_name()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::SketchMerge { dest, sources },
@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("INFO") => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::SketchInfo { name },
                 ))
@@ -125,7 +125,7 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Add => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let element = self.parse_string()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::FilterAdd { name, element },
@@ -133,7 +133,7 @@ impl<'a> Parser<'a> {
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("CHECK") => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let element = self.parse_string()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::FilterCheck { name, element },
@@ -141,7 +141,7 @@ impl<'a> Parser<'a> {
             }
             Token::Delete => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let element = self.parse_string()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::FilterDelete { name, element },
@@ -149,14 +149,14 @@ impl<'a> Parser<'a> {
             }
             Token::Count => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::FilterCount { name },
                 ))
             }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("INFO") => {
                 self.advance()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::FilterInfo { name },
                 ))
@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => {
                 self.advance()?;
                 let if_not_exists = self.match_if_not_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let precision = if self.consume_ident_ci("PRECISION")? {
                     self.parse_positive_integer("PRECISION")? as u8
                 } else {
@@ -192,7 +192,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
                 self.advance()?;
                 let if_not_exists = self.match_if_not_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 // Optional WIDTH and DEPTH. `DEPTH` lexes as the
                 // reserved `Token::Depth` keyword (used by graph
                 // traversal modifiers), so `consume_ident_ci("DEPTH")`
@@ -221,7 +221,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("FILTER") => {
                 self.advance()?;
                 let if_not_exists = self.match_if_not_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 let capacity = if self.consume_ident_ci("CAPACITY")? {
                     self.parse_positive_integer("CAPACITY")? as usize
                 } else {
@@ -249,7 +249,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => {
                 self.advance()?;
                 let if_exists = self.match_if_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::DropHll { name, if_exists },
                 ))
@@ -257,7 +257,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
                 self.advance()?;
                 let if_exists = self.match_if_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::DropSketch { name, if_exists },
                 ))
@@ -265,7 +265,7 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("FILTER") => {
                 self.advance()?;
                 let if_exists = self.match_if_exists()?;
-                let name = self.expect_ident()?;
+                let name = self.parse_collection_name()?;
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::DropFilter { name, if_exists },
                 ))

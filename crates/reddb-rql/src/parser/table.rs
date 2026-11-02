@@ -303,25 +303,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read one segment of a dotted table name. The graph analytics outputs
-    /// `components` and `centrality` lex as reserved keywords, so they are
-    /// normalised back to their lowercase spelling here; every other segment
-    /// (e.g. `communities`, or virtual-schema suffixes like `collections`) is
-    /// an ordinary identifier. Issue #800.
-    fn parse_table_name_segment(&mut self) -> Result<String, ParseError> {
-        match self.peek() {
-            Token::Components => {
-                self.advance()?;
-                Ok("components".to_string())
-            }
-            Token::Centrality => {
-                self.advance()?;
-                Ok("centrality".to_string())
-            }
-            _ => self.expect_ident(),
-        }
-    }
-
     fn parse_select_query_inner(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Select)?;
 
@@ -414,14 +395,7 @@ impl<'a> Parser<'a> {
                 )?);
                 name
             } else {
-                let ident = self.expect_ident()?;
-                let mut name = ident;
-                while matches!(self.peek(), Token::Dot) {
-                    self.advance()?; // consume '.'
-                    let segment = self.parse_table_name_segment()?;
-                    name.push('.');
-                    name.push_str(&segment);
-                }
+                let name = self.parse_collection_name()?;
                 // Table-valued function call: `ident(arg, ...)` (issue #795).
                 if matches!(self.peek(), Token::LParen) {
                     self.advance()?; // consume '('
