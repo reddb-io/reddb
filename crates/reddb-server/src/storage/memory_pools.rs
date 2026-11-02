@@ -18,10 +18,10 @@
 //! and the policy's basis points sum to at most `10_000`. Boot asserts both
 //! halves of that statement rather than trusting the arithmetic.
 //!
-//! What this module is *not*: it does not enforce admission. A pool over its
-//! share is visible in `red.stats` and nothing more — enforcement is the next
-//! slice (ADR 0073 §4). Reporting is therefore free of policy: a plain relaxed
-//! atomic per pool, no allocation, no lock.
+//! Reporting uses one atomic per pool. Runtime admission also shares a short
+//! ledger lock for sampled storage, outstanding mutations and owned query
+//! buffers. The ledger never holds storage locks or samples storage itself;
+//! callbacks can reserve output while the sampler waits for their read locks.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
@@ -329,6 +329,10 @@ pub struct MemoryAccounting {
     pressure_reclamations_triggered: AtomicU64,
     pressure_bytes_reclaimed: AtomicU64,
     high_water_bytes: AtomicU64,
+    // Sampled storage plus outstanding mutation growth. This short ledger lock
+    // never covers sampling or storage access: read callbacks can admit output
+    // while a sampler waits for their segment lock without an ABBA deadlock.
+    admission_non_query_bytes: parking_lot::Mutex<u64>,
 }
 
 impl MemoryAccounting {
@@ -351,6 +355,7 @@ impl MemoryAccounting {
             pressure_reclamations_triggered: AtomicU64::new(0),
             pressure_bytes_reclaimed: AtomicU64::new(0),
             high_water_bytes: AtomicU64::new(0),
+            admission_non_query_bytes: parking_lot::Mutex::new(0),
         }
     }
 
@@ -385,6 +390,48 @@ impl MemoryAccounting {
         let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
             Some(used.saturating_sub(bytes))
         });
+    }
+
+    /// Publish a completed storage sample and its still-outstanding mutation
+    /// reservations. The runtime serializes samplers; owned query charges are
+    /// read under this ledger lock and can never be overwritten by a sample.
+    pub(crate) fn reconcile_non_query_admission(&self, bytes: u64) {
+        let mut non_query = self.admission_non_query_bytes.lock();
+        *non_query = bytes;
+        self.observe_total_used(bytes.saturating_add(self.used_bytes(MemoryPool::QueryBuffers)));
+    }
+
+    pub(crate) fn try_charge_query_buffer(&self, bytes: u64) -> bool {
+        let non_query = self.admission_non_query_bytes.lock();
+        let Some(projected) = non_query
+            .checked_add(self.used_bytes(MemoryPool::QueryBuffers))
+            .and_then(|used| used.checked_add(bytes))
+        else {
+            return false;
+        };
+        if projected > self.budget.resolved_bytes {
+            return false;
+        }
+        self.charge(MemoryPool::QueryBuffers, bytes);
+        self.observe_total_used(projected);
+        true
+    }
+
+    /// Hold growth until a later sample observes its completed publication.
+    pub(crate) fn try_reserve_mutation_growth(&self, bytes: u64) -> bool {
+        let mut non_query = self.admission_non_query_bytes.lock();
+        let Some(projected) = non_query
+            .checked_add(self.used_bytes(MemoryPool::QueryBuffers))
+            .and_then(|used| used.checked_add(bytes))
+        else {
+            return false;
+        };
+        if projected > self.budget.resolved_bytes {
+            return false;
+        }
+        *non_query += bytes;
+        self.observe_total_used(projected);
+        true
     }
 
     /// Owned buffers must be charged once and released once. A mismatch is an

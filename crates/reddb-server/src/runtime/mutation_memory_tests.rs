@@ -44,7 +44,7 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
     use std::sync::Arc;
 
     let runtime =
-        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(64 * 1024))
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(128 * 1024))
             .expect("runtime");
     let auth = Arc::new(crate::auth::AuthStore::new(
         crate::auth::AuthConfig::default(),
@@ -171,6 +171,17 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
     runtime
         .execute_query("CREATE INDEX secret_inputs_id ON secret_inputs (id) USING BTREE")
         .expect("index for direct wire candidates");
+    // Keep enough headroom for the admitted response so this case reaches the
+    // secret decoder. The 512 KiB decoded value still exceeds the whole budget.
+    runtime.refresh_memory_accounting();
+    assert!(
+        runtime
+            .memory_accounting()
+            .total_used_bytes()
+            .saturating_add(4096)
+            < runtime.memory_budget().resolved_bytes,
+        "fixture must reach predicate decoding before output admission refuses"
+    );
     {
         let _scope = super::execution_context::SecretStoreGuard::install(&runtime);
         let response = crate::wire::query_direct::try_handle_query_binary_direct(
@@ -183,7 +194,13 @@ fn compressed_secret_expression_input_respects_the_decode_budget() {
             Some(&reddb_wire::legacy::MSG_ERROR),
             "direct wire scan must reject rather than publish partial rows"
         );
-        assert!(String::from_utf8_lossy(&response[5..]).contains("read memory limit"));
+        assert!(
+            String::from_utf8_lossy(&response[5..]).contains("read memory limit"),
+            "direct scan error: {}; sampled usage: {}; budget: {}",
+            String::from_utf8_lossy(&response[5..]),
+            runtime.memory_accounting().total_used_bytes(),
+            runtime.memory_budget().resolved_bytes,
+        );
     }
     assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
 

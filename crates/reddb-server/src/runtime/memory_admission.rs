@@ -34,7 +34,7 @@ pub(super) struct OwnedMemoryReservation {
 /// Unlike mutation reservations, these bytes have exactly one owned allocation
 /// and can be returned immediately after that allocation is freed. Keep only
 /// the accounting Arc: a queued response must not retain the entire runtime.
-pub(super) struct QueryBufferReservation {
+pub(crate) struct QueryBufferReservation {
     accounting: std::sync::Arc<crate::storage::memory_pools::MemoryAccounting>,
     bytes: u64,
 }
@@ -155,19 +155,21 @@ const INDEX_ENTRY_BYTES: u64 = 96;
 
 impl crate::RedDBRuntime {
     pub(super) fn try_reserve_query_buffer(&self, bytes: usize) -> Option<QueryBufferReservation> {
+        self.refresh_memory_accounting();
+        self.try_reserve_query_buffer_from_sample(bytes)
+    }
+
+    /// For storage callbacks after their caller has sampled outside the scan.
+    /// The ledger includes all concurrent query owners and mutation reservations;
+    /// it never waits for storage or the sampler/publication mutex.
+    pub(super) fn try_reserve_query_buffer_from_sample(
+        &self,
+        bytes: usize,
+    ) -> Option<QueryBufferReservation> {
         let bytes = u64::try_from(bytes).ok()?;
-        let mut reservations = self.inner.memory_reservations.lock();
-        self.refresh_memory_accounting_with_reservations(&mut reservations);
-        let accounting = self.memory_accounting();
-        let projected = accounting
-            .total_used_bytes()
-            .checked_add(reservations.reserved_bytes)?
-            .checked_add(bytes)?;
-        if projected > accounting.budget().resolved_bytes {
+        if !self.memory_accounting().try_charge_query_buffer(bytes) {
             return None;
         }
-        accounting.charge(MemoryPool::QueryBuffers, bytes);
-        accounting.observe_total_used(projected);
         Some(QueryBufferReservation {
             accounting: std::sync::Arc::clone(&self.inner.memory_accounting),
             bytes,
@@ -262,12 +264,10 @@ impl crate::RedDBRuntime {
     ) -> Option<MemoryReservation<'_>> {
         let mut reservations = self.inner.memory_reservations.lock();
         self.refresh_memory_accounting_with_reservations(&mut reservations);
-        let accounting = self.memory_accounting();
-        let projected = accounting
-            .total_used_bytes()
-            .checked_add(reservations.reserved_bytes)?
-            .checked_add(growth_bytes)?;
-        if projected > accounting.budget().resolved_bytes {
+        if !self
+            .memory_accounting()
+            .try_reserve_mutation_growth(growth_bytes)
+        {
             return None;
         }
         reservations.reserved_bytes += growth_bytes;

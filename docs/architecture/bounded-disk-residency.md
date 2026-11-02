@@ -246,10 +246,9 @@ compression. Frames exceeding the wire size limit fail before the encoding copy.
 Regression tests cover shared ownership, pre-copy refusal, encoder unwinding,
 full-queue cancellation, a blocked duplex socket, failure cleanup and recovery,
 and 1/4/16 transmitters sharing one budget. These are transport ownership tests,
-not the authenticated-server workload/latency qualification above. Payloads are
-still built before transmitter admission. Per-row presentation trees, legacy
-binary serialization/conversion workspaces, gRPC/protobuf, handshake and executor
-workspaces remain outside this change. It does not establish a total
+not the authenticated-server workload/latency qualification above. Per-row
+presentation trees, command payloads, gRPC/protobuf, handshake and executor
+workspaces still need their own pre-allocation admission. It does not establish a total
 RSS bound, storage plateau, or permission to activate managed disk residency.
 
 RedWire output streams now execute through the request seam and keep the
@@ -275,8 +274,30 @@ responses drop, and bound cumulative allocation to prevent full-buffer copies
 from returning. The test allocator counts successful resize replacement bytes;
 these are requested allocation measurements, not allocator-resident RSS or
 latency benchmarks. Wire bytes, column resolution and value encoding are unchanged.
-Legacy serialization still allocates before outbound frame admission and needs
-its own budget-aware writer; removing retained scratch does not close that gap.
+Materialized binary reads now admit column metadata and exact serialized capacity
+before allocation. Borrowed value encoding avoids temporary text/blob copies.
+The admitted legacy owner stays charged while the RedWire transmitter reserves
+and copies into its final output owner, without an intermediate payload copy.
+Committed command acknowledgements retain their existing no-late-read-refusal rule.
+
+Direct binary scans also admit their output before allocation. They sample storage
+once outside the scan, then reserve geometric buffer growth through a short ledger
+shared with mutation admission. The ledger never samples storage or waits on the
+sampler mutex, avoiding a storage-lock/sampler-lock cycle inside callbacks. Both
+old and new capacities remain charged during growth; a refused row discards the
+accepted prefix and returns an error without retrying through the fallback path.
+LIMIT, hash equality, BETWEEN and composite scans keep their direct execution paths.
+Ordered scans admit candidate/slot workspaces and individual row buffers, then
+assemble rows in candidate order even when segment traversal visits another order.
+Empty results retain admitted headers. The canonical wire codec patches the legacy
+envelope in place, without another allocation.
+
+Cost sketch: geometric growth copies less than twice the final capacity across
+resizes, uses one ledger lock per growth, and performs no storage resampling per
+row; ordered row buffers allocate their exact encoded length. This is an algorithmic
+bound, not a measured latency or whole-process RSS qualification. Parser, index
+candidate generation, backing-read and predicate workspaces still need admission;
+charging the response does not account for those earlier allocations.
 
 ## Remaining implementation before activation
 

@@ -5,7 +5,11 @@ use super::RedDBRuntime;
 use std::fmt;
 
 mod binary;
+#[cfg(test)]
+mod direct_tests;
+mod growing;
 pub(crate) use binary::BinaryQueryResponse;
+pub(crate) use growing::GrowingQueryBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryBufferError {
@@ -212,6 +216,67 @@ mod tests {
     use crate::storage::memory_pools::MemoryPool;
     use crate::RedDBOptions;
     use std::fmt::Write;
+
+    #[test]
+    fn direct_scan_refuses_response_growth_beyond_shared_budget_and_retries() {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(1024 * 1024))
+                .unwrap();
+        runtime
+            .execute_query("CREATE TABLE direct_response_budget (payload TEXT)")
+            .unwrap();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO direct_response_budget (payload) VALUES ($1)",
+                &[reddb_types::Value::text("x".repeat(64 * 1024))],
+            )
+            .unwrap();
+        let sql = "SELECT payload FROM direct_response_budget LIMIT 1";
+        let response = crate::wire::query_direct::try_handle_query_binary_direct(&runtime, sql)
+            .expect("LIMIT scan stays on the direct path");
+        assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
+        drop(response);
+        runtime.refresh_memory_accounting();
+        let available =
+            runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
+        let held = runtime
+            .try_reserve_query_buffer(available as usize - 16 * 1024)
+            .unwrap();
+        let response = crate::wire::query_direct::try_handle_query_binary_direct(&runtime, sql)
+            .expect("admission refusal must not fall back and execute the read again");
+        assert_eq!(
+            response[4],
+            reddb_wire::legacy::MSG_ERROR,
+            "a direct scan must not allocate a 64 KiB reply with only 16 KiB headroom"
+        );
+        assert!(String::from_utf8_lossy(&response[5..])
+            .to_lowercase()
+            .contains("memory"));
+        drop(response);
+        drop(held);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+        let response =
+            crate::wire::query_direct::try_handle_query_binary_direct(&runtime, sql).unwrap();
+        assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
+        assert!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers)
+                >= response.len() as u64
+        );
+        drop(response);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+    }
 
     #[test]
     fn binary_committed_commands_do_not_receive_late_read_result_refusals() {

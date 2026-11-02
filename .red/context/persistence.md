@@ -43,9 +43,14 @@ of silently disappearing from an apparently successful response.
 The legacy binary result encoder writes into its final frame and frees its
 working allocation with the response instead of retaining the largest scratch
 buffer on each worker thread. This removes retained scratch and full-payload
-copies; legacy serialization still precedes transmitter budget admission.
+copies. Materialized binary reads reserve resolver metadata and exact encoded
+capacity first. Direct scans reserve incremental output growth outside storage
+sampling, sharing the mutation ledger, and retain response owners through RedWire
+conversion. Ordered direct scans also reserve candidate/slot vectors and encoded
+row owners; admission failure discards any accepted prefix. Their parser, index
+lookup, backing-read and predicate workspaces remain separate admission gaps.
 Executor workspaces, legacy raw runtime results, presentation trees, streaming
-execution workspaces, pre-encoding payload construction, handshake buffers and other
+execution workspaces, command payload construction, handshake buffers and other
 non-HTTP outputs still require their own owned admission; this accounting alone
 does not establish a process-wide memory ceiling.
 
