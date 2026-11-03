@@ -33,6 +33,25 @@ fn refresh_context_index(
     Ok(())
 }
 
+fn ensure_insert_entity_rls(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    entity: &crate::storage::UnifiedEntity,
+) -> RedDBResult<()> {
+    if crate::runtime::rls_injection::entity_passes_rls_action(
+        runtime,
+        collection,
+        reddb_rql::ast::PolicyAction::Insert,
+        entity,
+    ) {
+        Ok(())
+    } else {
+        Err(crate::RedDBError::Query(format!(
+            "insert into collection '{collection}' denied by row-level security"
+        )))
+    }
+}
+
 /// Pull `(name, value)` pairs for every indexable field on an entity.
 /// Returns empty if field names are not recoverable here, so secondary-index
 /// maintenance has nothing to act on. Used by the delete + update paths.
@@ -1634,6 +1653,14 @@ impl RedDBRuntime {
     ) -> RedDBResult<CreateEntityOutput> {
         let applied =
             self.apply_loaded_patch_entity_core(collection, entity, payload, operations)?;
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            &applied.collection,
+            reddb_rql::ast::PolicyAction::Update,
+            &applied.entity,
+        ) {
+            return Err(crate::RedDBError::NotFound("entity not found".to_string()));
+        }
         let _reservation = self.admit_entity_mutation(&applied)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
         #[cfg(test)]
@@ -1727,8 +1754,31 @@ fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
 impl RedDBRuntime {
     pub(crate) fn create_node_unchecked(
         &self,
-        input: CreateNodeInput,
+        mut input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
+        crate::runtime::mutation::enforce_tenant_fields(
+            self,
+            &input.collection,
+            &mut input.properties,
+        )?;
+        let node_type = input
+            .node_type
+            .clone()
+            .unwrap_or_else(|| input.label.clone());
+        let candidate = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::GraphNode(Box::new(
+                crate::storage::unified::GraphNodeKind {
+                    label: input.label.clone(),
+                    node_type,
+                },
+            )),
+            crate::storage::EntityData::Node(crate::storage::NodeData::with_properties(
+                input.properties.iter().cloned().collect(),
+            )),
+        );
+        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
@@ -1783,8 +1833,31 @@ impl RedDBRuntime {
 
     pub(crate) fn create_edge_unchecked(
         &self,
-        input: CreateEdgeInput,
+        mut input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
+        crate::runtime::mutation::enforce_tenant_fields(
+            self,
+            &input.collection,
+            &mut input.properties,
+        )?;
+        let weight = input.weight.unwrap_or(1.0);
+        let candidate = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::GraphEdge(Box::new(
+                crate::storage::unified::GraphEdgeKind {
+                    label: input.label.clone(),
+                    from_node: input.from.raw().to_string(),
+                    to_node: input.to.raw().to_string(),
+                    weight: (weight * 1000.0) as u32,
+                },
+            )),
+            crate::storage::EntityData::Edge(crate::storage::EdgeData::with_properties(
+                weight,
+                input.properties.iter().cloned().collect(),
+            )),
+        );
+        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
@@ -1839,6 +1912,23 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
 
     if rows.is_empty() {
         return Ok(Vec::new());
+    }
+    if crate::runtime::execution_context::current_auth_identity().is_some() {
+        let inputs = rows
+            .into_iter()
+            .map(|values| CreateRowInput {
+                collection: collection.clone(),
+                fields: column_names.iter().cloned().zip(values).collect(),
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            })
+            .collect();
+        return runtime.create_rows_batch_prevalidated_with_outputs(CreateRowsBatchInput {
+            collection,
+            rows: inputs,
+            suppress_events: false,
+        });
     }
     // Schema prevalidation does not admit standalone index keys. Route these
     // collections through the guarded row kernel before installing any row.
@@ -2229,6 +2319,17 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
+        let mut vector_data = crate::storage::VectorData::new(input.dense.clone());
+        vector_data.content = input.content.clone();
+        let candidate = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::Vector {
+                collection: input.collection.clone(),
+            },
+            crate::storage::EntityData::Vector(vector_data),
+        );
+        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
@@ -2306,6 +2407,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::Document)?;
@@ -2320,10 +2422,36 @@ impl RuntimeEntityPort for RedDBRuntime {
         // Serialize the full body for the "body" field. Behind the
         // `storage.binary_document_body` flag (PRD-1398) this is the native binary
         // container; otherwise plain JSON. Reads decode either form to JSON.
-        let binary_body = self.binary_document_body_enabled();
-        let body_bytes = crate::document_body::serialize_document_body(&input.body, binary_body)?;
-        let fields: Vec<(String, reddb_types::Value)> =
-            vec![("body".to_string(), reddb_types::Value::Json(body_bytes))];
+        let mut fields: Vec<(String, reddb_types::Value)> = vec![(
+            "body".to_string(),
+            reddb_types::Value::Json(
+                crate::json::to_vec(&input.body)
+                    .map_err(|err| crate::RedDBError::Query(err.to_string()))?,
+            ),
+        )];
+        crate::runtime::mutation::enforce_tenant_fields(self, &input.collection, &mut fields)?;
+        let (field_names, field_values) =
+            crate::runtime::impl_dml_support::pairwise_columns_values(&fields);
+        let scoped_body =
+            crate::runtime::impl_dml_support::find_document_body_json(&field_names, &field_values)?;
+        let body_bytes = crate::document_body::serialize_document_body(
+            &scoped_body,
+            self.binary_document_body_enabled(),
+        )?;
+        if let Some((_, body)) = fields.iter_mut().find(|(name, _)| name == "body") {
+            *body = reddb_types::Value::Json(body_bytes);
+        }
+        let mut row = crate::storage::RowData::new(Vec::new());
+        row.named = Some(fields.iter().cloned().collect());
+        let candidate = crate::storage::UnifiedEntity::new(
+            crate::storage::EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from(input.collection.as_str()),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(row),
+        );
+        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
 
         let mut metadata = input.metadata;
         contract.apply_default_ttl(&mut metadata);
@@ -2373,6 +2501,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         input: CreateTimeSeriesPointInput,
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
         let db = self.db();
         let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
         contract.ensure_model(crate::catalog::CollectionModel::TimeSeries)?;
@@ -2421,32 +2550,38 @@ impl RuntimeEntityPort for RedDBRuntime {
         collection: &str,
         key: &str,
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Select, collection)?;
         let resolver = crate::runtime::kv_read::KvReadResolver::for_rest_kv(self, collection)?;
-        Ok(resolver
-            .record(key)?
-            .map(|record| (record.value.unwrap_or(Value::Null), record.id)))
+        let Some(record) = resolver.record(key)? else {
+            return Ok(None);
+        };
+        let visible = self
+            .db()
+            .store()
+            .get(collection, record.id)
+            .is_some_and(|entity| {
+                crate::runtime::rls_injection::entity_passes_rls_action(
+                    self,
+                    collection,
+                    reddb_rql::ast::PolicyAction::Select,
+                    &entity,
+                )
+            });
+        Ok(visible.then_some((record.value.unwrap_or(Value::Null), record.id)))
     }
 
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let found = self.get_kv(collection, key)?;
-        if let Some((_, id)) = found {
-            let db = self.db();
-            let store = db.store();
-            let deleted = store
-                .delete(collection, id)
-                .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
-            if deleted {
-                store.context_index().remove_entity(id);
-            }
-            Ok(deleted)
-        } else {
-            Ok(false)
-        }
+        crate::runtime::impl_kv::KvAtomicOps::new(self).delete(
+            crate::catalog::CollectionModel::Kv,
+            collection,
+            key,
+        )
     }
 
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Update, &input.collection)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2475,11 +2610,23 @@ impl RuntimeEntityPort for RedDBRuntime {
                 id.raw()
             )));
         };
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            &collection,
+            reddb_rql::ast::PolicyAction::Update,
+            &entity,
+        ) {
+            return Err(crate::RedDBError::NotFound(format!(
+                "entity not found: {}",
+                id.raw()
+            )));
+        }
         self.apply_loaded_patch_entity(collection, entity, payload, operations, topology_guard)
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, &input.collection)?;
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2493,11 +2640,24 @@ impl RuntimeEntityPort for RedDBRuntime {
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
         // entity is already gone, the delete below is a no-op anyway.
-        let pre_delete_fields = store
-            .get(&input.collection, input.id)
-            .as_ref()
-            .map(entity_row_fields_snapshot)
-            .unwrap_or_default();
+        let Some(entity) = store.get(&input.collection, input.id) else {
+            return Ok(DeleteEntityOutput {
+                deleted: false,
+                id: input.id,
+            });
+        };
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            &input.collection,
+            reddb_rql::ast::PolicyAction::Delete,
+            &entity,
+        ) {
+            return Ok(DeleteEntityOutput {
+                deleted: false,
+                id: input.id,
+            });
+        }
+        let pre_delete_fields = entity_row_fields_snapshot(&entity);
         // Store delete first (source of truth). Crash between here and index removal
         // leaves the entity invisible to most queries but recoverable; the reverse
         // (remove index first, then crash) leaves the entity permanently orphaned.

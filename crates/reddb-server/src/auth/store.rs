@@ -2450,6 +2450,15 @@ impl AuthStore {
         }
     }
 
+    /// Resolve the tenant-aware owner of an API key without exposing its record.
+    pub fn api_key_owner(&self, key: &str) -> Option<UserId> {
+        let key_id = api_key_credential_id(key);
+        self.api_key_index
+            .read()
+            .ok()
+            .and_then(|index| index.get(&key_id).map(|(id, _)| id.clone()))
+    }
+
     /// Revoke (delete) an API key.
     pub fn revoke_api_key(&self, key: &str) -> Result<(), AuthError> {
         if let Some(configured) = self.configured_control_events() {

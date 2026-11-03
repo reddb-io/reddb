@@ -559,6 +559,49 @@ impl SegmentManager {
         Ok((total, items))
     }
 
+    /// Page a caller-filtered logical view while keeping the visible total exact.
+    /// Unlike post-page filtering, this never leaks the number or position of
+    /// rows rejected by `predicate`.
+    pub fn try_page_in_id_order_where(
+        &self,
+        offset: usize,
+        limit: usize,
+        limit_bytes: usize,
+        mut predicate: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
+        let mut visible = 0_usize;
+        let mut retained_bytes = 0_usize;
+        let mut items = Vec::new();
+        let mut error = None;
+        self.try_scan_for_each(None, limit_bytes, |entity| {
+            if !predicate(entity) {
+                return true;
+            }
+            let position = visible;
+            visible = visible.saturating_add(1);
+            if position < offset || items.len() >= limit {
+                return true;
+            }
+            let required_bytes =
+                retained_bytes.saturating_add(crate::storage::memory_size::entity_bytes(entity));
+            if required_bytes > limit_bytes {
+                error = Some(StoreError::ReadLimitExceeded {
+                    required_bytes,
+                    limit_bytes,
+                });
+                return false;
+            }
+            retained_bytes = required_bytes;
+            items.push(entity.clone());
+            true
+        })?;
+        if let Some(error) = error {
+            return Err(error);
+        }
+        self.restore_owned_row_schemas(items.iter_mut());
+        Ok((visible, items))
+    }
+
     /// Physical key history. Indexed bases avoid unrelated payload reads;
     /// resident and unindexed sources still verify each logical key.
     pub fn try_for_each_key_entity(

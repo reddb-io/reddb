@@ -162,6 +162,10 @@ name = "grouped_sql_core"
 path = "tests/grouped/sql_core.rs"
 
 [[test]]
+name = "grouped_tenancy_policy"
+path = "tests/grouped_tenancy_policy.rs"
+
+[[test]]
 name = "grouped_surface_contracts"
 path = "tests/grouped_surface_contracts.rs"
 
@@ -172,7 +176,7 @@ path = "tests/grouped/timeseries_retention.rs"
 [dependencies]
 reddb-wire = { workspace = true }
 reddb-grpc-proto = { workspace = true }
-reddb-client = { workspace = true, features = ["http"] }
+reddb-client = { workspace = true, features = ["http", "redwire-tls"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }

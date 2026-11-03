@@ -48,7 +48,6 @@ pub(crate) fn resolve_auth_caller(
     let token = headers
         .get("authorization")
         .and_then(|v| v.strip_prefix("Bearer "))?;
-    let auth_store = server.auth_store.as_ref()?;
     if super::routing::looks_like_jwt(token) {
         if let Some(validator) = server.runtime.oauth_validator() {
             if let Ok((tenant, username, role)) =
@@ -61,6 +60,7 @@ pub(crate) fn resolve_auth_caller(
             }
         }
     }
+    let auth_store = server.auth_store.as_ref()?;
     let (id, role) = auth_store.validate_token_full(token)?;
     Some(AuthCaller { id, role })
 }
@@ -755,11 +755,6 @@ impl RedDBServer {
     ///
     /// Returns the current user's identity based on the auth token.
     pub(crate) fn handle_auth_whoami(&self, headers: &BTreeMap<String, String>) -> HttpResponse {
-        let auth_store = match &self.auth_store {
-            Some(store) => store,
-            None => return json_error(501, "authentication is not configured"),
-        };
-
         let token = headers
             .get("authorization")
             .and_then(|v| v.strip_prefix("Bearer "));
@@ -799,6 +794,9 @@ impl RedDBServer {
                         }
                     }
                 }
+                let Some(auth_store) = self.auth_store.as_ref() else {
+                    return json_error(401, "invalid or expired token");
+                };
                 match auth_store.validate_token_full(tok) {
                     Some((id, role)) => {
                         let mut object = Map::new();
@@ -818,7 +816,12 @@ impl RedDBServer {
                 }
             }
             None => {
-                if auth_store.is_enabled() {
+                if self.runtime.oauth_validator().is_some()
+                    || self
+                        .auth_store
+                        .as_ref()
+                        .is_some_and(|store| store.is_enabled())
+                {
                     json_error(401, "no authorization token provided")
                 } else {
                     let mut object = Map::new();

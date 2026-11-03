@@ -257,9 +257,8 @@ pub enum ConnectionTarget {
     Memory,
     /// `file:///abs/path` — embedded engine on disk.
     File { path: PathBuf },
-    /// Single remote endpoint over `grpc://` or `grpcs://`. Stored
-    /// as a normalised `http://host:port` string because tonic's
-    /// `Endpoint` consumes that form.
+    /// Single remote endpoint over `grpc://` or `grpcs://`. Stored as a
+    /// normalised `http://` or `https://` endpoint for tonic.
     Grpc { endpoint: String },
     /// Multi-host gRPC URI: primary + read replicas. Writes hit the
     /// primary; reads round-robin across replicas unless
@@ -347,7 +346,7 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
 /// are identified and redacted before transport connectors are built.
 pub fn parse_with_auth(uri: &str) -> Result<ConnectionSpec, ParseError> {
     let normalised = normalise_scheme(uri);
-    let redacted_uri = redact_uri_userinfo(&normalised);
+    let redacted_uri = redact_connection_uri(&normalised);
     let target =
         parse(uri).map_err(|err| redact_parse_error(err, uri, &normalised, &redacted_uri))?;
     let auth = auth_from_uri_userinfo(&normalised)
@@ -516,8 +515,13 @@ pub fn parse_with_limits(
                     DEFAULT_PORT_GRPC
                 }
             });
+            let endpoint_scheme = if parsed.scheme() == "grpcs" {
+                "https"
+            } else {
+                "http"
+            };
             Ok(ConnectionTarget::Grpc {
-                endpoint: format!("http://{host}:{port}"),
+                endpoint: format!("{endpoint_scheme}://{host}:{port}"),
             })
         }
         Some(ConnectionScheme::Http | ConnectionScheme::Https) => {
@@ -590,6 +594,11 @@ fn auth_from_uri_userinfo(uri: &str) -> Result<ConnectionAuth, ParseError> {
     }
 }
 
+fn redact_connection_uri(uri: &str) -> String {
+    let uri = redact_uri_userinfo(uri);
+    redact_uri_query_secrets(&uri)
+}
+
 fn redact_uri_userinfo(uri: &str) -> String {
     let Some(scheme_end) = uri.find("://") else {
         return uri.to_string();
@@ -615,6 +624,80 @@ fn redact_uri_userinfo(uri: &str) -> String {
         replacement,
         &uri[authority_start + at..]
     )
+}
+
+fn redact_uri_query_secrets(uri: &str) -> String {
+    let Some(query_start) = uri.find('?') else {
+        return uri.to_string();
+    };
+    let query_end = uri[query_start + 1..]
+        .find('#')
+        .map(|offset| query_start + 1 + offset)
+        .unwrap_or(uri.len());
+    let query = &uri[query_start + 1..query_end];
+    let mut redacted = String::with_capacity(uri.len());
+    redacted.push_str(&uri[..query_start + 1]);
+    for (index, parameter) in query.split('&').enumerate() {
+        if index > 0 {
+            redacted.push('&');
+        }
+        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        redacted.push_str(name);
+        if parameter.contains('=') {
+            redacted.push('=');
+            if sensitive_query_name(name) {
+                redacted.push_str("<redacted>");
+            } else {
+                redacted.push_str(value);
+            }
+        }
+    }
+    redacted.push_str(&uri[query_end..]);
+    redacted
+}
+
+fn sensitive_query_name(raw: &str) -> bool {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let high = (bytes[index + 1] as char).to_digit(16);
+                let low = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(high), Some(low)) = (high, low) {
+                    decoded.push(((high << 4) | low) as u8);
+                    index += 3;
+                    continue;
+                }
+                decoded.push(bytes[index]);
+            }
+            b'+' => decoded.push(b' '),
+            byte => decoded.push(byte),
+        }
+        index += 1;
+    }
+    let normalized: String = String::from_utf8_lossy(&decoded)
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "token" | "password" | "pass" | "passwd" | "secret" | "cert" | "key" | "ca" | "apikey"
+    ) || normalized.ends_with("token")
+        || normalized.ends_with("password")
+        || normalized.ends_with("passwd")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("privatekey")
+        || normalized.ends_with("keyfile")
+        || normalized.ends_with("certfile")
+        || normalized.ends_with("cafile")
+        || ((normalized.starts_with("ssl") || normalized.starts_with("tls"))
+            && (normalized.ends_with("key")
+                || normalized.ends_with("cert")
+                || normalized.ends_with("ca")))
 }
 
 fn enforce_query_param_limit(url: &Url, limits: &ConnStringLimits) -> Result<(), ParseError> {
@@ -643,10 +726,10 @@ fn try_parse_grpc_cluster(
     uri: &str,
     limits: &ConnStringLimits,
 ) -> Result<Option<ConnectionTarget>, ParseError> {
-    let (rest, default_port) = if let Some(r) = uri.strip_prefix("grpc://") {
-        (r, DEFAULT_PORT_GRPC)
+    let (rest, default_port, endpoint_scheme) = if let Some(r) = uri.strip_prefix("grpc://") {
+        (r, DEFAULT_PORT_GRPC, "http")
     } else if let Some(r) = uri.strip_prefix("grpcs://") {
-        (r, DEFAULT_PORT_GRPCS)
+        (r, DEFAULT_PORT_GRPCS, "https")
     } else {
         return Ok(None);
     };
@@ -726,7 +809,7 @@ fn try_parse_grpc_cluster(
                 "grpc cluster URI has an empty host entry",
             ));
         }
-        endpoints.push(format!("http://{host}:{port}"));
+        endpoints.push(format!("{endpoint_scheme}://{host}:{port}"));
     }
 
     if let Some(q) = query_part {
