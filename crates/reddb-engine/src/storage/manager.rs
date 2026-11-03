@@ -650,7 +650,11 @@ impl SegmentManager {
         self.collection.starts_with("red_") || self.collection.starts_with("red.")
     }
 
-    fn recovery_schema(&self, row: &super::entity::RowData) -> Option<Arc<Vec<String>>> {
+    fn recovery_schema(
+        &self,
+        row: &super::entity::RowData,
+        column_schema: Option<Arc<Vec<String>>>,
+    ) -> Option<Arc<Vec<String>>> {
         if self.recovery_preserves_named_rows() {
             return None;
         }
@@ -658,7 +662,7 @@ impl SegmentManager {
         let matches = |schema: &Vec<String>| {
             schema.len() == named.len() && schema.iter().all(|name| named.contains_key(name))
         };
-        if let Some(schema) = self.column_schema().filter(|schema| matches(schema)) {
+        if let Some(schema) = column_schema.filter(|schema| matches(schema)) {
             return Some(schema);
         }
         {
@@ -687,8 +691,16 @@ impl SegmentManager {
     /// same bounded schema cache and positional-value preservation rules.
     #[doc(hidden)]
     pub fn restore_snapshot_row_layout(&self, entity: &mut UnifiedEntity) {
+        self.restore_recovery_row_layout(entity, self.column_schema());
+    }
+
+    fn restore_recovery_row_layout(
+        &self,
+        entity: &mut UnifiedEntity,
+        column_schema: Option<Arc<Vec<String>>>,
+    ) {
         if let super::entity::EntityData::Row(row) = &mut entity.data {
-            if let Some(schema) = self.recovery_schema(row) {
+            if let Some(schema) = self.recovery_schema(row, column_schema) {
                 row.compact_with_schema(&schema);
             }
         }

@@ -429,11 +429,10 @@ fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
     let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
     let (_directory, cold) = cold_runtime();
     let resident = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("resident runtime");
-    for runtime in [&resident, &cold] {
-        runtime
-            .execute_query("CREATE TABLE wire_rows (id INTEGER, payload TEXT)")
-            .expect("declare rows");
-    }
+    // File recovery restores records before runtime declares column schemas.
+    // Deliberately use a declaration order different from recovery's order.
+    resident.db().store().get_or_create_collection("wire_rows");
+    cold.db().store().get_or_create_collection("wire_rows");
     let store = cold.db().store();
     let base = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
         store.pager().expect("pager"),
@@ -477,6 +476,33 @@ fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
             1024 * 1024,
             3,
         );
+    for runtime in [&resident, &cold] {
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("recovered collection")
+            .set_column_schema_if_empty(vec!["payload".into(), "id".into()]);
+        // Newly written named records are not recovered file records. Keep
+        // their independently observable native representation unchanged.
+        let mut overlay =
+            UnifiedEntity::table_row(EntityId::new(1_000_004), "wire_rows", 4, vec![]);
+        overlay.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(HashMap::from([
+                ("id".into(), Value::Integer(4)),
+                ("payload".into(), Value::text("live")),
+            ])),
+            schema: None,
+        });
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("overlay collection")
+            .insert(overlay)
+            .expect("live row");
+    }
     let mut servers = Vec::new();
     let mut addresses = Vec::new();
     for runtime in [resident, cold] {
@@ -484,7 +510,7 @@ fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
         addresses.push(listener.local_addr().expect("fixture address"));
         servers.push(RedDBServer::new(runtime).serve_in_background_on(listener));
     }
-    for offset in [0, 1, 2, 3, usize::MAX] {
+    for offset in [0, 1, 2, 3, 4, usize::MAX] {
         let path = format!("/collections/wire_rows/scan?offset={offset}&limit=2");
         assert_eq!(
             get(addresses[0], &path),
@@ -492,6 +518,13 @@ fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
             "native representation at offset {offset}"
         );
     }
+    let recovered = get(addresses[1], "/collections/wire_rows/scan?offset=0&limit=1");
+    assert_eq!(
+        recovered["items"][0]["data"]["columns"][0],
+        1_699_999_999_999_999_999_i64
+    );
+    let overlay = get(addresses[1], "/collections/wire_rows/scan?offset=3&limit=1");
+    assert_eq!(overlay["items"][0]["data"]["named"]["payload"], "live");
 }
 
 fn ascii_noise(bytes: usize) -> String {

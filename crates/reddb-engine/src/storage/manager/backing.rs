@@ -423,14 +423,14 @@ impl SegmentManager {
     pub fn try_for_each_entity(
         &self,
         limit_bytes: usize,
-        callback: impl FnMut(&UnifiedEntity) -> bool,
+        mut callback: impl FnMut(&UnifiedEntity) -> bool,
     ) -> Result<(), StoreError> {
         let backing_guard = self.backing.read();
         let Some(backing) = backing_guard.as_ref() else {
             self.for_each_entity(callback);
             return Ok(());
         };
-        self.try_for_each_backed_entity(backing, limit_bytes, 0, callback)
+        self.try_for_each_backed_entity(backing, limit_bytes, 0, |entity| callback(&entity))
     }
 
     fn try_for_each_backed_entity(
@@ -438,7 +438,7 @@ impl SegmentManager {
         backing: &BackingRead,
         limit_bytes: usize,
         mut skip: usize,
-        mut callback: impl FnMut(&UnifiedEntity) -> bool,
+        mut callback: impl FnMut(std::borrow::Cow<'_, UnifiedEntity>) -> bool,
     ) -> Result<(), StoreError> {
         let limit_bytes = limit_bytes.min(backing.read_bytes_max);
         let mut identities = Vec::new();
@@ -470,7 +470,7 @@ impl SegmentManager {
                             limit_bytes,
                         });
                     }
-                    Ok(callback(entity))
+                    Ok(callback(std::borrow::Cow::Borrowed(entity)))
                 });
                 if result.transpose()? == Some(false) {
                     return Ok(());
@@ -497,7 +497,7 @@ impl SegmentManager {
                 limit_bytes.min(backing.read_bytes_max),
             )?;
             self.restore_owned_row_schemas(std::iter::once(&mut entity));
-            if !callback(&entity) {
+            if !callback(std::borrow::Cow::Owned(entity)) {
                 return Ok(());
             }
         }
@@ -520,9 +520,15 @@ impl SegmentManager {
         let mut items = Vec::new();
         let mut retained_bytes = 0_usize;
         let mut error = None;
-        let mut capture = |entity: &UnifiedEntity| {
+        let mut capture = |mut entity: std::borrow::Cow<'_, UnifiedEntity>| {
+            // Eager file recovery sees these named records before runtime
+            // rehydrates the declared column schema. Reproduce that layout
+            // only for decoded base rows; live overlays keep their wire shape.
+            if let std::borrow::Cow::Owned(entity) = &mut entity {
+                self.restore_recovery_row_layout(entity, None);
+            }
             let required_bytes =
-                retained_bytes.saturating_add(crate::storage::memory_size::entity_bytes(entity));
+                retained_bytes.saturating_add(crate::storage::memory_size::entity_bytes(&entity));
             if required_bytes > limit_bytes {
                 error = Some(StoreError::ReadLimitExceeded {
                     required_bytes,
@@ -531,7 +537,7 @@ impl SegmentManager {
                 return false;
             }
             retained_bytes = required_bytes;
-            items.push(entity.clone());
+            items.push(entity.into_owned());
             items.len() < limit
         };
         if let Some(backing) = backing_guard.as_ref() {
@@ -543,14 +549,11 @@ impl SegmentManager {
                     skip -= 1;
                     return true;
                 }
-                capture(entity)
+                capture(std::borrow::Cow::Borrowed(entity))
             });
         }
         if let Some(error) = error {
             return Err(error);
-        }
-        for entity in &mut items {
-            self.restore_snapshot_row_layout(entity);
         }
         self.restore_owned_row_schemas(items.iter_mut());
         Ok((total, items))
