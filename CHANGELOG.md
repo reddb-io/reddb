@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.27.12
+
+### Patch Changes
+
+- [#2602](https://github.com/reddb-io/reddb/pull/2602) [`5e1c499`](https://github.com/reddb-io/reddb/commit/5e1c4990c118dc2bc02a3a392c7bdb6bd671d8a5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep cold collection drops bounded to their native registry and targeted
+  physical metadata publication. Avoid fingerprinting append-heavy internal
+  collection history before acknowledging the drop, and preserve the committed
+  absence plus unrelated collections across restart.
+
 ## 1.27.11
 
 ### Patch Changes
