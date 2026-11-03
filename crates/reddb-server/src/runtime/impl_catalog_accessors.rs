@@ -68,10 +68,31 @@ impl RedDBRuntime {
         // prevent us from durably persisting what's already in memory.
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
+        self.checkpoint_local()?;
+        if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %err,
+                "checkpoint: skipping remote upload — lease not held"
+            );
+            return Ok(());
+        }
+        self.inner
+            .db
+            .upload_to_remote_backend()
+            .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
         let started = std::time::Instant::now();
         self.seal_hypertable_chunks_for_checkpoint(
             self.inner.checkpoint_columnar_emission_budget_chunks,
         )?;
+        let store = self.inner.db.store();
+        let publication = store.vault_publication_lock.lock();
+        // Collections created since startup need the compact visibility
+        // inventory before their first resident-to-disk publication too.
+        self.prepare_paged_counts()?;
         self.persist_probabilistic_snapshots()?;
         self.inner.db.flush_local_only().map_err(|err| {
             // Issue #205 — local flush failure is a CheckpointFailed
@@ -91,22 +112,12 @@ impl RedDBRuntime {
             .emit_global();
             RedDBError::Engine(msg)
         })?;
+        drop(publication);
         let checkpoint_lsn = self.cdc_current_lsn();
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
-        if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
-            tracing::warn!(
-                target: "reddb::serverless::lease",
-                error = %err,
-                "checkpoint: skipping remote upload — lease not held"
-            );
-            return Ok(());
-        }
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Engine(err.to_string()))
+        Ok(())
     }
 
     /// Guard remote-mutating operations on the writer lease.

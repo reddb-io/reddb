@@ -285,6 +285,7 @@ impl UnifiedStore {
         if manager.checkpoint_revisions() != current.segments {
             return Ok(None);
         }
+        current.has_unprojected_rows = !deferred.is_empty();
         current.deferred_rows = Some(Arc::new(deferred));
         // Validate every source before changing the published tree. Afterwards
         // materialize only bounded batches from those exact durable images;

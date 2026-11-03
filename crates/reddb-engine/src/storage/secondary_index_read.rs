@@ -44,6 +44,36 @@ impl<P: PageStore> SecondaryIndexRead<P> {
         self.tree.root_page_id()
     }
 
+    /// Resume a physical inventory after a complete projected-key/ID posting.
+    /// Hosts may retain that bounded position instead of pinning a generation
+    /// between maintenance ticks, then recheck candidates against current data.
+    pub fn resume_postings(
+        &self,
+        after: Option<&[u8]>,
+    ) -> Result<SecondaryRangeCursor<P>, StoreError> {
+        if after.is_some_and(|key| !(8..=SECONDARY_KEY_BYTES_MAX + 8).contains(&key.len())) {
+            return Err(StoreError::Serialization(
+                "invalid posting resume key".into(),
+            ));
+        }
+        let mut cursor = self
+            .tree
+            .cursor_seek(after.unwrap_or_default())
+            .map_err(read_error)?
+            .with_immutable_leaves();
+        if let Some(after) = after {
+            if cursor.peek_key().map_err(read_error)?.as_deref() == Some(after) {
+                cursor.skip_next().map_err(read_error)?;
+            }
+        }
+        Ok(SecondaryRangeCursor {
+            cursor: Some(cursor),
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+            _source: self.source.clone(),
+        })
+    }
+
     /// Visit compact projected keys without reading source records or posting
     /// values. The immutable handle pins both trees for the entire traversal.
     /// Retains one leaf and at most one bounded key, independent of row count.

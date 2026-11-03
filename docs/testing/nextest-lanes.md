@@ -65,4 +65,4 @@ scripts/nextest-e2e-shard.sh 4 4
 ```
 
 Each invocation runs `cargo nextest run --workspace -E 'kind(test)' --partition
-count:<index>/<total>` under the `ci` profile (single retry + JUnit report).
+count:<index>/<total>` under the `ci` profile (no automatic retries + JUnit report).

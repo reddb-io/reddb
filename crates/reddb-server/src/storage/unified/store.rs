@@ -251,12 +251,13 @@ struct CheckpointVersion {
     /// full validation path when more than 1,024 such rows are outstanding.
     /// Also carries bounded unprojected IDs across completed inline GC batches.
     deferred_rows: Option<Arc<Vec<EntityId>>>,
-    /// Inline GC advanced the segment proof past rows still awaiting projection.
+    /// The resident image includes rows omitted or normalized in the checkpoint.
     has_unprojected_rows: bool,
 }
 
 impl CheckpointVersion {
     fn remember_deferred_row(&mut self, id: EntityId) {
+        self.has_unprojected_rows = true;
         let Some(rows) = self.deferred_rows.as_mut() else {
             return;
         };
