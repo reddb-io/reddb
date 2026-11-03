@@ -132,22 +132,15 @@ pub fn apply_config_file(store: &UnifiedStore, path: &str) -> usize {
 /// Single-pass presence check so `apply_config_file` doesn't rescan
 /// red_config for every key.
 fn key_already_present(store: &UnifiedStore, key: &str) -> bool {
-    let Some(manager) = store.get_collection("red_config") else {
-        return false;
-    };
-    let mut found = false;
-    manager.for_each_entity(|entity| {
-        if let Some(row) = entity.data.as_row() {
-            if let Some(reddb_types::Value::Text(s)) = row.get_field("key") {
-                if s.as_ref() == key {
-                    found = true;
-                    return false;
-                }
-            }
+    match store.try_get_config(key) {
+        Ok(value) => value.is_some(),
+        Err(error) => {
+            // A failed physical read is not a missing operator setting. Never
+            // overwrite it with a default or a mounted-file value.
+            tracing::warn!(key, %error, "cannot read persisted configuration; skipping seed");
+            true
         }
-        true
-    });
-    found
+    }
 }
 
 /// Flatten a JSON object into `{dotted_key → leaf_value}` pairs.

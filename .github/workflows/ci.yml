@@ -569,6 +569,13 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Reserve disk for Rust test binaries
+        # Hosted images include unused Android, .NET and Haskell SDKs. Their
+        # preinstalled files left only 56 MiB while linking integration tests.
+        # Remove them before restoring Rust caches; preserve all test coverage.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h . "$RUNNER_TEMP"
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
