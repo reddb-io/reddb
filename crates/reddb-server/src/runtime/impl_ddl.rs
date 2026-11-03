@@ -702,10 +702,9 @@ impl RedDBRuntime {
         if let Some(store) = self.inner.auth_store.read().clone() {
             store.invalidate_visible_collections_cache();
         }
-        self.inner
-            .db
-            .persist_metadata()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The native registry and targeted contract metadata publication above
+        // are the DROP commit boundary; do not turn this into a full database
+        // fingerprint/checkpoint.
         // Issue #120 — drop both the collection entries *and* every
         // index entry that was scoped to this collection.  Dropping the
         // collection wipes columns + collection-name + type-tags +
@@ -2041,10 +2040,9 @@ impl RedDBRuntime {
         if let Some(store) = self.inner.auth_store.read().clone() {
             store.invalidate_visible_collections_cache();
         }
-        self.inner
-            .db
-            .persist_metadata()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The native registry and targeted contract metadata publication above
+        // are the DROP commit boundary; do not turn this into a full database
+        // fingerprint/checkpoint.
         self.schema_vocabulary_apply(
             crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
                 collection: name.to_string(),

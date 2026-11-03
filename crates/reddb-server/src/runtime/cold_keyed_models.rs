@@ -112,6 +112,90 @@ fn complete_runtime_reopens_cold_tables_and_preserves_committed_crud() {
 }
 
 #[test]
+fn cold_indexed_table_drop_completes_before_a_follow_up_lookup() {
+    let directory = tempfile::tempdir().expect("cold drop fixture");
+    let options = RedDBOptions::persistent(directory.path().join("drop.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    seed.execute_query("CREATE TABLE dropped_rows (id INTEGER PRIMARY KEY, payload TEXT)")
+        .expect("table");
+    seed.execute_query("CREATE INDEX dropped_rows_payload ON dropped_rows (payload)")
+        .expect("index");
+    seed.execute_query_with_params(
+        "INSERT INTO dropped_rows (id, payload) VALUES ($1, $2)",
+        &[Value::Integer(1), Value::text("x".repeat(16 * 1024))],
+    )
+    .expect("row");
+    seed.execute_query("CREATE TABLE unrelated_rows (id INTEGER PRIMARY KEY, payload TEXT)")
+        .expect("unrelated table");
+    for id in 1..=64 {
+        seed.execute_query_with_params(
+            "INSERT INTO unrelated_rows (id, payload) VALUES ($1, $2)",
+            &[Value::Integer(id), Value::text("unrelated")],
+        )
+        .expect("unrelated row");
+    }
+    seed.flush().expect("durable source");
+    drop(seed);
+
+    let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+        RedDBRuntime::with_options(options.clone())
+    })
+    .expect("cold runtime");
+    assert!(runtime
+        .db()
+        .store()
+        .get_collection("dropped_rows")
+        .expect("cold table")
+        .has_backing());
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        runtime.db().reset_physical_root_row_scans_for_test();
+        let drop_result = runtime.execute_query("DROP TABLE dropped_rows");
+        let lookup_result = runtime.execute_query("SELECT id FROM dropped_rows LIMIT 1");
+        let root_row_scans = runtime.db().physical_root_row_scans_for_test();
+        let _ = done_tx.send((drop_result, lookup_result, root_row_scans));
+    });
+    let (drop_result, lookup_result, root_row_scans) = done_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("cold DROP and missing-table lookup must complete within ten seconds");
+    drop_result.expect("cold drop");
+    assert!(
+        root_row_scans.is_empty(),
+        "dropping one cold table must not fingerprint collection rows: {root_row_scans:?}"
+    );
+    let error = lookup_result.expect_err("dropped table must be missing");
+    assert!(
+        error.to_string().contains("dropped_rows")
+            && error.to_string().to_ascii_lowercase().contains("not found"),
+        "unexpected missing-table error: {error}"
+    );
+    worker.join().expect("cold drop worker");
+
+    let reopened = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+        RedDBRuntime::with_options(options)
+    })
+    .expect("reopen after drop");
+    assert!(
+        reopened
+            .execute_query("SELECT id FROM dropped_rows LIMIT 1")
+            .is_err(),
+        "the targeted metadata publication must preserve the drop across reopen"
+    );
+    let unrelated = reopened
+        .execute_query("SELECT COUNT(*) AS n FROM unrelated_rows")
+        .expect("unrelated collection survives drop and reopen");
+    assert_eq!(
+        unrelated.result.records[0].get("n"),
+        Some(&Value::Integer(64))
+    );
+}
+
+#[test]
 fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
     let directory = tempfile::tempdir().expect("indexed cold boot fixture");
     let options = RedDBOptions::persistent(directory.path().join("indexes.rdb"))

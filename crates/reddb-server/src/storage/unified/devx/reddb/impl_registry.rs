@@ -371,6 +371,51 @@ impl RedDB {
 
         self.invalidate_collection_contract_cache();
 
+        if self.paged_mode {
+            let Some(path) = self.path() else {
+                return Err("database path is not available".into());
+            };
+            // DROP already published the native collection registry before it
+            // reaches this contract edit.  Rebuild only the small physical
+            // metadata catalogue from its last durable roots, removing the
+            // dropped root and descriptors explicitly.  Calling the generic
+            // metadata updater here used to fingerprint every row in changed
+            // internal collections (notably append-heavy red_config) while
+            // holding the publication lock, turning a tiny DROP after cold
+            // boot into work proportional to the database's history.
+            //
+            // Other collection fingerprints describe their last checkpoint,
+            // just as they do between ordinary DML and the next checkpoint;
+            // the canonical checkpoint path remains responsible for
+            // recomputing changed fingerprints.
+            let previous = self.load_or_bootstrap_physical_metadata(false)?;
+            let mut roots = previous.superblock.collection_roots.clone();
+            roots.remove(collection);
+            let indexes = previous
+                .indexes
+                .iter()
+                .filter(|index| index.collection.as_deref() != Some(collection))
+                .cloned()
+                .collect();
+            let mut metadata = PhysicalMetadataFile::from_state(
+                self.options.clone(),
+                self.catalog_snapshot(),
+                roots,
+                indexes,
+                Some(&previous),
+            );
+            let removed = metadata
+                .collection_contracts
+                .iter()
+                .position(|contract| contract.name == collection)
+                .map(|index| metadata.collection_contracts.remove(index));
+            metadata.collection_ttl_defaults_ms.remove(collection);
+            metadata.save_for_data_path(path)?;
+            self.persist_native_physical_header(&metadata)?;
+            self.invalidate_collection_contract_cache();
+            return Ok(removed);
+        }
+
         let removed = self.update_collection_contract_metadata(|metadata| {
             let removed = metadata
                 .collection_contracts
