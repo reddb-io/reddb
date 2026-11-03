@@ -72,11 +72,11 @@ filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# CI profile: same hard per-test timeout, plus a single retry to absorb
-# genuinely flaky integration tests, and a JUnit report the runner can ingest.
+# CI profile: fail on the first execution so intermittent regressions stay
+# visible. Keep the hard per-test timeout and the runner's JUnit report.
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 2 }
-retries = 1
+retries = 0
 
 # These storage correctness regressions must fail on their first execution.
 # Keep their ordinary timeouts; retries must not turn a race into a green run.

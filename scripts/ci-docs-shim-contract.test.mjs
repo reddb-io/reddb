@@ -160,8 +160,21 @@ test("Test Suite shards on free runners and reports one failure-propagating requ
   assert.match(aggregate, /^ {4}name: Test Suite$/m);
   assert.match(aggregate, /^ {4}runs-on: ubuntu-latest$/m,
     "the required-context aggregate must use a free GitHub-hosted public runner");
-  assert.match(aggregate, /needs: \[gate, test-shards\]/);
+  assert.match(aggregate, /needs: \[gate, test-shards, client-size-budget\]/);
   assert.match(aggregate, /always\(\).*needs\.gate\.outputs\.run_heavy == 'true'/);
   assert.match(aggregate, /needs\.test-shards\.result.*success/,
     "the required Test Suite context must fail when any shard fails");
+  assert.match(aggregate, /needs\.client-size-budget\.result.*success/,
+    "the required Test Suite context must fail when the client-size gate fails");
+
+  const clientSize = jobs.get("client-size-budget");
+  assert.ok(clientSize, "the release-size build must have a separate runner");
+  assert.match(clientSize, /run: \.\/scripts\/check-red-client-size\.sh/);
+  assert.doesNotMatch(shards, /check-red-client-size\.sh/,
+    "release artifacts must not fill the integration runner's disk");
+  const cacheKey = (block) => block.match(/shared-key: (.+)/)?.[1];
+  assert.ok(cacheKey(clientSize));
+  assert.ok(cacheKey(shards));
+  assert.notEqual(cacheKey(clientSize), cacheKey(shards),
+    "test shards must not restore a cache containing the release-size build");
 });
