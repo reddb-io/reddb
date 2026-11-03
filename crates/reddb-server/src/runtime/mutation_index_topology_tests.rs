@@ -470,10 +470,39 @@ fn shared_mutation_guard_allows_other_writers_and_unrelated_ddl() {
 
 #[test]
 fn rollback_restores_indexes_after_waiting_for_backfill() {
-    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    rollback_backfill_with_gc(false);
+}
+
+#[test]
+fn savepoint_rollback_restores_indexes_after_waiting_for_backfill() {
+    rollback_backfill_with_gc(true);
+}
+
+fn rollback_backfill_with_gc(savepoint: bool) {
+    let mut runtime = RedDBRuntime::in_memory().expect("runtime");
+    // Drive the real collector at a controlled point, without a timer race.
+    drop(runtime.background_tasks.take());
     let id = seed(&runtime, "table");
     runtime.execute_query("BEGIN").expect("begin");
+    if savepoint {
+        runtime
+            .execute_query("SAVEPOINT before_update")
+            .expect("savepoint");
+    }
     mutate(&runtime, "sql_update", id).expect("pending update");
+    let (undo_send, undo_receive) = mpsc::channel();
+    let (collect_send, collect_receive) = mpsc::channel();
+    let collect_receive = Mutex::new(collect_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::BeforeUndoTopology {
+            undo_send.send(()).expect("undo reached topology");
+            collect_receive
+                .lock()
+                .expect("collector receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("collector finished");
+        }
+    }));
     let (snapshot_send, snapshot_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
     let release_receive = Mutex::new(release_receive);
@@ -485,7 +514,7 @@ fn rollback_restores_indexes_after_waiting_for_backfill() {
             .recv_timeout(TIMEOUT)
             .expect("resume builder");
     }));
-    let completed_early = std::thread::scope(|scope| {
+    let (completed_early, reclaimed) = std::thread::scope(|scope| {
         let ddl = scope.spawn(|| create_index(&runtime, COLLECTION, "mutation_lookup", true));
         snapshot_receive
             .recv_timeout(TIMEOUT)
@@ -495,19 +524,45 @@ fn rollback_restores_indexes_after_waiting_for_backfill() {
         let runtime = &runtime;
         let rollback = scope.spawn(move || {
             started_send.send(()).expect("rollback started");
-            let result = mutate(runtime, "rollback", id);
+            let result = if savepoint {
+                runtime
+                    .execute_query("ROLLBACK TO SAVEPOINT before_update")
+                    .map(|_| ())
+            } else {
+                mutate(runtime, "rollback", id)
+            };
             done_send.send(()).expect("rollback complete");
             result
         });
         started_receive
             .recv_timeout(TIMEOUT)
             .expect("rollback attempted");
+        undo_receive.recv_timeout(TIMEOUT).expect("undo paused");
+        let store = runtime.db().store();
+        let mut cursor = store
+            .mvcc_reclaim_cursor(COLLECTION.into())
+            .expect("GC cursor");
+        let reclaimed = store
+            .reclaim_mvcc_tick(
+                &mut cursor,
+                &runtime.snapshot_manager(),
+                runtime.mvcc_vacuum_cutoff_xid(),
+                4096,
+                256,
+            )
+            .expect("controlled GC");
+        assert!(cursor.finished(), "fixture fits one collector tick");
+        collect_send.send(()).expect("resume undo");
         let completed_early = done_receive.recv_timeout(BLOCKING_PROBE).is_ok();
         release_send.send(()).expect("release backfill");
         ddl.join().expect("DDL thread").expect("index");
         rollback.join().expect("rollback thread").expect("rollback");
-        completed_early
+        (completed_early, reclaimed)
     });
+    assert_eq!(
+        reclaimed, 0,
+        "GC cannot reclaim row fields needed by pending index undo"
+    );
     assert!(!completed_early, "undo must not race index backfill");
     assert!(runtime
         .index_store_ref()

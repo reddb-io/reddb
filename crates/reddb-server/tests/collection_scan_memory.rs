@@ -521,7 +521,7 @@ fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
     let recovered = get(addresses[1], "/collections/wire_rows/scan?offset=0&limit=1");
     assert_eq!(
         recovered["items"][0]["data"]["columns"][0],
-        1_699_999_999_999_999_999_i64
+        serde_json::json!({"$int": "1699999999999999999"})
     );
     let overlay = get(addresses[1], "/collections/wire_rows/scan?offset=3&limit=1");
     assert_eq!(overlay["items"][0]["data"]["named"]["payload"], "live");

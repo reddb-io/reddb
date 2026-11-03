@@ -1092,6 +1092,7 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 pub(crate) enum MutationTestPhase {
     StoragePublished,
     BeforeEvents,
+    BeforeUndoTopology,
 }
 
 type PagedBtreeProviders =

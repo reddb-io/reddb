@@ -170,6 +170,18 @@ impl TransactionState {
         connection_id: u64,
         name: &str,
     ) -> Result<Option<RollbackToSavepoint>, SavepointError> {
+        self.rollback_to_savepoint_with(connection_id, name, |_| Ok::<_, SavepointError>(()))
+            .map(|rollback| rollback.map(|(rollback, ())| rollback))
+    }
+
+    /// Keep subtransactions active while the host restores rows and indexes.
+    /// Failed undo still aborts their visibility before returning the error.
+    pub fn rollback_to_savepoint_with<T, E: From<SavepointError>>(
+        &self,
+        connection_id: u64,
+        name: &str,
+        prepare: impl FnOnce(&RollbackToSavepoint) -> Result<T, E>,
+    ) -> Result<Option<(RollbackToSavepoint, T)>, E> {
         let mut contexts = self.contexts.write();
         let Some(context) = contexts.get_mut(&connection_id) else {
             return Ok(None);
@@ -190,13 +202,15 @@ impl TransactionState {
             .collect::<Vec<_>>();
         drop(contexts);
 
-        for xid in &aborted_xids {
-            self.snapshot_manager.rollback(*xid);
-        }
-        Ok(Some(RollbackToSavepoint {
+        let rollback = RollbackToSavepoint {
             savepoint_xid,
             aborted_xids,
-        }))
+        };
+        let prepared = prepare(&rollback);
+        for xid in &rollback.aborted_xids {
+            self.snapshot_manager.rollback(*xid);
+        }
+        prepared.map(|prepared| Some((rollback, prepared)))
     }
 
     pub fn context(&self, connection_id: u64) -> Option<TxnContext> {
@@ -288,6 +302,31 @@ mod tests {
         assert_eq!(aborted.xid, aborted_xid);
         assert!(!state.in_transaction(11));
         assert!(state.snapshot_manager().is_aborted(aborted_xid));
+    }
+
+    #[test]
+    fn savepoint_undo_retains_active_xids_until_preparation_finishes_even_on_error() {
+        for fail in [false, true] {
+            let state = TransactionState::new();
+            state.begin(21, IsolationLevel::SnapshotIsolation);
+            let xid = state.savepoint(21, "undo").expect("savepoint");
+            let result = state.rollback_to_savepoint_with(21, "undo", |rollback| {
+                assert_eq!(rollback.aborted_xids, vec![xid]);
+                assert!(state.snapshot_manager().is_active(xid));
+                assert!(!state.snapshot_manager().is_aborted(xid));
+                if fail {
+                    Err(SavepointError {
+                        name: "undo failed".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.is_err(), fail);
+            assert!(!state.snapshot_manager().is_active(xid));
+            assert!(state.snapshot_manager().is_aborted(xid));
+            assert!(state.in_transaction(21));
+        }
     }
 
     #[test]

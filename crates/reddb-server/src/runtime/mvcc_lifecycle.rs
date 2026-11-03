@@ -53,9 +53,12 @@ impl RedDBRuntime {
         &self,
         connection_id: u64,
     ) -> RedDBResult<Option<crate::storage::transaction::snapshot::TxnContext>> {
-        let context = self.inner.transaction_state.rollback(connection_id);
+        // Keep writer XIDs active until undo has consumed their row fields.
+        // Otherwise GC can reclaim an aborted version while undo waits for
+        // index backfill, leaving the version's secondary-index entries behind.
         let undo = self.revive_pending_versioned_updates(connection_id);
         self.revive_pending_tombstones(connection_id);
+        let context = self.inner.transaction_state.rollback(connection_id);
         self.discard_pending_queue_dedup(connection_id);
         self.discard_pending_kv_watch_events(connection_id);
         self.discard_pending_queue_wakes(connection_id);
@@ -521,6 +524,11 @@ impl RedDBRuntime {
         // Undo newest versions first so repeated writes restore the original chain.
         for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
             let topology_lock = self.index_store_ref().collection_topology_lock(&collection);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &collection,
+                super::index_store::MutationTestPhase::BeforeUndoTopology,
+            );
             self.revive_versioned_update(
                 &collection,
                 old_id,
