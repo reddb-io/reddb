@@ -1,5 +1,7 @@
 # @reddb-io/sdk
 
+## 1.27.11
+
 ## 1.27.10
 
 ### Patch Changes
