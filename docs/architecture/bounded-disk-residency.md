@@ -419,6 +419,36 @@ window, and compares filtering/tenancy, overlay deletion, sparse checkpoint/reop
 and legacy fallback against the full scan. It runs in `make test-storage-apocalypse`
 as well as the ordinary integration suite.
 
+## Cold logical catalog reads
+
+The fallible catalog path includes the native base and resident replacements,
+insertions and deletions. Legacy collections without declared contracts retain
+their inferred model, schema mode, entity count and cross-reference count after
+reopen. Declared contracts remain authoritative; catalog observation does not
+rewrite them. The former resident-only observation could report a persisted
+legacy table as mixed/dynamic with zero entities.
+
+`RedDBRuntime::try_catalog` admits one bounded decode workspace through the shared
+query-buffer ledger. SQL catalog, typed-model and dependent operational views use
+this fallible path. Queue-policy metadata is also streamed from its native base.
+Corrupt pages and decode/admission errors reject the query rather than returning
+an apparently successful empty catalog. Existing infallible library adapters
+retain their resident compatibility behavior; disk-resident callers must use the
+fallible API.
+
+The order-independent manager visitor retains one native leaf and decoded row,
+without an ID vector or payload clone of the resident overlay. Its host holds the
+publication fence throughout the reduction to prevent concurrent materialization
+from counting a base row and its replacement twice. Cost is O(physical records)
+I/O/CPU and O(one decoded record + catalog descriptors) memory. This is correctness
+and bounded-workspace evidence, not a catalog-latency or concurrent-write claim;
+historical performance qualification remains required before activation.
+
+`cold_catalog` covers the SQL path before/after repeated reopen, typed legacy
+collections, base/overlay masking, publication, shared-budget denial and corrupt
+backing pages. Existing storage, audit-recovery, queue-policy and query-behavior
+suites run alongside it.
+
 ## Remaining implementation before activation
 
 - Connect the remaining persisted secondary trees to runtime providers and

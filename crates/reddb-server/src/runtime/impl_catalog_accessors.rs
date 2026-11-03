@@ -172,6 +172,38 @@ impl RedDBRuntime {
         self.inner.db.catalog_model_snapshot()
     }
 
+    /// Fallible catalog for disk-resident databases. The decode workspace shares
+    /// query admission with concurrent reads and is released on every error.
+    pub fn try_catalog(&self) -> RedDBResult<CatalogModelSnapshot> {
+        if self
+            .inner
+            .db
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_none()
+        {
+            return Ok(self.catalog());
+        }
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let _scratch = self
+            .try_reserve_query_buffer(read_bytes * 2)
+            .ok_or_else(|| {
+                self.memory_accounting().record_admission_denied();
+                RedDBError::MaterializationLimitExceeded {
+                    executor: "catalog",
+                    limit: usize::try_from(self.memory_budget().resolved_bytes)
+                        .unwrap_or(usize::MAX),
+                    current: usize::try_from(self.memory_accounting().total_used_bytes())
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                }
+            })?;
+        Ok(self.inner.db.try_catalog_model_snapshot(read_bytes)?)
+    }
+
     pub fn catalog_consistency_report(&self) -> crate::catalog::CatalogConsistencyReport {
         self.inner.db.catalog_consistency_report()
     }

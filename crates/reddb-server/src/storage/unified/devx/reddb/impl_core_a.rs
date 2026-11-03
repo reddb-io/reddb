@@ -1372,6 +1372,34 @@ impl RedDB {
         )
     }
 
+    /// Read complete catalog observations without hydrating persistent collections.
+    pub fn try_catalog_model_snapshot(
+        &self,
+        read_bytes_max: usize,
+    ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+        let catalog = self.runtime_index_catalog();
+        let contracts = self.collection_contracts();
+        let declarations = self
+            .physical_metadata()
+            .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
+                declared_indexes: metadata.indexes,
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
+            });
+        crate::catalog::try_snapshot_store_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            declarations.as_ref(),
+            Some(contracts.as_slice()),
+            read_bytes_max,
+        )
+    }
+
     pub fn catalog_consistency_report(&self) -> CatalogConsistencyReport {
         consistency_report(&self.catalog_model_snapshot())
     }
