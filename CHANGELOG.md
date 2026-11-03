@@ -1,5 +1,7 @@
 # Changelog
 
+## 1.27.10
+
 ## 1.27.9
 
 ### Patch Changes
