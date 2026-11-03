@@ -549,6 +549,9 @@ impl SegmentManager {
         if let Some(error) = error {
             return Err(error);
         }
+        for entity in &mut items {
+            self.restore_snapshot_row_layout(entity);
+        }
         self.restore_owned_row_schemas(items.iter_mut());
         Ok((total, items))
     }
