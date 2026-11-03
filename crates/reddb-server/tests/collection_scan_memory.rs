@@ -296,7 +296,7 @@ fn cold_collection_pages_include_persisted_rows_in_runtime_and_http() {
     let (_directory, runtime) = cold_runtime();
     runtime
         .execute_query(
-            "CREATE TABLE native_scan (key TEXT, value TEXT, version INT, tombstone BOOL)",
+            r#"CREATE TABLE native_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
         )
         .expect("declare native scan");
     install_native_history(
@@ -308,7 +308,7 @@ fn cold_collection_pages_include_persisted_rows_in_runtime_and_http() {
         |version| Value::text(format!("persisted-{version}")),
     );
     runtime
-        .execute_query("INSERT INTO native_scan (key,value,version,tombstone) VALUES ('overlay','resident',7,false)")
+        .execute_query(r#"INSERT INTO native_scan ("key","value","version","tombstone") VALUES ('overlay','resident',7,false)"#)
         .expect("resident overlay");
     let mut identities = Vec::new();
     let mut cursor = None;
@@ -369,7 +369,7 @@ fn cold_collection_scan_propagates_decode_limit_instead_of_returning_empty_page(
     let (_directory, runtime) = cold_runtime();
     runtime
         .execute_query(
-            "CREATE TABLE denied_scan (key TEXT, value TEXT, version INT, tombstone BOOL)",
+            r#"CREATE TABLE denied_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
         )
         .expect("declare denied scan");
     install_native_history(&runtime, "denied_scan", "wide", 1, 32, |_| {
@@ -389,7 +389,7 @@ fn cold_collection_page_skips_payloads_before_its_requested_window() {
     let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
     let (_directory, runtime) = cold_runtime();
     runtime
-        .execute_query("CREATE TABLE skip_scan (key TEXT, value TEXT, version INT, tombstone BOOL)")
+        .execute_query(r#"CREATE TABLE skip_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#)
         .expect("declare skip scan");
     install_native_history(
         &runtime,
