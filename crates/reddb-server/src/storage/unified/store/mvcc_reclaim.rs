@@ -2,17 +2,20 @@
 use super::*;
 use crate::storage::transaction::SnapshotManager;
 use crate::storage::unified::manager::PhysicalScanCursor;
+use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection, PagedCursor};
 
 pub(crate) struct MvccReclaimCursor {
     pub(crate) collection: String,
     manager: Arc<SegmentManager>,
     scan: PhysicalScanCursor,
+    cold: Option<PagedCursor<Pager>>,
+    cold_initialized: bool,
     invalidated: bool,
 }
 
 impl MvccReclaimCursor {
     pub(crate) fn finished(&self) -> bool {
-        self.invalidated || self.scan.finished()
+        self.invalidated || (self.scan.finished() && self.cold_initialized && self.cold.is_none())
     }
 }
 
@@ -24,6 +27,8 @@ impl UnifiedStore {
             collection,
             manager,
             scan,
+            cold: None,
+            cold_initialized: false,
             invalidated: false,
         })
     }
@@ -50,9 +55,19 @@ impl UnifiedStore {
             cursor.invalidated = true;
             return Ok(0);
         }
+        if !cursor.cold_initialized {
+            cursor.cold = self
+                .btree_indices
+                .read()
+                .get(&cursor.collection)
+                .filter(|_| manager.has_backing())
+                .map(|tree| PagedCollection::new(Arc::clone(tree)).scan())
+                .transpose()?;
+            cursor.cold_initialized = true;
+        }
         let mut scan_left = scan_budget;
         let mut reclaim = Vec::with_capacity(reclaim_budget);
-        while scan_left > 0 && reclaim.len() < reclaim_budget && !cursor.finished() {
+        while scan_left > 0 && reclaim.len() < reclaim_budget && !cursor.scan.finished() {
             let work = scan_left.min(reclaim_budget - reclaim.len());
             let mut work_left = work;
             let ids = manager.physical_scan_batch(&mut cursor.scan, &mut work_left);
@@ -72,7 +87,46 @@ impl UnifiedStore {
                 }
             });
         }
+        let read_limit = self.mvcc_reclaim_read_limit();
+        let mut decoded_bytes = 0_usize;
+        while scan_left > 0 && reclaim.len() < reclaim_budget && decoded_bytes < read_limit {
+            let Some(cold) = cursor.cold.as_mut() else {
+                break;
+            };
+            scan_left -= 1;
+            let Some(id) = cold.peek_id()? else {
+                cursor.cold = None;
+                break;
+            };
+            // A pinned old generation is only a candidate inventory. Recheck
+            // the authoritative base/overlay under the publication fence.
+            if let Some(entity) = manager.try_get(id, read_limit)? {
+                decoded_bytes = decoded_bytes
+                    .saturating_add(crate::storage::unified::memory_size::entity_bytes(&entity));
+                if matches!(
+                    entity.kind,
+                    EntityKind::TableRow { .. } | EntityKind::QueueMessage { .. }
+                ) {
+                    let aborted = entity.xmin != 0 && snapshots.is_aborted(entity.xmin);
+                    let obsolete = entity.xmax != 0
+                        && entity.xmax < cutoff
+                        && !snapshots.is_aborted(entity.xmax);
+                    if aborted || obsolete {
+                        reclaim.push(id);
+                    }
+                }
+            }
+            cold.skip_record()?;
+        }
+        reclaim.sort_unstable();
+        reclaim.dedup();
         Ok(self.delete_batch(&cursor.collection, &reclaim)?.len())
+    }
+
+    pub(crate) fn mvcc_reclaim_read_limit(&self) -> usize {
+        usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(0) / 8)
+            .unwrap_or(usize::MAX)
+            .clamp(16 * 1024, 16 * 1024 * 1024)
     }
 }
 
@@ -80,6 +134,78 @@ impl UnifiedStore {
 mod tests {
     use super::*;
     use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn cold_gc_rechecks_overlays_and_preserves_active_creators() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gc.rdb");
+        let mut config = UnifiedStoreConfig::default().with_page_cache_slots(8);
+        config.resident_memory_bytes_max = Some(4 * 1024 * 1024);
+        let store = UnifiedStore::open_with_config(&path, config.clone()).unwrap();
+        store.create_collection("rows").unwrap();
+        let snapshots = SnapshotManager::new();
+        let active = snapshots.begin();
+        let aborted = snapshots.begin();
+        snapshots.rollback(aborted);
+        for id in 1..=4 {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(id),
+                "rows",
+                id,
+                vec![Value::Integer(id as i64)],
+            );
+            match id {
+                1 | 2 => entity.xmax = 5,
+                3 => entity.xmin = active,
+                4 => entity.xmin = aborted,
+                _ => unreachable!(),
+            }
+            store.insert("rows", entity).unwrap();
+        }
+        store.persist().unwrap();
+        let manager = store.get_collection("rows").unwrap();
+        assert!(manager.has_backing());
+        let mut revived = manager
+            .try_get(EntityId::new(2), usize::MAX)
+            .unwrap()
+            .unwrap();
+        revived.xmax = 0;
+        manager.update(revived).unwrap();
+        let mut cursor = store.mvcc_reclaim_cursor("rows".into()).unwrap();
+        let mut reclaimed = 0;
+        for _ in 0..32 {
+            let tick = store
+                .reclaim_mvcc_tick(&mut cursor, &snapshots, 10, 1, 1)
+                .unwrap();
+            assert!(tick <= 1);
+            reclaimed += tick;
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(cursor.finished());
+        assert_eq!(reclaimed, 2);
+        assert!(manager
+            .try_get(EntityId::new(1), usize::MAX)
+            .unwrap()
+            .is_none());
+        assert!(manager
+            .try_get(EntityId::new(4), usize::MAX)
+            .unwrap()
+            .is_none());
+        for id in [2, 3] {
+            assert!(manager
+                .try_get(EntityId::new(id), usize::MAX)
+                .unwrap()
+                .is_some());
+        }
+        drop(cursor);
+        store.persist().unwrap();
+        drop(manager);
+        drop(store);
+        let reopened = UnifiedStore::open_with_config(&path, config).unwrap();
+        assert_eq!(reopened.get_collection("rows").unwrap().count(), 2);
+    }
 
     fn fixture() -> RedDBRuntime {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime opens");

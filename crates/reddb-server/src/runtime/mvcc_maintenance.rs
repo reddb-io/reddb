@@ -66,6 +66,18 @@ impl RedDBRuntime {
         let Some(cursor) = state.current.as_mut() else {
             return false;
         };
+        // Native GC retains one leaf and decodes one current row at a time.
+        // Charge encoded/decoded workspace before taking the publication fence.
+        let _workspace = if store.config().resident_memory_bytes_max.is_some() {
+            let Some(reservation) =
+                self.try_reserve_query_buffer(store.mvcc_reclaim_read_limit().saturating_mul(2))
+            else {
+                return false;
+            };
+            Some(reservation)
+        } else {
+            None
+        };
         let scan_budget = self
             .config_u64("runtime.mvcc.autovacuum.scan_rows_per_tick", 4096)
             .clamp(1, 4096) as usize;
@@ -112,6 +124,191 @@ impl RedDBRuntime {
 #[cfg(test)]
 mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
+
+    #[cfg(unix)]
+    #[test]
+    fn constant_live_data_churn_reuses_pages_after_cold_gc() {
+        use reddb_types::Value;
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("churn.rdb");
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        // Scheduling is part of this fixture: no sleeps or races against the
+        // periodic worker. Every cycle drives the same bounded production GC.
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE churn_rows (id INTEGER PRIMARY KEY, payload TEXT)")
+            .unwrap();
+        let payload = |generation: usize, id: usize| {
+            let mut state = (generation * 32 + id) as u64 + 1;
+            (0..64 * 1024)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (b'a' + (state % 26) as u8) as char
+                })
+                .collect::<String>()
+        };
+        let allocated = || {
+            [&path, &path.with_extension("rdb-uwal")]
+                .iter()
+                .map(|p| std::fs::metadata(p).map_or(0, |m| m.blocks() * 512))
+                .sum::<u64>()
+        };
+        let mut warmup_allocated = 0;
+        let mut peak_after_warmup = 0;
+        for generation in 0..120 {
+            for start in (0..32).step_by(8) {
+                runtime
+                    .execute_query(&format!(
+                        "DELETE FROM churn_rows WHERE id >= {start} AND id < {}",
+                        start + 8,
+                    ))
+                    .unwrap();
+            }
+            for start in (0..32).step_by(8) {
+                let values = (start..start + 8)
+                    .map(|id| format!("({id}, '{}')", payload(generation, id)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                runtime
+                    .execute_query(&format!(
+                        "INSERT INTO churn_rows (id, payload) VALUES {values}"
+                    ))
+                    .unwrap();
+            }
+            // Force the regression's hard case: obsolete versions are cold,
+            // and the cleanup must find them without a resident-only scan.
+            runtime.checkpoint().unwrap();
+            let store = runtime.db().store();
+            let mut cursor = store.mvcc_reclaim_cursor("churn_rows".into()).unwrap();
+            let mut reclaimed = 0;
+            for _ in 0..128 {
+                let count = store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        64,
+                        8,
+                    )
+                    .unwrap();
+                assert!(count <= 8, "bounded deletion work");
+                reclaimed += count;
+                if cursor.finished() {
+                    break;
+                }
+            }
+            assert!(
+                cursor.finished(),
+                "bounded sweep must converge at cycle {generation}"
+            );
+            assert_eq!(
+                reclaimed,
+                if generation == 0 { 0 } else { 32 },
+                "cycle {generation}"
+            );
+            drop(cursor);
+            runtime.checkpoint().unwrap();
+            let result = runtime
+                .execute_query("SELECT COUNT(*) AS n FROM churn_rows")
+                .unwrap();
+            assert_eq!(
+                result.result.records[0].get("n").unwrap().display_string(),
+                "32"
+            );
+            if generation == 19 {
+                warmup_allocated = allocated();
+            }
+            if generation >= 20 {
+                peak_after_warmup = peak_after_warmup.max(allocated());
+            }
+        }
+        let growth = peak_after_warmup.saturating_sub(warmup_allocated);
+        eprintln!("churn_cycles=120 warmup_allocated={warmup_allocated} peak_after_warmup={peak_after_warmup} growth_bytes={growth}");
+        assert!(
+            growth <= 64 * 1024 * 1024,
+            "storage grew {growth} bytes with constant live data"
+        );
+        drop(runtime);
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        for id in 0..32 {
+            let result = runtime
+                .execute_query(&format!("SELECT payload FROM churn_rows WHERE id = {id}"))
+                .unwrap();
+            assert_eq!(result.result.records.len(), 1);
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text(payload(119, id).as_str()))
+            );
+        }
+    }
+
+    #[test]
+    fn cold_history_reclamation_waits_for_a_retained_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("reader.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE cold_history (id INTEGER)")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO cold_history (id) VALUES (1)")
+            .unwrap();
+        let (_, retention) = runtime.snapshot_manager().fresh_retained_snapshot();
+        runtime
+            .execute_query("DELETE FROM cold_history WHERE id = 1")
+            .unwrap();
+        runtime.checkpoint().unwrap();
+        let store = runtime.db().store();
+        let manager = store.get_collection("cold_history").unwrap();
+        assert!(manager.has_backing());
+        let sweep = || {
+            let mut cursor = store.mvcc_reclaim_cursor("cold_history".into()).unwrap();
+            let mut reclaimed = 0;
+            for _ in 0..8 {
+                reclaimed += store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        1,
+                        1,
+                    )
+                    .unwrap();
+                if cursor.finished() {
+                    break;
+                }
+            }
+            assert!(cursor.finished());
+            reclaimed
+        };
+        assert_eq!(sweep(), 0);
+        assert_eq!(
+            manager.count(),
+            1,
+            "old reader still needs the cold preimage"
+        );
+        drop(retention);
+        assert_eq!(sweep(), 1);
+        assert_eq!(manager.count(), 0);
+    }
 
     fn fixture() -> RedDBRuntime {
         let mut runtime = RedDBRuntime::with_options(

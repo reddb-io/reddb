@@ -42,14 +42,14 @@ metadata is usually absent. This is not measured hot-query performance evidence.
 A cold collection retains its immutable base and a resident mutation overlay.
 Cold updates materialize their target row; physical deletion masks its base row.
 Checkpoint normally merges into an unpublished replacement using the existing
-ownership, WAL, metadata publication and page-retirement fences. Nontransactional
+ownership, WAL, metadata publication and page-retirement fences. Committed
 row inserts without logical keys can instead use the existing sparse WAL-image
 projection when the backing has no external strong/weak owners or cursor pins.
 Compatible unpinned secondary projections, including runtime COUNT visibility
 indexes, append their new postings in the same ownership epoch. Exact projector
 identities must match, and retained posting work is capped at 1 MiB before allocation. New readers are fenced while verifying and modifying that base. Page
-undo protects splits and overflow allocations; exact counts and the unchanged XID
-bound follow a changed root. Captured readers, changed/missing index definitions, updates, deletions, keyed
+undo protects splits and overflow allocations; exact counts and the XID upper
+bound, including appended committed creators, follow a changed root. Captured readers, changed/missing index definitions, updates, deletions, keyed
 rows, MVCC changes and exhausted mutation/WAL proofs retain the replacement path.
 That fallback still costs O(history + mutations); this optimization does not make
 all collection checkpoints incremental. Captured readers retain their generation. Pending transaction/Vault rows prevent overlay eviction.
@@ -448,6 +448,41 @@ historical performance qualification remains required before activation.
 collections, base/overlay masking, publication, shared-budget denial and corrupt
 backing pages. Existing storage, audit-recovery, queue-policy and query-behavior
 suites run alongside it.
+
+## Committed-write draining and native history reclamation (2026-11-03)
+
+Bounded paged runtimes check resident-arena pressure before mutation admission.
+At three quarters of the arena allowance they attempt the existing local
+checkpoint, retaining its WAL, auxiliary snapshots, metadata and publication
+fences, without uploading a remote snapshot. A busy publication fence is not
+waited on from mutation admission. Nested publication, deferred WAL captures,
+active calling transactions, startup and read-only runtimes skip this drain;
+ordinary shared-budget admission remains authoritative. SQL DML also checks
+before starting event capture. This is a synchronous checkpoint trigger, not a
+bounded-latency incremental checkpoint implementation; replacement fallbacks
+and pinned readers still require qualification.
+
+A checkpoint marks every omitted or normalized transaction/Vault row as still
+unprojected. It cannot replace that collection's resident overlay with its
+durable base until those images match. Sparse checkpoints recompute this state
+after revisiting deferred IDs, including commit and rollback outcomes.
+
+MVCC maintenance visits both weak resident positions and a pinned native base.
+The native cursor inventories IDs only; each candidate is read again from the
+current manager under the publication fence before reclamation. Superseded
+cursor images cannot delete a revived row, an active creator or a version still
+needed by a retained reader. Work is limited by inspected positions, reclaimed
+versions and decoded bytes, with one current row and leaf retained. Runtime
+maintenance reserves its encoded/decoded workspace through shared admission.
+I/O and decode failures propagate; cleanup does not interpret them as missing
+records. Physical removals use the existing WAL-backed deletion path.
+
+Regression fixtures use fixed payloads and explicit process-exit boundaries.
+The constant-live-data test stops background tasks and drives the production GC
+in bounded steps, checking exact removal counts, checkpoint/reopen payloads and
+peak allocated growth over 100 cycles after warmup. It does not rely on sleeps,
+wall-clock deadlines or background scheduling. Latency and concurrency/load
+measurements remain separate activation evidence.
 
 ## Remaining implementation before activation
 

@@ -155,6 +155,7 @@ impl RedDBRuntime {
         if self.inner.transaction_state.in_transaction(conn_id) {
             return self.with_deferred_store_wal_if_transaction(f);
         }
+        self.drain_committed_writes_under_pressure(0)?;
         if !capture_autocommit_events {
             return f();
         }

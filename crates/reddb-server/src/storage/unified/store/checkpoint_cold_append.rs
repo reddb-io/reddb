@@ -1,4 +1,4 @@
-//! Sparse publication for nontransactional cold inserts (e.g. audit history).
+//! Sparse publication for committed cold inserts, including SQL autocommit.
 use super::*;
 use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 
@@ -65,6 +65,7 @@ impl UnifiedStore {
         let root_before = tree.root_page_id();
         manager
             .try_with_unshared_backing(root_before, || {
+                let mut appended_xid_high_water_mark = 0;
                 let result = (|| {
                     // The store and the sole backing source are the only tree owners.
                     // Owned cursors can outlive their source: check their separate pin.
@@ -77,7 +78,9 @@ impl UnifiedStore {
                             let EntityData::Row(row) = &entity.data else {
                                 return false;
                             };
-                            entity.xmin == 0
+                            appended_xid_high_water_mark =
+                                appended_xid_high_water_mark.max(entity.xmin);
+                            !current.excluded_xids.contains(&entity.xmin)
                                 && entity.xmax == 0
                                 && !current.pending_vault.contains(id)
                                 && SegmentKeyLookup::key(entity).is_none()
@@ -141,11 +144,13 @@ impl UnifiedStore {
                 })();
                 let published = if result.as_ref().is_ok_and(Option::is_some) {
                     let root = tree.root_page_id();
-                    // Appended rows have XID zero, so an existing base bound remains
-                    // valid even if a split changed the root. Publish the new exact
-                    // count too, avoiding an O(history) recount of an in-place tree.
+                    // Carry the appended headers into the existing upper bound
+                    // even when an in-place update retains the same root page.
+                    // Publish the exact count without recounting old payloads.
                     if let Some(summary) = self.recovery_xid_summary.write().as_mut() {
                         if summary.roots.get(collection) == Some(&root_before) {
+                            summary.high_water_mark =
+                                summary.high_water_mark.max(appended_xid_high_water_mark);
                             summary.roots.insert(collection.to_owned(), root);
                         }
                     }

@@ -68,6 +68,22 @@ impl RedDBRuntime {
         // prevent us from durably persisting what's already in memory.
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
+        self.checkpoint_local()?;
+        if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %err,
+                "checkpoint: skipping remote upload — lease not held"
+            );
+            return Ok(());
+        }
+        self.inner
+            .db
+            .upload_to_remote_backend()
+            .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
         let started = std::time::Instant::now();
         self.seal_hypertable_chunks_for_checkpoint(
             self.inner.checkpoint_columnar_emission_budget_chunks,
@@ -95,18 +111,7 @@ impl RedDBRuntime {
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
-        if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
-            tracing::warn!(
-                target: "reddb::serverless::lease",
-                error = %err,
-                "checkpoint: skipping remote upload — lease not held"
-            );
-            return Ok(());
-        }
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Engine(err.to_string()))
+        Ok(())
     }
 
     /// Guard remote-mutating operations on the writer lease.
