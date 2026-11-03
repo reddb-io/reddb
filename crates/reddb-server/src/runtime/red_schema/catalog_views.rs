@@ -11,8 +11,8 @@ use super::*;
 pub(super) fn indices_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         INDEX_COLUMNS
             .iter()
@@ -57,14 +57,14 @@ pub(super) fn indices_snapshot(
         }
     }
 
-    rows
+    Ok(rows)
 }
 
 pub(super) fn show_indexes_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         SHOW_INDEX_COLUMNS
             .iter()
@@ -101,7 +101,7 @@ pub(super) fn show_indexes_snapshot(
         }
     }
 
-    rows
+    Ok(rows)
 }
 
 fn index_status_record(
@@ -155,8 +155,8 @@ pub(super) fn describe_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = describe_target_collection(query)?;
     let db = runtime.db();
-    let exists = db
-        .catalog_model_snapshot()
+    let exists = runtime
+        .try_catalog()?
         .collections
         .into_iter()
         .any(|entry| entry.name == collection);
@@ -236,8 +236,8 @@ pub(super) fn show_create_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = show_create_target_collection(query)?;
     let db = runtime.db();
-    let catalog_entry = db
-        .catalog_model_snapshot()
+    let catalog_entry = runtime
+        .try_catalog()?
         .collections
         .into_iter()
         .find(|entry| entry.name == collection);
@@ -445,8 +445,8 @@ pub(super) fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         COLLECTION_COLUMNS
             .iter()
@@ -456,7 +456,7 @@ pub(super) fn collections_snapshot(
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|collection| {
@@ -524,7 +524,7 @@ pub(super) fn collections_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 
 /// Number of most-common values surfaced per column in `red.stats`.
@@ -559,7 +559,7 @@ pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
     query: &TableQuery,
-) -> Vec<UnifiedRecord> {
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let schema = Arc::new(
         STATS_COLUMNS
             .iter()
@@ -575,9 +575,9 @@ pub(super) fn stats_snapshot(
     if target.as_deref() == Some(MEMORY_BUDGET_COLLECTION) {
         let mut rows = Vec::new();
         append_memory_budget_stats(&mut rows, &schema, runtime, target.as_deref());
-        return rows;
+        return Ok(rows);
     }
-    let snapshot = runtime.db().catalog_model_snapshot();
+    let snapshot = runtime.try_catalog()?;
     let store = runtime.db().store();
 
     let checkpoint_stats = runtime
@@ -681,7 +681,7 @@ pub(super) fn stats_snapshot(
             _ => {}
         }
     }
-    rows
+    Ok(rows)
 }
 
 fn append_scrub_stats(
@@ -1641,7 +1641,7 @@ fn most_common_values(
 pub(super) fn columns_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let db = runtime.db();
     let mut records = Vec::new();
     let schema = Arc::new(
@@ -1650,7 +1650,7 @@ pub(super) fn columns_snapshot(
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let snapshot = db.catalog_model_snapshot();
+    let snapshot = runtime.try_catalog()?;
     let contracts = db.collection_contracts();
     let contracts_by_name: HashMap<_, _> = contracts
         .iter()
@@ -1693,7 +1693,7 @@ pub(super) fn columns_snapshot(
         }
     }
 
-    records
+    Ok(records)
 }
 
 fn column_record(
@@ -1964,7 +1964,8 @@ mod scoped_stats_memory_tests {
                     &runtime,
                     None,
                     Some(&visible),
-                );
+                )
+                .expect("document catalog");
                 assert_eq!(documents.len(), 1);
                 assert_eq!(
                     documents[0].get("document_count"),
@@ -1974,7 +1975,10 @@ mod scoped_stats_memory_tests {
                     documents[0].get("inferred_field_count"),
                     Some(&Value::UnsignedInteger(2))
                 );
-                (columns_snapshot(&runtime, Some(&visible)), stats)
+                (
+                    columns_snapshot(&runtime, Some(&visible)).expect("column catalog"),
+                    stats,
+                )
             })
         };
         let (before, baseline) = observe(0);

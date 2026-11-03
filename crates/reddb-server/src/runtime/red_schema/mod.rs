@@ -860,9 +860,9 @@ pub(super) fn red_query(
     let control_events = matches!(virtual_kind, VirtualTableKind::ControlEvents);
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => {
-            catalog_views::collections_snapshot(runtime, tenant, visible_collections)
+            catalog_views::collections_snapshot(runtime, tenant, visible_collections)?
         }
-        VirtualTableKind::Columns => catalog_views::columns_snapshot(runtime, visible_collections),
+        VirtualTableKind::Columns => catalog_views::columns_snapshot(runtime, visible_collections)?,
         VirtualTableKind::Describe => {
             catalog_views::describe_snapshot(runtime, visible_collections, query)?
         }
@@ -870,25 +870,25 @@ pub(super) fn red_query(
             catalog_views::show_create_snapshot(runtime, visible_collections, query)?
         }
         VirtualTableKind::ShowIndexes => {
-            catalog_views::show_indexes_snapshot(runtime, visible_collections)
+            catalog_views::show_indexes_snapshot(runtime, visible_collections)?
         }
-        VirtualTableKind::Indices => catalog_views::indices_snapshot(runtime, visible_collections),
+        VirtualTableKind::Indices => catalog_views::indices_snapshot(runtime, visible_collections)?,
         VirtualTableKind::Policies => {
             governance_views::policies_snapshot(runtime, tenant, visible_collections)
         }
         VirtualTableKind::Stats => {
-            catalog_views::stats_snapshot(runtime, visible_collections, query)
+            catalog_views::stats_snapshot(runtime, visible_collections, query)?
         }
         VirtualTableKind::Subscriptions => {
-            ops_views::subscriptions_snapshot(runtime, visible_collections)
+            ops_views::subscriptions_snapshot(runtime, visible_collections)?
         }
-        VirtualTableKind::Retention => ops_views::retention_snapshot(runtime, visible_collections),
+        VirtualTableKind::Retention => ops_views::retention_snapshot(runtime, visible_collections)?,
         VirtualTableKind::MaterializedViews => ops_views::materialized_views_snapshot(runtime),
         VirtualTableKind::QueuePending => {
-            ops_views::queue_pending_snapshot(runtime, visible_collections)
+            ops_views::queue_pending_snapshot(runtime, visible_collections)?
         }
         VirtualTableKind::Queues => {
-            ops_views::queues_snapshot(runtime, tenant, visible_collections)
+            ops_views::queues_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Forks => ops_views::forks_snapshot(runtime)?,
         VirtualTableKind::AnalyticsMetrics => ops_views::analytics_metrics_snapshot(runtime),
@@ -915,20 +915,20 @@ pub(super) fn red_query(
         VirtualTableKind::ControlCapabilities => governance_views::control_capabilities_snapshot(),
         VirtualTableKind::PolicyActions => governance_views::policy_actions_snapshot(),
         VirtualTableKind::Tables => {
-            model_views::tables_snapshot(runtime, tenant, visible_collections)
+            model_views::tables_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Documents => {
-            model_views::documents_snapshot(runtime, tenant, visible_collections)
+            model_views::documents_snapshot(runtime, tenant, visible_collections)?
         }
-        VirtualTableKind::Kv => model_views::kv_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Kv => model_views::kv_snapshot(runtime, tenant, visible_collections)?,
         VirtualTableKind::Vectors => {
-            model_views::vectors_snapshot(runtime, tenant, visible_collections)
+            model_views::vectors_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Graphs => {
-            model_views::graphs_snapshot(runtime, tenant, visible_collections)
+            model_views::graphs_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Timeseries => {
-            model_views::timeseries_snapshot(runtime, tenant, visible_collections)
+            model_views::timeseries_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Metrics => {
             model_views::metrics_snapshot(runtime, tenant, visible_collections)

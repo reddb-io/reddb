@@ -77,6 +77,52 @@ impl Iterator for PagedEntityCursor {
 }
 
 impl SegmentManager {
+    /// Visit the physical base and resident replacements without an ID-order
+    /// workspace. This is for order-independent metadata reductions, not SQL
+    /// ordering. The host must fence writers throughout this reduction so a
+    /// materialized base row cannot be counted twice. Callbacks must not mutate
+    /// or re-enter this collection.
+    pub fn try_for_each_entity_unordered(
+        &self,
+        limit_bytes: usize,
+        mut callback: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        let backing_guard = self.backing.read();
+        let Some(backing) = backing_guard.as_ref() else {
+            self.for_each_entity(callback);
+            return Ok(());
+        };
+        let limit_bytes = limit_bytes.min(backing.read_bytes_max);
+        let mut cursor = backing.source.cursor()?;
+        while let Some(id) = cursor.peek_id()? {
+            if backing.removed.contains(&id) || self.get_with(id, |_| ()).is_some() {
+                cursor.skip_record()?;
+                continue;
+            }
+            let record = cursor
+                .next_record(limit_bytes)?
+                .expect("invariant: peeked physical row exists");
+            let (mut entity, _) = record.decode_with_budget(backing.format_version, limit_bytes)?;
+            self.restore_owned_row_schemas(std::iter::once(&mut entity));
+            if !callback(&entity) {
+                return Ok(());
+            }
+        }
+        let mut result = Ok(());
+        self.for_each_entity(|entity| {
+            let required_bytes = crate::storage::memory_size::entity_bytes(entity);
+            if required_bytes > limit_bytes {
+                result = Err(StoreError::ReadLimitExceeded {
+                    required_bytes,
+                    limit_bytes,
+                });
+                return false;
+            }
+            callback(entity)
+        });
+        result
+    }
+
     /// The host must fence publication while capturing the base and overlay.
     /// This retains O(dirty overlay) state and decodes at most one base row.
     pub fn try_paged_entity_cursor(
