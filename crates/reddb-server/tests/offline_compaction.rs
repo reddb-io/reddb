@@ -227,7 +227,9 @@ fn compact_real_runtime_preserves_resume_indexes_and_subsequent_writes() {
         runtime
             .execute_query("DELETE FROM records WHERE id = 20")
             .expect("delete version");
-        runtime.flush().expect("checkpoint");
+        runtime
+            .graceful_shutdown(false)
+            .expect("shutdown before compaction");
     }
     let destination = directory.path().join("compacted");
     compact_paged(&source, &destination).expect("compact actual runtime");
@@ -262,7 +264,9 @@ fn compact_real_runtime_preserves_resume_indexes_and_subsequent_writes() {
                 .execute_query("INSERT INTO records (id, value) VALUES (99, 'after')")
                 .expect("post-compact write");
         }
-        runtime.flush().expect("post-compact checkpoint");
+        runtime
+            .graceful_shutdown(false)
+            .expect("post-compact shutdown");
     }
 }
 
