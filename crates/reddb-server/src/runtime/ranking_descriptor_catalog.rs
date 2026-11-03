@@ -358,25 +358,10 @@ pub fn parse_approx_rank_of(sql: &str) -> Option<RedDBResult<ApproxRankOfRequest
 /// Read the latest persisted `value` Text for an arbitrary `red_config`
 /// key (most-recent entity wins, mirroring the WAL-as-log-of-writes shape).
 fn read_latest_config_value(store: &UnifiedStore, key: &str) -> Option<String> {
-    let manager = store.get_collection("red_config")?;
-    let mut all = manager.query_all(|_| true);
-    all.sort_by_key(|entity| std::cmp::Reverse(entity.id.raw()));
-    for entity in all {
-        let EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        let matches = matches!(
-            named.get("key"),
-            Some(Value::Text(value)) if value.as_ref() == key
-        );
-        if matches {
-            if let Some(Value::Text(value)) = named.get("value") {
-                return Some(value.to_string());
-            }
-        }
+    match store.get_config(key) {
+        Some(Value::Text(value)) => Some(value.to_string()),
+        _ => None,
     }
-    None
 }
 
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {

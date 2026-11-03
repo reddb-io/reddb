@@ -370,24 +370,15 @@ pub fn heal_critical_keys(store: &UnifiedStore) {
 /// Lightweight presence probe. Avoids loading the whole red_config
 /// collection; scans until the first hit.
 fn is_key_present(store: &UnifiedStore, key: &str) -> bool {
-    let Some(manager) = store.get_collection("red_config") else {
-        return false;
-    };
-    let mut found = false;
-    manager.for_each_entity(|entity| {
-        if let Some(row) = entity.data.as_row() {
-            let entry_key = row.get_field("key").and_then(|v| match v {
-                reddb_types::Value::Text(s) => Some(s.as_ref()),
-                _ => None,
-            });
-            if entry_key == Some(key) {
-                found = true;
-                return false; // short-circuit
-            }
+    match store.try_get_config(key) {
+        Ok(value) => value.is_some(),
+        Err(error) => {
+            // A failed physical read is not a missing operator setting. Never
+            // overwrite it with a default or a mounted-file value.
+            tracing::warn!(key, %error, "cannot read persisted configuration; skipping seed");
+            true
         }
-        true
-    });
-    found
+    }
 }
 
 #[cfg(test)]

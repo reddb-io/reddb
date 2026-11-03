@@ -76,6 +76,85 @@ mod tests {
         assert!(!show_secrets_allows_key("red.config.ai.default.provider"));
         assert!(show_secrets_allows_key("acme.key"));
     }
+
+    #[test]
+    fn typed_config_readers_preserve_cold_values_and_live_updates() {
+        let directory = tempfile::tempdir().expect("config fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("config.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("runtime");
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree(
+                "probe",
+                &crate::json!({"boolean": false, "integer": 42, "float": 1.5, "string": "saved"}),
+            )
+            .expect("persist configuration");
+        store
+            .try_set_config_tree("red.config.queue.max_wait_ms", &crate::json!(1))
+            .expect("queue wait limit");
+        store.persist().expect("checkpoint");
+        let manager = store
+            .get_collection("red_config")
+            .expect("config collection");
+        assert!(manager.has_backing(), "fixture must read persisted rows");
+        assert!(
+            manager.query_all(|_| true).is_empty(),
+            "fixture must be cold"
+        );
+        assert_eq!(
+            store.try_get_config("probe.integer").unwrap(),
+            Some(Value::Integer(42))
+        );
+        assert!(!runtime.config_bool("probe.boolean", true));
+        assert_eq!(runtime.config_u64("probe.integer", 9), 42);
+        assert_eq!(runtime.config_f64("probe.float", 9.0), 1.5);
+        assert_eq!(runtime.config_string("probe.string", "default"), "saved");
+        assert!(runtime.redwire_queue_wait_cap_check(5).is_err());
+        store
+            .try_set_config_tree("probe.integer", &crate::json!(73))
+            .expect("live replacement");
+        assert_eq!(runtime.config_u64("probe.integer", 9), 73);
+        assert_eq!(runtime.config_u64("probe.missing", 9), 9);
+    }
+
+    #[test]
+    fn boot_defaults_and_overlay_preserve_cold_operator_configuration() {
+        let directory = tempfile::tempdir().expect("config fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("config.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("runtime");
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree("concurrency.locking.enabled", &crate::json!(false))
+            .expect("operator configuration");
+        store.persist().expect("checkpoint");
+        super::super::config_matrix::heal_critical_keys(store.as_ref());
+        assert_eq!(
+            store.try_get_config("concurrency.locking.enabled").unwrap(),
+            Some(Value::Boolean(false))
+        );
+        let overlay = directory.path().join("overlay.json");
+        std::fs::write(&overlay, r#"{"concurrency":{"locking":{"enabled":true}}}"#)
+            .expect("overlay fixture");
+        assert_eq!(
+            super::super::config_overlay::apply_config_file(
+                store.as_ref(),
+                overlay.to_str().unwrap()
+            ),
+            0
+        );
+        assert_eq!(
+            store.try_get_config("concurrency.locking.enabled").unwrap(),
+            Some(Value::Boolean(false))
+        );
+    }
 }
 
 pub(crate) fn insert_config_json_path(
@@ -214,36 +293,12 @@ impl RedDBRuntime {
                 return b;
             }
         }
-        let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
-            return default;
-        };
-        let mut result = default;
-        let mut latest_id: u64 = 0;
-        manager.for_each_entity(|entity| {
-            if let Some(row) = entity.data.as_row() {
-                let entry_key = row.get_field("key").and_then(|v| match v {
-                    reddb_types::Value::Text(s) => Some(s.as_ref()),
-                    _ => None,
-                });
-                if entry_key == Some(key) {
-                    let id = entity.id.raw();
-                    if id >= latest_id {
-                        latest_id = id;
-                        result = match row.get_field("value") {
-                            Some(reddb_types::Value::Boolean(b)) => *b,
-                            Some(reddb_types::Value::Text(s)) => {
-                                matches!(s.as_ref(), "true" | "TRUE" | "True" | "1")
-                            }
-                            Some(reddb_types::Value::Integer(n)) => *n != 0,
-                            _ => default,
-                        };
-                    }
-                }
-            }
-            true
-        });
-        result
+        match self.inner.db.store().get_config(key) {
+            Some(Value::Boolean(value)) => value,
+            Some(Value::Text(value)) => matches!(value.as_ref(), "true" | "TRUE" | "True" | "1"),
+            Some(Value::Integer(value)) => value != 0,
+            _ => default,
+        }
     }
 
     /// Whether DOCUMENT writes should store the body as the native binary
@@ -256,112 +311,43 @@ impl RedDBRuntime {
 
     pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
-            if let Some(reddb_types::Value::UnsignedInteger(n)) =
+            if let Some(Value::UnsignedInteger(value)) =
                 crate::runtime::config_overlay::coerce_env_value(key, raw)
             {
-                return n;
+                return value;
             }
         }
-        let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
-            return default;
-        };
-        let mut result = default;
-        let mut latest_id: u64 = 0;
-        manager.for_each_entity(|entity| {
-            if let Some(row) = entity.data.as_row() {
-                let entry_key = row.get_field("key").and_then(|v| match v {
-                    reddb_types::Value::Text(s) => Some(s.as_ref()),
-                    _ => None,
-                });
-                if entry_key == Some(key) {
-                    let id = entity.id.raw();
-                    if id >= latest_id {
-                        latest_id = id;
-                        result = match row.get_field("value") {
-                            Some(reddb_types::Value::Integer(n)) => *n as u64,
-                            Some(reddb_types::Value::UnsignedInteger(n)) => *n,
-                            Some(reddb_types::Value::Text(s)) => {
-                                s.parse::<u64>().unwrap_or(default)
-                            }
-                            _ => default,
-                        };
-                    }
-                }
-            }
-            true
-        });
-        result
+        match self.inner.db.store().get_config(key) {
+            Some(Value::Integer(value)) => value as u64,
+            Some(Value::UnsignedInteger(value)) => value,
+            Some(Value::Text(value)) => value.parse::<u64>().unwrap_or(default),
+            _ => default,
+        }
     }
 
     pub(crate) fn config_f64(&self, key: &str, default: f64) -> f64 {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
-            if let Ok(n) = raw.parse::<f64>() {
-                return n;
+            if let Ok(value) = raw.parse::<f64>() {
+                return value;
             }
         }
-        let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
-            return default;
-        };
-        let mut result = default;
-        let mut latest_id: u64 = 0;
-        manager.for_each_entity(|entity| {
-            if let Some(row) = entity.data.as_row() {
-                let entry_key = row.get_field("key").and_then(|v| match v {
-                    reddb_types::Value::Text(s) => Some(s.as_ref()),
-                    _ => None,
-                });
-                if entry_key == Some(key) {
-                    let id = entity.id.raw();
-                    if id >= latest_id {
-                        latest_id = id;
-                        result = match row.get_field("value") {
-                            Some(reddb_types::Value::Float(n)) => *n,
-                            Some(reddb_types::Value::Integer(n)) => *n as f64,
-                            Some(reddb_types::Value::UnsignedInteger(n)) => *n as f64,
-                            Some(reddb_types::Value::Text(s)) => {
-                                s.parse::<f64>().unwrap_or(default)
-                            }
-                            _ => default,
-                        };
-                    }
-                }
-            }
-            true
-        });
-        result
+        match self.inner.db.store().get_config(key) {
+            Some(Value::Float(value)) => value,
+            Some(Value::Integer(value)) => value as f64,
+            Some(Value::UnsignedInteger(value)) => value as f64,
+            Some(Value::Text(value)) => value.parse::<f64>().unwrap_or(default),
+            _ => default,
+        }
     }
 
     pub(crate) fn config_string(&self, key: &str, default: &str) -> String {
         if let Some(raw) = self.inner.env_config_overrides.get(key) {
             return raw.clone();
         }
-        let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
-            return default.to_string();
-        };
-        let mut result = default.to_string();
-        let mut latest_id: u64 = 0;
-        manager.for_each_entity(|entity| {
-            if let Some(row) = entity.data.as_row() {
-                let entry_key = row.get_field("key").and_then(|v| match v {
-                    reddb_types::Value::Text(s) => Some(s.as_ref()),
-                    _ => None,
-                });
-                if entry_key == Some(key) {
-                    let id = entity.id.raw();
-                    if id >= latest_id {
-                        latest_id = id;
-                        if let Some(reddb_types::Value::Text(value)) = row.get_field("value") {
-                            result = value.to_string();
-                        }
-                    }
-                }
-            }
-            true
-        });
-        result
+        match self.inner.db.store().get_config(key) {
+            Some(Value::Text(value)) => value.to_string(),
+            _ => default.to_string(),
+        }
     }
 
     /// Whether `SECRET('...')` literals should be encrypted with the
