@@ -430,6 +430,16 @@ impl SegmentManager {
             self.for_each_entity(callback);
             return Ok(());
         };
+        self.try_for_each_backed_entity(backing, limit_bytes, 0, |entity| callback(&entity))
+    }
+
+    fn try_for_each_backed_entity(
+        &self,
+        backing: &BackingRead,
+        limit_bytes: usize,
+        mut skip: usize,
+        mut callback: impl FnMut(std::borrow::Cow<'_, UnifiedEntity>) -> bool,
+    ) -> Result<(), StoreError> {
         let limit_bytes = limit_bytes.min(backing.read_bytes_max);
         let mut identities = Vec::new();
         self.for_each_entity(|entity| {
@@ -449,6 +459,10 @@ impl SegmentManager {
                 }
                 identities.next();
                 let result = self.get_with(id, |entity| {
+                    if skip > 0 {
+                        skip -= 1;
+                        return Ok(true);
+                    }
                     let required_bytes = crate::storage::memory_size::entity_bytes(entity);
                     if required_bytes > limit_bytes {
                         return Err(StoreError::ReadLimitExceeded {
@@ -456,7 +470,7 @@ impl SegmentManager {
                             limit_bytes,
                         });
                     }
-                    Ok(callback(entity))
+                    Ok(callback(std::borrow::Cow::Borrowed(entity)))
                 });
                 if result.transpose()? == Some(false) {
                     return Ok(());
@@ -470,6 +484,11 @@ impl SegmentManager {
                 cursor.skip_record()?;
                 continue;
             }
+            if skip > 0 {
+                skip -= 1;
+                cursor.skip_record()?;
+                continue;
+            }
             let record = cursor
                 .next_record(limit_bytes)?
                 .expect("invariant: peeked physical row exists");
@@ -478,10 +497,66 @@ impl SegmentManager {
                 limit_bytes.min(backing.read_bytes_max),
             )?;
             self.restore_owned_row_schemas(std::iter::once(&mut entity));
-            if !callback(&entity) {
+            if !callback(std::borrow::Cow::Owned(entity)) {
                 return Ok(());
             }
         }
+    }
+
+    /// Page the same base/overlay physical view used by fallible query reads.
+    /// Prefix records are skipped without decoding; only the requested page is
+    /// cloned. The manager's counter includes base rows and resident mutations.
+    pub fn try_page_in_id_order(
+        &self,
+        offset: usize,
+        limit: usize,
+        limit_bytes: usize,
+    ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
+        let backing_guard = self.backing.read();
+        let total = self.count();
+        if offset >= total || limit == 0 {
+            return Ok((total, Vec::new()));
+        }
+        let mut items = Vec::new();
+        let mut retained_bytes = 0_usize;
+        let mut error = None;
+        let mut capture = |mut entity: std::borrow::Cow<'_, UnifiedEntity>| {
+            // Eager file recovery sees these named records before runtime
+            // rehydrates the declared column schema. Reproduce that layout
+            // only for decoded base rows; live overlays keep their wire shape.
+            if let std::borrow::Cow::Owned(entity) = &mut entity {
+                self.restore_recovery_row_layout(entity, None);
+            }
+            let required_bytes =
+                retained_bytes.saturating_add(crate::storage::memory_size::entity_bytes(&entity));
+            if required_bytes > limit_bytes {
+                error = Some(StoreError::ReadLimitExceeded {
+                    required_bytes,
+                    limit_bytes,
+                });
+                return false;
+            }
+            retained_bytes = required_bytes;
+            items.push(entity.into_owned());
+            items.len() < limit
+        };
+        if let Some(backing) = backing_guard.as_ref() {
+            self.try_for_each_backed_entity(backing, limit_bytes, offset, &mut capture)?;
+        } else {
+            let mut skip = offset;
+            self.for_each_entity_in_id_order(|entity| {
+                if skip > 0 {
+                    skip -= 1;
+                    return true;
+                }
+                capture(std::borrow::Cow::Borrowed(entity))
+            });
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        self.restore_owned_row_schemas(items.iter_mut());
+        Ok((total, items))
     }
 
     /// Physical key history. Indexed bases avoid unrelated payload reads;

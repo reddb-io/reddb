@@ -1,14 +1,16 @@
 use reddb_server::storage::{EntityId, UnifiedEntity};
-use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use reddb_types::Value;
 
 #[test]
 fn legacy_table_catalog_preserves_model_schema_and_count_after_cold_reopen() {
     let directory = tempfile::tempdir().expect("private catalog fixture");
     let options = RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("native paged legacy fixture")
         .with_memory_budget(64 * 1024 * 1024)
-        .with_bounded_disk_residency(true);
-    {
+        .with_bounded_disk_residency(false);
+    let expected_indexes = {
         let runtime = RedDBRuntime::with_options(options.clone()).expect("ordinary runtime");
         let store = runtime.db().store();
         store
@@ -29,13 +31,46 @@ fn legacy_table_catalog_preserves_model_schema_and_count_after_cold_reopen() {
         }
         assert_legacy_table_catalog(&runtime);
         runtime.checkpoint().expect("persist ordinary fixture");
-    }
+        legacy_physical_indexes(&runtime)
+    };
+    // The legacy profile creates a native paged file. Explicit bounded
+    // residency currently opens that file through the standalone profile.
+    let cold_options = RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
     for _ in 0..2 {
-        let runtime = RedDBRuntime::with_options(options.clone().with_bounded_disk_residency(true))
-            .expect("disk-resident reopen");
+        let runtime =
+            RedDBRuntime::with_options(cold_options.clone()).expect("disk-resident reopen");
         assert_legacy_table_catalog(&runtime);
+        assert_eq!(legacy_physical_indexes(&runtime), expected_indexes);
         runtime.checkpoint().expect("checkpoint cold catalog");
+        assert_eq!(legacy_physical_indexes(&runtime), expected_indexes);
     }
+}
+
+fn legacy_physical_indexes(runtime: &RedDBRuntime) -> Vec<(String, String, String, bool)> {
+    let mut indexes = runtime
+        .db()
+        .physical_metadata()
+        .expect("physical metadata")
+        .indexes
+        .into_iter()
+        .filter(|index| index.collection.as_deref() == Some("legacy_catalog_rows"))
+        .map(|index| {
+            (
+                index.name,
+                format!("{:?}", index.kind),
+                index.backend,
+                index.enabled,
+            )
+        })
+        .collect::<Vec<_>>();
+    indexes.sort();
+    assert!(
+        !indexes.is_empty(),
+        "ordinary recovery has an index inventory"
+    );
+    indexes
 }
 
 fn assert_legacy_table_catalog(runtime: &RedDBRuntime) {

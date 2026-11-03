@@ -290,6 +290,243 @@ fn cold_runtime() -> (tempfile::TempDir, RedDBRuntime) {
     (directory, runtime)
 }
 
+#[test]
+fn cold_collection_pages_include_persisted_rows_in_runtime_and_http() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            r#"CREATE TABLE native_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
+        )
+        .expect("declare native scan");
+    install_native_history(
+        &runtime,
+        "native_scan",
+        "history",
+        6,
+        1024 * 1024,
+        |version| Value::text(format!("persisted-{version}")),
+    );
+    runtime
+        .execute_query(r#"INSERT INTO native_scan ("key","value","version","tombstone") VALUES ('overlay','resident',7,false)"#)
+        .expect("resident overlay");
+    let mut identities = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = runtime
+            .scan_collection("native_scan", cursor, 2)
+            .expect("merged page");
+        assert_eq!(page.total, 7);
+        for entity in &page.items {
+            let EntityData::Row(row) = &entity.data else {
+                panic!("native row")
+            };
+            assert!(row.get_field("value").is_some(), "row schema preserved");
+            identities.push(entity.id);
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(identities.len(), 7);
+    assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+    for offset in [7, usize::MAX] {
+        let page = runtime
+            .scan_collection("native_scan", Some(ScanCursor { offset }), 2)
+            .expect("past end");
+        assert_eq!(page.total, 7);
+        assert!(page.items.is_empty());
+        assert!(page.next.is_none());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let _server = RedDBServer::new(runtime).serve_in_background_on(listener);
+    for offset in [0, 2, 4, 6, 7, usize::MAX] {
+        let page = get(
+            address,
+            &format!("/collections/native_scan/scan?offset={offset}&limit=2"),
+        );
+        assert_eq!(page["total"], 7);
+        assert_eq!(
+            page["items"].as_array().expect("items").len(),
+            7_usize.saturating_sub(offset).min(2)
+        );
+        assert_eq!(
+            page["next_offset"],
+            if offset < 5 {
+                serde_json::json!(offset + 2)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+    }
+}
+
+#[test]
+fn cold_collection_scan_propagates_decode_limit_instead_of_returning_empty_page() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            r#"CREATE TABLE denied_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
+        )
+        .expect("declare denied scan");
+    install_native_history(&runtime, "denied_scan", "wide", 1, 32, |_| {
+        Value::text("x".repeat(1024))
+    });
+    let error = runtime
+        .scan_collection("denied_scan", None, 1)
+        .expect_err("cold decode failure cannot become empty success");
+    assert!(
+        error.to_string().to_lowercase().contains("limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cold_collection_page_skips_payloads_before_its_requested_window() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(r#"CREATE TABLE skip_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#)
+        .expect("declare skip scan");
+    install_native_history(
+        &runtime,
+        "skip_scan",
+        "wide-prefix",
+        2,
+        64 * 1024,
+        |version| {
+            Value::text(if version == 1 {
+                "x".repeat(128 * 1024)
+            } else {
+                "small".into()
+            })
+        },
+    );
+    assert!(runtime.scan_collection("skip_scan", None, 1).is_err());
+    let page = runtime
+        .scan_collection("skip_scan", Some(ScanCursor { offset: 1 }), 1)
+        .expect("skip encoded prefix without allocating it");
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    let EntityData::Row(row) = &page.items[0].data else {
+        panic!("native row")
+    };
+    assert_eq!(row.get_field("value"), Some(&Value::text("small")));
+    assert!(page.next.is_none());
+}
+
+#[test]
+fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::storage::{EntityId, RowData, UnifiedEntity};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, cold) = cold_runtime();
+    let resident = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("resident runtime");
+    // File recovery restores records before runtime declares column schemas.
+    // Deliberately use a declaration order different from recovery's order.
+    resident.db().store().get_or_create_collection("wire_rows");
+    cold.db().store().get_or_create_collection("wire_rows");
+    let store = cold.db().store();
+    let base = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        store.pager().expect("pager"),
+    )));
+    let resident_manager = resident
+        .db()
+        .store()
+        .get_collection("wire_rows")
+        .expect("resident collection");
+    for id in 1..=3 {
+        let mut fields = HashMap::from([
+            ("id".to_string(), Value::Integer(1_699_999_999_999_999_999)),
+            ("payload".to_string(), Value::text("x".repeat(32 * 1024))),
+        ]);
+        if id == 2 {
+            fields.insert("dynamic".to_string(), Value::Boolean(true));
+        }
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "wire_rows", id, vec![]);
+        entity.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        });
+        base.insert(
+            &entity.id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("cold record");
+        resident_manager
+            .restore_snapshot_entity(entity)
+            .expect("ordinary resident recovery");
+    }
+    store
+        .get_collection("wire_rows")
+        .expect("cold collection")
+        .install_backing(
+            Arc::new(PagedCollection::new(Arc::clone(&base))),
+            base.root_page_id(),
+            store.format_version(),
+            1024 * 1024,
+            3,
+        );
+    for runtime in [&resident, &cold] {
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("recovered collection")
+            .set_column_schema_if_empty(vec!["payload".into(), "id".into()]);
+        // Newly written named records are not recovered file records. Keep
+        // their independently observable native representation unchanged.
+        let mut overlay =
+            UnifiedEntity::table_row(EntityId::new(1_000_004), "wire_rows", 4, vec![]);
+        overlay.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(HashMap::from([
+                ("id".into(), Value::Integer(4)),
+                ("payload".into(), Value::text("live")),
+            ])),
+            schema: None,
+        });
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("overlay collection")
+            .insert(overlay)
+            .expect("live row");
+    }
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for runtime in [resident, cold] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+        addresses.push(listener.local_addr().expect("fixture address"));
+        servers.push(RedDBServer::new(runtime).serve_in_background_on(listener));
+    }
+    for offset in [0, 1, 2, 3, 4, usize::MAX] {
+        let path = format!("/collections/wire_rows/scan?offset={offset}&limit=2");
+        assert_eq!(
+            get(addresses[0], &path),
+            get(addresses[1], &path),
+            "native representation at offset {offset}"
+        );
+    }
+    let recovered = get(addresses[1], "/collections/wire_rows/scan?offset=0&limit=1");
+    assert_eq!(
+        recovered["items"][0]["data"]["columns"][0],
+        serde_json::json!({"$int": "1699999999999999999"})
+    );
+    let overlay = get(addresses[1], "/collections/wire_rows/scan?offset=3&limit=1");
+    assert_eq!(overlay["items"][0]["data"]["named"]["payload"], "live");
+}
+
 fn ascii_noise(bytes: usize) -> String {
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut state = 0x1234_5678_u32;

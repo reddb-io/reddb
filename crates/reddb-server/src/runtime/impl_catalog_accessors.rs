@@ -167,7 +167,10 @@ impl RedDBRuntime {
 
         let offset = cursor.map(|cursor| cursor.offset).unwrap_or(0);
         let limit = limit.max(1);
-        let (total, items) = manager.page_in_id_order(offset, limit);
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let (total, items) = manager.try_page_in_id_order(offset, limit, read_bytes)?;
         let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 

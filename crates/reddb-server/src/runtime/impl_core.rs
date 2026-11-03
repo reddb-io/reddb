@@ -1590,9 +1590,7 @@ impl RedDBRuntime {
                         match self
                             .inner
                             .transaction_state
-                            .rollback_to_savepoint(conn_id, name)?
-                        {
-                            Some(rollback) => {
+                            .rollback_to_savepoint_with(conn_id, name, |rollback| {
                                 self.rollback_vault_savepoint(conn_id, rollback.savepoint_xid);
                                 let reverted_updates = self.revive_versioned_updates_since(
                                     conn_id,
@@ -1600,7 +1598,10 @@ impl RedDBRuntime {
                                 );
                                 let revived =
                                     self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
-                                let reverted_updates = reverted_updates?;
+                                reverted_updates.map(|updates| (updates, revived))
+                            })?
+                        {
+                            Some((rollback, (reverted_updates, revived))) => {
                                 (
                                     "rollback_to_savepoint",
                                     format!(
@@ -3244,6 +3245,11 @@ impl RedDBRuntime {
         for candidate in candidates {
             let (collection, old_id, new_id, xid, previous_xmax) = &candidate;
             let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                super::index_store::MutationTestPhase::BeforeUndoTopology,
+            );
             let topology_guard = topology_lock.read();
             let mut guard = self.inner.pending_versioned_updates.write();
             let Some(pending) = guard.get_mut(&conn_id) else {
