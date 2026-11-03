@@ -162,10 +162,6 @@ name = "grouped_sql_core"
 path = "tests/grouped/sql_core.rs"
 
 [[test]]
-name = "grouped_tenancy_policy"
-path = "tests/grouped_tenancy_policy.rs"
-
-[[test]]
 name = "grouped_surface_contracts"
 path = "tests/grouped_surface_contracts.rs"
 

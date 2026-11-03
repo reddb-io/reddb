@@ -2190,12 +2190,18 @@ dependencies = [
  "getrandom 0.4.3",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-tonic",
  "reddb-io-types",
  "reddb-io-wire",
  "reqwest",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "ureq",
+ "webpki-roots",
+ "zstd",
 ]
 
 [[package]]
@@ -2355,6 +2361,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
  "zstd",
 ]
 
