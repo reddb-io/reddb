@@ -1964,7 +1964,8 @@ mod scoped_stats_memory_tests {
                     &runtime,
                     None,
                     Some(&visible),
-                );
+                )
+                .expect("document catalog");
                 assert_eq!(documents.len(), 1);
                 assert_eq!(
                     documents[0].get("document_count"),
@@ -1974,7 +1975,10 @@ mod scoped_stats_memory_tests {
                     documents[0].get("inferred_field_count"),
                     Some(&Value::UnsignedInteger(2))
                 );
-                (columns_snapshot(&runtime, Some(&visible)), stats)
+                (
+                    columns_snapshot(&runtime, Some(&visible)).expect("column catalog"),
+                    stats,
+                )
             })
         };
         let (before, baseline) = observe(0);
