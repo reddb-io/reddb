@@ -418,6 +418,82 @@ fn cold_collection_page_skips_payloads_before_its_requested_window() {
     assert!(page.next.is_none());
 }
 
+#[test]
+fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::storage::{EntityId, RowData, UnifiedEntity};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, cold) = cold_runtime();
+    let resident = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("resident runtime");
+    for runtime in [&resident, &cold] {
+        runtime
+            .execute_query("CREATE TABLE wire_rows (id INTEGER, payload TEXT)")
+            .expect("declare rows");
+    }
+    let store = cold.db().store();
+    let base = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        store.pager().expect("pager"),
+    )));
+    let resident_manager = resident
+        .db()
+        .store()
+        .get_collection("wire_rows")
+        .expect("resident collection");
+    for id in 1..=3 {
+        let mut fields = HashMap::from([
+            ("id".to_string(), Value::Integer(1_699_999_999_999_999_999)),
+            ("payload".to_string(), Value::text("x".repeat(32 * 1024))),
+        ]);
+        if id == 2 {
+            fields.insert("dynamic".to_string(), Value::Boolean(true));
+        }
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "wire_rows", id, vec![]);
+        entity.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        });
+        base.insert(
+            &entity.id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("cold record");
+        resident_manager
+            .restore_snapshot_entity(entity)
+            .expect("ordinary resident recovery");
+    }
+    store
+        .get_collection("wire_rows")
+        .expect("cold collection")
+        .install_backing(
+            Arc::new(PagedCollection::new(Arc::clone(&base))),
+            base.root_page_id(),
+            store.format_version(),
+            1024 * 1024,
+            3,
+        );
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for runtime in [resident, cold] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+        addresses.push(listener.local_addr().expect("fixture address"));
+        servers.push(RedDBServer::new(runtime).serve_in_background_on(listener));
+    }
+    for offset in [0, 1, 2, 3, usize::MAX] {
+        let path = format!("/collections/wire_rows/scan?offset={offset}&limit=2");
+        assert_eq!(
+            get(addresses[0], &path),
+            get(addresses[1], &path),
+            "native representation at offset {offset}"
+        );
+    }
+}
+
 fn ascii_noise(bytes: usize) -> String {
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut state = 0x1234_5678_u32;

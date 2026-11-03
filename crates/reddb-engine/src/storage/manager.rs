@@ -328,6 +328,7 @@ impl SegmentManager {
     ) {
         let schema = self.column_schema();
         for entity in entities {
+            self.restore_snapshot_row_layout(entity);
             if let super::entity::EntityData::Row(row) = &mut entity.data {
                 if row.named.is_none() && row.schema.is_none() {
                     row.schema = schema.clone();
