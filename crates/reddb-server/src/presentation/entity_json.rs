@@ -367,3 +367,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod historical_copy_qualification;

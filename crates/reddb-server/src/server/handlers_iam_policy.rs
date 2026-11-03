@@ -116,7 +116,7 @@ impl RedDBServer {
         HttpResponse {
             status: 200,
             content_type: "application/json",
-            body: body.into_bytes(),
+            body: body.into_bytes().into(),
             extra_headers: Vec::new(),
         }
     }
@@ -356,7 +356,7 @@ impl RedDBServer {
                 HttpResponse {
                     status: 204,
                     content_type: "application/json",
-                    body: Vec::new(),
+                    body: Vec::new().into(),
                     extra_headers: Vec::new(),
                 }
             }
@@ -428,7 +428,7 @@ impl RedDBServer {
                 HttpResponse {
                     status: 204,
                     content_type: "application/json",
-                    body: Vec::new(),
+                    body: Vec::new().into(),
                     extra_headers: Vec::new(),
                 }
             }
@@ -471,7 +471,7 @@ impl RedDBServer {
                 HttpResponse {
                     status: 204,
                     content_type: "application/json",
-                    body: Vec::new(),
+                    body: Vec::new().into(),
                     extra_headers: Vec::new(),
                 }
             }
@@ -540,7 +540,7 @@ impl RedDBServer {
                 HttpResponse {
                     status: 204,
                     content_type: "application/json",
-                    body: Vec::new(),
+                    body: Vec::new().into(),
                     extra_headers: Vec::new(),
                 }
             }

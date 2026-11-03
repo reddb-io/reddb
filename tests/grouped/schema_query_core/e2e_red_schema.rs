@@ -1494,12 +1494,13 @@ const MEMORY_BUDGET_SOURCES: [&str; 5] = [
 
 // Issue #1962 (ADR 0073 §2) — the pools that receive shares of that budget,
 // in the order `red.stats` reports them.
-const MEMORY_POOL_NAMES: [&str; 5] = [
+const MEMORY_POOL_NAMES: [&str; 6] = [
     "page_cache",
     "blob_cache_l1",
     "segment_arena",
     "index_memory",
     "wal_buffers",
+    "query_buffers",
 ];
 
 fn budget_metric(rt: &RedDBRuntime, metric: &str) -> Value {
@@ -1540,6 +1541,51 @@ fn pool_metric(rt: &RedDBRuntime, pool: &str, metric: &str) -> u64 {
         Some(Value::UnsignedInteger(bytes)) => *bytes,
         other => panic!("{pool}.{metric} should be unsigned, got {other:?}"),
     }
+}
+
+#[test]
+fn red_stats_reports_retained_request_result_ownership_through_clones() {
+    use reddb::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
+    cleanup_scope();
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("runtime");
+    exec(&runtime, "CREATE TABLE result_usage (payload TEXT)");
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO result_usage (payload) VALUES ($1)",
+            &[Value::text("x".repeat(8192))],
+        )
+        .expect("seed");
+    let prepared = PreparedRegistry::new();
+    let result = QueryRequestExecutor::new(&runtime, &prepared)
+        .execute(QueryRequest::sql(
+            "SELECT payload FROM result_usage",
+            Vec::new(),
+        ))
+        .expect("read");
+    let held_bytes = pool_metric(&runtime, "query_buffers", "used_bytes");
+    assert!(
+        held_bytes >= 8192,
+        "public stats include the held result payload"
+    );
+    let copy = result.clone();
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        held_bytes
+    );
+    drop(result);
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        held_bytes,
+        "sampling cannot erase a live clone's charge"
+    );
+    drop(copy);
+    assert_eq!(
+        pool_metric(&runtime, "query_buffers", "used_bytes"),
+        0,
+        "last owner returns the public pool usage to zero"
+    );
 }
 
 #[test]
@@ -2046,13 +2092,42 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
         .expect("collection exists")
         .force_seal()
         .expect("force seal");
-    exec(&rt, "DELETE FROM reclaim_gate WHERE id < 159");
+    // Undo ownership can exceed this tiny budget even while the live seed
+    // fits. A refusal must preserve every row and release its reservations;
+    // bounded statements then prepare the same reclamation workload.
+    // DELETE workspace can trigger consolidation before the following insert
+    // needs it; measure the complete pressure/reclamation workflow.
+    let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
+    if let Err(error) = rt.execute_query("DELETE FROM reclaim_gate WHERE id < 159") {
+        let message = error.to_string();
+        assert!(message.contains("bytes over budget"), "{message}");
+        for first_id in (0..160).step_by(8) {
+            let rows = rt
+                .execute_query(&format!(
+                    "SELECT id FROM reclaim_gate WHERE id >= {first_id} AND id < {} ORDER BY id",
+                    first_id + 8
+                ))
+                .expect("bounded read after refused atomic delete");
+            assert_eq!(rows.result.records.len(), 8);
+            for (record, id) in rows.result.records.iter().zip(first_id..first_id + 8) {
+                assert_eq!(record.get("id"), Some(&Value::Integer(id)));
+            }
+        }
+        for first_id in (0..159).step_by(8) {
+            exec(
+                &rt,
+                &format!(
+                    "DELETE FROM reclaim_gate WHERE id >= {first_id} AND id < {}",
+                    (first_id + 8).min(159)
+                ),
+            );
+        }
+    }
     assert!(
         rt.db().store().reclaimable_segment_bytes() > 0,
         "bulk-seeded sealed deletes should be reclaimable"
     );
 
-    let before_reclamations = budget_unsigned(&rt, "pressure_reclamations_triggered");
     // Rows plus their index must fit after reclamation, not just current usage.
     let pressure_rows = (10_000..10_048)
         .map(|id| format!("({id}, 'pressure')"))
@@ -2073,6 +2148,15 @@ fn pressure_reclamation_runs_consolidation_before_refusing_growth() {
     );
 
     assert!(budget_unsigned(&rt, "total_used_bytes") <= budget);
+
+    let rows = rt
+        .execute_query("SELECT id FROM reclaim_gate ORDER BY id")
+        .expect("reclamation preserves surviving and newly inserted rows");
+    assert_eq!(rows.result.records.len(), 49);
+    let expected_ids = std::iter::once(159).chain(10_000..10_048);
+    for (record, id) in rows.result.records.iter().zip(expected_ids) {
+        assert_eq!(record.get("id"), Some(&Value::Integer(id)));
+    }
 
     cleanup_scope();
 }

@@ -157,6 +157,8 @@ impl From<pager_io::PagerIoError> for PagerError {
 /// Host-independent pager configuration. File creation and ownership are host policy.
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and generation-bound resume counters.
+    pub disk_residency: bool,
     pub cache_size: usize,
     pub read_only: bool,
     pub verify_checksums: bool,
@@ -166,6 +168,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: 10_000,
             read_only: false,
             verify_checksums: true,
@@ -447,6 +450,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && !self.config.disk_residency
+            && !self.config.read_only
+        {
+            return Err(PagerError::InvalidDatabase(
+                "prepared disk-resident database requires a disk-resident writer".into(),
+            ));
+        }
         if header.version < PHASE3_DWB_ZONE_FILE_VERSION {
             return Err(PagerError::LegacyPagedStore {
                 path: self.path.clone(),
@@ -515,6 +526,13 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
+        }
+        if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && !self.config.disk_residency
+        {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency format requires a disk-resident writer".into(),
+            ));
         }
         if !(PHASE3_DWB_ZONE_FILE_VERSION..=reddb_file::PAGE_FILE_VERSION).contains(&version) {
             return Err(PagerError::InvalidDatabase(

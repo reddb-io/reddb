@@ -12,157 +12,176 @@ use super::*;
 use crate::application::entity::AppliedEntityMutation;
 use crate::application::ports::entity_row_fields_snapshot;
 
+#[derive(Default)]
+pub(super) struct DeleteBatchResult {
+    pub(super) affected: u64,
+    pub(super) changes: Vec<(EntityId, u64)>,
+    pub(super) pre_images: HashMap<u64, crate::json::Value>,
+    // Event snapshots and rollback images share admission until both owners end.
+    _reservations: Vec<std::rc::Rc<super::memory_admission::OwnedMemoryReservation>>,
+}
+
 impl RedDBRuntime {
-    /// Returns `(affected_count, lsns)`. For the txn (xmax-stamp) path,
-    /// `lsns` is empty because events fire at commit time.
+    /// Correlate CDC with actual physical identities, including skipped inputs.
+    /// Transactional tombstones defer their CDC until commit.
     pub(super) fn delete_entities_batch(
         &self,
         collection: &str,
         ids: &[EntityId],
         _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
-    ) -> RedDBResult<(u64, Vec<u64>)> {
+        filter: Option<&Filter>,
+        capture_pre_images: bool,
+    ) -> RedDBResult<DeleteBatchResult> {
         if ids.is_empty() {
-            return Ok((0, vec![]));
+            return Ok(DeleteBatchResult::default());
         }
 
         let store = self.db().store();
-        // Keep tombstone stamps and their WAL in one publication interval,
-        // including writers that start after checkpoint visibility is frozen.
-        let _publication = store.vault_publication_lock.lock();
         let Some(manager) = store.get_collection(collection) else {
-            return Ok((0, vec![]));
+            return Ok(DeleteBatchResult::default());
         };
 
+        let row_locks =
+            super::delete_publication::lock_delete_rows(self, collection, &manager, ids)?;
+        // Lock order remains topology, row RMW, then store publication.
+        let _publication = store.vault_publication_lock.lock();
         let active_xid = self.current_xid();
         let conn_id = crate::runtime::impl_core::current_connection_id();
-        let mut autocommit_xid = None;
-        let mut tombstoned_ids = Vec::new();
-        let mut tombstoned_entities = Vec::new();
+        let mut preimages = Vec::new();
+        let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         let mut physical_delete_ids = Vec::new();
-        let mut index_delete_fields: Vec<(EntityId, Vec<(String, Value)>)> = Vec::new();
-        let table_row_resolver =
-            crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::current_statement();
-        // Phase 3: versioned graph collections tombstone node/edge
-        // deletes (xmax stamp) instead of physically removing them, so
-        // `AS OF` time-travel can still resolve the pre-delete version.
-        // Non-versioned graph collections keep the legacy physical
-        // delete (no history). Row entities (Phase 1/2) always tombstone
-        // under universal MVCC and are unaffected by this flag.
-        //
-        // Vectors (Phase 3b): versioned vector deletes tombstone (xmax
-        // stamp) instead of physically dropping, so history is retained.
-        // The `VECTOR SEARCH` read path post-filters every candidate
-        // through the current-snapshot visibility gate (which hides
-        // `xmax != 0` even in autocommit), so a tombstoned versioned
-        // vector never reaches live search. Non-versioned vectors keep
-        // the legacy physical delete.
-        let versioned_collection = self.vcs_is_versioned(collection).unwrap_or(false);
+        let mut index_delete_fields = Vec::new();
+        let mut pre_images = HashMap::new();
+        let snapshot = super::impl_core::capture_current_snapshot().map(|mut context| {
+            // A waited autocommit writer must recheck what its predecessor
+            // committed, rather than overwriting an older snapshot's xmax.
+            if active_xid.is_none() {
+                context.snapshot = context.manager.fresh_read_snapshot();
+            }
+            context
+        });
+        let resolver = super::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(snapshot);
+        let versioned_collection = self.vcs_is_versioned(collection)?;
 
+        // Finish every fallible source read before allocating a writer or
+        // publishing a tombstone. A later read cannot turn into a partial delete.
         for &id in ids {
-            let Some(mut entity) = manager.get(id) else {
+            let Some(mut entity) = manager.try_get(id, usize::MAX)? else {
                 continue;
             };
-            let is_versioned_graph = versioned_collection
-                && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
-            let is_versioned_vector =
-                versioned_collection && matches!(entity.data, EntityData::Vector(_));
-            if matches!(entity.data, EntityData::Row(_))
-                || is_versioned_graph
-                || is_versioned_vector
+            if active_xid.is_none()
+                && matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
+                && resolver.resolve_candidate(&entity).is_none()
             {
-                let previous_xmax = entity.xmax;
-                if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. }) {
-                    if table_row_resolver.resolve_candidate(&entity).is_none() {
-                        continue;
-                    }
-                } else if is_versioned_vector {
-                    // Versioned vectors gate the delete on the statement
-                    // snapshot (not a crude `xmax != 0`) so a concurrent
-                    // delete whose snapshot predates a still-uncommitted
-                    // tombstone still targets the row, records its own
-                    // pending tombstone, and conflicts at commit
-                    // (first-committer-wins).
-                    if table_row_resolver.resolve_read_candidate(&entity).is_none() {
-                        continue;
-                    }
-                } else if entity.xmax != 0 {
+                let Some(current) =
+                    resolver.try_resolve_logical_id(&store, collection, entity.logical_id())?
+                else {
+                    continue;
+                };
+                entity = current;
+            }
+            let versioned_graph = versioned_collection
+                && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
+            let versioned_vector =
+                versioned_collection && matches!(entity.data, EntityData::Vector(_));
+            if matches!(entity.data, EntityData::Row(_)) || versioned_graph || versioned_vector {
+                let visible = if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
+                {
+                    resolver.resolve_candidate(&entity).is_some()
+                } else if versioned_vector {
+                    resolver.resolve_read_candidate(&entity).is_some()
+                } else {
+                    entity.xmax == 0
+                };
+                if !visible || !self.delete_candidate_matches_filter(collection, &entity, filter)? {
                     continue;
                 }
-
-                let xid = match active_xid {
-                    Some(xid) => xid,
-                    None => match autocommit_xid {
-                        Some(xid) => xid,
-                        None => {
-                            let mgr = self.snapshot_manager();
-                            let xid = mgr.begin();
-                            autocommit_xid = Some(xid);
-                            xid
-                        }
-                    },
-                };
-                let pre_delete_fields = entity_row_fields_snapshot(&entity);
-                entity.set_xmax(xid);
-                if manager.update(entity.clone()).is_ok() {
-                    #[cfg(test)]
-                    self.index_store_ref().mutation_test_hook(
-                        collection,
-                        super::index_store::MutationTestPhase::StoragePublished,
-                    );
-                    if active_xid.is_some() {
-                        self.record_pending_tombstone(conn_id, collection, id, xid, previous_xmax);
-                    } else if !pre_delete_fields.is_empty() {
-                        index_delete_fields.push((id, pre_delete_fields));
-                    }
-                    tombstoned_entities.push(entity);
-                    tombstoned_ids.push(id);
+                // Retained preimages, postimages and the resident replacement
+                // overlap through WAL publication. Keep their admission owned
+                // by the rollback journal, including a captured event callback.
+                let bytes = crate::storage::unified::memory_size::entity_bytes(&entity)
+                    .saturating_add(
+                        crate::storage::unified::memory_size::entity_zone_growth_bytes(&entity),
+                    )
+                    .saturating_mul(if capture_pre_images { 4 } else { 3 })
+                    as u64;
+                reservations.admit_growth(bytes, "delete")?;
+                if capture_pre_images {
+                    pre_images.insert(entity.id.raw(), super::mutation::entity_row_json(&entity));
                 }
+                preimages.push(entity);
             } else {
-                let pre_delete_fields = entity_row_fields_snapshot(&entity);
-                if !pre_delete_fields.is_empty() {
-                    index_delete_fields.push((id, pre_delete_fields));
+                if !self.delete_candidate_matches_filter(collection, &entity, filter)? {
+                    continue;
+                }
+                if capture_pre_images {
+                    reservations.admit_growth(
+                        crate::storage::unified::memory_size::entity_bytes(&entity) as u64,
+                        "delete event",
+                    )?;
+                    pre_images.insert(entity.id.raw(), super::mutation::entity_row_json(&entity));
+                }
+                let fields = entity_row_fields_snapshot(&entity);
+                if !fields.is_empty() {
+                    index_delete_fields.push((id, fields));
                 }
                 physical_delete_ids.push(id);
             }
         }
 
-        if let Some(xid) = autocommit_xid {
-            self.snapshot_manager().commit(xid);
-        }
-
-        let mut affected = tombstoned_ids.len() as u64;
-        let mut lsns = Vec::with_capacity(tombstoned_ids.len() + physical_delete_ids.len());
-        if active_xid.is_some() {
-            store
-                .persist_entities_to_pager(collection, &tombstoned_entities)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        } else {
-            store
-                .persist_entities_to_pager(collection, &tombstoned_entities)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-            for id in &tombstoned_ids {
-                if let Some((_, fields)) = index_delete_fields
-                    .iter()
-                    .find(|(indexed_id, _)| indexed_id == id)
-                {
-                    self.index_store_ref()
-                        .index_entity_delete(collection, *id, fields)
-                        .map_err(RedDBError::Internal)?;
+        let mut affected = preimages.len() as u64;
+        let mut changes = Vec::with_capacity(preimages.len() + physical_delete_ids.len());
+        let owned_reservations = reservations.into_owned();
+        if !preimages.is_empty() {
+            let mut publication = super::delete_publication::DeletePublication::new(
+                self,
+                collection,
+                Arc::clone(&manager),
+                preimages,
+                owned_reservations.clone(),
+                active_xid,
+                row_locks,
+            );
+            let persistence = (|| -> RedDBResult<Vec<UnifiedEntity>> {
+                let entities = publication.apply()?;
+                // Never dirty tree pages before this batch has durable WAL.
+                // Checkpoint and WAL replay merge the resident replacements.
+                store
+                    .persist_entities_to_pager_wal_only(collection, &entities)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                Ok(entities)
+            })();
+            let entities = match persistence {
+                Ok(entities) => entities,
+                Err(error) => {
+                    publication.abort()?;
+                    return Err(error);
                 }
-                store.context_index().remove_entity(*id);
-                let lsn = self.cdc_emit(
-                    crate::replication::cdc::ChangeOperation::Delete,
-                    collection,
-                    id.raw(),
-                    "entity",
-                );
-                lsns.push(lsn);
+            };
+            let tombstoned_ids: Vec<_> = entities.into_iter().map(|entity| entity.id).collect();
+            if active_xid.is_some() {
+                publication.finish_transaction(conn_id);
+            } else {
+                // With event capture, visibility and index removal wait for
+                // the outer WAL append. Failure there restores the preimages.
+                publication.finish_autocommit()?;
+                for id in tombstoned_ids {
+                    changes.push((
+                        id,
+                        self.cdc_emit(
+                            crate::replication::cdc::ChangeOperation::Delete,
+                            collection,
+                            id.raw(),
+                            "entity",
+                        ),
+                    ));
+                }
             }
         }
 
         let deleted_ids = store
             .delete_batch(collection, &physical_delete_ids)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
         #[cfg(test)]
         if !deleted_ids.is_empty() {
             self.index_store_ref().mutation_test_hook(
@@ -181,16 +200,41 @@ impl RedDBRuntime {
                     .map_err(RedDBError::Internal)?;
             }
             store.context_index().remove_entity(*id);
-            let lsn = self.cdc_emit(
-                crate::replication::cdc::ChangeOperation::Delete,
-                collection,
-                id.raw(),
-                "entity",
-            );
-            lsns.push(lsn);
+            changes.push((
+                *id,
+                self.cdc_emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    id.raw(),
+                    "entity",
+                ),
+            ));
         }
 
-        Ok((affected, lsns))
+        Ok(DeleteBatchResult {
+            affected,
+            changes,
+            pre_images,
+            _reservations: owned_reservations,
+        })
+    }
+
+    fn delete_candidate_matches_filter(
+        &self,
+        collection: &str,
+        entity: &UnifiedEntity,
+        filter: Option<&Filter>,
+    ) -> RedDBResult<bool> {
+        let Some(filter) = filter else {
+            return Ok(true);
+        };
+        crate::runtime::query_exec::evaluate_entity_filter_result_with_db(
+            Some(self.db().as_ref()),
+            entity,
+            filter,
+            collection,
+            collection,
+        )
     }
 
     /// Flushes context-index updates and CDC for each applied mutation.

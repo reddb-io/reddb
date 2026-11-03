@@ -28,6 +28,12 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 # Surface the slowest tests so the e2e shards can be rebalanced over time.
 final-status-level = "slow"
 
+# Fixed-work storage campaigns reserve the runner while measuring their finite
+# I/O workload. Keep the ordinary timeout and every operation/assertion.
+[[profile.default.overrides]]
+filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc)'
+threads-required = "num-cpus"
+
 # Building a 200-table persistent catalog is intentionally CPU- and I/O-heavy:
 # it needs ~114s of a whole machine, against the 120s ceiling above, so under
 # any parallel load it is killed as a timeout. The `ci` profile already grants
@@ -59,17 +65,29 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 
 # The full checkpoint/recovery crash matrix repeatedly starts child processes
 # and fsyncs real files. The shared runner reached its final cases at the 120s
-# cutoff. Preserve every case and assertion with exclusive, bounded execution.
+# cutoff. Both resident and cold variants run the same complete matrix.
+# Preserve every case and assertion with exclusive, bounded execution.
 [[profile.default.overrides]]
-filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# CI profile: same hard per-test timeout, plus a single retry to absorb
-# genuinely flaky integration tests, and a JUnit report the runner can ingest.
+# CI profile: fail on the first execution so intermittent regressions stay
+# visible. Keep the hard per-test timeout and the runner's JUnit report.
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 2 }
-retries = 1
+retries = 0
+
+# These storage correctness regressions must fail on their first execution.
+# Keep their ordinary timeouts; retries must not turn a race into a green run.
+[[profile.ci.overrides]]
+filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc)'
+threads-required = "num-cpus"
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'binary(=bounded_write_progress) | test(runtime::mvcc_maintenance::tests::) | test(storage::unified::store::mvcc_reclaim::tests::)'
+retries = 0
 
 # Building a 200-table persistent catalog is intentionally CPU- and I/O-heavy.
 # Give this one overflow-chain regression exclusive access to the public runner
@@ -87,7 +105,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [[profile.ci.overrides]]
-filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix)'
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
 retries = 0

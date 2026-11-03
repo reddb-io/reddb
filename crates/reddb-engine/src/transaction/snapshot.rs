@@ -222,6 +222,11 @@ impl SnapshotManager {
     /// concurrent writer.
     pub fn begin(&self) -> Xid {
         let mut state = self.state.write();
+        // A real writer advances beyond the reserved autocommit range. Retire
+        // its unused slots so later inserts cannot receive older identities
+        // and pin fresh statements' vacuum horizons behind committed deletes.
+        let mut pool = self.autocommit_pool.lock();
+        pool.next = pool.end;
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
         state.active.insert(xid);
         self.visibility_revision.fetch_add(1, Ordering::Release);
@@ -838,6 +843,26 @@ mod tests {
     }
 
     #[test]
+    fn mixed_allocations_preserve_transaction_order_and_reclaim_horizon() {
+        let manager = Arc::new(SnapshotManager::new());
+        let old = manager.allocate_committed_xid();
+        let deletion = manager.begin();
+        manager.commit(deletion);
+        let next_insert = manager.allocate_committed_xid();
+        assert!(
+            next_insert > deletion,
+            "a later insert cannot reuse an older reserved xid"
+        );
+        let (snapshot, _retention) = manager.fresh_retained_snapshot();
+        assert!(!snapshot.sees(old, deletion));
+        assert!(snapshot.sees(next_insert, XID_NONE));
+        assert!(
+            manager.oldest_required_xid().expect("retained statement") > deletion,
+            "unused allocator slots cannot keep already visible deletes resident"
+        );
+    }
+
+    #[test]
     fn allocate_committed_xid_skips_active_set() {
         let m = SnapshotManager::new();
         let _x = m.allocate_committed_xid();
@@ -903,14 +928,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_exclude_unissued_pool_slots_even_below_reader_xid() {
+    fn snapshots_hide_autocommit_writers_allocated_after_begin() {
         let manager = SnapshotManager::new();
         let old = manager.allocate_committed_xid();
         let reader = manager.begin();
         let transaction_snapshot = manager.snapshot(reader);
         let statement_snapshot = manager.fresh_read_snapshot();
         let future = manager.allocate_committed_xid();
-        assert!(future < reader, "fixture must exercise the reserved range");
+        assert!(future > reader, "begin retires the older reserved range");
         for snapshot in [transaction_snapshot, statement_snapshot] {
             assert!(snapshot.sees(old, XID_NONE));
             assert!(!snapshot.sees(future, XID_NONE));
@@ -918,6 +943,27 @@ mod tests {
         }
         assert!(manager.fresh_read_snapshot().sees(future, XID_NONE));
         manager.rollback(reader);
+    }
+
+    #[test]
+    fn retiring_unused_slots_preserves_an_older_readers_history() {
+        let manager = Arc::new(SnapshotManager::new());
+        let old = manager.allocate_committed_xid();
+        let (snapshot, retention) = manager.fresh_retained_snapshot();
+        let deletion = manager.begin();
+        manager.commit(deletion);
+        let next_insert = manager.allocate_committed_xid();
+        let (_current, _current_retention) = manager.fresh_retained_snapshot();
+        assert!(snapshot.sees(old, deletion));
+        assert!(!snapshot.sees(next_insert, XID_NONE));
+        assert!(manager.oldest_required_xid().expect("old reader retained") <= deletion);
+        drop(retention);
+        assert!(
+            manager
+                .oldest_required_xid()
+                .expect("current reader retained")
+                > deletion
+        );
     }
 
     #[test]

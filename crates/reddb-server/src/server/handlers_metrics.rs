@@ -275,7 +275,7 @@ impl RedDBServer {
         match self.ingest_prometheus_remote_write(query, headers, &body) {
             Ok(()) => HttpResponse {
                 status: 204,
-                body: Vec::new(),
+                body: Vec::new().into(),
                 content_type: "text/plain",
                 extra_headers: Vec::new(),
             },

@@ -112,3 +112,45 @@ pub fn resolve_logical_id(
         .get_table_row_by_logical_id(collection, logical_id)
         .filter(|entity| visible(entity))
 }
+
+/// Fallible version access streams candidates instead of retaining a history Vec.
+/// Hosts supply only versions of the requested collection/logical identity.
+pub trait FallibleTableRowVersionStore {
+    type Error;
+
+    fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: crate::storage::entity::EntityId,
+    ) -> Result<Option<crate::storage::entity::UnifiedEntity>, Self::Error>;
+
+    fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: crate::storage::entity::EntityId,
+        visit: impl FnMut(&crate::storage::entity::UnifiedEntity) -> bool,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Retain one selected version; a later read failure invalidates the selection.
+pub fn try_resolve_logical_id<S: FallibleTableRowVersionStore>(
+    store: &S,
+    collection: &str,
+    logical_id: crate::storage::entity::EntityId,
+    select_versions: bool,
+    mut visible: impl FnMut(&crate::storage::entity::UnifiedEntity) -> bool,
+) -> Result<Option<crate::storage::entity::UnifiedEntity>, S::Error> {
+    if !select_versions {
+        return store
+            .try_get_table_row_by_logical_id(collection, logical_id)
+            .map(|entity| entity.filter(|entity| visible(entity)));
+    }
+    let mut selected: Option<crate::storage::entity::UnifiedEntity> = None;
+    store.try_for_each_table_row_version(collection, logical_id, |entity| {
+        if visible(entity) && selected.as_ref().is_none_or(|old| entity.xmin >= old.xmin) {
+            selected = Some(entity.clone());
+        }
+        true
+    })?;
+    Ok(selected)
+}

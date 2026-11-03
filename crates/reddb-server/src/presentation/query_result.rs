@@ -93,46 +93,72 @@ pub(crate) fn proto_reply(
     entity_types: &Option<Vec<String>>,
     capabilities: &Option<Vec<String>>,
 ) -> QueryReply {
-    let RuntimeQueryResult {
-        mode,
-        statement,
-        engine,
-        result,
-        affected_rows,
-        ..
-    } = result;
-    let mode = super::query_result_json::query_mode_name(mode).to_string();
+    proto_reply_view(std::borrow::Cow::Owned(result), entity_types, capabilities)
+}
+
+pub(crate) fn owned_proto_reply(
+    result: crate::runtime::OwnedQueryResult,
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+) -> QueryReply {
+    result.render(|value| proto_reply_view(value, entity_types, capabilities))
+}
+
+fn proto_reply_view(
+    value: std::borrow::Cow<'_, RuntimeQueryResult>,
+    entity_types: &Option<Vec<String>>,
+    capabilities: &Option<Vec<String>>,
+) -> QueryReply {
+    use std::borrow::Cow;
+    let mode = super::query_result_json::query_mode_name(value.mode).to_string();
+    let statement = value.statement;
+    let engine = value.engine;
+    let affected_rows = value.affected_rows;
 
     if statement == "ask" {
+        let result_json = ask_json(&value.result.records)
+            .unwrap_or_else(empty_ask_json)
+            .to_string_compact();
+        let columns = match value {
+            Cow::Owned(value) => value.result.columns,
+            Cow::Borrowed(value) => value.result.columns.clone(),
+        };
         return QueryReply {
             ok: true,
             mode,
             statement: statement.to_string(),
             engine: engine.to_string(),
-            columns: result.columns,
+            columns,
             record_count: 1,
-            result_json: ask_json(&result.records)
-                .unwrap_or_else(empty_ask_json)
-                .to_string_compact(),
+            result_json,
             affected_rows,
         };
     }
 
-    // Fast path: use pre-serialized JSON if available (move, no clone).
-    if let Some(pre_serialized_json) = result.pre_serialized_json {
-        let count = result.stats.rows_scanned;
+    // Unleased owned results preserve the string-move fast path. Admitted or
+    // shared results stay borrowed; their encoded output needs its own owner.
+    if value.result.pre_serialized_json.is_some() {
+        let count = value.result.stats.rows_scanned;
+        let (columns, pre_serialized_json) = match value {
+            Cow::Owned(value) => (value.result.columns, value.result.pre_serialized_json),
+            Cow::Borrowed(value) => (
+                value.result.columns.clone(),
+                value.result.pre_serialized_json.clone(),
+            ),
+        };
         return QueryReply {
             ok: true,
             mode,
             statement: statement.to_string(),
             engine: engine.to_string(),
-            columns: result.columns,
+            columns,
             record_count: count,
-            result_json: pre_serialized_json,
+            result_json: pre_serialized_json.expect("pre-serialized result was checked"),
             affected_rows,
         };
     }
 
+    let result = &value.result;
     let records =
         super::query_view::filter_query_records(&result.records, entity_types, capabilities);
     QueryReply {
@@ -142,7 +168,7 @@ pub(crate) fn proto_reply(
         engine: engine.to_string(),
         columns: result.columns.clone(),
         record_count: records.len() as u64,
-        result_json: flat_result_json_string(&result, &records, entity_types, capabilities),
+        result_json: flat_result_json_string(result, &records, entity_types, capabilities),
         affected_rows,
     }
 }

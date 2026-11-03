@@ -345,7 +345,7 @@ mod tests {
         let server = RedDBServer::new(runtime.clone());
 
         let response = server.handle_admin_failover_promote(promote_request());
-        let body = String::from_utf8(response.body).expect("response body");
+        let body = String::from_utf8(response.body.to_vec()).expect("response body");
 
         assert_eq!(response.status, 200, "{body}");
         assert!(body.contains(r#""timeline":2"#), "{body}");

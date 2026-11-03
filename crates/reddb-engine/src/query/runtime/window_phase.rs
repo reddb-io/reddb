@@ -11,7 +11,8 @@ use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 use super::projection::{projection_name, projection_uses_secret};
 
 /// Inputs must already have passed parser/AST admission and row visibility checks.
-/// Expression evaluation keeps the native typed-then-legacy, db-less fallback policy.
+/// Storage-backed hosts override the fallible evaluator; existing optional hosts
+/// retain their typed/legacy expression policy through the default adapter.
 pub trait WindowHost {
     type Error;
     fn guard_materialization(&self, rows: usize) -> Result<(), Self::Error>;
@@ -20,6 +21,13 @@ pub trait WindowHost {
         expression: &reddb_rql::ast::Expr,
         source: &UnifiedRecord,
     ) -> Option<Value>;
+    fn try_evaluate_expression(
+        &self,
+        expression: &reddb_rql::ast::Expr,
+        source: &UnifiedRecord,
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(self.evaluate_expression(expression, source))
+    }
     fn secret_query_output(&self, value: Value) -> Result<Value, Self::Error>;
     fn query_error(&self, message: String) -> Self::Error;
 }
@@ -89,46 +97,46 @@ fn eval_projection_constant<H: WindowHost>(
     depth: u32,
     proj: &Projection,
     record: &UnifiedRecord,
-) -> Option<Value> {
+) -> Result<Option<Value>, H::Error> {
     if depth > reddb_rql::limits::JSON_LITERAL_MAX_DEPTH {
-        return None;
+        return Ok(None);
     }
-    // Direct literal — `expr_to_projection` lowers `Expr::Literal` to
-    // `Projection::Column("LIT:<rendered>")`.
     if let Projection::Column(s) = proj {
         if let Some(lit) = s.strip_prefix("LIT:") {
             if lit.is_empty() {
-                return Some(Value::Null);
+                return Ok(Some(Value::Null));
             }
             if let Ok(v) = lit.parse::<i64>() {
-                return Some(Value::Integer(v));
+                return Ok(Some(Value::Integer(v)));
             }
             if let Ok(v) = lit.parse::<f64>() {
-                return Some(Value::Float(v));
+                return Ok(Some(Value::Float(v)));
             }
-            return Some(Value::text(lit.to_string()));
+            return Ok(Some(Value::text(lit.to_string())));
         }
     }
-    // Unary minus is lowered to `SUB(LIT:0, <operand>)` by
-    // `expr_to_projection`. The evaluator does not know "SUB" as a
-    // function — recognise the pattern here so `LAG(ts, 1, -1)`
-    // surfaces the right default instead of a typed
-    // UnknownFunction → Null.
+    // Preserve the lowered unary-minus form used by LAG/LEAD defaults.
     if let Projection::Function(name, sub_args) = proj {
         let base = name.split(':').next().unwrap_or(name);
         if base.eq_ignore_ascii_case("SUB") && sub_args.len() == 2 {
-            let lhs = eval_projection_constant(host, depth + 1, &sub_args[0], record)?;
-            let rhs = eval_projection_constant(host, depth + 1, &sub_args[1], record)?;
+            let Some(lhs) = eval_projection_constant(host, depth + 1, &sub_args[0], record)? else {
+                return Ok(None);
+            };
+            let Some(rhs) = eval_projection_constant(host, depth + 1, &sub_args[1], record)? else {
+                return Ok(None);
+            };
             if let (Value::Integer(a), Value::Integer(b)) = (&lhs, &rhs) {
-                return a.checked_sub(*b).map(Value::Integer);
+                return Ok(a.checked_sub(*b).map(Value::Integer));
             }
             if let (Some(a), Some(b)) = (value_as_f64(&lhs), value_as_f64(&rhs)) {
-                return Some(Value::Float(a - b));
+                return Ok(Some(Value::Float(a - b)));
             }
         }
     }
-    let (expr, _) = projection_to_expr(proj)?;
-    host.evaluate_expression(&expr, record)
+    let Some((expr, _)) = projection_to_expr(proj) else {
+        return Ok(None);
+    };
+    host.try_evaluate_expression(&expr, record)
 }
 
 // Bound projection recursion before the lowering routine walks it. Embedded Expr /
@@ -175,14 +183,16 @@ fn compute_window_column<H: WindowHost>(
                 .partition_by
                 .iter()
                 .map(|expr| {
-                    value_to_canonical_key(
-                        &host.evaluate_expression(expr, rec).unwrap_or(Value::Null),
+                    Ok(value_to_canonical_key(
+                        &host
+                            .try_evaluate_expression(expr, rec)?
+                            .unwrap_or(Value::Null),
                     )
-                    .unwrap_or(CanonicalKey::Null)
+                    .unwrap_or(CanonicalKey::Null))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, H::Error>>()
         })
-        .collect();
+        .collect::<Result<Vec<_>, H::Error>>()?;
 
     let order_keys: Vec<Vec<CanonicalKey>> = records
         .iter()
@@ -191,16 +201,16 @@ fn compute_window_column<H: WindowHost>(
                 .order_by
                 .iter()
                 .map(|item| {
-                    value_to_canonical_key(
+                    Ok(value_to_canonical_key(
                         &host
-                            .evaluate_expression(&item.expr, rec)
+                            .try_evaluate_expression(&item.expr, rec)?
                             .unwrap_or(Value::Null),
                     )
-                    .unwrap_or(CanonicalKey::Null)
+                    .unwrap_or(CanonicalKey::Null))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, H::Error>>()
         })
-        .collect();
+        .collect::<Result<Vec<_>, H::Error>>()?;
 
     // Group row indices by partition key, preserving first-seen order
     // so functions without a partition_by still see deterministic
@@ -254,8 +264,11 @@ fn compute_window_column<H: WindowHost>(
                     })?;
                     records
                         .iter()
-                        .map(|rec| host.evaluate_expression(&expr, rec).unwrap_or(Value::Null))
-                        .collect()
+                        .map(|rec| {
+                            host.try_evaluate_expression(&expr, rec)
+                                .map(|value| value.unwrap_or(Value::Null))
+                        })
+                        .collect::<Result<Vec<_>, H::Error>>()?
                 }
             }
         } else {
@@ -277,7 +290,7 @@ fn compute_window_column<H: WindowHost>(
             })?;
 
             let offset = if let Some(arg) = args.get(1) {
-                match eval_projection_constant(host, 0, arg, &records[0]) {
+                match eval_projection_constant(host, 0, arg, &records[0])? {
                     Some(Value::Integer(v) | Value::BigInt(v)) if v < 0 => {
                         return Err(host
                             .query_error(format!("{upper} offset must be non-negative, got {v}")));
@@ -295,17 +308,18 @@ fn compute_window_column<H: WindowHost>(
                 1
             };
 
-            let default = args
-                .get(2)
-                .and_then(|arg| eval_projection_constant(host, 0, arg, &records[0]));
+            let default = match args.get(2) {
+                Some(arg) => eval_projection_constant(host, 0, arg, &records[0])?,
+                None => None,
+            };
 
             let src_values: Vec<Value> = records
                 .iter()
                 .map(|rec| {
-                    host.evaluate_expression(&src_expr, rec)
-                        .unwrap_or(Value::Null)
+                    host.try_evaluate_expression(&src_expr, rec)
+                        .map(|value| value.unwrap_or(Value::Null))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, H::Error>>()?;
 
             (offset, default, src_values)
         } else {

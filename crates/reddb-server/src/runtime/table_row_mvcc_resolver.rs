@@ -72,6 +72,25 @@ impl TableRowMvccReadResolver {
         )
     }
 
+    pub(crate) fn try_resolve_logical_id(
+        &self,
+        store: &UnifiedStore,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> crate::RedDBResult<Option<UnifiedEntity>> {
+        let mut selected = reddb_engine::transaction::read::try_resolve_logical_id(
+            store,
+            collection,
+            logical_id,
+            self.needs_version_selection(),
+            |entity| self.resolve_candidate(entity).is_some(),
+        )?;
+        if let Some(manager) = store.get_collection(collection) {
+            manager.restore_owned_row_schemas(selected.iter_mut());
+        }
+        Ok(selected)
+    }
+
     fn needs_version_selection(&self) -> bool {
         match &self.snapshot {
             TableRowReadSnapshot::CurrentThread => {
@@ -108,6 +127,27 @@ impl reddb_engine::transaction::read::TableRowVersionStore for UnifiedStore {
         logical_id: EntityId,
     ) -> Option<UnifiedEntity> {
         UnifiedStore::get_table_row_by_logical_id(self, collection, logical_id)
+    }
+}
+
+impl reddb_engine::transaction::read::FallibleTableRowVersionStore for UnifiedStore {
+    type Error = crate::storage::StoreError;
+
+    fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, Self::Error> {
+        UnifiedStore::try_get_table_row_by_logical_id(self, collection, logical_id)
+    }
+
+    fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+        visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), Self::Error> {
+        UnifiedStore::try_for_each_table_row_version(self, collection, logical_id, visit)
     }
 }
 

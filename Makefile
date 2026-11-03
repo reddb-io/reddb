@@ -128,7 +128,7 @@ test-storage-apocalypse:
 	cargo test --locked -p reddb-io-server --lib storage::unified::store::commit:: -- --test-threads=1 --nocapture
 	cargo test --locked -p reddb-io-server --lib inline_ -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib storage::engine:: -- --test-threads=1
-	cargo test --locked -p reddb-io-server --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test single_file_collection_model_recovery --test btree_delete_stack --test btree_mixed_width_split --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update --test vacuum_snapshot_horizon --no-fail-fast -- --test-threads=1
+	cargo test --locked -p reddb-io-server --test cold_control_events --test offline_compaction --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test single_file_collection_model_recovery --test btree_delete_stack --test btree_mixed_width_split --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update --test vacuum_snapshot_horizon --no-fail-fast -- --test-threads=1
 
 .PHONY: test-memory-regressions
 test-memory-regressions:

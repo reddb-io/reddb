@@ -9,7 +9,7 @@ use reddb_rql::{
     ast::{Expr, FieldRef, Filter, OrderByClause, TableQuery},
     sql_lowering::effective_table_projections,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 #[derive(Default)]
 pub(super) struct ResultHost {
@@ -17,6 +17,8 @@ pub(super) struct ResultHost {
     group_limit: Option<usize>,
     group_counts: RefCell<Vec<usize>>,
     deny_output: bool,
+    having_failure_at: Option<usize>,
+    having_calls: Cell<usize>,
 }
 impl AggregateHost for ResultHost {
     fn compare_values(&self, left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
@@ -43,6 +45,15 @@ impl AggregateResultHost for ResultHost {
         let mut query = super::super::record_filters::table_query("SELECT * FROM orders");
         query.filter = Some(filter.clone());
         super::super::record_filters::matches_where(record, &query, None).expect("fixture HAVING")
+    }
+    fn try_having_matches(&self, filter: &Filter, record: &UnifiedRecord) -> Result<bool, String> {
+        let calls = self.having_calls.get() + 1;
+        self.having_calls.set(calls);
+        if self.having_failure_at == Some(calls) {
+            self.events.borrow_mut().push("having_error");
+            return Err("having read failed".into());
+        }
+        Ok(self.having_matches(filter, record))
     }
     fn sort_records(&self, records: &mut Vec<UnifiedRecord>, clauses: &[OrderByClause]) {
         self.events.borrow_mut().push("sort");
@@ -134,6 +145,45 @@ pub(super) fn grouped_columns_and_hidden_values() {
         &*host.events.borrow(),
         &["guard", "having", "having", "having", "sort"]
     );
+}
+
+pub(super) fn having_failure_rejects_the_complete_result_and_allows_retry() {
+    let inputs: &[(&str, &[i64])] = &[("red", &[1]), ("blue", &[2])];
+    let grouped = "SELECT tenant, COUNT(*) AS n FROM orders GROUP BY tenant HAVING COUNT(*) > 0 ORDER BY tenant";
+    for (label, inputs, failure_at) in [
+        ("first grouped read", inputs, 1),
+        ("after accepted prefix", inputs, 2),
+        ("empty ungrouped result", &[][..], 1),
+    ] {
+        let host = ResultHost {
+            having_failure_at: Some(failure_at),
+            ..Default::default()
+        };
+        // The native AST admits HAVING on an empty ungrouped result. The SQL
+        // parser currently only accepts HAVING after GROUP BY, so install that
+        // admitted predicate without relying on unsupported SQL grammar.
+        let mut query = query(grouped);
+        if inputs.is_empty() {
+            let having = query.having_expr.take();
+            query = self::query("SELECT COUNT(*) AS n FROM orders ORDER BY COUNT(*)");
+            query.having_expr = having;
+        }
+        assert_eq!(
+            run_query(&host, &query, inputs, None).expect_err("HAVING must reject partial output"),
+            "having read failed",
+            "{label}"
+        );
+        assert_eq!(
+            host.having_calls.get(),
+            failure_at,
+            "stop at first failed group"
+        );
+        assert!(!host.events.borrow().contains(&"sort"));
+        assert!(!host.events.borrow().contains(&"secret"));
+        let result = run_query(&ResultHost::default(), &query, inputs, None)
+            .expect("retry after HAVING read recovery");
+        assert_eq!(result.records.len(), if inputs.is_empty() { 0 } else { 2 });
+    }
 }
 
 pub(super) fn empty_input_semantics() {

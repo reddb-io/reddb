@@ -39,6 +39,7 @@ fn config() -> ServerCommandConfig {
         wire_tls_key: None,
         pg_bind_addr: None,
         create_if_missing: true,
+        bounded_disk_residency: false,
         read_only: false,
         role: "standalone".to_string(),
         primary_addr: None,

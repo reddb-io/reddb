@@ -77,7 +77,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 flate2 = "1"
 tar = "0.4"
 roaring = "0.11"
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 # crossbeam-queue::SegQueue powers the lock-free WAL append path
 # (Roadmap #2 / issue #157). Writers atomically reserve an LSN via
 # next_lsn.fetch_add and push their encoded bytes onto the queue —

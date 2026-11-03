@@ -529,11 +529,13 @@ impl ResidentStore {
             manager.register_row_id(*row_id);
         }
 
+        // Resolve backing I/O before mutating indexes or deciding insert vs update.
+        let existing = manager.try_get(entity.id, usize::MAX)?.is_some();
         self.context_index.remove_entity(entity.id);
         let _ = self.unindex_cross_refs(entity.id);
         self.remove_from_graph_label_index(collection, entity.id);
 
-        if manager.get(entity.id).is_some() {
+        if existing {
             manager
                 .update_with_metadata(entity.clone(), metadata.as_ref())
                 .map_err(StoreError::from)?;

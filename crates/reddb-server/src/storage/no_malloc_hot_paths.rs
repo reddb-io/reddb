@@ -34,7 +34,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        COUNTER.with(|counter| counter.borrow_mut().record_dealloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_dealloc(layout.size()));
         unsafe { System.dealloc(ptr, layout) }
     }
 
@@ -45,7 +45,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         COUNTER.with(|counter| counter.borrow_mut().record_alloc(new_size));
-        unsafe { System.realloc(ptr, layout, new_size) }
+        let result = unsafe { System.realloc(ptr, layout, new_size) };
+        if !result.is_null() {
+            // A successful resize replaces the old requested allocation even
+            // when the allocator can grow it in place. Keep dealloc counts
+            // unchanged; released bytes let scoped tests measure retention.
+            COUNTER.with(|counter| counter.borrow_mut().record_released_bytes(layout.size()));
+        }
+        result
     }
 }
 
@@ -53,6 +60,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
 pub(crate) struct AllocationCount {
     pub(crate) allocs: usize,
     pub(crate) allocated_bytes: usize,
+    pub(crate) largest_allocation_bytes: usize,
+    pub(crate) peak_live_bytes: usize,
+    pub(crate) deallocated_bytes: usize,
     deallocs: usize,
 }
 
@@ -60,6 +70,10 @@ struct AllocationCounter {
     enabled: Cell<bool>,
     allocs: Cell<usize>,
     allocated_bytes: Cell<usize>,
+    largest_allocation_bytes: Cell<usize>,
+    live_bytes: Cell<usize>,
+    peak_live_bytes: Cell<usize>,
+    deallocated_bytes: Cell<usize>,
     deallocs: Cell<usize>,
 }
 
@@ -69,6 +83,10 @@ impl AllocationCounter {
             enabled: Cell::new(false),
             allocs: Cell::new(0),
             allocated_bytes: Cell::new(0),
+            largest_allocation_bytes: Cell::new(0),
+            live_bytes: Cell::new(0),
+            peak_live_bytes: Cell::new(0),
+            deallocated_bytes: Cell::new(0),
             deallocs: Cell::new(0),
         }
     }
@@ -76,14 +94,30 @@ impl AllocationCounter {
     fn record_alloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.allocs.set(self.allocs.get() + 1);
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_add(bytes));
+            self.peak_live_bytes
+                .set(self.peak_live_bytes.get().max(self.live_bytes.get()));
+            self.largest_allocation_bytes
+                .set(self.largest_allocation_bytes.get().max(bytes));
             self.allocated_bytes
                 .set(self.allocated_bytes.get().saturating_add(bytes));
         }
     }
 
-    fn record_dealloc(&mut self) {
+    fn record_dealloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.deallocs.set(self.deallocs.get() + 1);
+            self.record_released_bytes(bytes);
+        }
+    }
+
+    fn record_released_bytes(&mut self, bytes: usize) {
+        if self.enabled.get() {
+            self.deallocated_bytes
+                .set(self.deallocated_bytes.get().saturating_add(bytes));
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_sub(bytes));
         }
     }
 
@@ -94,6 +128,10 @@ impl AllocationCounter {
         );
         self.allocs.set(0);
         self.allocated_bytes.set(0);
+        self.largest_allocation_bytes.set(0);
+        self.live_bytes.set(0);
+        self.peak_live_bytes.set(0);
+        self.deallocated_bytes.set(0);
         self.deallocs.set(0);
     }
 
@@ -101,6 +139,9 @@ impl AllocationCounter {
         let count = AllocationCount {
             allocs: self.allocs.get(),
             allocated_bytes: self.allocated_bytes.get(),
+            largest_allocation_bytes: self.largest_allocation_bytes.get(),
+            peak_live_bytes: self.peak_live_bytes.get(),
+            deallocated_bytes: self.deallocated_bytes.get(),
             deallocs: self.deallocs.get(),
         };
         self.enabled.set(false);
@@ -254,6 +295,21 @@ fn counting_allocator_measures_a_known_allocating_fixture() {
         count.deallocs, 1,
         "dropping the Box inside the measured closure should register exactly one deallocation"
     );
+    assert_eq!(count.allocated_bytes, count.deallocated_bytes);
+    assert_eq!(count.peak_live_bytes, 8);
+}
+
+#[test]
+fn counting_allocator_accounts_for_released_bytes_during_resize() {
+    let ((), count) = measure_allocations(|| {
+        let mut value = Vec::<u8>::with_capacity(8);
+        value.extend_from_slice(&[0; 8]);
+        value.reserve_exact(24);
+        assert_eq!(value.capacity(), 32);
+    });
+    assert_eq!(count.allocated_bytes, 40);
+    assert_eq!(count.peak_live_bytes, 40);
+    assert_eq!(count.deallocated_bytes, 40);
 }
 
 #[test]

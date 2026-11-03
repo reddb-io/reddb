@@ -122,6 +122,7 @@ pub struct ServerCommandConfig {
     /// this port via the v3 protocol. Defaults to None (disabled).
     pub pg_bind_addr: Option<String>,
     pub create_if_missing: bool,
+    pub bounded_disk_residency: bool,
     pub read_only: bool,
     pub role: String,
     pub primary_addr: Option<String>,
@@ -297,6 +298,7 @@ impl ServerCommandConfig {
 
         options.mode = StorageMode::Persistent;
         options.create_if_missing = self.create_if_missing;
+        options.bounded_disk_residency = self.bounded_disk_residency;
         // PLAN.md Phase 4.3 — read_only resolution priority:
         //   1. CLI flag (`--readonly`) — explicit operator intent.
         //   2. `RED_READONLY=true` env — orchestrator override.
@@ -402,8 +404,13 @@ impl ServerCommandConfig {
             && path_absent
             && embedded_single_file
         {
-            options.storage_profile.packaging =
-                crate::storage::StoragePackaging::OperationalDirectory;
+            // Explicit disk residency already creates a native pager. Keep its
+            // single-file selection instead of routing it through the legacy
+            // snapshot factory's operational-directory bootstrap workaround.
+            if !options.bounded_disk_residency {
+                options.storage_profile.packaging =
+                    crate::storage::StoragePackaging::OperationalDirectory;
+            }
             options.create_if_missing = true;
             tracing::info!(
                 target: "reddb::bootstrap",
@@ -1799,6 +1806,13 @@ fn build_runtime_with_bootstrap(
         &runtime,
     );
     let telemetry_guard = crate::telemetry::init(merged);
+    if db_options.bounded_disk_residency {
+        tracing::info!(
+            target: "reddb::storage::residency",
+            resident_memory_bytes_max = runtime.db().store().config().resident_memory_bytes_max,
+            "bounded disk residency enabled"
+        );
+    }
 
     let no_auth = no_auth_active(&db_options);
     let auth_store =
@@ -1836,7 +1850,8 @@ fn build_runtime_with_bootstrap(
     let bootstrap_already_completed = runtime
         .db()
         .store()
-        .get_config(BOOTSTRAP_COMPLETED_KEY)
+        .try_get_config(BOOTSTRAP_COMPLETED_KEY)
+        .map_err(|error| error.to_string())?
         .is_some();
     let disposition = crate::cluster::authorize_cluster_bootstrap(
         db_options.storage_profile.deploy_profile,
@@ -1986,7 +2001,11 @@ fn apply_preset_from_config(
 ) -> Result<(), String> {
     let store = runtime.db().store();
 
-    if store.get_config(BOOTSTRAP_COMPLETED_KEY).is_some() {
+    if store
+        .try_get_config(BOOTSTRAP_COMPLETED_KEY)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
         crate::cli::bootstrap_manifest::rehydrate_manifest_registry(
             runtime,
             &runtime.config_registry(),
@@ -2010,7 +2029,7 @@ fn apply_preset_from_config(
             &runtime.config_registry(),
             &path,
         )?;
-        persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id));
+        persist_bootstrap_state(runtime, "manifest", Some(&first_admin_id))?;
         tracing::info!("bootstrap manifest applied");
         return Ok(());
     }
@@ -2051,7 +2070,7 @@ fn apply_preset_from_config(
         write_bootstrap_certificate(bootstrap, cert)?;
     }
 
-    persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref());
+    persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref())?;
     tracing::info!(preset = %preset, "bootstrap preset applied");
     Ok(())
 }
@@ -2397,7 +2416,11 @@ fn regulated_registry_entry(
     }
 }
 
-fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id: Option<&str>) {
+fn persist_bootstrap_state(
+    runtime: &RedDBRuntime,
+    preset: &str,
+    first_admin_id: Option<&str>,
+) -> Result<(), String> {
     let store = runtime.db().store();
     let mut tree = crate::serde_json::Map::new();
     tree.insert(
@@ -2415,7 +2438,10 @@ fn persist_bootstrap_state(runtime: &RedDBRuntime, preset: &str, first_admin_id:
         );
     }
     let json = crate::serde_json::Value::Object(tree);
-    store.set_config_tree("", &json);
+    store
+        .try_set_config_tree("", &json)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Read `red.logging.*` keys from the persistent config store and
@@ -2857,6 +2883,15 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    #[test]
+    fn server_options_preserve_explicit_disk_residency() {
+        let _guard = no_auth_env_lock().lock().unwrap();
+        let mut config = no_auth_test_config(true);
+        assert!(!config.to_db_options().unwrap().bounded_disk_residency);
+        config.bounded_disk_residency = true;
+        assert!(config.to_db_options().unwrap().bounded_disk_residency);
+    }
+
     fn no_auth_test_config(no_auth: bool) -> ServerCommandConfig {
         ServerCommandConfig {
             path: None,
@@ -2881,6 +2916,7 @@ mod tests {
             wire_tls_key: None,
             pg_bind_addr: None,
             create_if_missing: true,
+            bounded_disk_residency: false,
             read_only: false,
             role: "standalone".to_string(),
             primary_addr: None,

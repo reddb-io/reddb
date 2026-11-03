@@ -28,8 +28,9 @@ mod vector;
 // not just super-path).
 pub(crate) use filter_compiled::{CompiledEntityFilter, CompiledEntityFilterDecision};
 pub(crate) use helpers::{
-    evaluate_entity_filter, evaluate_entity_filter_with_db, extract_entity_id_from_filter,
-    extract_select_column_names, extract_zone_predicates, try_hash_eq_lookup,
+    evaluate_entity_filter, evaluate_entity_filter_result_with_db, evaluate_entity_filter_with_db,
+    extract_entity_id_from_filter, extract_select_column_names, extract_zone_predicates,
+    try_hash_eq_lookup,
 };
 pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(crate) use indexed_scan::try_sorted_index_lookup;
@@ -420,11 +421,18 @@ fn project_scalar_via_evaluator(
                     .unwrap_or(Value::Null)
                 }
                 Err(err) => {
-                    return Err(RedDBError::Query(if sensitive {
-                        "secret expression evaluation failed".into()
-                    } else {
-                        err.to_string()
-                    }))
+                    return Err(RedDBError::Query(
+                        if sensitive
+                            && !matches!(
+                                &err,
+                                crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                            )
+                        {
+                            "secret expression evaluation failed".into()
+                        } else {
+                            err.to_string()
+                        },
+                    ))
                 }
             }
         };

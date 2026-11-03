@@ -160,9 +160,23 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
+        if manager.has_backing() {
+            return self.sparse_cold_append_tree(collection, manager, tree, previous, current);
+        }
         if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
+        self.apply_sparse_checkpoint_tree(collection, manager, tree, previous, current)
+    }
+
+    pub(super) fn apply_sparse_checkpoint_tree(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        tree: &Arc<BTree>,
+        previous: &CheckpointVersion,
+        current: &mut CheckpointVersion,
+    ) -> Result<Option<Arc<BTree>>, StoreError> {
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
             return Ok(None);
         }
@@ -196,16 +210,20 @@ impl UnifiedStore {
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
-                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && current.excluded_xids.contains(&entity.xmin))
+                    || (matches!(
+                        entity.data,
+                        EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                    ) && current.excluded_xids.contains(&entity.xmin))
                 {
                     defer = true;
                     return None;
                 }
                 let raw =
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
-                let projected = if matches!(entity.data, EntityData::Row(_))
-                    && current.excluded_xids.contains(&entity.xmax)
+                let projected = if matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                ) && current.excluded_xids.contains(&entity.xmax)
                 {
                     defer = true;
                     let mut normalized = entity.clone();
@@ -267,6 +285,7 @@ impl UnifiedStore {
         if manager.checkpoint_revisions() != current.segments {
             return Ok(None);
         }
+        current.has_unprojected_rows = !deferred.is_empty();
         current.deferred_rows = Some(Arc::new(deferred));
         // Validate every source before changing the published tree. Afterwards
         // materialize only bounded batches from those exact durable images;

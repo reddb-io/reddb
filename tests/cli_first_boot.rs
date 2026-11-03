@@ -536,6 +536,15 @@ fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() {
+    password_bootstrap_restart_contract(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_disk_residency_server_authenticates_and_recovers_after_restart() {
+    password_bootstrap_restart_contract(true).await;
+}
+
+async fn password_bootstrap_restart_contract(bounded_disk_residency: bool) {
     use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
     use reddb_client::ValueOut;
 
@@ -566,6 +575,9 @@ async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() 
             "--wire-bind",
             &wire,
         ];
+        if bounded_disk_residency {
+            args.push("--bounded-disk-residency");
+        }
         if phase == 0 {
             args.extend_from_slice(&[
                 "--bootstrap-preset",
@@ -581,6 +593,7 @@ async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() 
             &directory.path().join(format!("phase-{phase}.stderr")),
             &[
                 ("REDDB_AUTH", "true"),
+                ("REDDB_MEMORY_BUDGET", "64MiB"),
                 ("REDDB_VAULT_PASSPHRASE", credential),
                 ("REDDB_VAULT_PASSPHRASE_FILE", ""),
             ],
@@ -637,6 +650,30 @@ async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() 
                 .map(|(_, value)| value),
             Some(&ValueOut::String(expected.into()))
         );
+        if bounded_disk_residency {
+            if phase == 0 {
+                client
+                    .query("CREATE TABLE durable_rows (id INT)")
+                    .await
+                    .expect("create disk-backed table");
+                client
+                    .query("INSERT INTO durable_rows (id) VALUES (42)")
+                    .await
+                    .expect("acknowledged write");
+            }
+            let rows = client
+                .query("SELECT id FROM durable_rows")
+                .await
+                .expect("read after authentication");
+            assert_eq!(rows.rows.len(), 1);
+            assert_eq!(
+                rows.rows[0]
+                    .iter()
+                    .find(|(name, _)| name == "id")
+                    .map(|(_, value)| value),
+                Some(&ValueOut::Integer(42))
+            );
+        }
         client.close().await.expect("close server client");
     }
 }

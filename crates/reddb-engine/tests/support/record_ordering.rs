@@ -7,7 +7,9 @@ use reddb_engine::query::{
         ordering::{
             compare_runtime_optional_values, compare_runtime_order_with_host,
             sort_or_top_k_records_with_host, sort_records_by_order_by_with_host,
-            top_k_records_by_order_by_with_host, OrderingHost,
+            top_k_records_by_order_by_with_host, try_compare_runtime_order_with_host,
+            try_sort_or_top_k_records_with_host, try_sort_records_by_order_by_with_host,
+            try_top_k_records_by_order_by_with_host, FallibleOrderingHost, OrderingHost,
         },
         value_functions::{evaluate_value_function_with_host, ValueFunctionHost},
     },
@@ -38,6 +40,10 @@ pub const CASES: &[(&str, fn())] = &[
         "record_order_unordered_and_nan_edges",
         unordered_and_nan_edges,
     ),
+    (
+        "record_order_fallible_keys_and_retry",
+        fallible_keys_and_retry,
+    ),
 ];
 
 struct Host<'a> {
@@ -45,6 +51,7 @@ struct Host<'a> {
     evaluations: Cell<usize>,
     identities: Cell<usize>,
     topk_disabled: bool,
+    failure_at: Cell<Option<usize>>,
 }
 
 impl<'a> Host<'a> {
@@ -54,6 +61,7 @@ impl<'a> Host<'a> {
             evaluations: Cell::new(0),
             identities: Cell::new(0),
             topk_disabled: false,
+            failure_at: Cell::new(None),
         }
     }
 }
@@ -82,6 +90,39 @@ impl OrderingHost for Host<'_> {
     }
     fn topk_disabled(&self) -> bool {
         self.topk_disabled
+    }
+}
+
+impl FallibleOrderingHost for Host<'_> {
+    type Error = &'static str;
+    fn try_resolve_field(
+        &self,
+        record: &UnifiedRecord,
+        field: &FieldRef,
+        table_name: Option<&str>,
+        table_alias: Option<&str>,
+    ) -> Result<Option<Value>, Self::Error> {
+        self.evaluations.set(self.evaluations.get() + 1);
+        if self.failure_at.get() == Some(self.evaluations.get()) {
+            return Err("sort key read failed");
+        }
+        Ok(resolve_runtime_field(
+            record,
+            field,
+            table_name,
+            table_alias,
+        ))
+    }
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Option<Value>, Self::Error> {
+        if self.failure_at.get() == Some(self.evaluations.get() + 1) {
+            self.evaluations.set(self.evaluations.get() + 1);
+            return Err("sort key read failed");
+        }
+        Ok(self.evaluate_expression(expression, record))
     }
 }
 
@@ -544,4 +585,98 @@ impl ValueFunctionHost for RecordExpressionHost<'_> {
     fn fallback_function(&self, _: &str, _: &[Value]) -> Option<Value> {
         panic!("fixture does not admit native scalar effects")
     }
+}
+
+fn fallible_keys_and_retry() {
+    for suffix in [
+        "ORDER BY o.quantity + 1 LIMIT 2 OFFSET 1",
+        "ORDER BY o.quantity LIMIT 2 OFFSET 1",
+    ] {
+        fallible_keys_and_retry_for_query(&query(suffix));
+    }
+}
+
+fn fallible_keys_and_retry_for_query(query: &TableQuery) {
+    let rows: Vec<_> = (0..12)
+        .rev()
+        .map(|id| row(id, Value::Integer(id as i64)))
+        .collect();
+    for strategy in 0..3 {
+        for failure_at in [1, 3, 12] {
+            let host = Host::new(query, None);
+            host.failure_at.set(Some(failure_at));
+            let mut selected = rows.clone();
+            let run = |records: &mut Vec<UnifiedRecord>| match strategy {
+                0 => try_sort_records_by_order_by_with_host(
+                    &host,
+                    records,
+                    &query.order_by,
+                    Some("orders"),
+                    Some("o"),
+                ),
+                1 => try_top_k_records_by_order_by_with_host(
+                    &host,
+                    records,
+                    &query.order_by,
+                    2,
+                    Some("orders"),
+                    Some("o"),
+                ),
+                _ => try_sort_or_top_k_records_with_host(
+                    &host,
+                    records,
+                    &query.order_by,
+                    query.offset,
+                    query.limit,
+                    Some("orders"),
+                    Some("o"),
+                ),
+            };
+            assert_eq!(run(&mut selected), Err("sort key read failed"));
+            assert_eq!(
+                ids(&selected),
+                ids(&rows),
+                "failed keys must not reorder or truncate input"
+            );
+            assert_eq!(host.evaluations.get(), failure_at);
+            host.failure_at.set(None);
+            host.evaluations.set(0);
+            run(&mut selected).expect("retry after key read recovery");
+            let count = match strategy {
+                0 => 12,
+                1 => 2,
+                _ => 3,
+            };
+            assert_eq!(ids(&selected), (0..count).collect::<Vec<_>>());
+            assert_eq!(host.evaluations.get(), 12, "extract keys once per row");
+        }
+    }
+    let host = Host::new(query, None);
+    host.failure_at.set(Some(2));
+    assert_eq!(
+        try_compare_runtime_order_with_host(
+            &host,
+            &rows[0],
+            &rows[1],
+            &query.order_by,
+            Some("orders"),
+            Some("o")
+        ),
+        Err("sort key read failed")
+    );
+    assert_eq!(host.evaluations.get(), 2);
+    host.evaluations.set(0);
+    host.failure_at.set(Some(1));
+    let mut selected = rows.clone();
+    try_top_k_records_by_order_by_with_host(
+        &host,
+        &mut selected,
+        &query.order_by,
+        0,
+        Some("orders"),
+        Some("o"),
+    )
+    .expect("zero result needs no key reads");
+    assert!(selected.is_empty());
+    assert_eq!(host.evaluations.get(), 0);
 }

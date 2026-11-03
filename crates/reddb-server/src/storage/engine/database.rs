@@ -214,6 +214,7 @@ impl Database {
 
         // Create pager config
         let pager_config = PagerConfig {
+            disk_residency: false,
             cache_size: config.cache_size,
             read_only: config.read_only,
             create: config.create,

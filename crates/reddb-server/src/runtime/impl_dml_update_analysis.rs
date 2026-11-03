@@ -85,11 +85,11 @@ pub(super) fn field_ref_matches_update_column(
     }
 }
 
-pub(super) fn resolve_update_entity_by_logical_id(
+pub(super) fn try_resolve_update_entity_by_logical_id(
     runtime: &RedDBRuntime,
     table: &str,
     logical_id: EntityId,
-) -> Option<UnifiedEntity> {
+) -> RedDBResult<Option<UnifiedEntity>> {
     let store = runtime.inner.db.store();
 
     // Read-modify-write pre-image resolution.
@@ -122,15 +122,17 @@ pub(super) fn resolve_update_entity_by_logical_id(
         };
         let resolver =
             crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver::captured(Some(ctx));
-        if let Some(entity) = resolver.resolve_logical_id(&store, table, logical_id) {
-            return Some(entity);
+        if let Some(entity) = resolver.try_resolve_logical_id(&store, table, logical_id)? {
+            return Ok(Some(entity));
         }
-    } else if let Some(entity) = store.get_table_row_by_logical_id(table, logical_id) {
-        return Some(entity);
+    } else if let Some(entity) = store.try_get_table_row_by_logical_id(table, logical_id)? {
+        return Ok(Some(entity));
     }
     // Fallback for non-table-row entities (graph nodes/edges, etc.) where
     // entity_id == logical_id and the MVCC table-row resolver doesn't apply.
-    store.get(table, logical_id)
+    Ok(store
+        .try_get(table, logical_id, usize::MAX)?
+        .filter(|entity| !matches!(entity.kind, EntityKind::TableRow { .. })))
 }
 
 pub(super) fn update_cdc_item_kind(
@@ -189,43 +191,67 @@ pub(super) fn ordered_update_target_ids(
     entity_ids: &[EntityId],
     order_by: &[OrderByClause],
     limit: Option<usize>,
-) -> Vec<EntityId> {
-    let mut entities: Vec<UnifiedEntity> =
-        manager.get_many(entity_ids).into_iter().flatten().collect();
-    match limit {
-        // Top-k path only when a LIMIT bounds the output.
-        Some(limit) => {
-            partial_top_k(&mut entities, limit, |left, right| {
-                compare_update_order(left, right, order_by)
-            });
-        }
-        None => entities.sort_by(|left, right| compare_update_order(left, right, order_by)),
+) -> RedDBResult<Vec<EntityId>> {
+    #[derive(Clone)]
+    struct Target {
+        id: EntityId,
+        logical_id: EntityId,
+        key_offset: usize,
     }
-    entities.into_iter().map(|entity| entity.id).collect()
-}
-
-pub(super) fn compare_update_order(
-    left: &UnifiedEntity,
-    right: &UnifiedEntity,
-    order_by: &[OrderByClause],
-) -> Ordering {
-    for clause in order_by {
-        let left_value = update_order_value(left, &clause.field);
-        let right_value = update_order_value(right, &clause.field);
-        let ordering = compare_update_order_values(
-            left_value.as_ref(),
-            right_value.as_ref(),
-            clause.nulls_first,
+    let key_count = entity_ids
+        .len()
+        .checked_mul(order_by.len())
+        .ok_or_else(|| {
+            RedDBError::Query("UPDATE ordering key count exceeds addressable memory".into())
+        })?;
+    let mut keys = Vec::with_capacity(key_count);
+    let mut targets = Vec::with_capacity(entity_ids.len());
+    manager.try_for_each_id(entity_ids, usize::MAX, |_, entity| {
+        // Borrowed resident visitors retain the compact positional row. Restore
+        // names on one temporary row, as the previous owned batch read did.
+        let mut restored;
+        let entity = match &entity.data {
+            EntityData::Row(row) if row.named.is_none() && row.schema.is_none() => {
+                restored = entity.clone();
+                manager.restore_owned_row_schemas(std::iter::once(&mut restored));
+                &restored
+            }
+            _ => entity,
+        };
+        targets.push(Target {
+            id: entity.id,
+            logical_id: entity.logical_id(),
+            key_offset: keys.len(),
+        });
+        keys.extend(
+            order_by
+                .iter()
+                .map(|clause| update_order_value(entity, &clause.field)),
         );
-        if ordering != Ordering::Equal {
-            return if clause.ascending {
-                ordering
-            } else {
-                ordering.reverse()
-            };
+        true
+    })?;
+    let compare = |left: &Target, right: &Target| {
+        for (position, clause) in order_by.iter().enumerate() {
+            let ordering = compare_update_order_values(
+                keys[left.key_offset + position].as_ref(),
+                keys[right.key_offset + position].as_ref(),
+                clause.nulls_first,
+            );
+            if ordering != Ordering::Equal {
+                return if clause.ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                };
+            }
         }
+        left.logical_id.cmp(&right.logical_id)
+    };
+    match limit {
+        Some(limit) => partial_top_k(&mut targets, limit, compare),
+        None => targets.sort_by(compare),
     }
-    left.logical_id().raw().cmp(&right.logical_id().raw())
+    Ok(targets.into_iter().map(|target| target.id).collect())
 }
 
 pub(super) fn compare_update_order_values(
@@ -285,6 +311,53 @@ pub(super) fn update_order_value(entity: &UnifiedEntity, field: &FieldRef) -> Op
         EntityData::Node(_) | EntityData::Edge(_) => runtime_any_record_from_entity_ref(entity)
             .and_then(|record| record.get(column).cloned()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_targets_restore_missing_positional_names_before_extracting_keys() {
+        let manager = Arc::new(crate::storage::SegmentManager::new("ordered_rows"));
+        manager.set_column_schema_if_empty(vec!["id".into(), "payload".into()]);
+        for (physical, value) in [(1, 2), (2, 1), (3, 0)] {
+            let row = UnifiedEntity::table_row(
+                EntityId::new(physical),
+                "ordered_rows",
+                physical,
+                vec![Value::Integer(value), Value::text("kept")],
+            );
+            manager.insert(row).expect("positional row");
+            assert!(manager
+                .get_with(EntityId::new(physical), |entity| {
+                    let row = entity.data.as_row().expect("row");
+                    row.named.is_none() && row.schema.is_none()
+                })
+                .expect("raw positional fixture"));
+        }
+        let ids = [EntityId::new(1), EntityId::new(2), EntityId::new(3)];
+        for (direction, expected) in [("ASC", [3, 2]), ("DESC", [1, 2])] {
+            let sql = format!("UPDATE ordered_rows SET id = id ORDER BY id {direction} LIMIT 2");
+            let QueryExpr::Update(query) = reddb_rql::parse(&sql).expect("ordered update").query
+            else {
+                panic!("expected UPDATE");
+            };
+            for limit in [1, 2] {
+                let selected =
+                    ordered_update_target_ids(&manager, &ids, &query.order_by, Some(limit))
+                        .expect("extract positional keys");
+                assert_eq!(
+                    selected,
+                    expected[..limit]
+                        .iter()
+                        .copied()
+                        .map(EntityId::new)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }
 

@@ -470,7 +470,7 @@ async fn read_edge_request(
 
 /// Build a hyper response from a buffered [`HttpResponse`], applying the
 /// single CORS choke point plus any guard-validated `extra_headers`.
-fn buffered_response_to_axum(response: HttpResponse) -> Response {
+pub(super) fn buffered_response_to_axum(response: HttpResponse) -> Response {
     let mut builder = Response::builder()
         .status(response.status)
         .header(http::header::CONTENT_TYPE, response.content_type);

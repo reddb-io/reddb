@@ -14,6 +14,7 @@ pub(crate) fn status_text(status: u16) -> &'static str {
         500 => "Internal Server Error",
         501 => "Not Implemented",
         503 => "Service Unavailable",
+        507 => "Insufficient Storage",
         _ => "OK",
     }
 }
@@ -113,7 +114,7 @@ impl HttpRequest {
 
 pub(crate) struct HttpResponse {
     pub(crate) status: u16,
-    pub(crate) body: Vec<u8>,
+    pub(crate) body: bytes::Bytes,
     pub(crate) content_type: &'static str,
     /// Extra response headers beyond the hard-coded
     /// Content-Type / Content-Length / Connection trio. Values are
@@ -135,7 +136,7 @@ pub(crate) struct HttpResponse {
 ///
 /// This is the **single source of truth** for the CORS header set. Every
 /// response serializer emits exactly these pairs so the posture cannot
-/// drift per-path: [`HttpResponse::to_http_bytes`] (buffered responses),
+/// drift per-path: [`HttpResponse::write_to`] (buffered responses),
 /// [`super::output_stream::write_chunked_response_header`] (streaming
 /// NDJSON), and the async axum edge ([`super::axum_edge`], buffered
 /// responses). Streaming/SSE heads carry these inline and the axum edge
@@ -207,36 +208,56 @@ fn cors_allow_origin() -> Option<String> {
 }
 
 impl HttpResponse {
+    #[cfg(test)]
     pub(crate) fn to_http_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
+        self.write_to(&mut bytes)
+            .expect("writing to a Vec cannot fail");
+        bytes
+    }
+
+    /// Write framing and the owned body directly, without duplicating the body
+    /// into an unaccounted transport allocation.
+    pub(crate) fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
         // Permissive CORS rides on every response through this single
         // serialization choke point (see `cors_header_pairs`) so browser
         // clients can call the HTTP API cross-origin without a reverse
         // proxy. The OPTIONS preflight is answered in `routing::route`
         // before auth.
-        let header = format!(
+        let mut header = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
             self.status,
             status_text(self.status),
             self.content_type,
             self.body.len()
-        );
-        bytes.extend_from_slice(header.as_bytes());
+        )
+        .into_bytes();
         for (name, value) in cors_header_pairs() {
-            bytes.extend_from_slice(name.as_bytes());
-            bytes.extend_from_slice(b": ");
-            bytes.extend_from_slice(value.as_bytes());
-            bytes.extend_from_slice(b"\r\n");
+            header.extend_from_slice(name.as_bytes());
+            header.extend_from_slice(b": ");
+            header.extend_from_slice(value.as_bytes());
+            header.extend_from_slice(b"\r\n");
         }
         for (name, value) in &self.extra_headers {
-            bytes.extend_from_slice(name.as_bytes());
-            bytes.extend_from_slice(b": ");
-            bytes.extend_from_slice(value.as_bytes());
-            bytes.extend_from_slice(b"\r\n");
+            header.extend_from_slice(name.as_bytes());
+            header.extend_from_slice(b": ");
+            header.extend_from_slice(value.as_bytes());
+            header.extend_from_slice(b"\r\n");
         }
-        bytes.extend_from_slice(b"\r\n");
-        bytes.extend_from_slice(&self.body);
-        bytes
+        header.extend_from_slice(b"\r\n");
+        // TCP can send both slices in one syscall. Handle writers that accept
+        // only a prefix without copying the body or losing its budget owner.
+        let mut buffers = [io::IoSlice::new(&header), io::IoSlice::new(&self.body)];
+        let mut pending = &mut buffers[..];
+        while !pending.is_empty() {
+            match writer.write_vectored(pending) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(written) => io::IoSlice::advance_slices(&mut pending, written),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Attach a guard-validated header to this response.
@@ -311,7 +332,7 @@ pub(crate) fn json_error_code(
 pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
     HttpResponse {
         status,
-        body: value.to_string_compact().into_bytes(),
+        body: value.to_string_compact().into_bytes().into(),
         content_type: "application/json",
         extra_headers: Vec::new(),
     }
@@ -498,6 +519,58 @@ mod transport_tests {
         );
         assert_eq!(resp.status, 404);
         assert!(String::from_utf8_lossy(&resp.body).contains("not found"));
+    }
+
+    #[test]
+    fn response_write_handles_short_vectored_writes_without_copying_the_body() {
+        struct PartialWriter {
+            value: Vec<u8>,
+            interrupt: bool,
+            body_pointer: *const u8,
+            saw_owned_body: bool,
+        }
+        impl Write for PartialWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                panic!("response must use the vectored writer");
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+            fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+                self.saw_owned_body |= buffers
+                    .iter()
+                    .any(|buffer| buffer.as_ptr() == self.body_pointer);
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                let mut written = 0;
+                for buffer in buffers {
+                    let length = buffer.len().min(7 - written);
+                    self.value.extend_from_slice(&buffer[..length]);
+                    written += length;
+                    if written == 7 {
+                        break;
+                    }
+                }
+                Ok(written)
+            }
+        }
+        let response = json_ok("retained payload");
+        let mut writer = PartialWriter {
+            value: Vec::new(),
+            interrupt: true,
+            body_pointer: response.body.as_ptr(),
+            saw_owned_body: false,
+        };
+        response
+            .write_to(&mut writer)
+            .expect("interrupted and short writes are retried");
+        assert!(
+            writer.saw_owned_body,
+            "transport borrows the admitted body allocation"
+        );
+        assert_eq!(writer.value, response.to_http_bytes());
+        assert!(writer.value.ends_with(&response.body));
     }
 
     #[test]

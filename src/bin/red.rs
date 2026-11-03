@@ -1721,6 +1721,10 @@ fn main() {
             std::process::exit(run_migrate_pager_zone_command(&result.flags));
         }
 
+        "compact" => {
+            std::process::exit(run_compact_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -2148,10 +2152,8 @@ fn main() {
                 for entity in entities {
                     let mut row_obj = reddb::json::Map::new();
                     if let reddb::storage::EntityData::Row(ref row) = entity.data {
-                        if let Some(named) = &row.named {
-                            for (k, v) in named {
-                                row_obj.insert(k.clone(), v.to_json());
-                            }
+                        for (name, value) in row.iter_fields() {
+                            row_obj.insert(name.to_string(), value.to_json());
                         }
                     }
                     let mut wrapper = reddb::json::Map::new();
@@ -3198,6 +3200,41 @@ fn run_migrate_from_redis_command(flags: &HashMap<String, FlagValue>) -> i32 {
     0
 }
 
+fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::compact_paged(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("compact", &report.machine_json());
+            } else {
+                println!("Compacted {} -> {} bytes; verified {} records across {} trees. Source preserved.",
+                    report.source_bytes, report.destination_bytes, report.records, report.trees);
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("compact", &error.to_string());
+            } else {
+                eprintln!("compact: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -3827,6 +3864,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
+        ("compact".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),
@@ -4069,6 +4107,7 @@ fn build_server_config(
         wire_tls_key,
         pg_bind_addr,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
+        bounded_disk_residency: flag_bool(flags, "bounded-disk-residency"),
         read_only: flag_bool(flags, "read-only"),
         role,
         primary_addr: flag_string(flags, "primary-addr")
@@ -6919,6 +6958,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 .expect("telemetry config")
                 .log_file_disabled
         );
+    }
+
+    #[test]
+    fn parser_threads_explicit_disk_residency_into_server_config() {
+        let _lock = env_lock().lock().unwrap();
+        for enabled in [false, true] {
+            let mut args = vec!["server".to_string()];
+            if enabled {
+                args.push("--bounded-disk-residency".to_string());
+            }
+            let tokens = cli::token::tokenize(&args);
+            let parser =
+                cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
+            let result = parser.parse(&tokens);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(
+                build_server_config(&result.flags, None)
+                    .unwrap()
+                    .bounded_disk_residency,
+                enabled
+            );
+        }
     }
 
     #[test]

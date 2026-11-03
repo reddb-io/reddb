@@ -974,7 +974,7 @@ impl RedDBServer {
             return HttpResponse {
                 status: 200,
                 content_type: "application/x-ndjson",
-                body: body.into_bytes(),
+                body: body.into_bytes().into(),
                 extra_headers: Vec::new(),
             };
         }
@@ -1109,7 +1109,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_metrics();
-        let body = String::from_utf8(response.body).expect("utf8 metrics");
+        let body = String::from_utf8(response.body.to_vec()).expect("utf8 metrics");
 
         for needle in [
             "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l1\"}",
@@ -1146,7 +1146,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_metrics();
-        let body = String::from_utf8(response.body).expect("utf8 metrics");
+        let body = String::from_utf8(response.body.to_vec()).expect("utf8 metrics");
 
         for needle in [
             "# TYPE reddb_replication_full_resync_total counter",

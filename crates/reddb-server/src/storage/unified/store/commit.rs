@@ -991,8 +991,23 @@ impl StoreCommitCoordinator {
             .pager
             .as_ref()
             .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
+        let format_version = if !store.secondary_index_specs.read().is_empty() {
+            reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+        } else if store.config.resident_memory_bytes_max.is_some() {
+            reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        } else {
+            reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION
+        };
+        // Dropping the final secondary tree never permits an old writer to
+        // reopen the file; its retired pages may still be reader-pinned.
+        let format_version = format_version.max(
+            pager
+                .header()
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .version,
+        );
         pager
-            .fence_file_format_version(reddb_file::file_format::PAGE_CHECKPOINT_UNDO_FILE_VERSION)
+            .fence_file_format_version(format_version)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let coordinator = Arc::clone(
             store
@@ -1144,6 +1159,12 @@ impl StoreCommitCoordinator {
             store.remember_checkpoint_rows(vec![action], Default::default());
         }
 
+        if applied && store.config.resident_memory_bytes_max.is_some() {
+            // The immutable base plus committed WAL overlay is authoritative.
+            // Keep the WAL until a paced checkpoint publishes the replacement;
+            // boot must not copy every cold payload for a few replayed rows.
+            return Ok(());
+        }
         if applied {
             // Opening is exclusive: no client can mutate published trees
             // while replay constructs replacement generations.
@@ -1349,6 +1370,25 @@ impl UnifiedStore {
         if actions.actions.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        if self
+            .test_require_deferred_publication_fence
+            .swap(false, Ordering::AcqRel)
+            && !self.vault_publication_lock.is_owned_by_current_thread()
+        {
+            return Err(StoreError::Io(io::Error::other(
+                "deferred WAL missing checkpoint publication fence",
+            )));
+        }
+        #[cfg(test)]
+        if self
+            .test_fail_deferred_wal_append
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Io(io::Error::other(
+                "injected deferred WAL append failure",
+            )));
+        }
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions.actions);
         }
@@ -1411,7 +1451,10 @@ impl UnifiedStore {
         &self,
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
-        self.finish_paged_write_for_projection(actions, false)
+        self.finish_paged_write_for_projection(
+            actions,
+            self.config.resident_memory_bytes_max.is_some(),
+        )
     }
 
     pub(crate) fn finish_paged_write_for_projection(
@@ -1714,7 +1757,11 @@ impl UnifiedStore {
         self.resident
             .swap_collection_state(name, new_manager, prepared);
 
-        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
+        {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
             let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
                 .iter()
@@ -1800,7 +1847,11 @@ impl UnifiedStore {
             &self.config.manager_config,
         )?;
 
-        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees) {
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
+        {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -1834,7 +1885,10 @@ impl UnifiedStore {
         update_btrees: bool,
     ) -> Result<(), StoreError> {
         self.resident.apply_replayed_delete(collection, id, || {
-            if self.pager.is_some() && update_btrees {
+            if self.pager.is_some()
+                && update_btrees
+                && self.config.resident_memory_bytes_max.is_none()
+            {
                 let btree_indices = self.btree_indices.read();
                 if let Some(btree) = btree_indices.get(collection) {
                     let root_before = btree.root_page_id();

@@ -16,8 +16,9 @@
 //!
 //! 1. `value.len() > MAX_VALUE_SIZE` → [`ValueLayoutError::ValueTooLarge`]
 //!    (no allocation, no LZ4 work).
-//! 2. `value.len() <= OVERFLOW_THRESHOLD` → inline raw.
-//! 3. Else try LZ4. If the compressed bytes fit inline → inline compressed.
+//! 2. `value.len() <= COMPRESSION_THRESHOLD` → inline raw.
+//! 3. Else try LZ4. If the selected raw/compressed bytes fit the native
+//!    leaf's `OVERFLOW_THRESHOLD` → inline with the matching flag.
 //! 4. Else spill via [`OverflowChain`], storing only the pointer in the
 //!    leaf cell.
 //!
@@ -30,10 +31,12 @@ use crate::storage::page_store::PageStore;
 use reddb_file::vector_value_codec as value_codec;
 use reddb_file::BTreeValueCell;
 
-/// At or below this length a value stores inline in the leaf, raw or
-/// compressed. Above it, the value spills via [`OverflowChain`]. Set per
-/// ADR 0023 — preserves leaf fanout regardless of page size.
+/// Encoded values up to this size share a native leaf, raw or compressed.
+/// Larger values spill via [`OverflowChain`] (ADR 0023).
 pub const OVERFLOW_THRESHOLD: usize = reddb_file::BTREE_VALUE_OVERFLOW_THRESHOLD;
+
+/// Preserve compression above the established 1-KiB raw fast path.
+pub const COMPRESSION_THRESHOLD: usize = reddb_file::BTREE_VALUE_COMPRESSION_THRESHOLD;
 
 /// Hard upper bound on logical value size. Values above this are
 /// rejected before any LZ4 or overflow work runs.
@@ -56,6 +59,11 @@ pub enum ValueLayoutError {
     Codec(value_codec::ValueCodecError),
     /// Overflow chain operation failed.
     Overflow(OverflowError),
+    /// Decode scratch plus output would exceed the read's memory allowance.
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for ValueLayoutError {
@@ -75,6 +83,13 @@ impl std::fmt::Display for ValueLayoutError {
             }
             Self::Codec(e) => write!(f, "value codec: {}", e),
             Self::Overflow(e) => write!(f, "overflow chain: {}", e),
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "read needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
         }
     }
 }
@@ -111,12 +126,15 @@ pub(crate) fn encode_inline_without_pages(
     if value.len() > MAX_VALUE_SIZE {
         return Err(ValueLayoutError::ValueTooLarge(value.len()));
     }
-    if value.len() <= OVERFLOW_THRESHOLD {
+    if value.len() <= COMPRESSION_THRESHOLD {
         return Ok(Some(reddb_file::encode_btree_inline_raw(value)));
     }
     let (flag, bytes) = value_codec::encode(value);
-    if flag == value_codec::ValueFlag::Lz4 && bytes.len() <= OVERFLOW_THRESHOLD {
-        return Ok(Some(reddb_file::encode_btree_inline_compressed(&bytes)));
+    if bytes.len() <= OVERFLOW_THRESHOLD {
+        return Ok(Some(match flag {
+            value_codec::ValueFlag::Raw => reddb_file::encode_btree_inline_raw(&bytes),
+            value_codec::ValueFlag::Lz4 => reddb_file::encode_btree_inline_compressed(&bytes),
+        }));
     }
     Ok(None)
 }
@@ -132,7 +150,7 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
     // Step 1: small values short-circuit to inline raw. No LZ4 work, no
     // overflow allocation — preserves the legacy hot path for tiny
     // values like entity IDs or short JSON.
-    if value.len() <= OVERFLOW_THRESHOLD {
+    if value.len() <= COMPRESSION_THRESHOLD {
         return Ok(reddb_file::encode_btree_inline_raw(value));
     }
 
@@ -140,12 +158,13 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
     // compression would not shrink the input.
     let (codec_flag, codec_bytes) = value_codec::encode(value);
 
-    // Step 3: if compressed bytes (including their length header) fit
-    // inline, keep them in the leaf. Note this only fires when codec
-    // actually produced Lz4 bytes — Raw bytes ≥ original length > threshold
-    // by construction, so they cannot inline.
-    if codec_flag == value_codec::ValueFlag::Lz4 && codec_bytes.len() <= OVERFLOW_THRESHOLD {
-        return Ok(reddb_file::encode_btree_inline_compressed(&codec_bytes));
+    // Step 3: share leaf space for either selected representation. Keep the
+    // previous compression trigger even when a medium raw value now fits.
+    if codec_bytes.len() <= OVERFLOW_THRESHOLD {
+        return Ok(match codec_flag {
+            value_codec::ValueFlag::Raw => reddb_file::encode_btree_inline_raw(&codec_bytes),
+            value_codec::ValueFlag::Lz4 => reddb_file::encode_btree_inline_compressed(&codec_bytes),
+        });
     }
 
     // Step 4: spill. We always store the bytes the codec produced —
@@ -166,15 +185,30 @@ pub fn encode<P: PageStore>(pager: &P, value: &[u8]) -> Result<Vec<u8>, ValueLay
 /// Inspect leaf-cell flags, follow the pointer if any, concatenate the
 /// chain, decode if compressed, return the materialised value.
 pub fn decode<P: PageStore>(pager: &P, stored: &[u8]) -> Result<Vec<u8>, ValueLayoutError> {
+    decode_with_budget(pager, stored, usize::MAX)
+}
+
+/// Bound allocations before reading an overflow chain or expanding compressed bytes.
+/// Compressed overflow retains both the encoded chain and its decoded output.
+pub fn decode_with_budget<P: PageStore>(
+    pager: &P,
+    stored: &[u8],
+    limit_bytes: usize,
+) -> Result<Vec<u8>, ValueLayoutError> {
     match reddb_file::decode_btree_value_cell(stored)? {
         BTreeValueCell::Pointer {
             is_compressed,
             head_page_id,
             total_len,
         } => {
+            let encoded_bytes = usize::try_from(total_len)
+                .map_err(|_| ValueLayoutError::ValueTooLarge(usize::MAX))?;
+            check_read_budget(encoded_bytes, limit_bytes)?;
             let chain = OverflowChain::new(pager);
             let chain_bytes = chain.read(head_page_id, total_len)?;
             if is_compressed {
+                let decoded_bytes = compressed_output_bytes(&chain_bytes)?;
+                check_read_budget(encoded_bytes.saturating_add(decoded_bytes), limit_bytes)?;
                 Ok(value_codec::decode(
                     value_codec::ValueFlag::Lz4,
                     &chain_bytes,
@@ -186,11 +220,33 @@ pub fn decode<P: PageStore>(pager: &P, stored: &[u8]) -> Result<Vec<u8>, ValueLa
         BTreeValueCell::Inline {
             is_compressed,
             payload,
-        } => Ok(reddb_file::decode_btree_inline_payload(
-            is_compressed,
-            payload,
-        )?),
+        } => {
+            let decoded_bytes = if is_compressed {
+                compressed_output_bytes(payload)?
+            } else {
+                payload.len()
+            };
+            check_read_budget(decoded_bytes, limit_bytes)?;
+            Ok(reddb_file::decode_btree_inline_payload(
+                is_compressed,
+                payload,
+            )?)
+        }
     }
+}
+
+fn compressed_output_bytes(bytes: &[u8]) -> Result<usize, ValueLayoutError> {
+    value_codec::decoded_length(value_codec::ValueFlag::Lz4, bytes).map_err(ValueLayoutError::Codec)
+}
+
+fn check_read_budget(required_bytes: usize, limit_bytes: usize) -> Result<(), ValueLayoutError> {
+    if required_bytes > limit_bytes {
+        return Err(ValueLayoutError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        });
+    }
+    Ok(())
 }
 
 /// Return the head overflow page id when `stored` represents a pointer

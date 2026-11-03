@@ -21,6 +21,33 @@
 use super::execution_context::current_connection_id;
 use super::*;
 
+/// An unwinding DML callback must not leave a thread-local capture installed.
+struct DmlWalCapture(bool);
+
+impl DmlWalCapture {
+    fn begin() -> Self {
+        assert!(
+            !UnifiedStore::deferred_store_wal_capture_active(),
+            "DML WAL captures cannot nest"
+        );
+        UnifiedStore::begin_deferred_store_wal_capture();
+        Self(true)
+    }
+
+    fn finish(mut self) -> crate::storage::unified::DeferredStoreWalActions {
+        self.0 = false;
+        UnifiedStore::take_deferred_store_wal_capture()
+    }
+}
+
+impl Drop for DmlWalCapture {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = UnifiedStore::take_deferred_store_wal_capture();
+        }
+    }
+}
+
 impl RedDBRuntime {
     pub(crate) fn rollback_connection(
         &self,
@@ -107,9 +134,9 @@ impl RedDBRuntime {
             return f();
         }
 
-        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let capture = DmlWalCapture::begin();
         let result = f();
-        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
+        let captured = capture.finish();
         match result {
             Ok(value) => {
                 self.record_pending_store_wal_actions(conn_id, captured);
@@ -128,18 +155,25 @@ impl RedDBRuntime {
         if self.inner.transaction_state.in_transaction(conn_id) {
             return self.with_deferred_store_wal_if_transaction(f);
         }
+        self.drain_committed_writes_under_pressure(0)?;
         if !capture_autocommit_events {
             return f();
         }
 
-        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let capture = DmlWalCapture::begin();
         let result = f();
-        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
-        self.inner
-            .db
-            .store()
-            .append_deferred_store_wal_actions(captured)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let captured = capture.finish();
+        if result.is_err() && deletions.has_pending() {
+            return result;
+        }
+        deletions.publish(self, || {
+            self.inner
+                .db
+                .store()
+                .append_deferred_store_wal_actions(captured)
+                .map_err(|err| RedDBError::Internal(err.to_string()))
+        })?;
         result
     }
 
@@ -238,7 +272,7 @@ impl RedDBRuntime {
             && (xid > snapshot.xid || snapshot.in_progress.contains(&xid))
     }
 
-    fn conflict_error(
+    pub(super) fn conflict_error(
         collection: &str,
         logical_id: crate::storage::unified::entity::EntityId,
         xid: crate::storage::transaction::snapshot::Xid,

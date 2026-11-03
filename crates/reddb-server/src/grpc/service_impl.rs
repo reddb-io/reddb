@@ -1708,7 +1708,7 @@ impl RedDb for GrpcRuntime {
         })
         .await
         .map_err(|error| Status::internal(format!("query task failed: {error}")))??;
-        Ok(Response::new(query_reply(
+        Ok(Response::new(owned_query_reply(
             result,
             &entity_types,
             &capabilities,
@@ -1733,7 +1733,7 @@ impl RedDb for GrpcRuntime {
                 Vec::new(),
                 commit_policy,
             )?;
-            results.push(query_reply(result, &no_filter, &no_filter));
+            results.push(owned_query_reply(result, &no_filter, &no_filter));
         }
         Ok(Response::new(BatchQueryReply { results }))
     }
@@ -1775,7 +1775,7 @@ impl RedDb for GrpcRuntime {
             .execute(request)
             .map_err(grpc_query_request_error)?;
         let no_filter: Option<Vec<String>> = None;
-        Ok(Response::new(query_reply(result, &no_filter, &no_filter)))
+        Ok(Response::new(owned_query_reply(result, &no_filter, &no_filter)))
     }
 
     async fn explain_query(

@@ -1,6 +1,16 @@
 use super::*;
 use crate::api::DurabilityMode;
 
+#[cfg(test)]
+fn flush_local_only_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_native name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 fn write_optional_snapshot_sidecar(
     json: &crate::json::Value,
     field: &str,
@@ -34,6 +44,14 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
+    // The explicit server/library option and scoped legacy test fixtures select
+    // the same factory. Defaults remain resident until deployment qualification.
+    if options.bounded_disk_residency
+        || (cfg!(test) && QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.get()))
+    {
+        config.resident_memory_bytes_max =
+            Some(shares.share_bytes(crate::storage::memory_pools::MemoryPool::SegmentArena));
+    }
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
@@ -311,6 +329,16 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        if options.bounded_disk_residency
+            && (!embedded_single_file_selected(options)
+                || options.replication.role != crate::replication::ReplicationRole::Standalone
+                || options.remote_backend.is_some()
+                || options.remote_backend_atomic.is_some())
+        {
+            return Err(
+                "bounded disk residency requires standalone single-file local storage".into(),
+            );
+        }
         // Tier wiring: flip the six tier-flag global toggles from the
         // resolved StorageLayout, then materialise the support
         // directories the layout demands (logs/wal/snapshots/etc).
@@ -450,7 +478,26 @@ impl RedDB {
         } else {
             None
         };
-        let embedded_open = if embedded_single_file_selected(options) {
+        let embedded_open = if options.bounded_disk_residency {
+            // The snapshot-backed embedded factory has no durable page ownership
+            // coordinator. Explicit residency must create/open the native pager,
+            // including on the very first boot, before registering disk indexes.
+            if !path_buf.exists() && !options.create_if_missing {
+                return Err(format!(
+                    "database path does not exist and create_if_missing is false: {}",
+                    path_buf.display()
+                )
+                .into());
+            }
+            if path_buf.exists()
+                && (Self::is_binary_dump(&path_buf)?
+                    || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+            {
+                return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
+            }
+            let store = UnifiedStore::open_with_config(&path_buf, store_config.clone())?;
+            Some((store, Some(path_buf.clone()), true))
+        } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
                     Ok(artifact) => {
@@ -623,8 +670,14 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "publication-lock");
         let _ = self.ec_consolidate_all();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
@@ -634,8 +687,14 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "store-persist");
             self.publish_append_only_segments(path)?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "append-only-publication");
             self.persist_metadata()?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight
@@ -1313,6 +1372,34 @@ impl RedDB {
         )
     }
 
+    /// Read complete catalog observations without hydrating persistent collections.
+    pub fn try_catalog_model_snapshot(
+        &self,
+        read_bytes_max: usize,
+    ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+        let catalog = self.runtime_index_catalog();
+        let contracts = self.collection_contracts();
+        let declarations = self
+            .physical_metadata()
+            .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
+                declared_indexes: metadata.indexes,
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
+            });
+        crate::catalog::try_snapshot_store_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            declarations.as_ref(),
+            Some(contracts.as_slice()),
+            read_bytes_max,
+        )
+    }
+
     pub fn catalog_consistency_report(&self) -> CatalogConsistencyReport {
         consistency_report(&self.catalog_model_snapshot())
     }
@@ -1451,6 +1538,10 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
         Value::Integer(t) => Some(*t),
         _ => None,
     }
+}
+
+thread_local! {
+    static QUALIFICATION_DISK_RESIDENCY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1612,5 +1703,50 @@ mod ephemeral_cleanup_tests {
         let options = RedDBOptions::persistent(&path);
 
         assert!(!should_cleanup_ephemeral_data_path(&options, &path));
+    }
+}
+
+#[cfg(test)]
+impl RedDB {
+    pub(crate) fn with_disk_residency_for_qualification<T>(operation: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.set(self.0));
+            }
+        }
+        let previous = QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.replace(true));
+        let _restore = Restore(previous);
+        operation()
+    }
+}
+
+#[cfg(test)]
+mod qualification_scope_tests {
+    use super::*;
+
+    #[test]
+    fn qualification_factory_selection_is_nested_thread_local_and_unwind_safe() {
+        let options = RedDBOptions::in_memory().with_memory_budget(64 * 1024 * 1024);
+        let selected = || {
+            store_config_from_options(&options)
+                .expect("config")
+                .resident_memory_bytes_max
+        };
+        assert_eq!(selected(), None);
+        RedDB::with_disk_residency_for_qualification(|| {
+            assert!(selected().is_some());
+            RedDB::with_disk_residency_for_qualification(|| assert!(selected().is_some()));
+            assert!(selected().is_some());
+            std::thread::scope(|threads| {
+                threads.spawn(|| assert_eq!(selected(), None));
+            });
+        });
+        assert_eq!(selected(), None);
+        let result = std::panic::catch_unwind(|| {
+            RedDB::with_disk_residency_for_qualification(|| panic!("qualification fixture"));
+        });
+        assert!(result.is_err());
+        assert_eq!(selected(), None);
     }
 }

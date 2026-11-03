@@ -46,6 +46,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn copy_error(error: &RdbFileError) -> RdbFileError {
     match error {
+        RdbFileError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        } => RdbFileError::ReadLimitExceeded {
+            required_bytes: *required_bytes,
+            limit_bytes: *limit_bytes,
+        },
         RdbFileError::InvalidOperation(message) => RdbFileError::InvalidOperation(message.clone()),
         RdbFileError::ZoneUnrecoverable { zone, path } => RdbFileError::ZoneUnrecoverable {
             zone,

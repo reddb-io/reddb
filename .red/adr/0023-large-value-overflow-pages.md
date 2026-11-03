@@ -66,6 +66,32 @@ that covers documents and rich payloads while keeping worst-case GET cost
 bounded. LZ4 ahead of overflow means the common case (markdown, JSON, text)
 rarely approaches it.
 
+## Amendment — native page size and medium-value packing (2026-11-01)
+
+The shared native page is now 16 KiB. The original 1-KiB spill threshold came
+from the 4-KiB page design above and left an incompressible 1,025-byte value in
+a dedicated 16-KiB overflow page. In the real B-tree regression, 256 such values
+(262,400 payload bytes) occupied 4,210,688 bytes before this amendment.
+
+The write policy now permits the selected raw/compressed representation to
+share a leaf up to `PAGED_PAGE_SIZE / 4` (4 KiB). Keep the compression trigger at
+1 KiB: medium compressible values must still compress, rather than expanding
+into raw inline cells. The byte contract, value-size ceiling, checksums and
+MVCC/overflow ownership rules remain the same. A compile-time assertion requires
+two maximum-key inline cells, including flags/headers/slots, to fit a leaf.
+
+Sketch: a 1,025-byte value alone in a 16-KiB page incurs about 16x page space;
+packing multiple values into a leaf bounds the common split overhead instead.
+The 256-row fixture now uses 540,672 bytes and no overflow pages. Raw sizes
+1,025/2,048/3,072/4,096 bytes, compression preservation, maximum-size keys and six
+inline/overflow replacement cycles are covered by the shared-engine regression.
+These are deterministic page-space observations, not runtime RSS/boot evidence.
+
+This policy applies to new or rebuilt cells. Existing trees retain their layout
+until rewritten; enabling the policy does not start a bulk rewrite at boot.
+Qualification on rewritten historical data and an actual older public-binary
+read/update/reopen remain required before release or STG use of the amendment.
+
 ## Consequences
 
 - Resolves the reported ingest failure; values up to 256 MB become storable.
