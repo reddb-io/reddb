@@ -76,6 +76,32 @@ fn visible(snapshot: Option<&SnapshotContext>, xmin: u64, xmax: u64, hidden: boo
 }
 
 impl UnifiedStore {
+    /// The compact visibility inventory belongs to this exact immutable base.
+    /// GC still rechecks any reclaimable posting against the current row.
+    pub(super) fn count_visibility_cursor(
+        &self,
+        collection: &str,
+        manager: &SegmentManager,
+    ) -> Result<
+        Option<reddb_engine::storage::secondary_index_read::SecondaryRangeCursor<Pager>>,
+        StoreError,
+    > {
+        let Some(root) = manager.backing_root_page() else {
+            return Ok(None);
+        };
+        if self.collection_root_page(collection) != Some(root) {
+            return Ok(None);
+        }
+        let schema = manager.column_schema();
+        self.secondary_index(
+            collection,
+            NAME,
+            &identity(schema.as_deref().map(Vec::as_slice)),
+        )
+        .map(|index| index.ordered_range(std::ops::Bound::Unbounded, std::ops::Bound::Unbounded))
+        .transpose()
+    }
+
     /// Only the opt-in cold runtime prepares these indexes. Ordinary stores
     /// retain their current formats and scans. Missing projections are safe
     /// scan fallbacks until the next preparation checkpoint.

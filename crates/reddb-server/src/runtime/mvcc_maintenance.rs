@@ -310,6 +310,83 @@ mod tests {
         assert_eq!(manager.count(), 0);
     }
 
+    #[test]
+    fn cold_gc_skips_live_payloads_using_the_visibility_projection() {
+        use crate::storage::{EntityId, StoreError};
+        use reddb_engine::storage::collection_read::{
+            CollectionCursor, CollectionRead, EncodedRecord,
+        };
+        use std::sync::Arc;
+        struct RefusePayload;
+        impl CollectionRead for RefusePayload {
+            fn get_record(
+                &self,
+                _: EntityId,
+                _: usize,
+            ) -> Result<Option<EncodedRecord>, StoreError> {
+                Err(StoreError::Serialization(
+                    "GC read an unneeded live payload".into(),
+                ))
+            }
+            fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+                Err(StoreError::Serialization("GC scanned live payloads".into()))
+            }
+            fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+                Err(StoreError::Serialization(
+                    "GC retained live payloads".into(),
+                ))
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("inventory.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE live_rows (id INTEGER, payload TEXT)")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO live_rows (id, payload) VALUES (1, 'retained')")
+            .unwrap();
+        runtime.checkpoint().unwrap();
+        let store = runtime.db().store();
+        let manager = store.get_collection("live_rows").unwrap();
+        let root = manager.backing_root_page().unwrap();
+        let count = manager.count() as u64;
+        let (source, _) = manager.current_backing_overlay().unwrap();
+        manager.install_backing(
+            Arc::new(RefusePayload),
+            root,
+            store.format_version(),
+            1024,
+            count,
+        );
+        let mut cursor = store.mvcc_reclaim_cursor("live_rows".into()).unwrap();
+        for _ in 0..8 {
+            assert_eq!(
+                store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        1,
+                        1
+                    )
+                    .unwrap(),
+                0
+            );
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(cursor.finished());
+        assert_eq!(manager.count(), 1);
+        manager.install_backing(source, root, store.format_version(), 1024, count);
+    }
+
     fn fixture() -> RedDBRuntime {
         let mut runtime = RedDBRuntime::with_options(
             RedDBOptions::in_memory().with_memory_budget(2 * 1024 * 1024),

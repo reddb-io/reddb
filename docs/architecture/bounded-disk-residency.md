@@ -468,8 +468,10 @@ durable base until those images match. Sparse checkpoints recompute this state
 after revisiting deferred IDs, including commit and rollback outcomes.
 
 MVCC maintenance visits both weak resident positions and a pinned native base.
-The native cursor inventories IDs only; each candidate is read again from the
-current manager under the publication fence before reclamation. Superseded
+When its compatible visibility projection exists, cleanup reads compact XID
+postings and skips live payloads. Unprepared bases retain the primary-ID cursor
+fallback. Each reclaimable candidate is read again from the current manager
+under the publication fence before reclamation. Superseded
 cursor images cannot delete a revived row, an active creator or a version still
 needed by a retained reader. Work is limited by inspected positions, reclaimed
 versions and decoded bytes, with one current row and leaf retained. Runtime
