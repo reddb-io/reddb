@@ -735,7 +735,7 @@ impl RedDB {
         let catalog_name = catalog.name.clone();
         let catalog_total_entities = catalog.total_entities;
         let catalog_total_collections = catalog.total_collections;
-        let indexes = self.physical_index_state();
+        let indexes = self.physical_index_state_from_native_state(native_state, previous);
 
         let mut manifest =
             crate::api::SchemaManifest::now(self.options.clone(), catalog.total_collections);
@@ -1401,7 +1401,10 @@ impl RedDB {
         let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
 
         if metadata.indexes.is_empty() {
-            metadata.indexes = self.physical_index_state();
+            metadata.indexes = self
+                .native_physical_state()
+                .map(|state| self.physical_index_state_from_native_state(&state, Some(&metadata)))
+                .unwrap_or_else(|| self.physical_index_state());
         }
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
