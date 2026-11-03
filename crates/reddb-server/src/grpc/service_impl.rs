@@ -3502,7 +3502,7 @@ impl RedDb for GrpcRuntime {
         }
         let (actor, _) = grpc_request_identity(&request)
             .ok_or_else(|| Status::unauthenticated("authentication required"))?;
-        let tenant_filter = actor.tenant.as_deref().map(|tenant| Some(tenant));
+        let tenant_filter = actor.tenant.as_deref().map(Some);
         let users = self.auth_store.list_users_scoped(tenant_filter);
         let user_list: Vec<JsonValue> = users
             .into_iter()

@@ -665,7 +665,7 @@ fn authorize_binding(
     // The admin gate runs before the catalog so its denial code stays
     // PERMISSION_DENIED for anonymous callers too, matching `authorize_admin`.
     if binding.auth == GrpcAuthClass::Admin {
-        crate::auth::middleware::check_permission(&auth, false, true)
+        crate::auth::middleware::check_permission(auth, false, true)
             .map_err(Status::permission_denied)?;
     }
 
