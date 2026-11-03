@@ -273,6 +273,7 @@ impl TransactionState {
 
 #[cfg(test)]
 mod tests {
+    use super::SavepointError;
     use crate::transaction::IsolationLevel;
 
     use super::TransactionState;
