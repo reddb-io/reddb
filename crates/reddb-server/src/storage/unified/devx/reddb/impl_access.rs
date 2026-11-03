@@ -1,11 +1,42 @@
 use super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static PHYSICAL_ROOT_ROW_SCANS: std::cell::RefCell<std::collections::BTreeMap<String, u64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn record_physical_root_row_scan(collection: &str) {
+    PHYSICAL_ROOT_ROW_SCANS.with(|scans| {
+        *scans
+            .borrow_mut()
+            .entry(collection.to_string())
+            .or_default() += 1;
+    });
+}
+
+#[cfg(not(test))]
+fn record_physical_root_row_scan(_collection: &str) {}
+
 pub(crate) struct NativeArtifactBuild {
     pub records: Vec<(NativeVectorArtifactSummary, Vec<u8>)>,
     pub deferred_collections: std::collections::HashSet<String>,
 }
 
 impl RedDB {
+    #[cfg(test)]
+    pub(crate) fn reset_physical_root_row_scans_for_test(&self) {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow_mut().clear());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn physical_root_row_scans_for_test(
+        &self,
+    ) -> std::collections::BTreeMap<String, u64> {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow().clone())
+    }
+
     /// Access the quorum coordinator (Phase 2.6 PG parity).
     ///
     /// `None` when this instance is not a primary. Write paths call
@@ -1167,6 +1198,7 @@ impl RedDB {
 
             let root = manager.cached_physical_root(root, || {
                 manager.for_each_entity_in_id_order(|entity| {
+                    record_physical_root_row_scan(&name);
                     fnv1a_hash_value(&mut root, &entity.id.raw());
                     fnv1a_hash_value(&mut root, &entity.kind);
                     fnv1a_hash_value(&mut root, &entity.created_at);
