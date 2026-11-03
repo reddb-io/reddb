@@ -1,11 +1,13 @@
 use reddb_server::storage::{EntityId, UnifiedEntity};
-use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use reddb_types::Value;
 
 #[test]
 fn legacy_table_catalog_preserves_model_schema_and_count_after_cold_reopen() {
     let directory = tempfile::tempdir().expect("private catalog fixture");
     let options = RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("native paged legacy fixture")
         .with_memory_budget(64 * 1024 * 1024)
         .with_bounded_disk_residency(false);
     let expected_indexes = {

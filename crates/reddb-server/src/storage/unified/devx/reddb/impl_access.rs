@@ -1107,6 +1107,19 @@ impl RedDB {
 
         let mut states = Vec::new();
         for collection in snapshot.collections {
+            // This infallible snapshot only observes resident entities. A cold
+            // base, including one with a resident overlay, cannot supply an
+            // inferred model here. The caller reconciles its durable index
+            // descriptors from the native registry and physical metadata.
+            // Treating an unobserved base as Mixed invents graph/search indexes
+            // on ordinary tables each time metadata is republished.
+            if self
+                .store
+                .get_collection(&collection.name)
+                .is_some_and(|manager| manager.has_backing())
+            {
+                continue;
+            }
             for index_name in &collection.indices {
                 let metric = metrics_by_name.get(index_name);
                 let kind = metric
