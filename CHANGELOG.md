@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.27.11
+
+### Patch Changes
+
+- [#2598](https://github.com/reddb-io/reddb/pull/2598) [`1f48afe`](https://github.com/reddb-io/reddb/commit/1f48afe5d918f64a2cfd3e58c7f4227ba758febf) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read native collection pages from the merged disk and resident view. Preserve
+  physical ID order, row schemas and exact counts, skip earlier encoded payloads
+  without decoding them, and propagate cold-read or page-budget failures instead
+  of returning a successful empty collection.
+
+  Preserve recovery column order and the native shape of live rows. Retain the
+  durable index inventory for cold collections instead of inventing indexes from
+  an empty resident view. Keep full and savepoint rollback versions protected
+  from MVCC reclamation until their secondary-index undo completes.
+
+- [#2600](https://github.com/reddb-io/reddb/pull/2600) [`29c61d7`](https://github.com/reddb-io/reddb/commit/29c61d703cad80b95a048e20a5a9829a087c18a1) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Resolve typed runtime configuration and persisted ranking configuration through
+  the shared disk-and-resident configuration reader. Preserve operator settings
+  when checkpointed configuration leaves RAM, and prevent bootstrap defaults or
+  mounted overlays from replacing persisted keys. Keep persisted queue consumer
+  groups readable after the same checkpoint.
+
 ## 1.27.10
 
 ## 1.27.9
