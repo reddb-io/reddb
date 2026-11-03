@@ -146,7 +146,10 @@ mod tests {
             .unwrap();
         let payload = |generation: usize, id: usize| {
             let mut state = (generation * 32 + id) as u64 + 1;
-            (0..64 * 1024)
+            // Exercise small inline, near-inline and overflow values in every
+            // fixed cycle without making CI depend on bulk-throughput speed.
+            let bytes = [180, 4 * 1024, 64 * 1024][id % 3];
+            (0..bytes)
                 .map(|_| {
                     state ^= state << 13;
                     state ^= state >> 7;
@@ -156,7 +159,7 @@ mod tests {
                 .collect::<String>()
         };
         let allocated = || {
-            [&path, &path.with_extension("rdb-uwal")]
+            [&path, &reddb_file::layout::unified_wal_path(&path)]
                 .iter()
                 .map(|p| std::fs::metadata(p).map_or(0, |m| m.blocks() * 512))
                 .sum::<u64>()
@@ -228,6 +231,13 @@ mod tests {
             }
             if generation >= 20 {
                 peak_after_warmup = peak_after_warmup.max(allocated());
+            }
+            if generation % 20 == 19 {
+                eprintln!(
+                    "churn_cycles={} allocated_bytes={} reclaimed_versions={reclaimed}",
+                    generation + 1,
+                    allocated()
+                );
             }
         }
         let growth = peak_after_warmup.saturating_sub(warmup_allocated);
@@ -353,6 +363,10 @@ mod tests {
             .unwrap();
         runtime.checkpoint().unwrap();
         let store = runtime.db().store();
+        assert_eq!(
+            store.try_count_from_index("live_rows", None).unwrap(),
+            Some(1)
+        );
         let manager = store.get_collection("live_rows").unwrap();
         let root = manager.backing_root_page().unwrap();
         let count = manager.count() as u64;
@@ -385,6 +399,121 @@ mod tests {
         assert!(cursor.finished());
         assert_eq!(manager.count(), 1);
         manager.install_backing(source, root, store.format_version(), 1024, count);
+    }
+
+    #[test]
+    fn paused_cold_gc_does_not_force_a_checkpoint_to_copy_live_history() {
+        use crate::storage::{EntityId, StoreError};
+        use reddb_engine::storage::collection_read::{
+            CollectionCursor, CollectionRead, EncodedRecord,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        struct CountScans {
+            inner: Arc<dyn CollectionRead + Send + Sync>,
+            scans: Arc<AtomicUsize>,
+        }
+        impl CollectionRead for CountScans {
+            fn get_record(
+                &self,
+                id: EntityId,
+                bytes: usize,
+            ) -> Result<Option<EncodedRecord>, StoreError> {
+                self.inner.get_record(id, bytes)
+            }
+            fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                self.inner.cursor()
+            }
+            fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                self.inner.owned_cursor()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("pins.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE append_rows (id INTEGER, payload TEXT)")
+            .unwrap();
+        runtime
+            .execute_query(
+                "INSERT INTO append_rows (id, payload) VALUES (1, 'old one'), (2, 'old two')",
+            )
+            .unwrap();
+        runtime.checkpoint().unwrap();
+        let store = runtime.db().store();
+        let manager = store.get_collection("append_rows").unwrap();
+        let root = manager.backing_root_page().unwrap();
+        let count = manager.count() as u64;
+        let (source, _) = manager.current_backing_overlay().unwrap();
+        let scans = Arc::new(AtomicUsize::new(0));
+        manager.install_backing(
+            Arc::new(CountScans {
+                inner: source,
+                scans: Arc::clone(&scans),
+            }),
+            root,
+            store.format_version(),
+            1024 * 1024,
+            count,
+        );
+        let mut cursor = store.mvcc_reclaim_cursor("append_rows".into()).unwrap();
+        assert_eq!(
+            store
+                .reclaim_mvcc_tick(
+                    &mut cursor,
+                    &runtime.snapshot_manager(),
+                    runtime.mvcc_vacuum_cutoff_xid(),
+                    1,
+                    1
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            !cursor.finished(),
+            "maintenance is deliberately paused mid-inventory"
+        );
+        runtime
+            .execute_query("INSERT INTO append_rows (id, payload) VALUES (3, 'new')")
+            .unwrap();
+        runtime.checkpoint().unwrap();
+        assert_eq!(
+            scans.load(Ordering::Relaxed),
+            0,
+            "a paused GC tick must not force live history through full replacement"
+        );
+        for _ in 0..8 {
+            assert_eq!(
+                store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        1,
+                        1
+                    )
+                    .unwrap(),
+                0
+            );
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(
+            cursor.finished(),
+            "resume from the current generation after checkpoint"
+        );
+        assert_eq!(manager.count(), 3);
+        drop(cursor);
     }
 
     fn fixture() -> RedDBRuntime {

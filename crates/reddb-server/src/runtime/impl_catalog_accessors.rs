@@ -88,6 +88,11 @@ impl RedDBRuntime {
         self.seal_hypertable_chunks_for_checkpoint(
             self.inner.checkpoint_columnar_emission_budget_chunks,
         )?;
+        let store = self.inner.db.store();
+        let publication = store.vault_publication_lock.lock();
+        // Collections created since startup need the compact visibility
+        // inventory before their first resident-to-disk publication too.
+        self.prepare_paged_counts()?;
         self.persist_probabilistic_snapshots()?;
         self.inner.db.flush_local_only().map_err(|err| {
             // Issue #205 — local flush failure is a CheckpointFailed
@@ -107,6 +112,7 @@ impl RedDBRuntime {
             .emit_global();
             RedDBError::Engine(msg)
         })?;
+        drop(publication);
         let checkpoint_lsn = self.cdc_current_lsn();
         self.inner
             .checkpoint_projection_stats

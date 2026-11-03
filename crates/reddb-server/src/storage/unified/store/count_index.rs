@@ -82,6 +82,7 @@ impl UnifiedStore {
         &self,
         collection: &str,
         manager: &SegmentManager,
+        after: Option<&[u8]>,
     ) -> Result<
         Option<reddb_engine::storage::secondary_index_read::SecondaryRangeCursor<Pager>>,
         StoreError,
@@ -98,7 +99,7 @@ impl UnifiedStore {
             NAME,
             &identity(schema.as_deref().map(Vec::as_slice)),
         )
-        .map(|index| index.ordered_range(std::ops::Bound::Unbounded, std::ops::Bound::Unbounded))
+        .map(|index| index.resume_postings(after))
         .transpose()
     }
 

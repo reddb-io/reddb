@@ -458,7 +458,9 @@ fences, without uploading a remote snapshot. A busy publication fence is not
 waited on from mutation admission. Nested publication, deferred WAL captures,
 active calling transactions, startup and read-only runtimes skip this drain;
 ordinary shared-budget admission remains authoritative. SQL DML also checks
-before starting event capture. This is a synchronous checkpoint trigger, not a
+before starting event capture. Local checkpoints prepare visibility projections
+for collections created since startup before publishing their first cold base.
+This is a synchronous checkpoint trigger, not a
 bounded-latency incremental checkpoint implementation; replacement fallbacks
 and pinned readers still require qualification.
 
@@ -467,7 +469,10 @@ unprojected. It cannot replace that collection's resident overlay with its
 durable base until those images match. Sparse checkpoints recompute this state
 after revisiting deferred IDs, including commit and rollback outcomes.
 
-MVCC maintenance visits both weak resident positions and a pinned native base.
+MVCC maintenance visits both weak resident positions and a native base pinned
+only within one fenced tick. Between ticks it retains a bounded resume posting,
+including its physical ID, rather than data/index generations. A paused sweep
+therefore cannot force otherwise eligible appends through full-history copying.
 When its compatible visibility projection exists, cleanup reads compact XID
 postings and skips live payloads. Unprepared bases retain the primary-ID cursor
 fallback. Each reclaimable candidate is read again from the current manager
