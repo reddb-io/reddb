@@ -3454,3 +3454,39 @@ fn cold_queue_position_reads_fail_before_enqueue_and_retry_preserves_order() {
         matches!(inserted.kind, EntityKind::QueueMessage { position, .. } if position == expected_max + 1)
     );
 }
+
+#[test]
+fn cold_queue_group_and_wait_cap_survive_checkpoint() {
+    let directory = tempfile::tempdir().expect("cold queue fixture");
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("queue.rdb"))
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .expect("runtime");
+    runtime
+        .execute_query("CREATE QUEUE cold_queue_metadata")
+        .expect("queue");
+    runtime
+        .execute_query("QUEUE GROUP CREATE cold_queue_metadata workers")
+        .expect("consumer group");
+    runtime
+        .execute_query("SET CONFIG red.config.queue.max_wait_ms = 1")
+        .expect("queue wait cap");
+    runtime.checkpoint().expect("publish queue metadata");
+
+    let error = runtime
+        .execute_query(
+            "QUEUE READ cold_queue_metadata GROUP workers CONSUMER probe COUNT 1 WAIT 5ms",
+        )
+        .expect_err("persisted wait cap rejects an oversized wait");
+    assert!(error.to_string().contains("server cap"), "{error}");
+    assert!(error.to_string().contains("= 1ms"), "{error}");
+
+    let read = runtime
+        .execute_query(
+            "QUEUE READ cold_queue_metadata GROUP workers CONSUMER probe COUNT 1 WAIT 1ms",
+        )
+        .expect("persisted consumer group remains readable");
+    assert!(read.result.records.is_empty());
+}

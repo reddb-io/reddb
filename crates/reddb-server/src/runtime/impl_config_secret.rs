@@ -107,7 +107,7 @@ mod tests {
         );
         assert_eq!(
             store.try_get_config("probe.integer").unwrap(),
-            Some(Value::Integer(42))
+            Some(Value::UnsignedInteger(42))
         );
         assert!(!runtime.config_bool("probe.boolean", true));
         assert_eq!(runtime.config_u64("probe.integer", 9), 42);

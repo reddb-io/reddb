@@ -2188,22 +2188,31 @@ fn load_queue_groups(store: &UnifiedStore, queue: &str) -> RedDBResult<Vec<Queue
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return Ok(Vec::new());
     };
-    Ok(manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_group")
-                    && row_text(row, "queue").as_deref() == Some(queue)
-            })
-        })
-        .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            Some(QueueGroupEntry {
-                entity_id: entity.id,
-                group: row_text(row, "group")?,
-            })
-        })
-        .collect())
+    let _publication = manager
+        .has_backing()
+        .then(|| store.vault_publication_lock.lock());
+    let mut groups = Vec::new();
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_entity(usize::MAX, visit),
+        |entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            if row_text(row, "kind").as_deref() == Some("queue_group")
+                && row_text(row, "queue").as_deref() == Some(queue)
+            {
+                let Some(group) = row_text(row, "group") else {
+                    return true;
+                };
+                groups.push(QueueGroupEntry {
+                    entity_id: entity.id,
+                    group,
+                });
+            }
+            true
+        },
+    )?;
+    Ok(groups)
 }
 
 fn save_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResult<()> {
