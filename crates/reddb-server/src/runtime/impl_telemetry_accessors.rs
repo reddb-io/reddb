@@ -319,6 +319,13 @@ impl RedDBRuntime {
             ..Default::default()
         };
 
+        // Periodic maintenance can checkpoint too. Drain it before the final
+        // flush so no worker can append a fresh ownership epoch after this
+        // method has reported a closed, checkpointed source to its caller.
+        if let Some(background_tasks) = &self.background_tasks {
+            background_tasks.shutdown();
+        }
+
         // Flush WAL + run any pending checkpoint. Local fsync is
         // unconditional — even a lease-lost replica needs its WAL on
         // disk before exit so a future restore has the latest tail.
