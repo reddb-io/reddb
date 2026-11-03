@@ -1032,6 +1032,10 @@ fn cold_counter_mutations_keep_ttl_and_tags() {
     runtime
         .execute_query("KV INCR cold_counters.item BY 1")
         .expect("cold increment");
+    let cas = runtime
+        .execute_query("KV CAS cold_counters.item EXPECT 2 SET 3")
+        .expect("cold compare and set");
+    assert_eq!(cas.result.records[0].get("ok"), Some(&Value::Boolean(true)));
     let result = runtime
         .execute_query("KV GET cold_counters.item")
         .expect("incremented counter");

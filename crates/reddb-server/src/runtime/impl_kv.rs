@@ -538,6 +538,21 @@ impl<'a> KvAtomicOps<'a> {
         }
     }
 
+    fn delete_existing_for_replace_unlocked(
+        &self,
+        collection: &str,
+        id: crate::storage::EntityId,
+    ) -> RedDBResult<()> {
+        let store = self.runtime.inner.db.store();
+        let deleted = store
+            .delete(collection, id)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if deleted {
+            store.context_index().remove_entity(id);
+        }
+        Ok(())
+    }
+
     /// Tombstone a KV version by stamping `xmax = xid` and persisting it.
     ///
     /// The physical row stays alive (history); VACUUM reclaims it once no
@@ -676,8 +691,10 @@ impl<'a> KvAtomicOps<'a> {
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
-        if existing.is_some() && !atomic {
-            self.runtime.delete_kv(collection, key)?;
+        if !atomic {
+            if let Some((_, id)) = existing.as_ref() {
+                self.delete_existing_for_replace_unlocked(collection, *id)?;
+            }
         }
 
         let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
@@ -781,8 +798,10 @@ impl<'a> KvAtomicOps<'a> {
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
-        if current.is_some() && !atomic {
-            self.runtime.delete_kv(collection, key)?;
+        if !atomic {
+            if let Some((_, id)) = existing.as_ref() {
+                self.delete_existing_for_replace_unlocked(collection, *id)?;
+            }
         }
 
         let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
