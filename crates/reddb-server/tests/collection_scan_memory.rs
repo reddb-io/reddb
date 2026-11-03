@@ -290,6 +290,134 @@ fn cold_runtime() -> (tempfile::TempDir, RedDBRuntime) {
     (directory, runtime)
 }
 
+#[test]
+fn cold_collection_pages_include_persisted_rows_in_runtime_and_http() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            "CREATE TABLE native_scan (key TEXT, value TEXT, version INT, tombstone BOOL)",
+        )
+        .expect("declare native scan");
+    install_native_history(
+        &runtime,
+        "native_scan",
+        "history",
+        6,
+        1024 * 1024,
+        |version| Value::text(format!("persisted-{version}")),
+    );
+    runtime
+        .execute_query("INSERT INTO native_scan (key,value,version,tombstone) VALUES ('overlay','resident',7,false)")
+        .expect("resident overlay");
+    let mut identities = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = runtime
+            .scan_collection("native_scan", cursor, 2)
+            .expect("merged page");
+        assert_eq!(page.total, 7);
+        for entity in &page.items {
+            let EntityData::Row(row) = &entity.data else {
+                panic!("native row")
+            };
+            assert!(row.get_field("value").is_some(), "row schema preserved");
+            identities.push(entity.id);
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(identities.len(), 7);
+    assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+    for offset in [7, usize::MAX] {
+        let page = runtime
+            .scan_collection("native_scan", Some(ScanCursor { offset }), 2)
+            .expect("past end");
+        assert_eq!(page.total, 7);
+        assert!(page.items.is_empty());
+        assert!(page.next.is_none());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let _server = RedDBServer::new(runtime).serve_in_background_on(listener);
+    for offset in [0, 2, 4, 6, 7, usize::MAX] {
+        let page = get(
+            address,
+            &format!("/collections/native_scan/scan?offset={offset}&limit=2"),
+        );
+        assert_eq!(page["total"], 7);
+        assert_eq!(
+            page["items"].as_array().expect("items").len(),
+            7_usize.saturating_sub(offset).min(2)
+        );
+        assert_eq!(
+            page["next_offset"],
+            if offset < 5 {
+                serde_json::json!(offset + 2)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+    }
+}
+
+#[test]
+fn cold_collection_scan_propagates_decode_limit_instead_of_returning_empty_page() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            "CREATE TABLE denied_scan (key TEXT, value TEXT, version INT, tombstone BOOL)",
+        )
+        .expect("declare denied scan");
+    install_native_history(&runtime, "denied_scan", "wide", 1, 32, |_| {
+        Value::text("x".repeat(1024))
+    });
+    let error = runtime
+        .scan_collection("denied_scan", None, 1)
+        .expect_err("cold decode failure cannot become empty success");
+    assert!(
+        error.to_string().to_lowercase().contains("limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cold_collection_page_skips_payloads_before_its_requested_window() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query("CREATE TABLE skip_scan (key TEXT, value TEXT, version INT, tombstone BOOL)")
+        .expect("declare skip scan");
+    install_native_history(
+        &runtime,
+        "skip_scan",
+        "wide-prefix",
+        2,
+        64 * 1024,
+        |version| {
+            Value::text(if version == 1 {
+                "x".repeat(128 * 1024)
+            } else {
+                "small".into()
+            })
+        },
+    );
+    assert!(runtime.scan_collection("skip_scan", None, 1).is_err());
+    let page = runtime
+        .scan_collection("skip_scan", Some(ScanCursor { offset: 1 }), 1)
+        .expect("skip encoded prefix without allocating it");
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    let EntityData::Row(row) = &page.items[0].data else {
+        panic!("native row")
+    };
+    assert_eq!(row.get_field("value"), Some(&Value::text("small")));
+    assert!(page.next.is_none());
+}
+
 fn ascii_noise(bytes: usize) -> String {
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut state = 0x1234_5678_u32;
