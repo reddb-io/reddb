@@ -99,6 +99,7 @@ fn health_reserve_is_exact_bounded_and_independent() {
         rejected_health.starts_with("HTTP/1.1 503"),
         "full health reserve must reject another probe: {rejected_health:?}"
     );
+    assert!(rejected_health.contains("health_reserve_exhausted"));
 
     // Health saturation does not consume the normal query pool.
     let held_query_addr = addr.clone();
@@ -170,6 +171,12 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
         text_lower.contains("retry-after: 5"),
         "expected Retry-After header, got: {text:?}"
     );
+    assert!(
+        text.contains("global_inflight_exhausted"),
+        "expected a machine-readable refusal reason, got: {text:?}"
+    );
+    assert!(text.contains("\"resource\":\"http_inflight_requests\""));
+    assert!(text.contains("\"incident_id\":\"overload-"));
 
     // Kubernetes health probes must retain a small, separately bounded
     // reserve even while normal query capacity is exhausted. Otherwise a
@@ -324,7 +331,8 @@ fn queue_wait_consumes_the_total_handler_deadline() {
         queued.starts_with("HTTP/1.1 503"),
         "queued request should exhaust its handler deadline: {queued:?}"
     );
-    assert!(queued.contains("handler deadline exceeded"));
+    assert!(queued.contains("execution_queue_timeout"));
+    assert!(queued.contains("request deadline expired while waiting to execute"));
     assert_eq!(
         server.http_execution_queued(),
         0,
@@ -333,6 +341,7 @@ fn queue_wait_consumes_the_total_handler_deadline() {
 
     let active_response = active.join().expect("active request thread");
     assert!(active_response.starts_with("HTTP/1.1 503"));
+    assert!(active_response.contains("handler_deadline_exceeded"));
     server.set_test_slow_inject_ms(0);
     for _ in 0..100 {
         if server.http_limiter().current() == 0 && server.http_execution_active() == 0 {

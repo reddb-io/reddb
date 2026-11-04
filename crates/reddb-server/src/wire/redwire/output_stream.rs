@@ -234,12 +234,32 @@ pub async fn run_output_stream(
         return;
     }
 
-    // Keep the completed result's shared admission until the stream finishes
-    // or its worker is cancelled, including while a slow peer blocks sending.
-    let result = super::session::execute_with_redwire_context(&operation_context, role, || {
-        QueryRequestExecutor::new(&runtime, &PreparedRegistry::new())
-            .execute(QueryRequest::sql(request.sql, Vec::new()))
-    });
+    // The query itself shares the runtime-wide execution budget with every
+    // server transport and runs off Tokio's I/O workers. The completed
+    // result retains its separate memory admission while a slow peer drains;
+    // the scarce execution slot is released as soon as the engine returns.
+    let task_runtime = Arc::clone(&runtime);
+    let result = match super::session::redwire_spawn_blocking(runtime.as_ref(), move || {
+        super::session::execute_with_redwire_context(&operation_context, role, || {
+            QueryRequestExecutor::new(&task_runtime, &PreparedRegistry::new())
+                .execute(QueryRequest::sql(request.sql, Vec::new()))
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if let Ok(frame) = build_stream_error_frame(
+                correlation_id,
+                stream_id,
+                error.code(),
+                &error.client_message(),
+            ) {
+                let _ = send.send_frame(frame).await;
+            }
+            return;
+        }
+    };
 
     // Stream rows out as StreamChunk envelopes.
     let mut seq: u64 = 0;

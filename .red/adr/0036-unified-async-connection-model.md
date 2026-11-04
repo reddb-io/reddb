@@ -144,7 +144,37 @@ shared by Cassandra-style event-loop designs: connection concurrency, queued
 work and active execution are different resources and must not share one
 unbounded pool.
 
-This amendment initially governs buffered HTTP requests. RedWire, PostgreSQL
-compatibility, gRPC, streaming lanes and byte-weighted admission remain follow-up
-work under issue #2622; the server must not claim one global execution budget
-until those transports use it.
+### Runtime-wide execution amendment (2026-11-04)
+
+The execution budget belongs to `RedDBRuntime`, not to an HTTP listener. Every
+server adapter attached to that runtime shares the same active slots and bounded
+FIFO queue:
+
+- buffered HTTP and NDJSON data streams acquire before engine work, then data
+  streams release before a slow network drain; ASK SSE remains bounded by the
+  request/principal lane because its model callback is remote-I/O work;
+- gRPC query, scan, prepare/execute and mutation fast paths acquire before
+  `spawn_blocking` and report `RESOURCE_EXHAUSTED` or `DEADLINE_EXCEEDED`;
+- RedWire query, bulk, get/delete and output-stream execution acquire before
+  `spawn_blocking`; socket reads and response draining remain async;
+- PostgreSQL Query/Parse/Describe/Execute acquire before their existing
+  `block_in_place` bridge, release before the first response write, and refuse
+  with SQLSTATE `53000`.
+
+Embedded callers do not acquire this server gate: they remain direct,
+synchronous SQLite-style calls. Connection/session ceilings and request-byte or
+result-memory admission remain separate resources.
+
+Back-of-envelope sizing for a 1-vCPU node: `active=1`, total request envelope
+`=8`, therefore at most `1` synchronous engine call runs while `7` wait. Before
+this amendment four listeners could each create their own blocking work, so the
+effective active work was approximately `4 × transport concurrency`; afterward
+it is `1` runtime-wide. At 1 GiB this does not claim a memory capacity number:
+large request/result buffers remain governed by their byte admission.
+
+HTTPS advertises ALPN `h2` first and `http/1.1` second. HTTP/2 multiplexing
+reduces connection and head-of-line overhead but does not raise the runtime
+execution budget. HTTP/3 remains a future byte-transport adapter: QUIC does not
+remove storage/lock contention, and adding a second TLS/transport stack before
+the HTTP/2 and execution gates are measured would increase correctness and
+operational risk without addressing the observed refusal.

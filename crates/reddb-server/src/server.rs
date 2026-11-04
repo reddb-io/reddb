@@ -470,18 +470,20 @@ impl RedDBServer {
 
     pub fn with_options(runtime: RedDBRuntime, options: ServerOptions) -> Self {
         let http_limits = HttpLimitsResolved::builtin_defaults();
+        let execution_admission = runtime.configure_execution_admission(
+            http_limits.execution_workers,
+            http_limits
+                .max_handlers
+                .saturating_sub(http_limits.execution_workers),
+            http_limits.handler_timeout_ms,
+        );
         Self {
             runtime,
             options,
             auth_store: None,
             replication: None,
             http_limiter: HttpConnectionLimiter::new(http_limits.max_handlers),
-            execution_admission: ExecutionAdmission::new(
-                http_limits.execution_workers,
-                http_limits
-                    .max_handlers
-                    .saturating_sub(http_limits.execution_workers),
-            ),
+            execution_admission,
             health_limiter: HttpConnectionLimiter::new(HEALTH_HANDLER_CAP),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             handler_clock: Arc::new(SystemMonotonicClock::new()),
@@ -490,7 +492,7 @@ impl RedDBServer {
             http_request_metrics: HttpRequestMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
             principal_limiter: PrincipalConnectionLimiter::new(
-                http_limits::DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
+                http_limits.max_inflight_per_principal,
             ),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
@@ -533,8 +535,11 @@ impl RedDBServer {
     pub fn with_http_limiter_cap(mut self, cap: usize) -> Self {
         self.http_limiter = HttpConnectionLimiter::new(cap);
         let execution_workers = self.execution_admission.active_max().min(cap);
-        self.execution_admission =
-            ExecutionAdmission::new(execution_workers, cap.saturating_sub(execution_workers));
+        self.execution_admission = self.runtime.configure_execution_admission(
+            execution_workers,
+            cap.saturating_sub(execution_workers),
+            self.handler_timeout.as_millis().min(u64::MAX as u128) as u64,
+        );
         self
     }
 
@@ -544,9 +549,10 @@ impl RedDBServer {
     /// values are assumed validated by [`http_limits::resolve_http_limits`].
     pub fn with_http_limits(mut self, limits: HttpLimitsResolved) -> Self {
         self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
-        self.execution_admission = ExecutionAdmission::new(
+        self.execution_admission = self.runtime.configure_execution_admission(
             limits.execution_workers,
             limits.max_handlers.saturating_sub(limits.execution_workers),
+            limits.handler_timeout_ms,
         );
         self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
         self.retry_after_secs = limits.retry_after_secs;
@@ -603,8 +609,11 @@ impl RedDBServer {
     pub fn with_http_execution_workers(mut self, workers: usize) -> Self {
         assert!(workers > 0, "HTTP execution workers must be positive");
         let workers = workers.min(self.http_limiter.cap());
-        self.execution_admission =
-            ExecutionAdmission::new(workers, self.http_limiter.cap().saturating_sub(workers));
+        self.execution_admission = self.runtime.configure_execution_admission(
+            workers,
+            self.http_limiter.cap().saturating_sub(workers),
+            self.handler_timeout.as_millis().min(u64::MAX as u128) as u64,
+        );
         self
     }
 

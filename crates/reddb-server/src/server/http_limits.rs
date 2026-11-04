@@ -11,7 +11,8 @@
 //!   - execution_workers = num_cpus, clamped to max_handlers
 //!   - handler_timeout   = 30_000 ms
 //!   - retry_after_secs  = 5
-//!   - max_inflight_per_principal = 64   (issue #934; 0 disables)
+//!   - max_inflight_per_principal = min(64, max_handlers - 1)
+//!     (issue #934; 0 disables; one slot is reserved when possible)
 //!
 //! Each knob is validated at parse time and at resolution time so a
 //! stale red_config value cannot corrupt the running server.
@@ -50,11 +51,14 @@ pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 /// any single principal's concurrent in-flight requests at the async edge so
 /// one caller can't drain the whole global handler cap and starve the rest.
 /// `0` disables the per-principal cap entirely; a single-tenant deployment
-/// can set it there to pay nothing. Chosen below the typical multi-core
-/// global cap (256) so it provides real fairness headroom, while sitting
-/// above the global cap on tiny boxes (where there is no abuse pressure) so
-/// it never trips spuriously.
+/// can set it there to pay nothing. The effective default is clamped below
+/// the global handler envelope when possible so even a one-CPU server keeps
+/// one request slot available for another principal.
 pub const DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL: usize = 64;
+
+fn default_max_inflight_per_principal(max_handlers: usize) -> usize {
+    DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL.min(max_handlers.saturating_sub(1).max(1))
+}
 
 /// Validate a `max_handlers` candidate from any source. Returns the
 /// value unchanged on success.
@@ -140,7 +144,7 @@ impl HttpLimitsResolved {
             execution_workers: default_execution_workers().min(max_handlers),
             handler_timeout_ms: DEFAULT_HANDLER_TIMEOUT_MS,
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
-            max_inflight_per_principal: DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
+            max_inflight_per_principal: default_max_inflight_per_principal(max_handlers),
         }
     }
 }
@@ -206,7 +210,7 @@ where
                 .and_then(|v| validate_max_inflight_per_principal(v).ok())
         })
         .or(input.max_inflight_per_principal_env)
-        .unwrap_or(defaults.max_inflight_per_principal);
+        .unwrap_or_else(|| default_max_inflight_per_principal(max_handlers));
 
     HttpLimitsResolved {
         max_handlers,
@@ -392,7 +396,16 @@ mod tests {
         let resolved = resolve_http_limits(&HttpLimitsCliInput::default(), no_config());
         assert_eq!(
             resolved.max_inflight_per_principal,
-            DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL
+            default_max_inflight_per_principal(resolved.max_handlers)
+        );
+
+        let input = HttpLimitsCliInput {
+            max_handlers_flag: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, no_config()).max_inflight_per_principal,
+            1
         );
 
         // env over default

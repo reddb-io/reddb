@@ -1141,6 +1141,13 @@ struct RuntimeInner {
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
+    /// One execution budget for every network transport attached to this
+    /// runtime. HTTP, gRPC, RedWire and PG-wire must acquire from the same
+    /// object before entering synchronous engine work; embedded calls remain
+    /// direct and synchronous.
+    execution_admission:
+        parking_lot::RwLock<crate::transport::execution_admission::ExecutionAdmission>,
+    execution_queue_timeout_ms: AtomicU64,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
     index_store: index_store::IndexStore,
@@ -1480,6 +1487,37 @@ pub struct RedDBRuntime {
     // Temporary handles used by workers do not own their own shutdown guard.
     background_tasks: Option<Arc<background_tasks::RuntimeBackgroundTasks>>,
     inner: Arc<RuntimeInner>,
+}
+
+impl RedDBRuntime {
+    pub(crate) fn execution_admission(
+        &self,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        self.inner.execution_admission.read().clone()
+    }
+
+    pub(crate) fn configure_execution_admission(
+        &self,
+        active_max: usize,
+        queued_max: usize,
+        queue_timeout_ms: u64,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        let admission =
+            crate::transport::execution_admission::ExecutionAdmission::new(active_max, queued_max);
+        *self.inner.execution_admission.write() = admission.clone();
+        self.inner
+            .execution_queue_timeout_ms
+            .store(queue_timeout_ms, AtomicOrdering::Release);
+        admission
+    }
+
+    pub(crate) fn execution_queue_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.inner
+                .execution_queue_timeout_ms
+                .load(AtomicOrdering::Acquire),
+        )
+    }
 }
 
 pub struct RuntimeConnection {

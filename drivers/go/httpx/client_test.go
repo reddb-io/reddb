@@ -3,11 +3,13 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeServer mounts a tiny mux that pretends to be the RedDB HTTP surface.
@@ -103,6 +105,17 @@ func TestClient_LoginStoresToken(t *testing.T) {
 	}
 	if c.Token() != "tok-abc" {
 		t.Errorf("client did not retain token")
+	}
+}
+
+func TestClient_EnablesHTTP2OnCustomTransport(t *testing.T) {
+	c, err := NewClient(Options{BaseURL: "https://example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := c.httpc.Transport.(*http.Transport)
+	if !ok || !transport.ForceAttemptHTTP2 {
+		t.Fatalf("HTTP/2 not enabled: %#v", c.httpc.Transport)
 	}
 }
 
@@ -257,6 +270,30 @@ func TestClient_Raw500(t *testing.T) {
 	resp, _ := c.do(context.Background(), http.MethodGet, "/raw500", nil)
 	if _, err := parseEnvelope(resp); err == nil {
 		t.Error("expected error for 500")
+	}
+}
+
+func TestClient_StructuredOverloadError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/query", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"server at capacity","error_code":"execution_queue_full","detail":"engine execution queue is full"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, _ := NewClient(Options{BaseURL: srv.URL})
+	_, err := c.Query(context.Background(), "SELECT 1")
+	var responseError *ResponseError
+	if !errors.As(err, &responseError) {
+		t.Fatalf("expected ResponseError, got %T: %v", err, err)
+	}
+	if responseError.Code != "execution_queue_full" {
+		t.Fatalf("code = %q", responseError.Code)
+	}
+	if responseError.RetryAfter != 5*time.Second {
+		t.Fatalf("retry after = %s", responseError.RetryAfter)
 	}
 }
 

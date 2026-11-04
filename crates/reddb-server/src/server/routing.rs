@@ -84,6 +84,15 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
+        self.try_route_streaming_with_execution_permit(request, writer, None)
+    }
+
+    pub(crate) fn try_route_streaming_with_execution_permit<W: std::io::Write>(
+        &self,
+        request: &HttpRequest,
+        writer: &mut W,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+    ) -> io::Result<bool> {
         let request_path = Self::route_alias_target(&request.method, &request.path)
             .unwrap_or_else(|| request.path.clone());
         // Two streaming dispatch paths share this entry:
@@ -183,10 +192,15 @@ impl RedDBServer {
                         request.body.clone(),
                         &principal,
                         &tenant,
+                        execution_permit.take(),
                         writer,
                     )?;
                 } else if is_sse {
-                    self.handle_query_sse_stream(request.body.clone(), writer)?;
+                    self.handle_query_sse_stream(
+                        request.body.clone(),
+                        execution_permit.take(),
+                        writer,
+                    )?;
                 } else if is_input_stream_post {
                     let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
                     {
@@ -208,6 +222,7 @@ impl RedDBServer {
                             self.handle_query_ndjson_input_stream(
                                 request.body.clone(),
                                 &audit_ctx,
+                                execution_permit.take(),
                                 writer,
                             )?;
                         }
@@ -246,6 +261,7 @@ impl RedDBServer {
                             self.handle_query_ndjson_stream(
                                 request.body.clone(),
                                 &audit_ctx,
+                                execution_permit.take(),
                                 writer,
                             )?;
                         }
@@ -289,6 +305,13 @@ impl RedDBServer {
         let is_sse = is_query_post && is_stream_ask_query_body(&request.body);
         let is_ndjson = is_query_post && wants_ndjson_response(&request.headers);
         is_sse || is_ndjson || is_input_stream_post || is_select_stream_post
+    }
+
+    /// ASK STREAM performs remote/model I/O while emitting SSE callbacks.
+    /// It remains bounded by HTTP request/principal admission rather than
+    /// holding a scarce synchronous-engine slot for a slow network consumer.
+    pub(crate) fn streaming_request_uses_execution_admission(&self, request: &HttpRequest) -> bool {
+        self.is_streaming_request(request) && !is_stream_ask_query_body(&request.body)
     }
 
     /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
@@ -1532,6 +1555,16 @@ mod tests {
             br#"{"query":"SELECT 1 as n"}"#.to_vec(),
         );
         assert!(server.is_streaming_request(&output));
+        assert!(server.streaming_request_uses_execution_admission(&input));
+        assert!(server.streaming_request_uses_execution_admission(&output));
+
+        let ask_sse = request_with(
+            "POST",
+            "/query",
+            br#"{"query":"ASK 'why?' STREAM"}"#.to_vec(),
+        );
+        assert!(server.is_streaming_request(&ask_sse));
+        assert!(!server.streaming_request_uses_execution_admission(&ask_sse));
     }
 
     #[test]

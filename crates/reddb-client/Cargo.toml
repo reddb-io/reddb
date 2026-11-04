@@ -90,7 +90,7 @@ webpki-roots = { version = "1", optional = true }
 # HTTP / HTTPS transport for the published `Reddb::Http` variant.
 # Pulled in only by the `http` feature. `default-features = false`
 # skips OpenSSL; we use rustls.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync"] }
