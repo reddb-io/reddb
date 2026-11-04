@@ -36,8 +36,8 @@ importers:
   packages/browser-example:
     dependencies:
       '@reddb-io/browser':
-        specifier: 0.4.0
-        version: 0.4.0
+        specifier: workspace:*
+        version: link:../browser
       '@reddb-io/design-system':
         specifier: workspace:*
         version: link:../../vendor/ds

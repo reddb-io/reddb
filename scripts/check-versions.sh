@@ -120,6 +120,7 @@ check "@reddb-io/cli"               "$(grep -m1 '"version"' package.json | sed -
 
 node scripts/check-registry-names.mjs
 node scripts/check-contract-authorities.mjs
+node scripts/check-changeset-workspace.mjs
 
 # Drift guard: the committed version must never be BEHIND the latest published
 # stable tag. Catches the failure mode where a release was cut without the
