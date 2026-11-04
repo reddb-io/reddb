@@ -1,6 +1,5 @@
 ---
-"reddb": patch
-"reddb-io-server": patch
+"@reddb-io/cli": patch
 ---
 
 Cancel cooperative query execution when an HTTP request deadline expires so
