@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.6
+
+### Patch Changes
+
+- [#2625](https://github.com/reddb-io/reddb/pull/2625) [`029c792`](https://github.com/reddb-io/reddb/commit/029c7922cbf982f4c0531183e27b3bc985fe8123) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep recovered physical indexes queryable after reopen instead of misclassifying loaded registry entries as still building.
+
 ## 1.28.5
 
 ### Patch Changes
