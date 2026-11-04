@@ -338,7 +338,10 @@ impl RedDBServer {
         transport: HttpTransport,
     ) -> Response {
         let server = self.clone();
+        let cancellation = crate::runtime::query_budget::RequestCancellation::new();
+        let worker_cancellation = cancellation.clone();
         let join = tokio::task::spawn_blocking(move || {
+            let _cancellation_scope = worker_cancellation.install();
             // Both the global and per-principal permits are held for the
             // duration of the engine call and released when this closure
             // returns — so the per-principal slot is occupied for exactly
@@ -363,6 +366,11 @@ impl RedDBServer {
             Ok(Ok(response)) => buffered_response_to_axum(response),
             Ok(Err(_join_err)) => internal_error_response(),
             Err(_elapsed) => {
+                // Dropping a JoinHandle does not stop spawn_blocking work.
+                // Signal the transport-neutral query budget so cooperative
+                // engine checkpoints unwind the worker and release both
+                // admission permits instead of leaving capacity stranded.
+                cancellation.cancel();
                 self.http_metrics
                     .record_reject(transport, HttpRejectReason::HandlerTimeout);
                 handler_timeout_response()

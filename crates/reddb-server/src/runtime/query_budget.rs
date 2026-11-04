@@ -1,9 +1,10 @@
 //! Cooperative budgets for materialized read execution. Blocking storage calls,
 //! parsing and operators without work checkpoints are not preempted by a timer.
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::resource_limits::ResourceLimits;
@@ -20,6 +21,64 @@ struct Budget {
     output_bytes: u64,
 }
 thread_local! { static CURRENT: Cell<Option<Budget>> = const { Cell::new(None) }; }
+thread_local! {
+    static REQUEST_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Cancellation shared by an asynchronous transport deadline and the
+/// synchronous query worker it spawned. The worker installs a scope before
+/// dispatch; materialized-read checkpoints then observe cancellation even
+/// when no operator duration limit was configured.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RequestCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RequestCancellation {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn install(&self) -> RequestCancellationScope {
+        let previous =
+            REQUEST_CANCEL.with(|slot| slot.borrow_mut().replace(Arc::clone(&self.cancelled)));
+        RequestCancellationScope {
+            previous,
+            _thread: PhantomData,
+        }
+    }
+}
+
+/// Thread-affine guard keeping the shared cancellation allocation installed in
+/// the worker's request context and restoring any enclosing context on drop.
+pub(crate) struct RequestCancellationScope {
+    previous: Option<Arc<AtomicBool>>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for RequestCancellationScope {
+    fn drop(&mut self) {
+        REQUEST_CANCEL.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+fn request_cancellation_installed() -> bool {
+    REQUEST_CANCEL.with(|slot| slot.borrow().is_some())
+}
+
+fn request_cancelled() -> bool {
+    REQUEST_CANCEL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+    })
+}
 
 pub(crate) struct Scope<'a> {
     owns: bool,
@@ -40,7 +99,11 @@ impl<'a> Scope<'a> {
         let duration_max = limits.max_query_duration.filter(|value| !value.is_zero());
         let concurrent_max = limits.max_concurrent_queries.filter(|value| *value > 0);
         let output_max = limits.max_result_bytes.filter(|value| *value > 0);
-        if duration_max.is_none() && concurrent_max.is_none() && output_max.is_none() {
+        if duration_max.is_none()
+            && concurrent_max.is_none()
+            && output_max.is_none()
+            && !request_cancellation_installed()
+        {
             return Ok(scope);
         }
         if let Some(maximum) = concurrent_max {
@@ -115,6 +178,11 @@ pub(crate) fn charge_output(bytes: usize) -> RedDBResult<()> {
     })
 }
 pub(crate) fn charge(work: u64) -> RedDBResult<()> {
+    if request_cancelled() {
+        return Err(RedDBError::QuotaExceeded(
+            "duration:query_cancelled:request_deadline".to_string(),
+        ));
+    }
     CURRENT.with(|slot| {
         let Some(mut budget) = slot.get() else {
             return Ok(());
@@ -364,5 +432,48 @@ mod tests {
         assert!(!active());
         assert!(charge_output(usize::MAX).is_ok());
         assert_eq!(slots.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn request_deadline_cancels_worker_and_releases_query_admission() {
+        let limits = ResourceLimits {
+            max_concurrent_queries: Some(1),
+            ..Default::default()
+        };
+        let slots = AtomicU64::new(0);
+        let cancellation = RequestCancellation::new();
+        std::thread::scope(|threads| {
+            let worker_cancellation = cancellation.clone();
+            let worker_limits = &limits;
+            let worker_slots = &slots;
+            let worker = threads.spawn(move || {
+                let _request = worker_cancellation.install();
+                let _query = Scope::enter(worker_limits, worker_slots).expect("query admitted");
+                while charge(1).is_ok() {
+                    std::thread::yield_now();
+                }
+            });
+            while slots.load(Ordering::Acquire) != 1 {
+                std::thread::yield_now();
+            }
+            cancellation.cancel();
+            worker.join().expect("cancelled worker exits");
+        });
+        assert_eq!(slots.load(Ordering::Acquire), 0);
+        assert!(Scope::enter(&limits, &slots).is_ok());
+    }
+
+    #[test]
+    fn request_cancellation_scope_restores_nested_context() {
+        let outer = RequestCancellation::new();
+        let inner = RequestCancellation::new();
+        let _outer_scope = outer.install();
+        outer.cancel();
+        assert!(charge(0).is_err());
+        {
+            let _inner_scope = inner.install();
+            assert!(charge(0).is_ok());
+        }
+        assert!(charge(0).is_err());
     }
 }
