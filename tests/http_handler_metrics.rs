@@ -47,7 +47,7 @@ fn send_request(addr: &str, path: &str) -> String {
 }
 
 fn spawn_slow_request(addr: String) -> thread::JoinHandle<String> {
-    thread::spawn(move || send_request(&addr, "/health/live"))
+    thread::spawn(move || send_request(&addr, "/__test/slow-query"))
 }
 
 fn metric_value(body: &str, line_prefix: &str) -> u64 {
@@ -113,7 +113,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
 
     // Next connection is rejected by the limiter with the static
     // 503 + Retry-After path — this is the cap_exhausted reason.
-    let rejected = send_request(&addr, "/health/live");
+    let rejected = send_request(&addr, "/__test/rejected-query");
     assert!(
         rejected.starts_with("HTTP/1.1 503"),
         "expected limiter 503, got: {rejected:?}"
@@ -124,7 +124,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
     for handle in held {
         let body = handle.join().expect("held request thread");
         assert!(
-            body.starts_with("HTTP/1.1 2"),
+            body.starts_with("HTTP/1.1 404"),
             "held request should complete normally: {body:?}"
         );
     }
@@ -141,7 +141,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
 
     // (3) Trip the slice-2 deadline once — handler_timeout reason.
     server.set_test_slow_inject_ms(4_000);
-    let timed_out = send_request(&addr, "/health/live");
+    let timed_out = send_request(&addr, "/__test/timed-out-query");
     assert!(
         timed_out.starts_with("HTTP/1.1 503"),
         "expected deadline 503, got: {timed_out:?}"

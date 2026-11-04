@@ -3867,6 +3867,9 @@ mod tests {
 
     #[test]
     fn admin_routes_require_an_admin_bearer_when_no_admin_token_is_configured() {
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _token = SecurityEnvGuard::unset("RED_ADMIN_TOKEN");
         let _token_file = SecurityEnvGuard::unset("RED_ADMIN_TOKEN_FILE");
         let (server, _store, admin_key, writer_key) = server_with_users();

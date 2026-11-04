@@ -281,7 +281,8 @@ impl SlowQueryLogger {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::Instant;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
     use crate::runtime::EffectiveScope;
@@ -374,10 +375,10 @@ mod tests {
         );
     }
 
-    fn flush(_log: &Arc<SlowQueryLogger>) {
-        // NonBlocking sends bytes to a background thread; sleep gives the
-        // worker time to drain the channel and write to disk.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    fn flush(log: Arc<SlowQueryLogger>) {
+        // Dropping the final WorkerGuard drains and joins the non-blocking
+        // writer. A fixed sleep is racy under parallel CI load.
+        drop(log);
     }
 
     fn read_log_lines(dir: &TempSlowDir) -> Vec<crate::json::Value> {
@@ -403,7 +404,7 @@ mod tests {
             log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
         }
 
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert!(
             lines.is_empty(),
@@ -413,20 +414,30 @@ mod tests {
     }
 
     #[test]
-    fn below_threshold_wall_time_under_10ms() {
+    fn below_threshold_fast_path_does_not_wait_for_writer() {
         let dir = tmp_dir();
         let log = logger(&dir, 1000, 100);
-        let scope = empty_scope();
 
-        let start = Instant::now();
-        for _ in 0..10_000 {
-            log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
-        }
-        let elapsed = start.elapsed();
+        // Hold the slow sink lock. The below-threshold path must complete
+        // without consulting it; this verifies the hot-path property without
+        // a wall-clock microbenchmark that flakes under parallel CI load.
+        let writer_guard = log.writer.lock().expect("writer lock");
+        let worker_log = Arc::clone(&log);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let scope = empty_scope();
+            for _ in 0..10_000 {
+                worker_log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
+            }
+            let _ = done_tx.send(());
+        });
+
+        let completed_without_writer = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(writer_guard);
+        worker.join().expect("below-threshold worker");
         assert!(
-            elapsed.as_millis() < 10,
-            "10k below-threshold calls took {}ms (>10ms budget)",
-            elapsed.as_millis()
+            completed_without_writer,
+            "below-threshold calls waited for the slow-query writer"
         );
     }
 
@@ -441,7 +452,7 @@ mod tests {
         let scope = empty_scope();
 
         log.record(QueryKind::Select, 100, "SELECT * FROM t".into(), &scope);
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1, "expected 1 line");
@@ -464,7 +475,7 @@ mod tests {
             "INSERT INTO t VALUES (1)".into(),
             &scope,
         );
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1);
@@ -509,7 +520,7 @@ mod tests {
         for i in 0..calls {
             log.record(QueryKind::Select, 1, format!("SELECT {i}"), &scope);
         }
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         let emitted = lines.len() as u64;
@@ -541,7 +552,7 @@ mod tests {
             let scope = empty_scope();
 
             log.record(QueryKind::Select, 1, sql.to_string(), &scope);
-            flush(&log);
+            flush(log);
 
             let path = reddb_file::layout::legacy_slow_query_log_path(&dir);
             let body = std::fs::read_to_string(&path).unwrap_or_default();
@@ -578,7 +589,7 @@ mod tests {
 
         // Exactly at threshold: duration_ms < threshold_ms is false → emits.
         log.record(QueryKind::Select, 50, "SELECT 1".into(), &scope);
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1, "duration == threshold should emit");
     }
@@ -590,7 +601,7 @@ mod tests {
         let scope = empty_scope();
 
         log.record(QueryKind::Select, 49, "SELECT 1".into(), &scope);
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert!(lines.is_empty(), "duration < threshold must not emit");
     }

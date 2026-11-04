@@ -68,10 +68,10 @@ fn client_config_trusting(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
     Arc::new(client_config)
 }
 
-/// Clear-text `GET /health/live` over a raw TCP socket. Returns the
+/// Clear-text `GET` over a raw TCP socket. Returns the
 /// raw response string, or a `<no-body ...>` marker if the limiter
-/// closed the socket before/while writing (mirrors `tls_get_health`).
-fn http_get_health(addr: &str) -> String {
+/// closed the socket before/while writing (mirrors `tls_get`).
+fn http_get(addr: &str, path: &str) -> String {
     let mut tcp = match TcpStream::connect(addr) {
         Ok(s) => s,
         Err(e) => return format!("<connect-err {e:?}>"),
@@ -79,8 +79,8 @@ fn http_get_health(addr: &str) -> String {
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     tcp.set_write_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    let write_res = tcp.write_all(req).and_then(|_| tcp.flush());
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let write_res = tcp.write_all(req.as_bytes()).and_then(|_| tcp.flush());
     let mut buf = Vec::new();
     let read_res = tcp.read_to_end(&mut buf);
     let body = String::from_utf8_lossy(&buf).to_string();
@@ -95,8 +95,8 @@ fn http_get_health(addr: &str) -> String {
     }
 }
 
-fn spawn_http_get(addr: String) -> thread::JoinHandle<String> {
-    thread::spawn(move || http_get_health(&addr))
+fn spawn_http_get(addr: String, path: &'static str) -> thread::JoinHandle<String> {
+    thread::spawn(move || http_get(&addr, path))
 }
 
 fn wait_for_limiter(server: &RedDBServer, target: usize) -> bool {
@@ -109,7 +109,7 @@ fn wait_for_limiter(server: &RedDBServer, target: usize) -> bool {
     server.http_limiter().current() == target
 }
 
-fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
+fn tls_get(addr: &str, client_cfg: Arc<rustls::ClientConfig>, path: &str) -> String {
     let server_name: ServerName<'static> = ServerName::try_from("localhost").unwrap();
     let mut conn = rustls::ClientConnection::new(client_cfg, server_name).unwrap();
     let mut tcp = TcpStream::connect(addr).expect("tcp connect");
@@ -117,8 +117,10 @@ fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
     tcp.set_write_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
-    let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    let write_res = stream.write_all(req).and_then(|_| stream.flush());
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let write_res = stream
+        .write_all(req.as_bytes())
+        .and_then(|_| stream.flush());
     let mut buf = Vec::new();
     let read_res = stream.read_to_end(&mut buf);
     // Surface both results into the body string for the assertion in
@@ -139,8 +141,9 @@ fn tls_get_health(addr: &str, client_cfg: Arc<rustls::ClientConfig>) -> String {
 fn spawn_tls_get(
     addr: String,
     client_cfg: Arc<rustls::ClientConfig>,
+    path: &'static str,
 ) -> thread::JoinHandle<String> {
-    thread::spawn(move || tls_get_health(&addr, client_cfg))
+    thread::spawn(move || tls_get(&addr, client_cfg, path))
 }
 
 #[test]
@@ -175,7 +178,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
     server.set_test_slow_inject_ms(2_000);
     let mut held = Vec::new();
     for _ in 0..cap {
-        held.push(spawn_http_get(clear_addr.clone()));
+        held.push(spawn_http_get(clear_addr.clone(), "/__test/slow-query"));
     }
     assert!(
         wait_for_limiter(&server, cap),
@@ -186,7 +189,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
     // Now attempt a TLS request — it must be rejected by the shared
     // in-flight request cap.
     let client_cfg = client_config_trusting(&cert_der);
-    let body = tls_get_health(&tls_addr, Arc::clone(&client_cfg));
+    let body = tls_get(&tls_addr, Arc::clone(&client_cfg), "/__test/rejected-query");
     assert!(
         body.starts_with("HTTP/1.1 503"),
         "TLS request must be rejected while cap is saturated, got: {body:?}"
@@ -201,7 +204,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
     for handle in held {
         let body = handle.join().expect("held clear-text request");
         assert!(
-            body.starts_with("HTTP/1.1 2"),
+            body.starts_with("HTTP/1.1 404"),
             "held clear-text request should complete normally, got: {body:?}"
         );
     }
@@ -213,7 +216,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
     thread::sleep(Duration::from_millis(100));
 
     // Fresh TLS request now completes the handshake and serves.
-    let body2 = tls_get_health(&tls_addr, client_cfg);
+    let body2 = tls_get(&tls_addr, client_cfg, "/health/live");
     assert!(
         body2.starts_with("HTTP/1.1 2"),
         "TLS request must succeed after cap drains, got: {body2:?}"
@@ -243,7 +246,7 @@ fn tls_handler_deadline_emits_503_then_recovers() {
 
     let client_cfg = client_config_trusting(&cert_der);
     let start = Instant::now();
-    let body = tls_get_health(&addr, Arc::clone(&client_cfg));
+    let body = tls_get(&addr, Arc::clone(&client_cfg), "/__test/timed-out-query");
     let elapsed = start.elapsed();
 
     assert!(
@@ -277,7 +280,7 @@ fn tls_handler_deadline_emits_503_then_recovers() {
     );
 
     server.set_test_slow_inject_ms(0);
-    let body2 = tls_get_health(&addr, client_cfg);
+    let body2 = tls_get(&addr, client_cfg, "/health/live");
     assert!(
         body2.starts_with("HTTP/1.1 2"),
         "subsequent TLS request should succeed, got: {body2:?}"
@@ -320,8 +323,12 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     // TLS request. Both occupy the shared in-flight request limiter
     // while the test slow-inject hook sleeps.
     server.set_test_slow_inject_ms(2_000);
-    let hold_http = spawn_http_get(clear_addr.clone());
-    let hold_https = spawn_tls_get(tls_addr.clone(), Arc::clone(&client_cfg));
+    let hold_http = spawn_http_get(clear_addr.clone(), "/__test/slow-query");
+    let hold_https = spawn_tls_get(
+        tls_addr.clone(),
+        Arc::clone(&client_cfg),
+        "/__test/slow-query",
+    );
     assert!(
         wait_for_limiter(&server, cap),
         "a mix of one HTTP + one HTTPS request must saturate the shared cap, current={}",
@@ -330,7 +337,7 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
 
     // Cap is full (filled by both transports). A new clear-text request
     // is rejected with the limiter 503...
-    let http_body = http_get_health(&clear_addr);
+    let http_body = http_get(&clear_addr, "/__test/rejected-query");
     assert!(
         http_body.starts_with("HTTP/1.1 503"),
         "clear-text request must be rejected while shared cap is saturated, got: {http_body:?}"
@@ -341,7 +348,7 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     );
 
     // ...and a new TLS request is rejected by the same shared cap.
-    let https_body = tls_get_health(&tls_addr, Arc::clone(&client_cfg));
+    let https_body = tls_get(&tls_addr, Arc::clone(&client_cfg), "/__test/rejected-query");
     assert!(
         https_body.starts_with("HTTP/1.1 503"),
         "TLS request must be rejected while shared cap is saturated, got: {https_body:?}"
@@ -355,12 +362,12 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     server.set_test_slow_inject_ms(0);
     let http_done = hold_http.join().expect("held HTTP request");
     assert!(
-        http_done.starts_with("HTTP/1.1 2"),
+        http_done.starts_with("HTTP/1.1 404"),
         "held HTTP request should complete normally, got: {http_done:?}"
     );
     let https_done = hold_https.join().expect("held HTTPS request");
     assert!(
-        https_done.starts_with("HTTP/1.1 2"),
+        https_done.starts_with("HTTP/1.1 404"),
         "held HTTPS request should complete normally, got: {https_done:?}"
     );
     assert!(
@@ -371,12 +378,12 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     thread::sleep(Duration::from_millis(100));
 
     // Capacity restored on BOTH transports.
-    let http_ok = http_get_health(&clear_addr);
+    let http_ok = http_get(&clear_addr, "/health/live");
     assert!(
         http_ok.starts_with("HTTP/1.1 2"),
         "clear-text must recover after the shared cap drains, got: {http_ok:?}"
     );
-    let https_ok = tls_get_health(&tls_addr, client_cfg);
+    let https_ok = tls_get(&tls_addr, client_cfg, "/health/live");
     assert!(
         https_ok.starts_with("HTTP/1.1 2"),
         "TLS must recover after the shared cap drains, got: {https_ok:?}"
