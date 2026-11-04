@@ -1,6 +1,5 @@
 ---
-"reddb": patch
-"reddb-io-server": patch
+"@reddb-io/cli": patch
 ---
 
 Allow offline physical compaction on read-only OCI FSS/NFS sources while still
