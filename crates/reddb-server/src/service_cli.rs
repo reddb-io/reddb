@@ -20,14 +20,23 @@ pub use server_bootstrap::{bootstrap_server, run_server, transport_set, BootedNo
 
 pub const DEFAULT_ROUTER_BIND_ADDR: &str = "127.0.0.1:5050";
 
+fn suggested_worker_count(cpus: usize) -> usize {
+    match cpus {
+        0 | 1 => 1,
+        2 => 2,
+        _ => cpus - 1,
+    }
+}
+
 /// Detect available CPU cores and suggest worker thread count.
 pub fn detect_runtime_config() -> RuntimeConfig {
     let cpus = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
 
-    // Reserve 1 core for OS, use the rest for workers (minimum 1)
-    let suggested_workers = cpus.saturating_sub(1).max(1);
+    // Two-core instances need both workers to avoid a single blocked query
+    // serialising all engine work. Larger hosts still reserve one core.
+    let suggested_workers = suggested_worker_count(cpus);
 
     RuntimeConfig {
         available_cpus: cpus,
@@ -2781,6 +2790,13 @@ fn resolve_http_tls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_workers_use_both_cores_on_small_instances() {
+        assert_eq!(suggested_worker_count(1), 1);
+        assert_eq!(suggested_worker_count(2), 2);
+        assert_eq!(suggested_worker_count(4), 3);
+    }
 
     #[test]
     fn render_systemd_unit_contains_expected_execstart() {
