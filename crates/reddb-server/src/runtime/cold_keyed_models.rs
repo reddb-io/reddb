@@ -270,6 +270,18 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         .list_indices("cold_indexed_rows")
         .iter()
         .any(|index| index.name == "cold_email_unique" && index.unique));
+    let statuses = cold.index_statuses();
+    let status = statuses
+        .iter()
+        .find(|status| {
+            status.collection.as_deref() == Some("cold_indexed_rows") && status.kind == "btree"
+        })
+        .expect("reopened physical B-tree status");
+    assert_eq!(status.lifecycle_state, "ready");
+    assert!(
+        status.queryable,
+        "reopened physical index must remain queryable"
+    );
     let result = cold
         .execute_query("SELECT COUNT(*) AS n FROM cold_indexed_rows")
         .expect("unchanged source rows");
