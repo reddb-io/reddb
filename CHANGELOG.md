@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.5
+
+### Patch Changes
+
+- [#2623](https://github.com/reddb-io/reddb/pull/2623) [`8b534f9`](https://github.com/reddb-io/reddb/commit/8b534f9ef40bf40952cfadaad997eef5d95dc2f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound buffered HTTP engine execution by CPU-sized workers, queue admitted excess work FIFO, and expose execution saturation metrics.
+
 ## 1.28.4
 
 ### Patch Changes
