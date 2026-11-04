@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.7
+
+### Patch Changes
+
+- [#2628](https://github.com/reddb-io/reddb/pull/2628) [`11c7421`](https://github.com/reddb-io/reddb/commit/11c7421ccd4c9c575e08dcacf294611aa94584bf) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share bounded execution admission across HTTP, RedWire, PostgreSQL wire, and gRPC, expose actionable overload reasons, and enable HTTP/2 multiplexing in the supported clients.
+
 ## 1.28.6
 
 ### Patch Changes
