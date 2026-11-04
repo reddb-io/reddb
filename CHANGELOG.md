@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.27.13
+
+### Patch Changes
+
+- [#2607](https://github.com/reddb-io/reddb/pull/2607) [`65bbcef`](https://github.com/reddb-io/reddb/commit/65bbcef282681ecb7659855c73ad220913ad7d8f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Harden TLS connection handling, credential redaction, tenant isolation, and
+  row-level authorization across HTTP, gRPC, RedWire, and KV operations.
+
 ## 1.27.12
 
 ### Patch Changes
