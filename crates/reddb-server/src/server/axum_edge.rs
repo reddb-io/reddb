@@ -266,14 +266,18 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
+        let is_health_request = uses_health_capacity(&request);
+
         // Admission control is now per in-flight request, not per
         // connection: an idle keep-alive connection holds no slot, so the
         // cap no longer bounds connection count (issue #931 / AC #4).
         //
-        // Two gates, in order:
-        //   1. Global cap — bounds *total* in-flight work (async
-        //      backpressure). Exhaustion is a server-wide 503; it hits
-        //      every caller equally, which is the backpressure signal.
+        // Exact GET health probes use a separate bounded reserve so query
+        // saturation cannot evict a healthy process from its EndpointSlice.
+        // Every other request passes through two gates, in order:
+        //   1. Global query cap — bounds normal in-flight work (async
+        //      backpressure). Exhaustion is a server-wide 503 for normal
+        //      callers.
         //   2. Per-principal cap (issue #934) — bounds any *single*
         //      caller's share so one abusive principal can't drain the
         //      global cap and starve the rest. Over-cap is a structured
@@ -281,7 +285,12 @@ impl RedDBServer {
         //      off precisely. Checked second: there is no point telling a
         //      caller "you're over your share" when the server has no room
         //      for anyone.
-        let permit = match self.http_limiter.try_acquire() {
+        let limiter = if is_health_request {
+            &self.health_limiter
+        } else {
+            &self.http_limiter
+        };
+        let permit = match limiter.try_acquire() {
             Some(permit) => permit,
             None => {
                 self.http_metrics
@@ -290,16 +299,20 @@ impl RedDBServer {
             }
         };
 
-        let principal = super::routing::principal_for(&request.headers);
-        let principal_permit = match self.principal_limiter.try_acquire(&principal) {
-            Ok(principal_permit) => principal_permit,
-            Err(err) => {
-                // Drop the global permit before returning so the slot this
-                // refused caller briefly held is freed immediately.
-                drop(permit);
-                self.http_metrics
-                    .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
-                return self.reject_principal_response(&err);
+        let principal_permit = if is_health_request {
+            None
+        } else {
+            let principal = super::routing::principal_for(&request.headers);
+            match self.principal_limiter.try_acquire(&principal) {
+                Ok(principal_permit) => Some(principal_permit),
+                Err(err) => {
+                    // Drop the global permit before returning so the slot this
+                    // refused caller briefly held is freed immediately.
+                    drop(permit);
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
+                    return self.reject_principal_response(&err);
+                }
             }
         };
 
@@ -321,7 +334,7 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
-        principal_permit: PrincipalInflightPermit,
+        principal_permit: Option<PrincipalInflightPermit>,
         transport: HttpTransport,
     ) -> Response {
         let server = self.clone();
@@ -368,7 +381,7 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
-        principal_permit: PrincipalInflightPermit,
+        principal_permit: Option<PrincipalInflightPermit>,
     ) -> Response {
         let (head_tx, head_rx) = oneshot::channel::<EdgeStreamResponse>();
         let server = self.clone();
@@ -422,6 +435,17 @@ impl RedDBServer {
             .body(Body::from(body))
             .unwrap_or_else(|_| internal_error_response())
     }
+}
+
+/// Health capacity is intentionally narrow: only the exact, read-only
+/// endpoints used by process and Kubernetes probes bypass normal query
+/// admission. Prefix matches or write methods must never enter the reserve.
+fn uses_health_capacity(request: &HttpRequest) -> bool {
+    request.method == "GET"
+        && matches!(
+            request.path.as_str(),
+            "/health" | "/health/live" | "/health/ready" | "/health/startup"
+        )
 }
 
 /// Convert an incoming axum request into the internal [`HttpRequest`] the

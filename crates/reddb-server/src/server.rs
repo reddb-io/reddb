@@ -298,6 +298,12 @@ pub struct RedDBServer {
     /// `HttpConnectionLimiter` shares an `Arc` so every serve loop on
     /// the same `RedDBServer` shares one cap.
     http_limiter: HttpConnectionLimiter,
+    /// Small, independently bounded admission reserve for Kubernetes health
+    /// probes. A saturated query pool must not make a healthy process fail
+    /// readiness and disappear from its EndpointSlice. Only the four exact
+    /// GET health routes use this limiter; all other work remains subject to
+    /// `http_limiter` and the per-principal cap.
+    health_limiter: HttpConnectionLimiter,
     /// Per-handler total-time deadline (issue #570 slice 2). Each
     /// clear-text handler thread arms a deadline at spawn and bails
     /// with a best-effort 503 at coarse boundaries between request
@@ -364,6 +370,10 @@ pub struct RedDBServer {
 
 /// Default per-handler total-time budget (issue #571 slice 2).
 const DEFAULT_HANDLER_TIMEOUT: Duration = Duration::from_millis(30_000);
+
+/// Health probes are cheap and infrequent, but the reserve is still bounded
+/// so probe traffic cannot create an unlimited bypass around admission.
+const HEALTH_HANDLER_CAP: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerlessWarmupScope {
@@ -460,6 +470,7 @@ impl RedDBServer {
             auth_store: None,
             replication: None,
             http_limiter: HttpConnectionLimiter::with_default_cap(),
+            health_limiter: HttpConnectionLimiter::new(HEALTH_HANDLER_CAP),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             handler_clock: Arc::new(SystemMonotonicClock::new()),
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
@@ -547,6 +558,19 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn http_limiter(&self) -> &HttpConnectionLimiter {
         &self.http_limiter
+    }
+
+    /// Visible for tests that prove health and query admission are isolated.
+    #[doc(hidden)]
+    pub fn health_limiter(&self) -> &HttpConnectionLimiter {
+        &self.health_limiter
+    }
+
+    /// Visible for tests. Production always uses [`HEALTH_HANDLER_CAP`].
+    #[doc(hidden)]
+    pub fn with_health_limiter_cap(mut self, cap: usize) -> Self {
+        self.health_limiter = HttpConnectionLimiter::new(cap);
+        self
     }
 
     /// Visible for tests. Override the per-handler total-time deadline
