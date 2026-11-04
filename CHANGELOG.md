@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.3
+
+### Patch Changes
+
+- [#2616](https://github.com/reddb-io/reddb/pull/2616) [`f4d6f8b`](https://github.com/reddb-io/reddb/commit/f4d6f8b04a3f363045060897f92b348c95475edf) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Cancel cooperative query execution when an HTTP request deadline expires so
+  blocking workers release their global and per-principal capacity permits.
+
 ## 1.28.2
 
 ### Patch Changes
