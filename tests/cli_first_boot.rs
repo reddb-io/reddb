@@ -19,6 +19,30 @@ fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
 }
 
+#[test]
+fn official_dockerfiles_default_to_durable_authenticated_bootstrap() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "Dockerfile",
+        "docker/Dockerfile.release",
+        "docker/Dockerfile.musl",
+    ] {
+        let contents = std::fs::read_to_string(root.join(relative)).expect("read Dockerfile");
+        assert!(
+            contents.contains("ENV REDDB_VAULT=true"),
+            "{relative} must persist authentication in the vault"
+        );
+        assert!(
+            contents.contains("ENV REDDB_BOOTSTRAP_PRESET=production"),
+            "{relative} must fail closed until bootstrap credentials are supplied"
+        );
+        assert!(
+            !contents.contains("ENV REDDB_VAULT=false"),
+            "{relative} must not reopen bootstrap after restart"
+        );
+    }
+}
+
 /// Grab an OS-assigned free TCP port, then release it so the child can
 /// bind it. Small TOCTOU window, acceptable for a test.
 fn free_port() -> u16 {

@@ -284,6 +284,12 @@ impl RedDb for GrpcRuntime {
         if req.collection.trim().is_empty() || req.key.trim().is_empty() {
             return Err(Status::invalid_argument("collection and key are required"));
         }
+        self.runtime
+            .check_collection_privilege(
+                reddb_rql::ast::PolicyAction::Select,
+                &req.collection,
+            )
+            .map_err(to_status)?;
 
         let runtime = self.runtime.clone();
         let collection = req.collection;
@@ -297,17 +303,26 @@ impl RedDb for GrpcRuntime {
         } else {
             req.from_lsn
         };
+        let bundle = crate::runtime::execution_context::snapshot_bundle();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move {
             loop {
-                let events = if prefix {
-                    runtime.kv_watch_events_since_prefix(&collection, &key, cursor, 256)
-                } else {
-                    runtime.kv_watch_events_since(&collection, &key, cursor, 256)
-                };
+                let (events, scanned_through) =
+                    crate::runtime::execution_context::with_snapshot_bundle(&bundle, || {
+                        if prefix {
+                            runtime.kv_watch_batch_since_prefix(
+                                &collection,
+                                &key,
+                                cursor,
+                                256,
+                            )
+                        } else {
+                            runtime.kv_watch_batch_since(&collection, &key, cursor, 256)
+                        }
+                    });
+                cursor = scanned_through;
                 let mut sent = false;
                 for event in events {
-                    cursor = event.lsn;
                     let reply = KvWatchEvent {
                         key: event.key,
                         op: event.op.as_str().to_string(),
@@ -1689,14 +1704,14 @@ impl RedDb for GrpcRuntime {
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
-        let identity = grpc_request_identity(self, &request);
+        let identity = grpc_request_identity(&request);
         let request = request.into_inner();
         let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
         let runtime = self.runtime.clone();
         let prepared_registry = Arc::clone(&self.prepared_registry);
         // WAIT and storage I/O must not park the async worker that drives
         // producer requests. Install request identity inside the blocking task.
-        let result = tokio::task::spawn_blocking(move || {
+        let result = grpc_spawn_blocking(move || {
             execute_grpc_query_request(
                 &runtime,
                 &prepared_registry,
@@ -1720,7 +1735,7 @@ impl RedDb for GrpcRuntime {
         request: Request<BatchQueryRequest>,
     ) -> Result<Response<BatchQueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
-        let identity = grpc_request_identity(self, &request);
+        let identity = grpc_request_identity(&request);
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
         let mut results = Vec::with_capacity(queries.len());
@@ -1758,7 +1773,7 @@ impl RedDb for GrpcRuntime {
         request: Request<ExecutePreparedRequest>,
     ) -> Result<Response<QueryReply>, Status> {
         let commit_policy = grpc_commit_policy_from_metadata(request.metadata())?;
-        let identity = grpc_request_identity(self, &request);
+        let identity = grpc_request_identity(&request);
         let inner = request.into_inner();
         let params = inner
             .bind_json
@@ -2310,7 +2325,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
+        let reply = grpc_spawn_blocking(move || create_row_reply(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2323,7 +2338,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
+        let reply = grpc_spawn_blocking(move || create_node_reply(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2336,7 +2351,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
+        let reply = grpc_spawn_blocking(move || create_edge_reply(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2349,7 +2364,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
+        let reply = grpc_spawn_blocking(move || create_vector_reply(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2385,7 +2400,7 @@ impl RedDb for GrpcRuntime {
         // Running it directly inside an async fn would block the Tokio worker thread,
         // starving other concurrent requests under high write concurrency.
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || bulk_create_rows_fast(&rt, request))
+        let reply = grpc_spawn_blocking(move || bulk_create_rows_fast(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2398,7 +2413,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<proto::BulkInsertReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || bulk_insert_binary(&rt, request))
+        let reply = grpc_spawn_blocking(move || bulk_insert_binary(&rt, request))
             .await
             .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2468,7 +2483,7 @@ impl RedDb for GrpcRuntime {
 
         let runtime = self.runtime.clone();
         let key = idempotency_key.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
+        let outcome = grpc_spawn_blocking(move || {
             crate::server::handlers_entity::process_batch_insert(
                 &runtime,
                 &collection,
@@ -2490,7 +2505,7 @@ impl RedDb for GrpcRuntime {
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
-            tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
+            grpc_spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
                 .await
                 .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2504,7 +2519,7 @@ impl RedDb for GrpcRuntime {
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
-            tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
+            grpc_spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
                 .await
                 .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
         self.enforce_commit_policy_after_write()?;
@@ -2517,7 +2532,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || {
+        let reply = grpc_spawn_blocking(move || {
             bulk_create_reply(&rt, request, create_vector_reply)
         })
         .await
@@ -2532,7 +2547,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = tokio::task::spawn_blocking(move || {
+        let reply = grpc_spawn_blocking(move || {
             bulk_create_reply(&rt, request, create_document_reply)
         })
         .await
@@ -2545,7 +2560,7 @@ impl RedDb for GrpcRuntime {
         let ask_query = ask_query_from_request(request.into_inner(), false)?;
         let runtime = self.runtime.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        let result = grpc_spawn_blocking(move || {
             runtime
                 .execute_ask("ASK via gRPC", &ask_query)
                 .map_err(to_status)
@@ -2561,7 +2576,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<Self::AskStreamStream>, Status> {
         let ask_query = ask_query_from_request(request.into_inner(), true)?;
         let runtime = self.runtime.clone();
-        let events = tokio::task::spawn_blocking(move || {
+        let events = grpc_spawn_blocking(move || {
             let result = runtime
                 .execute_ask("ASK STREAM via gRPC", &ask_query)
                 .map_err(to_status)?;
@@ -3031,7 +3046,7 @@ impl RedDb for GrpcRuntime {
         if await_data && current_lsn <= since_lsn {
             let repl_for_wait = repl.clone();
             let timeout = std::time::Duration::from_millis(await_timeout_ms);
-            tokio::task::spawn_blocking(move || {
+            grpc_spawn_blocking(move || {
                 repl_for_wait.wait_for_logical_lsn_after(since_lsn, timeout)
             })
             .await
@@ -3396,9 +3411,8 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
-        // resolve is only for the per-target lifecycle authorization below.
-        let auth = self.resolve_auth(request.metadata());
+        let (actor, actor_role) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
@@ -3409,29 +3423,21 @@ impl RedDb for GrpcRuntime {
         let role = crate::auth::Role::from_str(&role_str)
             .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
 
-        if let AuthResult::Authenticated {
-            username: actor,
-            role: actor_role,
-            ..
-        } = &auth
-        {
-            let actor = crate::auth::UserId::platform(actor.clone());
-            let target = crate::auth::UserId::platform(username.clone());
-            if !self.auth_store.check_user_lifecycle_authz(
-                &actor,
-                *actor_role,
-                "user:create",
-                &target,
-            ) {
-                return Err(Status::permission_denied(format!(
-                    "policy denied user:create on user:{target}"
-                )));
-            }
+        let target = crate::auth::UserId::from_parts(actor.tenant.as_deref(), &username);
+        if !self.auth_store.check_user_lifecycle_authz(
+            &actor,
+            actor_role,
+            "user:create",
+            &target,
+        ) {
+            return Err(Status::permission_denied(format!(
+                "policy denied user:create on user:{target}"
+            )));
         }
 
         let user = self
             .auth_store
-            .create_user(&username, &password, role)
+            .create_user_in_tenant(actor.tenant.as_deref(), &username, &password, role)
             .map_err(|e| Status::already_exists(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3457,36 +3463,27 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        // The admin gate runs at dispatch (`GrpcAuthClass::Admin`); this
-        // resolve is only for the per-target lifecycle authorization below.
-        let auth = self.resolve_auth(request.metadata());
+        let (actor, actor_role) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
 
-        if let AuthResult::Authenticated {
-            username: actor,
-            role: actor_role,
-            ..
-        } = &auth
-        {
-            let actor = crate::auth::UserId::platform(actor.clone());
-            let target = crate::auth::UserId::platform(username.clone());
-            if !self.auth_store.check_user_lifecycle_authz(
-                &actor,
-                *actor_role,
-                "user:delete",
-                &target,
-            ) {
-                return Err(Status::permission_denied(format!(
-                    "policy denied user:delete on user:{target}"
-                )));
-            }
+        let target = crate::auth::UserId::from_parts(actor.tenant.as_deref(), &username);
+        if !self.auth_store.check_user_lifecycle_authz(
+            &actor,
+            actor_role,
+            "user:delete",
+            &target,
+        ) {
+            return Err(Status::permission_denied(format!(
+                "policy denied user:delete on user:{target}"
+            )));
         }
 
         self.auth_store
-            .delete_user(&username)
+            .delete_user_in_tenant(actor.tenant.as_deref(), &username)
             .map_err(|e| Status::not_found(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3503,14 +3500,18 @@ impl RedDb for GrpcRuntime {
         if !self.auth_store.is_enabled() {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
-
-
-        let users = self.auth_store.list_users();
+        let (actor, _) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
+        let tenant_filter = actor.tenant.as_deref().map(Some);
+        let users = self.auth_store.list_users_scoped(tenant_filter);
         let user_list: Vec<JsonValue> = users
             .into_iter()
             .map(|u| {
                 let mut m = Map::new();
                 m.insert("username".into(), JsonValue::String(u.username));
+                if let Some(tenant) = u.tenant_id {
+                    m.insert("tenant_id".into(), JsonValue::String(tenant));
+                }
                 m.insert(
                     "role".into(),
                     JsonValue::String(u.role.as_str().to_string()),
@@ -3558,8 +3559,8 @@ impl RedDb for GrpcRuntime {
         if !self.auth_store.is_enabled() {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
-
-
+        let (actor, _) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let username = json_string_field(&payload, "username")
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
@@ -3571,7 +3572,7 @@ impl RedDb for GrpcRuntime {
 
         let api_key = self
             .auth_store
-            .create_api_key(&username, &name, role)
+            .create_api_key_in_tenant(actor.tenant.as_deref(), &username, &name, role)
             .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
 
         let mut map = Map::new();
@@ -3596,12 +3597,19 @@ impl RedDb for GrpcRuntime {
         if !self.auth_store.is_enabled() {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
-
-
+        let (actor, _) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let key = json_string_field(&payload, "key")
             .ok_or_else(|| Status::invalid_argument("missing field: key"))?;
 
+        let owner = self
+            .auth_store
+            .api_key_owner(&key)
+            .ok_or_else(|| Status::not_found("API key not found"))?;
+        if actor.tenant.is_some() && actor.tenant != owner.tenant {
+            return Err(Status::not_found("API key not found"));
+        }
         self.auth_store
             .revoke_api_key(&key)
             .map_err(|e| Status::not_found(e.to_string()))?;
@@ -3620,15 +3628,9 @@ impl RedDb for GrpcRuntime {
             return Err(Status::failed_precondition("authentication is disabled"));
         }
 
-        let auth = self.resolve_auth(request.metadata());
-        let caller_username = match &auth {
-            AuthResult::Authenticated { username, .. } => username.clone(),
-            _ => {
-                return Err(Status::unauthenticated(
-                    "authentication required".to_string(),
-                ))
-            }
-        };
+        let (actor, actor_role) = grpc_request_identity(&request)
+            .ok_or_else(|| Status::unauthenticated("authentication required"))?;
+        let caller_username = actor.username.clone();
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let target_username =
@@ -3639,25 +3641,32 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument("missing field: new_password"))?;
 
         if target_username != caller_username {
-            check_permission(&auth, false, true).map_err(Status::permission_denied)?;
-            if let AuthResult::Authenticated { role, .. } = &auth {
-                let actor = crate::auth::UserId::platform(caller_username.clone());
-                let target = crate::auth::UserId::platform(target_username.clone());
-                if !self.auth_store.check_user_lifecycle_authz(
-                    &actor,
-                    *role,
-                    "user:password:change",
-                    &target,
-                ) {
-                    return Err(Status::permission_denied(format!(
-                        "policy denied user:password:change on user:{target}"
-                    )));
-                }
+            if !actor_role.can_admin() {
+                return Err(Status::permission_denied("admin role required"));
+            }
+            let target = crate::auth::UserId::from_parts(
+                actor.tenant.as_deref(),
+                &target_username,
+            );
+            if !self.auth_store.check_user_lifecycle_authz(
+                &actor,
+                actor_role,
+                "user:password:change",
+                &target,
+            ) {
+                return Err(Status::permission_denied(format!(
+                    "policy denied user:password:change on user:{target}"
+                )));
             }
         }
 
         self.auth_store
-            .change_password(&target_username, &old_password, &new_password)
+            .change_password_in_tenant(
+                actor.tenant.as_deref(),
+                &target_username,
+                &old_password,
+                &new_password,
+            )
             .map_err(|e| Status::unauthenticated(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3671,6 +3680,7 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
+        let identity = grpc_request_identity(&request);
         let auth = self.resolve_auth(request.metadata());
 
         let mut map = Map::new();
@@ -3682,6 +3692,12 @@ impl RedDb for GrpcRuntime {
             } => {
                 map.insert("authenticated".into(), JsonValue::Bool(true));
                 map.insert("username".into(), JsonValue::String(username.clone()));
+                if let Some(tenant) = identity
+                    .as_ref()
+                    .and_then(|(id, _)| id.tenant.as_ref())
+                {
+                    map.insert("tenant_id".into(), JsonValue::String(tenant.clone()));
+                }
                 map.insert("role".into(), JsonValue::String(role.as_str().to_string()));
                 let method = match source {
                     crate::auth::middleware::AuthSource::Password => "token",
@@ -3935,5 +3951,43 @@ mod tests {
             }
             other => panic!("expected answer_token event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tenant_admin_cannot_create_platform_user() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+        auth_store
+            .create_user_in_tenant(Some("acme"), "tenant-admin", "p", Role::Admin)
+            .expect("tenant admin");
+        let grpc = GrpcRuntime {
+            runtime,
+            auth_store: Arc::clone(&auth_store),
+            prepared_registry: Arc::new(PreparedRegistry::new()),
+            oauth_validator: None,
+        };
+        let mut request = Request::new(JsonPayloadRequest {
+            payload_json:
+                r#"{"username":"minted","password":"password","role":"admin"}"#.to_string(),
+        });
+        request
+            .extensions_mut()
+            .insert(catalog_dispatch::GrpcDispatchContext {
+                identity: Some((
+                    crate::auth::UserId::scoped("acme", "tenant-admin"),
+                    Role::Admin,
+                )),
+            });
+
+        grpc.auth_create_user(request)
+            .await
+            .expect("tenant-scoped user creation");
+
+        assert!(auth_store.get_user(Some("acme"), "minted").is_some());
+        assert!(auth_store.get_user(None, "minted").is_none());
     }
 }

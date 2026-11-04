@@ -31,6 +31,10 @@ docker run --rm -it \
   -p 55055:55055 \
   -p 5000:5000 \
   -v $(pwd)/data:/data \
+  -v $(pwd)/secrets:/run/secrets:ro \
+  -e REDDB_USERNAME_FILE=/run/secrets/reddb_username \
+  -e REDDB_PASSWORD_FILE=/run/secrets/reddb_password \
+  -e REDDB_VAULT_PASSPHRASE_FILE=/run/secrets/reddb_vault_passphrase \
   --name reddb \
   reddb
 ```
@@ -44,7 +48,10 @@ CMD ["server"]
 The image env supplies `REDDB_DATA_PATH=/data/red/database.rdb`,
 `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050`,
 `REDDB_GRPC_BIND_ADDR=0.0.0.0:55055`,
-`REDDB_HTTP_BIND_ADDR=0.0.0.0:5000`, and `REDDB_VAULT=false`.
+`REDDB_HTTP_BIND_ADDR=0.0.0.0:5000`, `REDDB_VAULT=true`, and
+`REDDB_BOOTSTRAP_PRESET=production`. First boot therefore requires the
+username, password, and vault passphrase secret files shown above. Reuse the
+same vault passphrase when restarting the persisted `/data` volume.
 
 ## Persistent data path and upgrades
 
@@ -203,6 +210,10 @@ docker run --rm -it \
 
 ## Docker Compose
 
+The topology snippets below inherit the fail-closed image defaults. Add the
+bootstrap and vault secret-file mounts from **With Auth Vault** before starting
+them; the service intentionally will not initialize anonymously.
+
 ### Single Server
 
 ```yaml
@@ -223,7 +234,7 @@ services:
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
@@ -254,7 +265,7 @@ services:
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "1"
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
@@ -281,7 +292,7 @@ services:
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "1"
       REDDB_PRIMARY_ADDR: http://primary:55055
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s

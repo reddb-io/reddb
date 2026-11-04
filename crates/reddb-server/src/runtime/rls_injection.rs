@@ -73,6 +73,96 @@ pub(crate) fn rls_is_enabled(runtime: &RedDBRuntime, table: &str) -> bool {
     runtime.inner.rls_enabled_tables.read().contains(table)
 }
 
+pub(crate) fn entity_passes_rls_action(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    action: reddb_rql::ast::PolicyAction,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> bool {
+    if current_auth_identity().is_none() || !rls_is_enabled(runtime, collection) {
+        return true;
+    }
+    let kind = entity_policy_target_kind(runtime, collection, entity);
+    let Some(filter) = rls_policy_filter_for_kind(runtime, collection, action, kind) else {
+        return false;
+    };
+    crate::runtime::query_exec::evaluate_entity_filter_with_db(
+        Some(&runtime.inner.db),
+        entity,
+        &filter,
+        collection,
+        collection,
+    )
+}
+
+fn entity_policy_target_kind(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> reddb_rql::ast::PolicyTargetKind {
+    use crate::storage::unified::entity::EntityKind;
+    use reddb_rql::ast::PolicyTargetKind;
+
+    match &entity.kind {
+        EntityKind::GraphNode(_) => PolicyTargetKind::Nodes,
+        EntityKind::GraphEdge(_) => PolicyTargetKind::Edges,
+        EntityKind::Vector { .. } => PolicyTargetKind::Vectors,
+        EntityKind::TimeSeriesPoint(_) => PolicyTargetKind::Points,
+        EntityKind::QueueMessage { .. } => PolicyTargetKind::Messages,
+        EntityKind::TableRow { .. }
+            if runtime
+                .db()
+                .collection_contract_arc(collection)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Document
+                }) =>
+        {
+            PolicyTargetKind::Documents
+        }
+        EntityKind::TableRow { .. } => PolicyTargetKind::Table,
+    }
+}
+
+pub(crate) fn kv_watch_event_passes_rls(
+    runtime: &RedDBRuntime,
+    event: &crate::replication::cdc::KvWatchEvent,
+) -> bool {
+    use crate::storage::unified::entity::{EntityData, EntityKind, RowData, UnifiedEntity};
+    use crate::storage::EntityId;
+    use reddb_rql::ast::PolicyAction;
+    use reddb_types::Value;
+    use std::sync::Arc;
+
+    if current_auth_identity().is_none() || !rls_is_enabled(runtime, &event.collection) {
+        return true;
+    }
+
+    let table: Arc<str> = Arc::from(event.collection.as_str());
+    let visible = |value: &crate::json::Value| {
+        let Ok(value) = crate::application::entity::json_to_storage_value(value) else {
+            return false;
+        };
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: Arc::clone(&table),
+                row_id: 0,
+            },
+            EntityData::Row(RowData::with_names(
+                vec![Value::text(event.key.clone()), value],
+                vec!["key".to_string(), "value".to_string()],
+            )),
+        );
+        entity_passes_rls_action(runtime, &event.collection, PolicyAction::Select, &entity)
+    };
+
+    let mut values = event.before.iter().chain(event.after.iter());
+    let Some(first) = values.next() else {
+        return false;
+    };
+    visible(first) && values.all(visible)
+}
+
 /// Per-entity gate used by the graph materialiser for `GraphNode`
 /// entities. RLS is checked against the source collection with
 /// `kind = Nodes`, which `matching_rls_policies_for_kind` resolves to

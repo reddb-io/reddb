@@ -84,11 +84,12 @@ impl RedDBServer {
 
         // Auth mechanisms that are configured on this listener. This is
         // *which methods exist*, not *what any caller may do*.
-        let auth_enabled = self
-            .auth_store
-            .as_ref()
-            .map(|s| s.is_enabled())
-            .unwrap_or(false);
+        let auth_enabled = self.runtime.oauth_validator().is_some()
+            || self
+                .auth_store
+                .as_ref()
+                .map(|s| s.is_enabled())
+                .unwrap_or(false);
         let on = |b: bool| {
             if b {
                 CapabilityState::Supported
@@ -190,18 +191,12 @@ impl RedDBServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let auth_enabled = self
-            .auth_store
-            .as_ref()
-            .map(|s| s.is_enabled())
-            .unwrap_or(false);
+        let auth_enabled = self.runtime.oauth_validator().is_some()
+            || self
+                .auth_store
+                .as_ref()
+                .is_some_and(|store| store.is_enabled());
         let read_only = self.runtime.write_gate().is_read_only();
-
-        let bearer = headers
-            .get("authorization")
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
 
         let mut authenticated = false;
         let mut tenant: Option<String> = None;
@@ -209,21 +204,11 @@ impl RedDBServer {
         let mut principal = super::routing::principal_for(headers);
 
         if auth_enabled {
-            if let (Some(token), Some(store)) = (bearer, self.auth_store.as_ref()) {
-                // Tenant-aware AuthStore identity first (API keys /
-                // session tokens), then fall back to the OAuth/JWT path
-                // which yields a role but no tenant.
-                if let Some((uid, r)) = store.validate_token_full(token) {
-                    authenticated = true;
-                    tenant = uid.tenant.clone();
-                    role = Some(r);
-                    principal = uid.to_string();
-                } else if let super::routing::BearerOutcome::Valid(r) =
-                    super::routing::resolve_bearer_role(token, &self.runtime, store)
-                {
-                    authenticated = true;
-                    role = Some(r);
-                }
+            if let Some(caller) = super::handlers_auth::resolve_auth_caller(self, headers) {
+                authenticated = true;
+                tenant = caller.id.tenant.clone();
+                role = Some(caller.role);
+                principal = caller.id.to_string();
             }
         }
 
@@ -236,11 +221,12 @@ impl RedDBServer {
         } else {
             // Auth enabled, caller unauthenticated. Reads are open only
             // when the deployment does not require auth for reads.
-            let require_auth = self
-                .auth_store
-                .as_ref()
-                .map(|s| s.config().require_auth)
-                .unwrap_or(true);
+            let require_auth = self.runtime.oauth_validator().is_some()
+                || self
+                    .auth_store
+                    .as_ref()
+                    .map(|s| s.config().require_auth)
+                    .unwrap_or(true);
             (!require_auth, false, false)
         };
 

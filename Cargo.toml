@@ -172,7 +172,7 @@ path = "tests/grouped/timeseries_retention.rs"
 [dependencies]
 reddb-wire = { workspace = true }
 reddb-grpc-proto = { workspace = true }
-reddb-client = { workspace = true, features = ["http"] }
+reddb-client = { workspace = true, features = ["http", "redwire-tls"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }

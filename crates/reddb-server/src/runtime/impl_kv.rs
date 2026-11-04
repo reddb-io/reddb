@@ -428,6 +428,21 @@ impl<'a> KvAtomicOps<'a> {
         let lock = (model != CollectionModel::Vault)
             .then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
         let _guard = lock.as_ref().map(|lock| lock.lock());
+        if model == CollectionModel::Kv {
+            self.runtime
+                .check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, collection)?;
+            let Some(entity) = self.get_entity(model, collection, key)? else {
+                return Ok(false);
+            };
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self.runtime,
+                collection,
+                reddb_rql::ast::PolicyAction::Delete,
+                &entity,
+            ) {
+                return Ok(false);
+            }
+        }
         self.delete_unlocked(model, collection, key)
     }
 
@@ -521,6 +536,21 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             Ok(false)
         }
+    }
+
+    fn delete_existing_for_replace_unlocked(
+        &self,
+        collection: &str,
+        id: crate::storage::EntityId,
+    ) -> RedDBResult<()> {
+        let store = self.runtime.inner.db.store();
+        let deleted = store
+            .delete(collection, id)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if deleted {
+            store.context_index().remove_entity(id);
+        }
+        Ok(())
     }
 
     /// Tombstone a KV version by stamping `xmax = xid` and persisting it.
@@ -661,8 +691,10 @@ impl<'a> KvAtomicOps<'a> {
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
-        if existing.is_some() && !atomic {
-            self.runtime.delete_kv(collection, key)?;
+        if !atomic {
+            if let Some((_, id)) = existing.as_ref() {
+                self.delete_existing_for_replace_unlocked(collection, *id)?;
+            }
         }
 
         let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
@@ -766,8 +798,10 @@ impl<'a> KvAtomicOps<'a> {
         let previous = atomic
             .then(|| existing.as_ref().map(|(_, id)| *id))
             .flatten();
-        if current.is_some() && !atomic {
-            self.runtime.delete_kv(collection, key)?;
+        if !atomic {
+            if let Some((_, id)) = existing.as_ref() {
+                self.delete_existing_for_replace_unlocked(collection, *id)?;
+            }
         }
 
         let mut meta_vec: Vec<(String, crate::storage::unified::MetadataValue)> =
@@ -827,9 +861,18 @@ impl<'a> KvAtomicOps<'a> {
         let store = self.runtime.inner.db.store();
         let mut removed = 0usize;
         for (key, id) in entries {
-            let before = store
-                .get(collection, id)
-                .and_then(|entity| kv_value_from_entity(&entity));
+            let Some(entity) = store.get(collection, id) else {
+                continue;
+            };
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self.runtime,
+                collection,
+                reddb_rql::ast::PolicyAction::Delete,
+                &entity,
+            ) {
+                continue;
+            }
+            let before = kv_value_from_entity(&entity);
             let deleted = store
                 .delete(collection, id)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -3761,7 +3804,10 @@ fn current_unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use crate::api::RedDBOptions;
+    use crate::application::ports::RuntimeEntityPort;
+    use crate::auth::Role;
     use crate::catalog::CollectionModel;
+    use crate::runtime::execution_context::{with_snapshot_bundle, SnapshotBundle};
     use crate::runtime::RedDBRuntime;
     use reddb_types::Value;
 
@@ -4067,6 +4113,61 @@ mod tests {
                 .get("value"),
             Some(reddb_types::Value::Null)
         ));
+    }
+
+    #[test]
+    fn authenticated_kv_watch_and_deletes_apply_row_level_security() {
+        let runtime = rt();
+        let ops = super::KvAtomicOps::new(&runtime);
+        for key in ["visible", "hidden"] {
+            ops.set_with_tags(
+                "guarded_cache",
+                key,
+                Value::text(key),
+                None,
+                &["shared".to_string()],
+                false,
+            )
+            .expect("seed key");
+        }
+        for query in [
+            "CREATE POLICY watch_visible ON guarded_cache FOR SELECT USING (key='visible')",
+            "CREATE POLICY delete_visible ON guarded_cache FOR DELETE USING (key='visible')",
+            "ALTER TABLE guarded_cache ENABLE ROW LEVEL SECURITY",
+        ] {
+            runtime.execute_query(query).expect(query);
+        }
+
+        let bundle = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("alice".to_string(), Role::Write)),
+            tenant: None,
+        };
+        with_snapshot_bundle(&bundle, || {
+            let events = runtime.kv_watch_events_since_prefix("guarded_cache", "", 0, 100);
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|event| event.key == "visible"));
+
+            assert!(!runtime
+                .delete_kv("guarded_cache", "hidden")
+                .expect("hidden delete"));
+            assert_eq!(
+                ops.invalidate_tags("guarded_cache", &["shared".to_string()])
+                    .expect("invalidate visible rows"),
+                1
+            );
+        });
+
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "guarded_cache", "visible")
+                .expect("visible key"),
+            None
+        );
+        assert_eq!(
+            ops.get(CollectionModel::Kv, "guarded_cache", "hidden")
+                .expect("hidden key"),
+            Some(Value::text("hidden"))
+        );
     }
 
     #[test]

@@ -118,6 +118,10 @@ impl<'rt> MutationEngine<'rt> {
         // method, so legitimate replica catch-up is unaffected.
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.runtime
+            .check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &collection)?;
+        self.enforce_tenant_scope(&collection, &mut rows)?;
+        self.enforce_insert_rls(&collection, &rows)?;
 
         // Synchronous content-moderation gate (#1274, ADR 0057). For a
         // collection that declares a `MODERATE (... sync = true)` policy,
@@ -167,6 +171,45 @@ impl<'rt> MutationEngine<'rt> {
             }
             return self.apply_with_topology(collection, rows, topology_guard);
         }
+    }
+
+    fn enforce_tenant_scope(&self, collection: &str, rows: &mut [MutationRow]) -> RedDBResult<()> {
+        for row in rows {
+            enforce_tenant_fields(self.runtime, collection, &mut row.fields)?;
+        }
+        Ok(())
+    }
+
+    fn enforce_insert_rls(&self, collection: &str, rows: &[MutationRow]) -> RedDBResult<()> {
+        if crate::runtime::execution_context::current_auth_identity().is_none()
+            || !crate::runtime::rls_injection::rls_is_enabled(self.runtime, collection)
+        {
+            return Ok(());
+        }
+        let table: Arc<str> = Arc::from(collection);
+        for row in rows {
+            let mut data = RowData::new(Vec::new());
+            data.named = Some(row.fields.iter().cloned().collect());
+            let entity = UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TableRow {
+                    table: Arc::clone(&table),
+                    row_id: 0,
+                },
+                EntityData::Row(data),
+            );
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self.runtime,
+                collection,
+                reddb_rql::ast::PolicyAction::Insert,
+                &entity,
+            ) {
+                return Err(RedDBError::Query(format!(
+                    "insert into collection '{collection}' denied by row-level security"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn apply_with_topology(
@@ -613,6 +656,92 @@ impl<'rt> MutationEngine<'rt> {
         // `CREATE INDEX` path in `impl_ddl::execute_create_index`.
         self.runtime.invalidate_plan_cache();
     }
+}
+
+pub(crate) fn enforce_tenant_fields(
+    runtime: &crate::RedDBRuntime,
+    collection: &str,
+    fields: &mut Vec<(String, Value)>,
+) -> RedDBResult<()> {
+    let Some(tenant_column) = runtime.tenant_column(collection) else {
+        return Ok(());
+    };
+    let active_tenant = crate::runtime::execution_context::current_tenant();
+    if let Some((root, tail)) = tenant_column.split_once('.') {
+        let existing = fields
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case(root));
+        match existing {
+            Some((_, value))
+                if crate::runtime::impl_dml_support::dotted_tail_already_set(value, tail) =>
+            {
+                if let Some(active) = active_tenant.as_deref() {
+                    let explicit =
+                        crate::runtime::impl_dml_support::dotted_tenant_text(value, tail)?;
+                    if explicit.as_deref() != Some(active) {
+                        return Err(RedDBError::Query(format!(
+                            "tenant discriminator '{tenant_column}' must match active tenant '{active}'"
+                        )));
+                    }
+                }
+            }
+            Some((_, value)) => {
+                let Some(active) = active_tenant.as_deref() else {
+                    return Err(RedDBError::Query(format!(
+                        "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                    )));
+                };
+                *value = crate::runtime::impl_dml_support::merge_dotted_tenant(
+                    value.clone(),
+                    tail,
+                    active,
+                )?;
+            }
+            None => {
+                let Some(active) = active_tenant.as_deref() else {
+                    return Err(RedDBError::Query(format!(
+                        "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                    )));
+                };
+                fields.push((
+                    root.to_string(),
+                    crate::runtime::impl_dml_support::merge_dotted_tenant(
+                        Value::Null,
+                        tail,
+                        active,
+                    )?,
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    match fields
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(&tenant_column))
+    {
+        Some(index) => {
+            if let Some(active) = active_tenant.as_deref() {
+                match &fields[index].1 {
+                    Value::Text(value) if value.as_ref() == active => {}
+                    _ => {
+                        return Err(RedDBError::Query(format!(
+                            "tenant discriminator '{tenant_column}' must match active tenant '{active}'"
+                        )))
+                    }
+                }
+            }
+        }
+        None => {
+            let Some(active) = active_tenant.as_deref() else {
+                return Err(RedDBError::Query(format!(
+                    "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                )));
+            };
+            fields.push((tenant_column, Value::text(active)));
+        }
+    }
+    Ok(())
 }
 
 impl crate::RedDBRuntime {

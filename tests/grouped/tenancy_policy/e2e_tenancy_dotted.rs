@@ -7,9 +7,11 @@
 //! fresh JSON object when the root column is absent.
 
 use reddb::runtime::mvcc::{
-    clear_current_connection_id, set_current_connection_id, set_current_tenant,
+    clear_current_connection_id, clear_current_tenant, set_current_connection_id,
+    set_current_tenant,
 };
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn open_runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
@@ -121,5 +123,78 @@ fn dotted_tenant_merges_existing_root_json() {
     set_current_tenant("globex".to_string());
     assert_eq!(row_count(&rt, "SELECT * FROM audit"), 0);
 
+    clear_current_connection_id();
+}
+
+#[test]
+fn explicit_flat_and_dotted_tenants_must_match_the_active_tenant() {
+    let rt = open_runtime();
+    exec(
+        &rt,
+        "CREATE TABLE flat_docs (id INT, tenant_id TEXT, body TEXT) TENANT BY (tenant_id)",
+    );
+    exec(
+        &rt,
+        "CREATE TABLE dotted_docs (id INT, headers TEXT) TENANT BY (headers.tenant)",
+    );
+
+    set_current_connection_id(501);
+    set_current_tenant("acme".to_string());
+
+    assert!(rt
+        .execute_query(
+            "INSERT INTO flat_docs (id, tenant_id, body) VALUES (1, 'globex', 'blocked')",
+        )
+        .is_err());
+    assert!(rt
+        .execute_query(
+            "INSERT INTO flat_docs (id, tenant_id, body) VALUES \
+             (2, 'acme', 'must-roll-back'), (3, 'globex', 'blocked')",
+        )
+        .is_err());
+    assert!(rt
+        .execute_query_with_params(
+            "INSERT INTO flat_docs (id, tenant_id, body) VALUES (4, $1, 'blocked')",
+            &[Value::text("globex")],
+        )
+        .is_err());
+    assert!(rt
+        .execute_query(
+            "INSERT INTO flat_docs (id, tenant_id, body) VALUES \
+             (5, 'globex', 'blocked') ON CONFLICT DO NOTHING",
+        )
+        .is_err());
+    assert!(rt
+        .execute_query(
+            "INSERT INTO dotted_docs (id, headers) VALUES \
+             (1, '{\"tenant\":\"globex\",\"trace\":\"x\"}')",
+        )
+        .is_err());
+    assert_eq!(row_count(&rt, "SELECT * FROM flat_docs"), 0);
+    assert_eq!(row_count(&rt, "SELECT * FROM dotted_docs"), 0);
+
+    exec(
+        &rt,
+        "INSERT INTO flat_docs (id, tenant_id, body) VALUES (6, 'acme', 'allowed')",
+    );
+    exec(
+        &rt,
+        "INSERT INTO dotted_docs (id, headers) VALUES \
+         (2, '{\"tenant\":\"acme\",\"trace\":\"ok\"}')",
+    );
+
+    clear_current_tenant();
+    clear_current_connection_id();
+    exec(
+        &rt,
+        "INSERT INTO flat_docs (id, tenant_id, body) VALUES (7, 'globex', 'platform-loader')",
+    );
+    set_current_connection_id(502);
+    set_current_tenant("acme".to_string());
+    assert_eq!(row_count(&rt, "SELECT * FROM flat_docs"), 1);
+    assert_eq!(row_count(&rt, "SELECT * FROM dotted_docs"), 1);
+    set_current_tenant("globex".to_string());
+    assert_eq!(row_count(&rt, "SELECT * FROM flat_docs"), 1);
+    assert_eq!(row_count(&rt, "SELECT * FROM dotted_docs"), 0);
     clear_current_connection_id();
 }

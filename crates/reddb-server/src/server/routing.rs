@@ -535,13 +535,29 @@ impl RedDBServer {
     ) -> Option<HttpResponse> {
         if let Some(collection) = collection_kv_invalidate_tags_path(path) {
             return Some(match method {
-                "POST" => self.handle_invalidate_kv_tags(collection, body.to_vec()),
+                "POST" => {
+                    if let Some(deny) =
+                        self.check_collection_http_policy(headers, "delete", collection)
+                    {
+                        deny
+                    } else {
+                        self.handle_invalidate_kv_tags(collection, body.to_vec())
+                    }
+                }
                 _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
             });
         }
         if let Some((collection, key)) = collection_kv_watch_path(path) {
             return Some(match method {
-                "GET" => self.handle_watch_kv(&collection, &key, query),
+                "GET" => {
+                    if let Some(deny) =
+                        self.check_collection_http_policy(headers, "select", &collection)
+                    {
+                        deny
+                    } else {
+                        self.handle_watch_kv(&collection, &key, query)
+                    }
+                }
                 _ => json_error(405, "method not allowed for KV watch endpoint"),
             });
         }
@@ -846,14 +862,10 @@ impl RedDBServer {
             return true;
         }
 
-        // If no auth store is configured, all requests are permitted.
-        let auth_store = match &self.auth_store {
-            Some(store) => store,
-            None => return true,
-        };
-
-        // If auth is disabled in the config, allow everything.
-        if !auth_store.is_enabled() {
+        let auth_store = self.auth_store.as_deref();
+        let oauth_enabled = self.runtime.oauth_validator().is_some();
+        let local_auth_enabled = auth_store.is_some_and(|store| store.is_enabled());
+        if !local_auth_enabled && !oauth_enabled {
             return true;
         }
 
@@ -867,7 +879,7 @@ impl RedDBServer {
 
         match token {
             Some(tok) => {
-                let role = match resolve_bearer_role(tok, &self.runtime, auth_store.as_ref()) {
+                let role = match resolve_bearer_role(tok, &self.runtime, auth_store) {
                     BearerOutcome::Valid(role) => role,
                     BearerOutcome::Invalid => return false,
                     BearerOutcome::NoMatch => return false,
@@ -891,7 +903,10 @@ impl RedDBServer {
                 // No token: allow only if require_auth is false, and never
                 // for operator routes (those need an admin bearer when no
                 // `RED_ADMIN_TOKEN` is configured).
-                !admin_role_required && !bearer_required && !auth_store.config().require_auth
+                !admin_role_required
+                    && !bearer_required
+                    && !oauth_enabled
+                    && auth_store.is_some_and(|store| !store.config().require_auth)
             }
         }
     }
@@ -942,7 +957,7 @@ pub(crate) fn looks_like_jwt(token: &str) -> bool {
 pub(crate) fn resolve_bearer_role(
     token: &str,
     runtime: &crate::runtime::RedDBRuntime,
-    auth_store: &crate::auth::store::AuthStore,
+    auth_store: Option<&crate::auth::store::AuthStore>,
 ) -> BearerOutcome {
     let token_fp = token_fingerprint(token);
     if looks_like_jwt(token) {
@@ -978,6 +993,9 @@ pub(crate) fn resolve_bearer_role(
         // matches the behaviour where an operator hands out long-lived
         // base64-segmented API keys that happen to look like JWTs.
     }
+    let Some(auth_store) = auth_store else {
+        return BearerOutcome::NoMatch;
+    };
     match auth_store.validate_token(token) {
         Some((_username, role)) => BearerOutcome::Valid(role),
         None => {

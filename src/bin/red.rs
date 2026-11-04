@@ -353,6 +353,20 @@ fn mcp_uri_allows_bearer(uri: &str) -> bool {
     )
 }
 
+fn mcp_redwire_connect_options(
+    host: String,
+    port: u16,
+    tls: bool,
+    auth: reddb_client::redwire::Auth,
+) -> reddb_client::redwire::ConnectOptions {
+    let options = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+    if tls {
+        options.with_tls(reddb_client::redwire::TlsConfig::new())
+    } else {
+        options
+    }
+}
+
 fn run_mcp_remote(mut options: McpClientOptions) -> i32 {
     if let Err(err) = validate_mcp_remote_connect(&mut options) {
         eprintln!("red mcp: {err}");
@@ -379,16 +393,17 @@ fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), Str
             })?;
             Ok(())
         }
-        reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+        reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
             let host = host.clone();
             let port = *port;
+            let tls = *tls;
             let auth = redwire_auth_from_connection_auth(&options.auth)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| format!("build runtime: {err}"))?;
             rt.block_on(async {
-                let opts = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                let opts = mcp_redwire_connect_options(host, port, tls, auth);
                 tokio::time::timeout(
                     options.timeout,
                     reddb_client::redwire::RedWireClient::connect(opts),
@@ -739,17 +754,17 @@ impl RemoteMcpServer {
                 reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
                     .map_err(|err| format!("{err}"))
             }
-            reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+            reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
                 let host = host.clone();
                 let port = *port;
+                let tls = *tls;
                 let auth = redwire_auth_from_connection_auth(&self.options.auth)?;
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|err| format!("build runtime: {err}"))?;
                 rt.block_on(async {
-                    let opts =
-                        reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                    let opts = mcp_redwire_connect_options(host, port, tls, auth);
                     let mut client = tokio::time::timeout(
                         self.options.timeout,
                         reddb_client::redwire::RedWireClient::connect(opts),
@@ -1605,10 +1620,17 @@ fn main() {
             if let Some(connect) = flag_string(&result.flags, "connect") {
                 if !connect.is_empty() {
                     let token = flag_string(&result.flags, "token").filter(|s| !s.is_empty());
-                    let endpoint = connect
-                        .strip_prefix("grpc://")
-                        .map(|rest| format!("http://{rest}"))
-                        .unwrap_or_else(|| connect.clone());
+                    let endpoint = match reddb_wire::parse(&connect) {
+                        Ok(reddb_wire::ConnectionTarget::Grpc { endpoint }) => endpoint,
+                        Ok(_) => {
+                            eprintln!("rpc: --connect requires grpc:// or grpcs://");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("rpc: invalid --connect URI: {err}");
+                            std::process::exit(1);
+                        }
+                    };
                     let code = reddb::rpc_stdio::run_remote(&endpoint, token);
                     std::process::exit(code);
                 }
@@ -6048,6 +6070,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
 
         assert!(err.contains("bearer token requires TLS"), "{err}");
         assert!(!err.contains("secret-token-1"), "{err}");
+    }
+
+    #[test]
+    fn mcp_redwire_connect_options_honor_secure_scheme() {
+        let secure = mcp_redwire_connect_options(
+            "db.example".to_string(),
+            5050,
+            true,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(secure.tls.is_some(), "reds:// must install a TLS config");
+
+        let cleartext = mcp_redwire_connect_options(
+            "localhost".to_string(),
+            5050,
+            false,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(
+            cleartext.tls.is_none(),
+            "red:// must remain explicit plaintext"
+        );
     }
 
     #[test]

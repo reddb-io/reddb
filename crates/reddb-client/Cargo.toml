@@ -48,6 +48,7 @@ redwire-tls = [
 reddb-grpc-proto = { workspace = true }
 reddb-wire = { workspace = true }
 reddb-types = { workspace = true }
+tonic = { workspace = true, features = ["channel", "tls-ring", "tls-webpki-roots"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.

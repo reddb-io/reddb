@@ -361,6 +361,12 @@ struct GrpcRuntime {
     oauth_validator: Option<Arc<crate::auth::OAuthValidator>>,
 }
 
+#[derive(Clone)]
+struct ResolvedGrpcAuth {
+    result: AuthResult,
+    identity: Option<(crate::auth::UserId, Role)>,
+}
+
 impl GrpcRuntime {
     fn admin_use_cases(&self) -> AdminUseCases<'_, RedDBRuntime> {
         AdminUseCases::new(&self.runtime)
@@ -462,27 +468,26 @@ impl Drop for GrpcIdentityGuard {
     }
 }
 
-/// Resolve the `(UserId, Role)` a gRPC request executes as, from the
-/// dispatch context the catalog interceptor attached plus the metadata
-/// bearer (for the role).
+/// Resolve the `(UserId, Role)` a gRPC request executes as from the typed
+/// dispatch context installed by the catalog interceptor.
 fn grpc_request_identity<T>(
-    runtime: &GrpcRuntime,
     request: &Request<T>,
 ) -> Option<(crate::auth::UserId, crate::auth::Role)> {
-    let principal = request
+    request
         .extensions()
         .get::<catalog_dispatch::GrpcDispatchContext>()
-        .and_then(|context| context.principal.clone())?;
-    let role = match runtime.resolve_auth(request.metadata()) {
-        crate::auth::middleware::AuthResult::Authenticated { role, .. } => role,
-        _ => return None,
-    };
-    let (tenant, username) = principal
-        .split_once('/')
-        .map_or((None, principal.as_str()), |(tenant, username)| {
-            (Some(tenant), username)
-        });
-    Some((crate::auth::UserId::from_parts(tenant, username), role))
+        .and_then(|context| context.identity.clone())
+}
+
+fn grpc_spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let bundle = crate::runtime::execution_context::snapshot_bundle();
+    tokio::task::spawn_blocking(move || {
+        crate::runtime::execution_context::with_snapshot_bundle(&bundle, f)
+    })
 }
 
 fn execute_grpc_query_request(

@@ -537,7 +537,7 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
 
 #[derive(Clone, Debug)]
 pub(super) struct GrpcDispatchContext {
-    pub(super) principal: Option<String>,
+    pub(super) identity: Option<(crate::auth::UserId, Role)>,
 }
 
 #[derive(Clone)]
@@ -590,8 +590,24 @@ where
         });
         match authorization {
             Ok(context) => {
+                let bundle = crate::runtime::execution_context::SnapshotBundle {
+                    snapshot: None,
+                    auth: context
+                        .identity
+                        .as_ref()
+                        .map(|(id, role)| (id.username.clone(), *role)),
+                    tenant: context
+                        .identity
+                        .as_ref()
+                        .and_then(|(id, _)| id.tenant.clone()),
+                };
                 request.extensions_mut().insert(context);
-                Box::pin(self.inner.call(request))
+                let mut future = Box::pin(self.inner.call(request));
+                Box::pin(std::future::poll_fn(move |cx| {
+                    crate::runtime::execution_context::with_snapshot_bundle(&bundle, || {
+                        future.as_mut().poll(cx)
+                    })
+                }))
             }
             Err(status) => Box::pin(async move { Ok(status.into_http()) }),
         }
@@ -624,32 +640,43 @@ fn authorize_binding(
     peer_auth: Option<AuthResult>,
 ) -> Result<GrpcDispatchContext, Status> {
     if let GrpcAuthClass::Replication(action) = binding.auth {
-        let auth = peer_auth.unwrap_or_else(|| runtime.resolve_auth(metadata));
-        let username = authorize_replication_capability(runtime, &auth, action)?;
+        let resolved = peer_auth.map_or_else(
+            || runtime.resolve_auth_with_identity(metadata),
+            |result| {
+                let identity = match &result {
+                    AuthResult::Authenticated { username, role, .. } => {
+                        Some((crate::auth::UserId::platform(username.clone()), *role))
+                    }
+                    AuthResult::Anonymous | AuthResult::Denied(_) => None,
+                };
+                ResolvedGrpcAuth { result, identity }
+            },
+        );
+        let identity = authorize_replication_capability(runtime, &resolved, action)?;
         return Ok(GrpcDispatchContext {
-            principal: Some(username),
+            identity: Some(identity),
         });
     }
 
-    let auth = runtime.resolve_auth(metadata);
-    let principal = match &auth {
-        AuthResult::Authenticated { username, .. } => Some(username.clone()),
-        AuthResult::Anonymous | AuthResult::Denied(_) => None,
-    };
+    let resolved = runtime.resolve_auth_with_identity(metadata);
+    let auth = &resolved.result;
+    let principal = resolved.identity.as_ref().map(|(id, _)| id.to_string());
 
     // The admin gate runs before the catalog so its denial code stays
     // PERMISSION_DENIED for anonymous callers too, matching `authorize_admin`.
     if binding.auth == GrpcAuthClass::Admin {
-        crate::auth::middleware::check_permission(&auth, false, true)
+        crate::auth::middleware::check_permission(auth, false, true)
             .map_err(Status::permission_denied)?;
     }
 
-    let (tenant, username) = principal
-        .as_deref()
-        .and_then(|principal| principal.split_once('/'))
-        .map_or((None, principal.as_deref()), |(tenant, username)| {
-            (Some(tenant), Some(username))
-        });
+    let tenant = resolved
+        .identity
+        .as_ref()
+        .and_then(|(id, _)| id.tenant.as_deref());
+    let username = resolved
+        .identity
+        .as_ref()
+        .map(|(id, _)| id.username.as_str());
     let operation_context = OperationContextFactory::build(OperationContextInput {
         request_id: metadata
             .get("x-request-id")
@@ -661,7 +688,7 @@ fn authorize_binding(
     });
     let engine = GrpcCommandPolicyEngine {
         auth_store: &runtime.auth_store,
-        auth: &auth,
+        auth,
         class: binding.auth,
         tenant,
         username,
@@ -682,7 +709,9 @@ fn authorize_binding(
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
     }
 
-    Ok(GrpcDispatchContext { principal })
+    Ok(GrpcDispatchContext {
+        identity: resolved.identity,
+    })
 }
 
 /// Issue #820: replication capabilities are policy-only. A `DefaultDeny`
@@ -690,16 +719,19 @@ fn authorize_binding(
 /// stream the WAL or ack an LSN without an explicit policy grant.
 fn authorize_replication_capability(
     runtime: &GrpcRuntime,
-    auth: &AuthResult,
+    resolved: &ResolvedGrpcAuth,
     action: &str,
-) -> Result<String, Status> {
-    let username = match auth {
+) -> Result<(crate::auth::UserId, Role), Status> {
+    let username = match &resolved.result {
         AuthResult::Authenticated { username, .. } => username.clone(),
         AuthResult::Denied(reason) => return Err(Status::unauthenticated(reason.clone())),
         AuthResult::Anonymous => return Err(Status::unauthenticated("authentication required")),
     };
 
-    let principal = crate::auth::UserId::platform(username.clone());
+    let (principal, role) = resolved
+        .identity
+        .clone()
+        .ok_or_else(|| Status::unauthenticated("authentication required"))?;
     let resource = ResourceRef::new("cluster", "replication");
     let outcome = runtime.auth_store.simulate(
         &principal,
@@ -708,7 +740,7 @@ fn authorize_replication_capability(
         crate::auth::store::SimCtx::default(),
     );
     match outcome.decision {
-        policies::Decision::Allow { .. } | policies::Decision::AdminBypass => Ok(username),
+        policies::Decision::Allow { .. } | policies::Decision::AdminBypass => Ok((principal, role)),
         _ => Err(Status::permission_denied(format!(
             "policy: principal '{username}' is not allowed to perform '{action}'"
         ))),
@@ -814,11 +846,12 @@ fn command_audience(command: &CommandSpec) -> &'static str {
     }
 }
 
-pub(super) fn authorized_principal<T>(request: &Request<T>) -> Result<&str, Status> {
+pub(super) fn authorized_principal<T>(request: &Request<T>) -> Result<String, Status> {
     request
         .extensions()
         .get::<GrpcDispatchContext>()
-        .and_then(|context| context.principal.as_deref())
+        .and_then(|context| context.identity.as_ref())
+        .map(|(id, _)| id.to_string())
         .ok_or_else(|| Status::unauthenticated("authenticated principal missing from dispatch"))
 }
 
@@ -1211,6 +1244,34 @@ mod tests {
 
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
         assert_eq!(checked, GRPC_COMMAND_BINDINGS.len() * PRINCIPALS.len());
+    }
+
+    #[test]
+    fn grpc_dispatch_preserves_tenant_scoped_identity() {
+        let harness = Harness::new();
+        harness
+            .grpc
+            .auth_store
+            .create_user_in_tenant(Some("acme"), "tenant-admin", "p", Role::Admin)
+            .expect("tenant admin");
+        let key = harness
+            .grpc
+            .auth_store
+            .create_api_key_in_tenant(Some("acme"), "tenant-admin", "admin", Role::Admin)
+            .expect("tenant admin key")
+            .key;
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            "authorization",
+            format!("Bearer {key}").parse().expect("metadata value"),
+        );
+
+        let context = authorize_binding(&harness.grpc, binding("AuthCreateUser"), &metadata, None)
+            .expect("tenant admin authorization");
+        let (identity, role) = context.identity.expect("typed identity");
+        assert_eq!(identity.username, "tenant-admin");
+        assert_eq!(identity.tenant.as_deref(), Some("acme"));
+        assert_eq!(role, Role::Admin);
     }
 
     /// Issue #820: the stream and ack capabilities stay separate, and neither
