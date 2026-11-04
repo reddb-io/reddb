@@ -157,39 +157,40 @@ fn https_admin_token_over_tls() {
 }
 
 #[test]
-fn https_alpn_advertises_http11() {
+fn https_alpn_prefers_http2_and_retains_http11_compatibility() {
     let (_db, rt) = support::persistent_runtime("http-tls-alpn");
     let (_dir, addr, server_cert_der) = spawn_https_server(rt, vec![]);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(server_cert_der.clone()))
-        .unwrap();
-    let mut client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let negotiate = |offered: Vec<Vec<u8>>| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(server_cert_der.clone()))
+            .unwrap();
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = offered;
 
-    let server_name: ServerName<'static> = ServerName::try_from("localhost").unwrap();
-    let mut conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
-    let mut tcp = std::net::TcpStream::connect(&addr).expect("tcp connect");
-    let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
+        let server_name: ServerName<'static> = ServerName::try_from("localhost").unwrap();
+        let mut conn = rustls::ClientConnection::new(Arc::new(client_config), server_name).unwrap();
+        let mut tcp = std::net::TcpStream::connect(&addr).expect("tcp connect");
+        conn.complete_io(&mut tcp).expect("tls handshake");
+        conn.alpn_protocol()
+            .expect("server must select an offered ALPN protocol")
+            .to_vec()
+    };
 
-    // Drive handshake by issuing a tiny read.
-    let req = b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    stream.write_all(req).unwrap();
-    let _ = stream.flush();
-    let mut buf = [0u8; 32];
-    let _ = stream.read(&mut buf);
-
-    // Server must have negotiated http/1.1 (we don't speak h2 in the
-    // embedded server). Either http/1.1 or no negotiation is acceptable
-    // for this build; we just assert the handshake completed without
-    // panicking and that the protocol, if reported, is http/1.1.
-    if let Some(proto) = conn.alpn_protocol() {
-        assert_eq!(proto, b"http/1.1", "ALPN must select http/1.1");
-    }
+    assert_eq!(
+        negotiate(vec![b"h2".to_vec(), b"http/1.1".to_vec()]),
+        b"h2",
+        "ALPN must prefer HTTP/2 when the client offers it"
+    );
+    assert_eq!(
+        negotiate(vec![b"http/1.1".to_vec()]),
+        b"http/1.1",
+        "ALPN must retain HTTP/1.1 compatibility"
+    );
 }
 
 #[test]
