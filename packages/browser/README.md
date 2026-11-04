@@ -523,3 +523,36 @@ session or RLS. The browser's file owner can still use the ordinary full SQL API
 Catalogs and scoped reads honor the same I/O health fence; an aborted explicit
 transaction must roll back first. Source filtering uses canonical record
 materialization and may temporarily allocate one record for each candidate.
+
+## Local file-owner Vault (0.8.0)
+
+```js
+const session = await createDatabaseSession()
+let db = await session.openDatabase({ name: 'my-private-workspace', create: true })
+await db.vault.unlock(masterPassword, { create: true }) // explicit first-use opt-in
+await db.query('BEGIN')
+await db.query('INSERT INTO profiles VALUES ($1, $2)', ['admin', 'connection:admin'])
+await db.vault.put('connection:admin', JSON.stringify(credentials))
+await db.query('COMMIT') // profile and encrypted credential publish together
+await db.close()
+db = await session.openDatabase({ name: 'my-private-workspace' })
+const credential = await db.vault.reveal('connection:admin') // explicit reveal
+await db.vault.lock() // metadata SQL remains usable
+await db.close()
+await session.close()
+```
+
+The Vault is a native internal Vault collection, sealed with the existing RDVX
+envelope and native v3 passphrase KDF. Passwords and opening keys never enter
+OPFS, WAL or JavaScript storage. The Worker-session key survives file release,
+but never a Worker/browser restart. Each initialization receives a random salt
+that fences stale keys if a file is replaced. Existing ciphertext is always
+authenticated before use; wrong passwords never recreate it. Credential payload
+size is bounded to 1 MiB. Certificate-based auth page chains and server auth
+records are preserved; this local API adds no server IAM or encrypted-column SQL.
+
+Use an outer application Web Lock to queue tabs before opening the SDK's
+exclusive owner. Explicit lock affects the local credential key, not an already
+authenticated remote connection. Hosts must choose opt-in saving and the lifetime
+of revealed credentials. Backups retain ordinary metadata in plaintext and may
+retain old encrypted records; deleting a secret does not promise secure erasure.

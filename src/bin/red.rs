@@ -1372,6 +1372,19 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Private desktop persistence service: fixed loopback binding, authenticated
+    // IPC-owned endpoint, and no user SQL/remote connection surface.
+    if args
+        .first()
+        .is_some_and(|argument| argument == "workspace-store")
+    {
+        if let Err(error) = reddb_engine::query::local_database::service::run(&args[1..]) {
+            eprintln!("workspace-store: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Handle empty args early.
     if args.is_empty() {
         print!("{}", cli::commands::main_help_text());

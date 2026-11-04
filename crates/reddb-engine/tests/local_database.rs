@@ -546,3 +546,136 @@ fn binding_failures_do_not_mutate_rows_and_abort_explicit_transactions() {
         [vec![Value::Integer(1)], vec![Value::Integer(2)]]
     );
 }
+
+#[test]
+fn local_vault_reopen_rollback_and_locked_metadata() {
+    let mut database = create();
+    let key = database
+        .vault_unlock("master password", true)
+        .expect("initialize");
+    run(&mut database, "CREATE TABLE profiles (name TEXT)");
+    database
+        .vault_put(&key, "admin", Some("a secret with tabs\tand\nnewlines"))
+        .expect("put");
+    run(&mut database, "BEGIN");
+    run(&mut database, "INSERT INTO profiles VALUES ('pending')");
+    database
+        .vault_put(&key, "admin", Some("pending-secret"))
+        .expect("pending");
+    assert_eq!(
+        database
+            .vault_reveal(&key, "admin")
+            .expect("read own write")
+            .as_deref(),
+        Some("pending-secret")
+    );
+    run(&mut database, "ROLLBACK");
+    assert_eq!(
+        database
+            .vault_reveal(&key, "admin")
+            .expect("rollback")
+            .as_deref(),
+        Some("a secret with tabs\tand\nnewlines")
+    );
+    assert!(rows(&mut database, "SELECT * FROM profiles").is_empty());
+    let mut database = LocalDatabase::open(database.into_inner(), "sql.rdb").expect("reopen");
+    assert_eq!(
+        database
+            .vault_keys(&key)
+            .expect("session key survives file release"),
+        ["admin"]
+    );
+    assert!(database.vault_unlock("wrong password", true).is_err());
+    assert_eq!(database.catalog().expect("locked catalog").rows.len(), 1);
+    assert!(database.query("SELECT * FROM red.local.vault", 0).is_err());
+    let other = create()
+        .vault_unlock("master password", true)
+        .expect("other profile");
+    assert!(database.vault_keys(&other).is_err());
+    run(&mut database, "BEGIN");
+    database
+        .vault_put(&key, "admin", Some("abandoned plaintext"))
+        .expect("stage");
+    let file = database.into_inner();
+    for secret in [
+        "master password",
+        "pending-secret",
+        "abandoned plaintext",
+        "a secret with tabs",
+    ] {
+        assert!(!file
+            .bytes
+            .borrow()
+            .windows(secret.len())
+            .any(|bytes| bytes == secret.as_bytes()));
+    }
+    let database = LocalDatabase::open(file, "sql.rdb").expect("drop discards transaction");
+    assert_eq!(
+        database
+            .vault_reveal(&key, "admin")
+            .expect("prior committed secret")
+            .as_deref(),
+        Some("a secret with tabs\tand\nnewlines")
+    );
+}
+
+#[test]
+fn local_vault_failure_boundaries_preserve_atomic_profile_and_secret() {
+    let mut baseline = create();
+    let key = baseline.vault_unlock("password", true).expect("initialize");
+    run(&mut baseline, "CREATE TABLE profiles (name TEXT)");
+    baseline
+        .vault_put(&key, "admin", Some("old credential"))
+        .expect("seed");
+    let image = baseline.into_inner().durable.into_inner();
+    let mut successful =
+        LocalDatabase::open(pager::MemoryFile::from_bytes(image.clone()), "sql.rdb").expect("open");
+    run(&mut successful, "BEGIN");
+    run(
+        &mut successful,
+        "INSERT INTO profiles VALUES ('new profile')",
+    );
+    successful
+        .vault_put(&key, "admin", Some("new credential"))
+        .expect("stage");
+    run(&mut successful, "COMMIT");
+    let count = successful.into_inner().operations.borrow().len();
+    for boundary in 1..=count {
+        for prefix in [0, 1, 100] {
+            let mut file = pager::MemoryFile::from_bytes(image.clone());
+            file.fail_at = Some(boundary);
+            file.fail_prefix = Some(prefix);
+            let mut database = LocalDatabase::open(file, "sql.rdb").expect("open");
+            run(&mut database, "BEGIN");
+            run(&mut database, "INSERT INTO profiles VALUES ('new profile')");
+            database
+                .vault_put(&key, "admin", Some("new credential"))
+                .expect("stage");
+            let _ = database.query("COMMIT", 2000);
+            let file = database.into_inner();
+            for secret in ["old credential", "new credential", "password"] {
+                assert!(!file
+                    .bytes
+                    .borrow()
+                    .windows(secret.len())
+                    .any(|bytes| bytes == secret.as_bytes()));
+            }
+            let mut recovered = LocalDatabase::open(
+                pager::MemoryFile::from_bytes(file.durable.into_inner()),
+                "sql.rdb",
+            )
+            .expect("recover");
+            let profiles = rows(&mut recovered, "SELECT * FROM profiles");
+            let secret = recovered.vault_reveal(&key, "admin").expect("reveal");
+            assert_eq!(
+                secret.as_deref(),
+                Some(if profiles.is_empty() {
+                    "old credential"
+                } else {
+                    "new credential"
+                }),
+                "boundary {boundary}/{prefix}"
+            );
+        }
+    }
+}

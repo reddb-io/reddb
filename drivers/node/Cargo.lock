@@ -96,6 +96,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2173,6 +2174,7 @@ name = "reddb-io"
 version = "1.27.12"
 dependencies = [
  "reddb-io-client",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
@@ -2209,6 +2211,9 @@ name = "reddb-io-crypto"
 version = "1.27.12"
 dependencies = [
  "aes-gcm",
+ "argon2",
+ "getrandom 0.4.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -2219,11 +2224,13 @@ dependencies = [
  "hex",
  "parking_lot",
  "rayon",
+ "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
  "regex",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

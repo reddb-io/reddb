@@ -3,6 +3,8 @@ name: RedDB Browser Foundation
 on:
   pull_request:
     paths:
+      - 'crates/reddb-crypto/**'
+      - 'crates/reddb-server/src/auth/vault.rs'
       - 'crates/reddb-file/**'
       - 'crates/reddb-engine/**'
       - 'crates/reddb-server/src/catalog.rs'
@@ -148,6 +150,7 @@ jobs:
           cargo test --locked -p reddb-io-server --lib runtime::evaluator_differential
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::aggregate
           cargo test --locked -p reddb-io-server --lib runtime::window_phase
+          cargo test --locked -p reddb-io-server --lib auth::vault::tests::portable_vault_preserves_native_auth_payload_and_passphrase_contract
           cargo test --locked -p reddb-io-server --test vault_contract
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
