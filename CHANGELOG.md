@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.0
+
+### Minor Changes
+
+- [#2609](https://github.com/reddb-io/reddb/pull/2609) [`8e295e2`](https://github.com/reddb-io/reddb/commit/8e295e2dbd54fe2a9177a1d7d907510c9436467b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add a private local workspace service to the RedDB binary, backed by the shared native/WASM Vault and transaction engine. Local hosts can atomically save connection metadata and encrypted credentials, retain metadata access while locked, and use OS-keychain opening credentials without exposing the private database as a user query target.
+
 ## 1.27.13
 
 ### Patch Changes
