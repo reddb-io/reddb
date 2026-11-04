@@ -109,9 +109,9 @@ decision, not a later slice:
 ## Consequences
 
 - One connection concurrency model to reason about; idle browser
-  connections are cheap tokio tasks, not scarce threads. The
-  `(2*num_cpus).clamp(8,256)` cap is replaced by async backpressure plus
-  per-principal connection/rate caps; ADR 0029 stream caps still apply.
+  connections are cheap tokio tasks, not scarce threads. Request admission is
+  bounded independently from synchronous engine execution; per-principal
+  request/rate caps and ADR 0029 stream caps still apply.
 - RedWire's framing is now explicitly transport-agnostic. Adding a future
   transport (WebTransport/HTTP/3) is a new adapter, not a protocol
   rewrite.
@@ -124,3 +124,27 @@ decision, not a later slice:
 - ADR 0034's dual-headed wake registry and "engine stays synchronous"
   decisions still hold; only its "HTTP stays thread-per-connection /
   does not grow a multiplexed event loop" stance is superseded here.
+
+### Execution admission amendment (2026-11-04)
+
+Async connections do not make synchronous engine work free. The HTTP edge
+therefore uses two explicit bounds:
+
+1. `max_handlers` is the admitted-request envelope. Its CPU-derived default is
+   `(2*num_cpus).clamp(8,256)` and includes both running and queued requests.
+2. `execution_workers` is the maximum number of buffered synchronous engine
+   calls active at once. Its default is `num_cpus`; admitted excess waits on a
+   bounded FIFO queue whose capacity is `max_handlers - execution_workers`.
+
+Queue wait consumes the request's existing total deadline. Health probes keep
+their separately bounded reserve and bypass engine execution admission. This
+preserves the SQLite-like embedded contract (direct engine calls remain
+synchronous and require no Tokio runtime) while applying the server-side lesson
+shared by Cassandra-style event-loop designs: connection concurrency, queued
+work and active execution are different resources and must not share one
+unbounded pool.
+
+This amendment initially governs buffered HTTP requests. RedWire, PostgreSQL
+compatibility, gRPC, streaming lanes and byte-weighted admission remain follow-up
+work under issue #2622; the server must not claim one global execution budget
+until those transports use it.

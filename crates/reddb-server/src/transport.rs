@@ -4,6 +4,8 @@
 //! surface. They intentionally live outside both so neither layer imports
 //! the other's implementation details.
 
+pub(crate) mod execution_admission;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     Router,

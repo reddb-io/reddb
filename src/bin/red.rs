@@ -4322,16 +4322,16 @@ fn operational_bootstrap_input(
     }
 }
 
-/// Read the three slice-5 HTTP limiter knobs from CLI flags and env
-/// vars, validate each, and pack them into a `HttpLimitsCliInput` for
+/// Read the HTTP admission/execution knobs from CLI flags and env vars,
+/// validate each, and pack them into a `HttpLimitsCliInput` for
 /// the resolver. Validation failures abort boot with a clear message
 /// (acceptance: "Invalid input fails fast with a clear error").
 fn build_http_limits_cli_input(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<reddb::server::HttpLimitsCliInput, String> {
     use reddb::server::http_limits::{
-        validate_handler_timeout_ms, validate_max_handlers, validate_max_inflight_per_principal,
-        validate_retry_after_secs,
+        validate_execution_workers, validate_handler_timeout_ms, validate_max_handlers,
+        validate_max_inflight_per_principal, validate_retry_after_secs,
     };
 
     fn parse_usize_validated<V>(
@@ -4383,6 +4383,17 @@ fn build_http_limits_cli_input(
         validate_max_handlers,
     )?;
 
+    let execution_workers_flag = parse_usize_validated(
+        "--http-execution-workers",
+        flag_string(flags, "http-execution-workers").filter(|value| !value.is_empty()),
+        validate_execution_workers,
+    )?;
+    let execution_workers_env = parse_usize_validated(
+        "REDDB_HTTP_EXECUTION_WORKERS",
+        env_string("REDDB_HTTP_EXECUTION_WORKERS"),
+        validate_execution_workers,
+    )?;
+
     let handler_timeout_ms_flag = parse_u64_validated(
         "--http-handler-timeout-ms",
         flag_string(flags, "http-handler-timeout-ms").filter(|v| !v.is_empty()),
@@ -4419,6 +4430,8 @@ fn build_http_limits_cli_input(
     Ok(reddb::server::HttpLimitsCliInput {
         max_handlers_flag,
         max_handlers_env,
+        execution_workers_flag,
+        execution_workers_env,
         handler_timeout_ms_flag,
         handler_timeout_ms_env,
         retry_after_secs_flag,
@@ -6342,19 +6355,23 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_HTTP_MAX_HANDLERS", "99"),
+            ("REDDB_HTTP_EXECUTION_WORKERS", "12"),
             ("REDDB_HTTP_HANDLER_TIMEOUT_MS", "7000"),
             ("REDDB_HTTP_RETRY_AFTER_SECS", "9"),
         ]);
         let flags = HashMap::from([
             ("http-max-handlers".to_string(), str_flag("16")),
+            ("http-execution-workers".to_string(), str_flag("4")),
             ("http-handler-timeout-ms".to_string(), str_flag("5000")),
             ("http-retry-after-secs".to_string(), str_flag("3")),
         ]);
         let limits = build_http_limits_cli_input(&flags).unwrap();
         assert_eq!(limits.max_handlers_flag, Some(16));
+        assert_eq!(limits.execution_workers_flag, Some(4));
         assert_eq!(limits.handler_timeout_ms_flag, Some(5_000));
         assert_eq!(limits.retry_after_secs_flag, Some(3));
         assert_eq!(limits.max_handlers_env, Some(99));
+        assert_eq!(limits.execution_workers_env, Some(12));
         assert_eq!(limits.handler_timeout_ms_env, Some(7_000));
         assert_eq!(limits.retry_after_secs_env, Some(9));
     }
@@ -6366,6 +6383,16 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let flags = HashMap::from([("http-max-handlers".to_string(), str_flag("0"))]);
         let err = build_http_limits_cli_input(&flags).unwrap_err();
         assert!(err.contains("--http-max-handlers"), "got: {err}");
+        assert!(err.contains(">= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_zero_execution_workers_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_EXECUTION_WORKERS"]);
+        let flags = HashMap::from([("http-execution-workers".to_string(), str_flag("0"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("--http-execution-workers"), "got: {err}");
         assert!(err.contains(">= 1"), "got: {err}");
     }
 

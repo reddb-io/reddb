@@ -1,23 +1,26 @@
-//! Prometheus metrics for the HTTP handler-thread pool.
+//! Prometheus metrics for HTTP admission and synchronous execution.
 //!
-//! Slice 4 of issue #573 / parent #569. Exposes four series per
-//! ADR-0017 (Prometheus / Grafana adapters) so operators can observe
-//! saturation arriving before the cap is hit:
+//! Exposes the legacy handler-envelope series plus execution-admission
+//! gauges and queue-wait histograms per ADR-0017 (Prometheus / Grafana
+//! adapters), so operators can distinguish front-door pressure from engine
+//! saturation:
 //!
-//! - `http_active_handler_threads{transport}` — gauge, sourced from
-//!   `HttpConnectionLimiter::current()` at scrape time.
+//! - `http_active_handler_threads{transport}` — legacy-named gauge of admitted
+//!   requests, sourced from `HttpConnectionLimiter::current()` at scrape time.
 //! - `http_handler_cap{transport}` — static gauge, sourced from the
 //!   limiter's cap. Same value for `http` and `https` since slice 3
 //!   collapsed both transports onto one cap.
 //! - `http_handler_rejected_total{transport, reason}` — counter,
-//!   incremented per 503 emitted by the accept-loop reject path
-//!   (`reason=cap_exhausted`) or per slice-2 deadline exit
-//!   (`reason=handler_timeout`).
+//!   incremented per admission or deadline rejection.
 //! - `http_handler_duration_seconds{transport}` — histogram of total
 //!   handler wall-clock time, sampled on every handler exit
 //!   (happy-path and timeout). Buckets are the standard Prometheus
 //!   client default set so existing dashboards render quantiles via
 //!   `histogram_quantile` without configuration.
+//! - `http_execution_{workers,active,queued,queue_capacity}` — live execution
+//!   lane state.
+//! - `http_execution_queue_wait_seconds{transport}` — time admitted requests
+//!   spend waiting for a synchronous execution slot.
 //!
 //! Counters and histogram updates are plain `AtomicU64` operations on
 //! the hot path. No registry, no mutex.
@@ -27,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::http_connection_limiter::HttpConnectionLimiter;
+use crate::transport::execution_admission::ExecutionAdmission;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpTransport {
@@ -54,6 +58,8 @@ impl HttpTransport {
 pub enum HttpRejectReason {
     CapExhausted,
     HandlerTimeout,
+    ExecutionQueueFull,
+    ExecutionQueueTimeout,
     /// Issue #934 — a principal hit its per-principal concurrent in-flight
     /// cap (the global cap still had room; this caller did not).
     PrincipalCapExhausted,
@@ -61,13 +67,15 @@ pub enum HttpRejectReason {
 
 /// Number of distinct [`HttpRejectReason`] variants — array width for the
 /// per-transport rejection counters.
-const REJECT_REASONS: usize = 3;
+const REJECT_REASONS: usize = 5;
 
 impl HttpRejectReason {
     fn label(self) -> &'static str {
         match self {
             HttpRejectReason::CapExhausted => "cap_exhausted",
             HttpRejectReason::HandlerTimeout => "handler_timeout",
+            HttpRejectReason::ExecutionQueueFull => "execution_queue_full",
+            HttpRejectReason::ExecutionQueueTimeout => "execution_queue_timeout",
             HttpRejectReason::PrincipalCapExhausted => "principal_cap_exhausted",
         }
     }
@@ -76,7 +84,9 @@ impl HttpRejectReason {
         match self {
             HttpRejectReason::CapExhausted => 0,
             HttpRejectReason::HandlerTimeout => 1,
-            HttpRejectReason::PrincipalCapExhausted => 2,
+            HttpRejectReason::ExecutionQueueFull => 2,
+            HttpRejectReason::ExecutionQueueTimeout => 3,
+            HttpRejectReason::PrincipalCapExhausted => 4,
         }
     }
 
@@ -85,6 +95,8 @@ impl HttpRejectReason {
         [
             HttpRejectReason::CapExhausted,
             HttpRejectReason::HandlerTimeout,
+            HttpRejectReason::ExecutionQueueFull,
+            HttpRejectReason::ExecutionQueueTimeout,
             HttpRejectReason::PrincipalCapExhausted,
         ]
     }
@@ -145,6 +157,7 @@ impl TransportHistogram {
 struct Inner {
     rejected: [[AtomicU64; REJECT_REASONS]; 2],
     duration: [TransportHistogram; 2],
+    queue_wait: [TransportHistogram; 2],
 }
 
 /// One fresh zeroed rejection-counter row (`REJECT_REASONS` wide).
@@ -163,6 +176,7 @@ impl HttpHandlerMetrics {
             inner: Arc::new(Inner {
                 rejected: [zeroed_reject_row(), zeroed_reject_row()],
                 duration: [TransportHistogram::new(), TransportHistogram::new()],
+                queue_wait: [TransportHistogram::new(), TransportHistogram::new()],
             }),
         }
     }
@@ -178,6 +192,13 @@ impl HttpHandlerMetrics {
         self.inner.duration[transport.index()].observe_seconds(seconds);
     }
 
+    pub fn record_queue_wait(&self, transport: HttpTransport, seconds: f64) {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return;
+        }
+        self.inner.queue_wait[transport.index()].observe_seconds(seconds);
+    }
+
     pub fn rejected_count(&self, transport: HttpTransport, reason: HttpRejectReason) -> u64 {
         self.inner.rejected[transport.index()][reason.index()].load(Ordering::Relaxed)
     }
@@ -188,23 +209,46 @@ impl HttpHandlerMetrics {
             .load(Ordering::Relaxed)
     }
 
-    /// Render all four series in Prometheus text exposition format,
-    /// appending to `body`. Reads the live `current()` and `cap()` off
-    /// the supplied limiter; the limiter is the source of truth for
-    /// the two gauges so the metrics can't drift from the admission
-    /// path.
+    pub fn queue_wait_sample_count(&self, transport: HttpTransport) -> u64 {
+        self.inner.queue_wait[transport.index()]
+            .inf
+            .load(Ordering::Relaxed)
+    }
+
+    /// Render admission counters and accumulated histograms in Prometheus text
+    /// exposition format. Kept as the source-compatible public formatter for
+    /// callers that do not own the server's live execution gate.
     pub fn render(&self, body: &mut String, limiter: &HttpConnectionLimiter) {
+        self.render_inner(body, limiter, None);
+    }
+
+    /// Render admission plus live execution-gate series for `/metrics`.
+    pub(crate) fn render_with_execution(
+        &self,
+        body: &mut String,
+        limiter: &HttpConnectionLimiter,
+        execution: &ExecutionAdmission,
+    ) {
+        self.render_inner(body, limiter, Some(execution));
+    }
+
+    fn render_inner(
+        &self,
+        body: &mut String,
+        limiter: &HttpConnectionLimiter,
+        execution: Option<&ExecutionAdmission>,
+    ) {
         let cap = limiter.cap();
         let current = limiter.current();
 
-        // `http_active_handler_threads{transport}` — gauge.
+        // `http_active_handler_threads{transport}` — legacy-named gauge.
         // The clear-text and TLS accept loops share a single limiter
         // (slice 3), so the live count is duplicated on both labels
         // for dashboard ergonomics: an operator can graph the per-
         // transport pane without special-casing the shared cap.
         let _ = writeln!(
             body,
-            "# HELP http_active_handler_threads Live HTTP/HTTPS handler threads holding a limiter permit."
+            "# HELP http_active_handler_threads Live admitted HTTP/HTTPS requests holding a limiter permit."
         );
         let _ = writeln!(body, "# TYPE http_active_handler_threads gauge");
         let _ = writeln!(
@@ -221,11 +265,45 @@ impl HttpHandlerMetrics {
         // `http_handler_cap{transport}` — static gauge.
         let _ = writeln!(
             body,
-            "# HELP http_handler_cap Configured maximum concurrent HTTP/HTTPS handler threads."
+            "# HELP http_handler_cap Configured maximum admitted in-flight HTTP/HTTPS requests."
         );
         let _ = writeln!(body, "# TYPE http_handler_cap gauge");
         let _ = writeln!(body, "http_handler_cap{{transport=\"http\"}} {}", cap);
         let _ = writeln!(body, "http_handler_cap{{transport=\"https\"}} {}", cap);
+
+        if let Some(execution) = execution {
+            let execution_active = execution.active();
+            let execution_queued = execution.queued();
+            let execution_workers = execution.active_max();
+            let execution_queue_capacity = execution.queued_max();
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_workers Configured maximum concurrent buffered non-health HTTP engine calls."
+            );
+            let _ = writeln!(body, "# TYPE http_execution_workers gauge");
+            let _ = writeln!(body, "http_execution_workers {execution_workers}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_active Live buffered non-health HTTP engine calls."
+            );
+            let _ = writeln!(body, "# TYPE http_execution_active gauge");
+            let _ = writeln!(body, "http_execution_active {execution_active}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_queued Buffered non-health HTTP requests waiting for an engine worker."
+            );
+            let _ = writeln!(body, "# TYPE http_execution_queued gauge");
+            let _ = writeln!(body, "http_execution_queued {execution_queued}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_queue_capacity Maximum buffered non-health HTTP requests allowed to wait for execution."
+            );
+            let _ = writeln!(body, "# TYPE http_execution_queue_capacity gauge");
+            let _ = writeln!(
+                body,
+                "http_execution_queue_capacity {execution_queue_capacity}"
+            );
+        }
 
         // `http_handler_rejected_total{transport, reason}` — counter.
         let _ = writeln!(
@@ -281,6 +359,44 @@ impl HttpHandlerMetrics {
                 "http_handler_duration_seconds_count{{transport=\"{}\"}} {}",
                 transport.label(),
                 inf
+            );
+        }
+
+        let _ = writeln!(
+            body,
+            "# HELP http_execution_queue_wait_seconds Time an admitted HTTP request waited for an engine worker."
+        );
+        let _ = writeln!(body, "# TYPE http_execution_queue_wait_seconds histogram");
+        for transport in [HttpTransport::Http, HttpTransport::Https] {
+            let histogram = &self.inner.queue_wait[transport.index()];
+            for (index, upper_bound) in DURATION_BUCKETS_SECONDS.iter().enumerate() {
+                let _ = writeln!(
+                    body,
+                    "http_execution_queue_wait_seconds_bucket{{transport=\"{}\",le=\"{}\"}} {}",
+                    transport.label(),
+                    format_bucket_le(*upper_bound),
+                    histogram.buckets[index].load(Ordering::Relaxed)
+                );
+            }
+            let count = histogram.inf.load(Ordering::Relaxed);
+            let _ = writeln!(
+                body,
+                "http_execution_queue_wait_seconds_bucket{{transport=\"{}\",le=\"+Inf\"}} {}",
+                transport.label(),
+                count
+            );
+            let sum_seconds = (histogram.sum_micros.load(Ordering::Relaxed) as f64) / 1_000_000.0;
+            let _ = writeln!(
+                body,
+                "http_execution_queue_wait_seconds_sum{{transport=\"{}\"}} {}",
+                transport.label(),
+                sum_seconds
+            );
+            let _ = writeln!(
+                body,
+                "http_execution_queue_wait_seconds_count{{transport=\"{}\"}} {}",
+                transport.label(),
+                count
             );
         }
     }
@@ -340,8 +456,9 @@ mod tests {
         assert_eq!(m.duration_sample_count(HttpTransport::Http), 3);
 
         let limiter = HttpConnectionLimiter::new(4);
+        let execution = ExecutionAdmission::new(2, 2);
         let mut body = String::new();
-        m.render(&mut body, &limiter);
+        m.render_with_execution(&mut body, &limiter, &execution);
 
         // `le="0.005"` includes only the 3ms sample (cumulative).
         assert!(body
@@ -362,26 +479,32 @@ mod tests {
     #[test]
     fn render_includes_cap_and_current_from_limiter() {
         let limiter = HttpConnectionLimiter::new(7);
+        let execution = ExecutionAdmission::new(2, 5);
         let _p = limiter.try_acquire().unwrap();
         let m = HttpHandlerMetrics::new();
         let mut body = String::new();
-        m.render(&mut body, &limiter);
+        m.render_with_execution(&mut body, &limiter, &execution);
         assert!(body.contains("http_handler_cap{transport=\"http\"} 7"));
         assert!(body.contains("http_handler_cap{transport=\"https\"} 7"));
         assert!(body.contains("http_active_handler_threads{transport=\"http\"} 1"));
         assert!(body.contains("http_active_handler_threads{transport=\"https\"} 1"));
+        assert!(body.contains("http_execution_workers 2"));
+        assert!(body.contains("http_execution_queue_capacity 5"));
     }
 
     #[test]
-    fn render_emits_all_four_rejection_labels() {
+    fn render_emits_all_rejection_labels() {
         let m = HttpHandlerMetrics::new();
         let limiter = HttpConnectionLimiter::new(1);
+        let execution = ExecutionAdmission::new(1, 0);
         let mut body = String::new();
-        m.render(&mut body, &limiter);
+        m.render_with_execution(&mut body, &limiter, &execution);
         for transport in ["http", "https"] {
             for reason in [
                 "cap_exhausted",
                 "handler_timeout",
+                "execution_queue_full",
+                "execution_queue_timeout",
                 "principal_cap_exhausted",
             ] {
                 let expected = format!(
@@ -399,5 +522,22 @@ mod tests {
         m.record_duration(HttpTransport::Http, f64::NAN);
         m.record_duration(HttpTransport::Http, f64::INFINITY);
         assert_eq!(m.duration_sample_count(HttpTransport::Http), 0);
+    }
+
+    #[test]
+    fn queue_wait_histogram_is_distinct_from_handler_duration() {
+        let metrics = HttpHandlerMetrics::new();
+        metrics.record_queue_wait(HttpTransport::Http, 0.04);
+        assert_eq!(metrics.queue_wait_sample_count(HttpTransport::Http), 1);
+        assert_eq!(metrics.duration_sample_count(HttpTransport::Http), 0);
+
+        let limiter = HttpConnectionLimiter::new(4);
+        let execution = ExecutionAdmission::new(1, 3);
+        let mut body = String::new();
+        metrics.render_with_execution(&mut body, &limiter, &execution);
+        assert!(body.contains(
+            "http_execution_queue_wait_seconds_bucket{transport=\"http\",le=\"0.05\"} 1"
+        ));
+        assert!(body.contains("http_execution_queue_wait_seconds_count{transport=\"http\"} 1"));
     }
 }

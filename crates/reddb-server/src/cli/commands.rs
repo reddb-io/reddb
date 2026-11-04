@@ -495,8 +495,14 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("no-log-file")
             .with_description("Disable rotating file logs (stderr only)"),
         FlagSchema::new("http-max-handlers").with_description(
-            "Max concurrent HTTP handler threads (env: REDDB_HTTP_MAX_HANDLERS; \
+            "Max admitted in-flight HTTP requests, including queued execution \
+             (env: REDDB_HTTP_MAX_HANDLERS; \
              red_config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
+        ),
+        FlagSchema::new("http-execution-workers").with_description(
+            "Max buffered non-health HTTP engine calls executed concurrently; excess admitted \
+             requests wait FIFO (env: REDDB_HTTP_EXECUTION_WORKERS; \
+             red_config: red.http.execution_workers; default: num_cpus)",
         ),
         FlagSchema::new("http-handler-timeout-ms")
             .with_description(
@@ -1059,8 +1065,9 @@ mod tests {
         let flag_names: Vec<&str> = server.flags.iter().map(|f| f.long.as_str()).collect();
         assert!(flag_names.contains(&"path"));
         assert!(flag_names.contains(&"bind"));
-        // Slice 5 of issue #574 — HTTP handler-pool knobs.
+        // HTTP admission and execution knobs.
         assert!(flag_names.contains(&"http-max-handlers"));
+        assert!(flag_names.contains(&"http-execution-workers"));
         assert!(flag_names.contains(&"http-handler-timeout-ms"));
         assert!(flag_names.contains(&"http-retry-after-secs"));
     }
@@ -1069,9 +1076,11 @@ mod tests {
     fn test_server_help_text_lists_http_limit_flags() {
         let help = command_help_text("server").unwrap();
         assert!(help.contains("--http-max-handlers"));
+        assert!(help.contains("--http-execution-workers"));
         assert!(help.contains("--http-handler-timeout-ms"));
         assert!(help.contains("--http-retry-after-secs"));
         assert!(help.contains("REDDB_HTTP_MAX_HANDLERS"));
+        assert!(help.contains("REDDB_HTTP_EXECUTION_WORKERS"));
     }
 
     #[test]

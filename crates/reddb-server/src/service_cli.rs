@@ -2644,6 +2644,7 @@ fn apply_http_limits(
     tracing::info!(
         target: "reddb::http_limits",
         max_handlers = resolved.max_handlers,
+        execution_workers = resolved.execution_workers,
         handler_timeout_ms = resolved.handler_timeout_ms,
         retry_after_secs = resolved.retry_after_secs,
         max_inflight_per_principal = resolved.max_inflight_per_principal,
