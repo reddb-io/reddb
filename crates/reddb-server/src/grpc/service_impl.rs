@@ -2702,7 +2702,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<OperationReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let request_id = request.id.clone();
+        let request_id = request.id;
         let output = grpc_spawn_blocking(&self.runtime, move || {
             rt.entity_use_cases().delete(DeleteEntityInput {
                 collection: request.collection,
