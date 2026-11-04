@@ -37,6 +37,26 @@ fn boot(cap: usize) -> (support::TempDbFile, String, RedDBServer) {
     boot_with_health_cap(cap, 4)
 }
 
+fn boot_with_execution_workers(
+    cap: usize,
+    execution_workers: usize,
+    handler_timeout: Duration,
+) -> (support::TempDbFile, String, RedDBServer) {
+    let (db, runtime) = support::persistent_runtime("http-execution-admission");
+    let server = RedDBServer::new(runtime)
+        .with_http_limiter_cap(cap)
+        .with_http_execution_workers(execution_workers)
+        .with_handler_timeout(handler_timeout);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().unwrap().to_string();
+    let server_clone = server.clone();
+    thread::spawn(move || {
+        let _ = server_clone.serve_on(listener);
+    });
+    thread::sleep(Duration::from_millis(80));
+    (db, addr, server)
+}
+
 fn boot_with_health_cap(
     cap: usize,
     health_cap: usize,
@@ -227,4 +247,99 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
         !is_limiter_reject,
         "fresh connection should not be rejected by the limiter, got: {resp:?}"
     );
+}
+
+#[test]
+fn queues_admitted_requests_without_exceeding_execution_workers() {
+    let cap = 3;
+    let (_db, addr, server) = boot_with_execution_workers(cap, 1, Duration::from_secs(30));
+    server.set_test_slow_inject_ms(2_000);
+
+    let mut held = Vec::new();
+    for _ in 0..cap {
+        held.push(spawn_slow_request(addr.clone()));
+    }
+
+    for _ in 0..100 {
+        if server.http_limiter().current() == cap
+            && server.http_execution_active() == 1
+            && server.http_execution_queued() == 2
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.http_limiter().current(), cap);
+    assert_eq!(server.http_execution_workers(), 1);
+    assert_eq!(server.http_execution_active(), 1);
+    assert_eq!(server.http_execution_queued(), 2);
+
+    let rejected = send_request(&addr, "/__test/envelope-full");
+    assert!(
+        rejected.starts_with("HTTP/1.1 503"),
+        "the request envelope should reject only after its active and queued slots fill: {rejected:?}"
+    );
+
+    // The active request keeps its original sleep, but queued requests read
+    // the cleared hook only after receiving the single execution slot.
+    server.set_test_slow_inject_ms(0);
+    for handle in held {
+        let response = handle.join().expect("admitted request thread");
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "admitted request should eventually execute: {response:?}"
+        );
+    }
+
+    for _ in 0..100 {
+        if server.http_limiter().current() == 0
+            && server.http_execution_active() == 0
+            && server.http_execution_queued() == 0
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.http_limiter().current(), 0);
+    assert_eq!(server.http_execution_active(), 0);
+    assert_eq!(server.http_execution_queued(), 0);
+}
+
+#[test]
+fn queue_wait_consumes_the_total_handler_deadline() {
+    let (_db, addr, server) = boot_with_execution_workers(2, 1, Duration::from_millis(100));
+    server.set_test_slow_inject_ms(500);
+
+    let active = spawn_slow_request(addr.clone());
+    for _ in 0..100 {
+        if server.http_execution_active() == 1 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(server.http_execution_active(), 1);
+
+    let queued = send_request(&addr, "/__test/queued-timeout");
+    assert!(
+        queued.starts_with("HTTP/1.1 503"),
+        "queued request should exhaust its handler deadline: {queued:?}"
+    );
+    assert!(queued.contains("handler deadline exceeded"));
+    assert_eq!(
+        server.http_execution_queued(),
+        0,
+        "timed-out waiter must release queue accounting"
+    );
+
+    let active_response = active.join().expect("active request thread");
+    assert!(active_response.starts_with("HTTP/1.1 503"));
+    server.set_test_slow_inject_ms(0);
+    for _ in 0..100 {
+        if server.http_limiter().current() == 0 && server.http_execution_active() == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(server.http_limiter().current(), 0);
+    assert_eq!(server.http_execution_active(), 0);
 }

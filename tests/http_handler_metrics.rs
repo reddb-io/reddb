@@ -1,13 +1,11 @@
-//! Integration test for issue #573 slice 4: Prometheus metrics for
-//! the HTTP handler-thread pool.
+//! Integration test for HTTP admission and execution metrics.
 //!
 //! Drives a known traffic shape against a real `RedDBServer`:
-//!   - one happy-path request (recorded into duration histogram)
+//!   - one happy-path request (recorded into duration and queue histograms)
 //!   - one cap_exhausted rejection (limiter cap saturated)
 //!   - one handler_timeout rejection (slice-2 deadline trip)
-//! then scrapes `/metrics` and asserts the four series declared in
-//! the issue brief are present with the expected label sets and
-//! monotonic counter relationships.
+//! then scrapes `/metrics` and asserts the admission and execution series are
+//! present with the expected label sets and monotonic counter relationships.
 
 #[allow(dead_code)]
 mod support;
@@ -23,6 +21,7 @@ fn boot(cap: usize, handler_timeout: Duration) -> (support::TempDbFile, String, 
     let (db, runtime) = support::persistent_runtime("http-handler-metrics");
     let server = RedDBServer::new(runtime)
         .with_http_limiter_cap(cap)
+        .with_http_execution_workers(1)
         .with_handler_timeout(handler_timeout);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap().to_string();
@@ -75,19 +74,17 @@ fn metric_value_f64(body: &str, line_prefix: &str) -> f64 {
 }
 
 #[test]
-fn metrics_emit_all_four_series_with_expected_label_sets() {
-    // Cap=2 so we can saturate with a single held connection that
-    // never sends a request and still leave room for the scrape.
+fn metrics_emit_admission_and_execution_series_with_expected_label_sets() {
     let cap = 2;
     let handler_timeout = Duration::from_millis(3_000);
     let (_db, addr, server) = boot(cap, handler_timeout);
 
     // (1) Happy-path request — records one sample in the http
     // duration histogram. Use a separate connection from later steps.
-    let happy = send_request(&addr, "/health/live");
+    let happy = send_request(&addr, "/");
     assert!(
         happy.starts_with("HTTP/1.1 2"),
-        "happy-path /health/live should succeed: {happy:?}"
+        "happy-path root request should succeed: {happy:?}"
     );
 
     // (2) Saturate the cap with real in-flight requests. The async edge
@@ -157,7 +154,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    // (4) Scrape /metrics and parse out the four target series.
+    // (4) Scrape /metrics and parse out the admission and execution series.
     let metrics = send_request(&addr, "/metrics");
     assert!(
         metrics.starts_with("HTTP/1.1 200"),
@@ -174,6 +171,11 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
         metric_value(body, "http_handler_cap{transport=\"https\"} "),
         cap as u64
     );
+
+    assert_eq!(metric_value(body, "http_execution_workers "), 1);
+    assert_eq!(metric_value(body, "http_execution_active "), 1);
+    assert_eq!(metric_value(body, "http_execution_queued "), 0);
+    assert_eq!(metric_value(body, "http_execution_queue_capacity "), 1);
 
     // http_active_handler_threads — the /metrics handler itself holds
     // a permit while it serves the scrape, so the value seen inside
@@ -223,7 +225,7 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
     );
 
     // http_handler_duration_seconds — histogram has at least one
-    // sample on http (the happy-path /health/live) and zero on https.
+    // sample on http (the happy-path root request) and zero on https.
     let http_count = metric_value(
         body,
         "http_handler_duration_seconds_count{transport=\"http\"} ",
@@ -253,6 +255,22 @@ fn metrics_emit_all_four_series_with_expected_label_sets() {
         "http_handler_duration_seconds_sum{transport=\"http\"} ",
     );
     assert!(sum >= 0.0, "duration sum should be non-negative: {sum}");
+
+    let queue_wait_count = metric_value(
+        body,
+        "http_execution_queue_wait_seconds_count{transport=\"http\"} ",
+    );
+    assert!(
+        queue_wait_count >= 1,
+        "expected at least one execution-admission sample, got {queue_wait_count}"
+    );
+    assert_eq!(
+        metric_value(
+            body,
+            "http_execution_queue_wait_seconds_count{transport=\"https\"} "
+        ),
+        0
+    );
 
     // (5) Second scrape — counters are monotonic. Active gauge can
     // float (1 during the scrape, 0 between); counters cannot regress.

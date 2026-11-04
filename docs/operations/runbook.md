@@ -45,6 +45,23 @@ env:
 
 The `_FILE` companion wins over the inline value when both are set.
 
+### HTTP capacity on small nodes
+
+RedDB separates cheap async request admission from synchronous engine
+execution. `REDDB_HTTP_MAX_HANDLERS` bounds all admitted non-health HTTP
+requests, including queued requests. `REDDB_HTTP_EXECUTION_WORKERS` bounds the
+subset executing synchronously; it defaults to the detected CPU count and is
+clamped to `max_handlers`. The remaining admitted requests wait FIFO and their
+queue time consumes the existing handler deadline.
+
+For a one-CPU pod, the defaults are one execution worker and an eight-request
+envelope. Do not raise execution workers merely to hide queueing: first inspect
+`http_execution_active`, `http_execution_queued` and
+`http_execution_queue_wait_seconds`. Sustained `active == workers` with a rising
+queue identifies engine/storage saturation. A `server at capacity` response
+means the request envelope was exhausted; it is not, by itself, evidence of an
+out-of-memory condition.
+
 ### Writer lease backend matrix
 
 Use `RED_LEASE_REQUIRED=true` only with a backend that supports conditional writes. S3-compatible stores use ETag + `If-Match`; filesystem uses a content-hash token plus an exclusive local lock. Generic HTTP is eligible only when the service implements ETag and precondition headers and the operator sets `RED_HTTP_CONDITIONAL_WRITES=true`.
@@ -208,6 +225,9 @@ Exit codes:
 | `reddb_slo_lag_budget_remaining_seconds` | `< 0` | Replica lag exhausted `RED_SLO_REPLICA_LAG_BUDGET_SECONDS`. |
 | `reddb_commit_wait_total{outcome="timed_out"}` | rising | `ack_n` policy is too tight or replicas can't keep up. |
 | `reddb_quota_rejected_total{principal=...}` | sustained | Caller exceeded `RED_MAX_QPS_PER_CALLER` budget. |
+| `http_execution_queued` | sustained `> 0` | Buffered HTTP work is waiting for synchronous engine capacity. |
+| `http_execution_queue_wait_seconds` | p99 rising | Engine/storage latency is consuming the request deadline. |
+| `http_handler_rejected_total{reason="cap_exhausted"}` | rising | The admitted-request envelope is full; clients should honor `Retry-After`. |
 
 ### Dashboards
 

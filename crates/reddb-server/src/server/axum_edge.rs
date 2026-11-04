@@ -36,7 +36,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use hyper_util::service::TowerToHyperService;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
@@ -45,6 +45,7 @@ use super::transport::{
     cors_header_pairs, find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse,
 };
 use super::RedDBServer;
+use crate::transport::execution_admission::ExecutionAdmissionError;
 
 /// Bounded buffer between the sync streaming producer (running on the
 /// `spawn_blocking` pool) and the async hyper body. Small enough to apply
@@ -320,8 +321,15 @@ impl RedDBServer {
             self.serve_streaming_request(request, permit, principal_permit)
                 .await
         } else {
-            self.serve_buffered_request(request, permit, principal_permit, transport)
-                .await
+            self.serve_buffered_request(
+                request,
+                permit,
+                principal_permit,
+                transport,
+                is_health_request,
+                started,
+            )
+            .await
         };
         self.http_metrics
             .record_duration(transport, started.elapsed().as_secs_f64());
@@ -336,7 +344,35 @@ impl RedDBServer {
         permit: HttpConnectionPermit,
         principal_permit: Option<PrincipalInflightPermit>,
         transport: HttpTransport,
+        is_health_request: bool,
+        started: Instant,
     ) -> Response {
+        let execution_permit = if is_health_request {
+            None
+        } else {
+            let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+            match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+                Ok(Ok(execution_permit)) => {
+                    self.http_metrics
+                        .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
+                    Some(execution_permit)
+                }
+                Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueFull);
+                    return self.reject_capacity_response();
+                }
+                Ok(Err(ExecutionAdmissionError::Closed)) => {
+                    return internal_error_response();
+                }
+                Err(_elapsed) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueTimeout);
+                    return handler_timeout_response();
+                }
+            }
+        };
+
         let server = self.clone();
         let cancellation = crate::runtime::query_budget::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
@@ -348,6 +384,7 @@ impl RedDBServer {
             // as long as the request is in flight.
             let _permit = permit;
             let _principal_permit = principal_permit;
+            let _execution_permit = execution_permit;
             // Test-only hook (shared with the retired sync path): a slow
             // injection keeps the request in flight while it sleeps, so an
             // integration test can saturate the per-principal cap with a
@@ -362,7 +399,8 @@ impl RedDBServer {
             }
             server.route(request)
         });
-        match tokio::time::timeout(self.handler_timeout, join).await {
+        let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+        match tokio::time::timeout(remaining, join).await {
             Ok(Ok(response)) => buffered_response_to_axum(response),
             Ok(Err(_join_err)) => internal_error_response(),
             Err(_elapsed) => {
