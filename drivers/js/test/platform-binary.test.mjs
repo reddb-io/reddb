@@ -12,12 +12,12 @@ import {
 
 test('platformPackageNames maps every supported host to its package', () => {
   assert.deepEqual(platformPackageNames({ platform: 'darwin', arch: 'arm64' }), ['@reddb-io/red-darwin-arm64'])
-  assert.deepEqual(platformPackageNames({ platform: 'darwin', arch: 'x64' }), ['@reddb-io/red-darwin-x64'])
   assert.deepEqual(platformPackageNames({ platform: 'win32', arch: 'x64' }), ['@reddb-io/red-win32-x64'])
-  assert.deepEqual(platformPackageNames({ platform: 'linux', arch: 'arm', libc: 'glibc' }), [
-    '@reddb-io/red-linux-arm',
-    '@reddb-io/red-linux-arm-musl',
-  ])
+})
+
+test('platformPackageNames rejects hosts without prebuilt packages', () => {
+  assert.deepEqual(platformPackageNames({ platform: 'darwin', arch: 'x64' }), [])
+  assert.deepEqual(platformPackageNames({ platform: 'linux', arch: 'arm', libc: 'glibc' }), [])
 })
 
 test('linux prefers the matching libc and falls back to the other variant', () => {

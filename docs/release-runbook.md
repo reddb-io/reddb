@@ -338,10 +338,10 @@ from these assets by `scripts/npm-platform-packages.mjs` (the `PLATFORMS`
 table there is the source of truth), plus the `red_client` thin-client
 variant of each:
 
-| Bin          | linux-x86_64 | linux-aarch64 | linux-armv7 | macos-x86_64 | macos-aarch64 | windows-x86_64.exe |
-|--------------|--------------|---------------|-------------|--------------|---------------|---------------------|
-| `red`        | required     | required      | required    | required     | required      | required            |
-| `red_client` | required     | required      | required    | required     | required      | required            |
+| Bin          | linux-x86_64 | linux-aarch64 | macos-aarch64 | windows-x86_64.exe |
+|--------------|--------------|---------------|-----------------|---------------------|
+| `red`        | required     | required      | required        | required            |
+| `red_client` | required     | required      | required        | required            |
 
 The static musl variants (`linux-x86_64-static`, `linux-aarch64-static`)
 are also required: they back the `-musl` npm platform packages and the thin
@@ -354,9 +354,8 @@ build job loaded it and got a response to a `version` request; it is covered by
 `checksums.txt` / `SHA256SUMS` like the binaries. `scripts/npm-platform-packages.mjs`
 ships it inside the matching `@reddb-io/red-*` package as `reddb.node`, and
 `@reddb-io/sdk` prefers it over spawning `red`. A missing addon is not a release
-failure: that platform keeps the subprocess path. Currently not built (cross-
-compiled, so never loaded in CI): `linux-armv7`, `macos-x86_64`, and the `-static`
-musl variants.
+failure: that platform keeps the subprocess path. The `-static` musl variants
+are cross-compiled and therefore do not carry the addon.
 
 Every stable release also publishes two aggregate SHA-256 manifests for the
 downloadable binaries and SBOMs:
@@ -442,17 +441,12 @@ The recovery playbook for any future repeat:
    skips versions already on the registry, so re-running a partially failed
    release is safe.
 
-## macOS x86_64 binary
+## Retired prebuilt targets
 
-Before issue #404 (this runbook entry), `red-macos-x86_64` and
-`red_client-macos-x86_64` were **not produced** — only Apple Silicon
-(`macos-aarch64`) shipped. The build matrix in
-`.github/workflows/release.yml` now includes a `macos-13` job for the
-`x86_64-apple-darwin` target; from `v1.0.6` onward both Intel and
-Apple Silicon assets ship side-by-side.
-
-Older releases (`v1.0.5` and earlier): Intel Mac users must either run
-the aarch64 binary under Rosetta 2 or build from source.
+`linux-armv7` and `macos-x86_64` were published through `v1.28.0`. They were
+removed from the primary release matrix to keep releases bounded around the
+platforms used by the server images and current SDK packages. Users on those
+targets can set `REDDB_BIN` to a locally built binary.
 
 ---
 

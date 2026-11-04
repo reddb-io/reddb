@@ -43,9 +43,12 @@ export function resolveSdkBinary() {
     return packaged
   }
   const wanted = platformPackageNames()[0]
+  const expected = wanted
+    ? `the ${wanted} package (an optionalDependency of @reddb-io/sdk)`
+    : `no prebuilt package is published for ${process.platform}/${process.arch}`
   throw new Error(
     `reddb: binary "${defaultBinaryName()}" not found.\n` +
-      `  expected:    the ${wanted} package (an optionalDependency of @reddb-io/sdk)\n` +
+      `  expected:    ${expected}\n` +
       `  override:    set REDDB_BIN=/path/to/${defaultBinaryName()}\n` +
       `  fix:         reinstall without --no-optional / --omit=optional, and make sure\n` +
       `               ${process.platform}/${process.arch} is a supported platform;\n` +
