@@ -278,30 +278,57 @@ impl HttpHandlerMetrics {
             let execution_queue_capacity = execution.queued_max();
             let _ = writeln!(
                 body,
-                "# HELP http_execution_workers Configured maximum concurrent buffered non-health HTTP engine calls."
+                "# HELP http_execution_workers Legacy alias for the runtime-wide engine-call limit."
             );
             let _ = writeln!(body, "# TYPE http_execution_workers gauge");
             let _ = writeln!(body, "http_execution_workers {execution_workers}");
             let _ = writeln!(
                 body,
-                "# HELP http_execution_active Live buffered non-health HTTP engine calls."
+                "# HELP reddb_execution_active_limit Runtime-wide maximum concurrent engine calls across server transports."
+            );
+            let _ = writeln!(body, "# TYPE reddb_execution_active_limit gauge");
+            let _ = writeln!(body, "reddb_execution_active_limit {execution_workers}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_active Legacy alias for runtime-wide active engine calls."
             );
             let _ = writeln!(body, "# TYPE http_execution_active gauge");
             let _ = writeln!(body, "http_execution_active {execution_active}");
             let _ = writeln!(
                 body,
-                "# HELP http_execution_queued Buffered non-health HTTP requests waiting for an engine worker."
+                "# HELP reddb_execution_active Runtime-wide active engine calls across server transports."
+            );
+            let _ = writeln!(body, "# TYPE reddb_execution_active gauge");
+            let _ = writeln!(body, "reddb_execution_active {execution_active}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_queued Legacy alias for runtime-wide operations waiting for an engine slot."
             );
             let _ = writeln!(body, "# TYPE http_execution_queued gauge");
             let _ = writeln!(body, "http_execution_queued {execution_queued}");
             let _ = writeln!(
                 body,
-                "# HELP http_execution_queue_capacity Maximum buffered non-health HTTP requests allowed to wait for execution."
+                "# HELP reddb_execution_queued Runtime-wide requests waiting for an engine execution slot."
+            );
+            let _ = writeln!(body, "# TYPE reddb_execution_queued gauge");
+            let _ = writeln!(body, "reddb_execution_queued {execution_queued}");
+            let _ = writeln!(
+                body,
+                "# HELP http_execution_queue_capacity Legacy alias for the runtime-wide execution wait-queue limit."
             );
             let _ = writeln!(body, "# TYPE http_execution_queue_capacity gauge");
             let _ = writeln!(
                 body,
                 "http_execution_queue_capacity {execution_queue_capacity}"
+            );
+            let _ = writeln!(
+                body,
+                "# HELP reddb_execution_queue_limit Runtime-wide bounded execution wait-queue limit."
+            );
+            let _ = writeln!(body, "# TYPE reddb_execution_queue_limit gauge");
+            let _ = writeln!(
+                body,
+                "reddb_execution_queue_limit {execution_queue_capacity}"
             );
         }
 
@@ -490,6 +517,8 @@ mod tests {
         assert!(body.contains("http_active_handler_threads{transport=\"https\"} 1"));
         assert!(body.contains("http_execution_workers 2"));
         assert!(body.contains("http_execution_queue_capacity 5"));
+        assert!(body.contains("reddb_execution_active_limit 2"));
+        assert!(body.contains("reddb_execution_queue_limit 5"));
     }
 
     #[test]

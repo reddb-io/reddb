@@ -1692,13 +1692,16 @@ impl RedDb for GrpcRuntime {
 
     async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
         let request = request.into_inner();
-        let page = self.runtime
-            .scan(crate::application::ScanCollectionInput {
+        let runtime = self.runtime.clone();
+        let page = grpc_spawn_blocking(&self.runtime, move || {
+            runtime.scan(crate::application::ScanCollectionInput {
                 collection: request.collection,
                 offset: request.offset as usize,
                 limit: request.limit.max(1) as usize,
             })
-            .map_err(to_status)?;
+        })
+        .await?
+        .map_err(to_status)?;
         Ok(Response::new(scan_reply(page)))
     }
 
@@ -1711,7 +1714,7 @@ impl RedDb for GrpcRuntime {
         let prepared_registry = Arc::clone(&self.prepared_registry);
         // WAIT and storage I/O must not park the async worker that drives
         // producer requests. Install request identity inside the blocking task.
-        let result = grpc_spawn_blocking(move || {
+        let result = grpc_spawn_blocking(&self.runtime, move || {
             execute_grpc_query_request(
                 &runtime,
                 &prepared_registry,
@@ -1721,8 +1724,7 @@ impl RedDb for GrpcRuntime {
                 commit_policy,
             )
         })
-        .await
-        .map_err(|error| Status::internal(format!("query task failed: {error}")))??;
+        .await??;
         Ok(Response::new(owned_query_reply(
             result,
             &entity_types,
@@ -1738,18 +1740,24 @@ impl RedDb for GrpcRuntime {
         let identity = grpc_request_identity(&request);
         let queries = request.into_inner().queries;
         let no_filter: Option<Vec<String>> = None;
-        let mut results = Vec::with_capacity(queries.len());
-        for sql in queries {
-            let result = execute_grpc_query_request(
-                &self.runtime,
-                &self.prepared_registry,
-                identity.clone(),
-                sql,
-                Vec::new(),
-                commit_policy,
-            )?;
-            results.push(owned_query_reply(result, &no_filter, &no_filter));
-        }
+        let runtime = self.runtime.clone();
+        let prepared_registry = Arc::clone(&self.prepared_registry);
+        let results = grpc_spawn_blocking(&self.runtime, move || {
+            let mut results = Vec::with_capacity(queries.len());
+            for sql in queries {
+                let result = execute_grpc_query_request(
+                    &runtime,
+                    &prepared_registry,
+                    identity.clone(),
+                    sql,
+                    Vec::new(),
+                    commit_policy,
+                )?;
+                results.push(owned_query_reply(result, &no_filter, &no_filter));
+            }
+            Ok::<_, Status>(results)
+        })
+        .await??;
         Ok(Response::new(BatchQueryReply { results }))
     }
 
@@ -1758,10 +1766,13 @@ impl RedDb for GrpcRuntime {
         request: Request<PrepareQueryRequest>,
     ) -> Result<Response<PrepareQueryReply>, Status> {
         let sql = request.into_inner().query;
-        let prepared = self
-            .prepared_registry
-            .prepare_auto_parameterized(&self.runtime, &sql)
-            .map_err(grpc_query_request_error)?;
+        let runtime = self.runtime.clone();
+        let prepared_registry = Arc::clone(&self.prepared_registry);
+        let prepared = grpc_spawn_blocking(&self.runtime, move || {
+            prepared_registry.prepare_auto_parameterized(&runtime, &sql)
+        })
+        .await?
+        .map_err(grpc_query_request_error)?;
         Ok(Response::new(PrepareQueryReply {
             prepared_id: prepared.id.into_raw(),
             parameter_count: prepared.parameter_count as u32,
@@ -1785,10 +1796,14 @@ impl RedDb for GrpcRuntime {
         if let Some(commit_policy) = commit_policy {
             request = request.with_commit_policy(commit_policy);
         }
-        let _identity = GrpcIdentityGuard::install(identity);
-        let result = QueryRequestExecutor::new(&self.runtime, &self.prepared_registry)
-            .execute(request)
-            .map_err(grpc_query_request_error)?;
+        let runtime = self.runtime.clone();
+        let prepared_registry = Arc::clone(&self.prepared_registry);
+        let result = grpc_spawn_blocking(&self.runtime, move || {
+            let _identity = GrpcIdentityGuard::install(identity);
+            QueryRequestExecutor::new(&runtime, &prepared_registry).execute(request)
+        })
+        .await?
+        .map_err(grpc_query_request_error)?;
         let no_filter: Option<Vec<String>> = None;
         Ok(Response::new(owned_query_reply(result, &no_filter, &no_filter)))
     }
@@ -2325,9 +2340,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || create_row_reply(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_row_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2338,9 +2352,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || create_node_reply(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_node_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2351,9 +2364,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || create_edge_reply(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_edge_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2364,9 +2376,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || create_vector_reply(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_vector_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2376,7 +2387,11 @@ impl RedDb for GrpcRuntime {
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
-        let reply = create_document_reply(self, request)?;
+        let rt = self.clone();
+        let reply = grpc_spawn_blocking(&self.runtime, move || {
+            create_document_reply(&rt, request)
+        })
+        .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2386,7 +2401,9 @@ impl RedDb for GrpcRuntime {
         request: Request<JsonCreateRequest>,
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
-        let reply = create_kv_reply(self, request)?;
+        let rt = self.clone();
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_kv_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2400,9 +2417,9 @@ impl RedDb for GrpcRuntime {
         // Running it directly inside an async fn would block the Tokio worker thread,
         // starving other concurrent requests under high write concurrency.
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || bulk_create_rows_fast(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || bulk_create_rows_fast(&rt, request))
+                .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2413,9 +2430,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<proto::BulkInsertReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || bulk_insert_binary(&rt, request))
-            .await
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || bulk_insert_binary(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2483,7 +2499,7 @@ impl RedDb for GrpcRuntime {
 
         let runtime = self.runtime.clone();
         let key = idempotency_key.clone();
-        let outcome = grpc_spawn_blocking(move || {
+        let outcome = grpc_spawn_blocking(&self.runtime, move || {
             crate::server::handlers_entity::process_batch_insert(
                 &runtime,
                 &collection,
@@ -2491,8 +2507,7 @@ impl RedDb for GrpcRuntime {
                 key.as_deref(),
             )
         })
-        .await
-        .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
+        .await?;
 
         self.enforce_commit_policy_after_write()?;
         grpc_batch_outcome_to_reply(outcome)
@@ -2505,9 +2520,10 @@ impl RedDb for GrpcRuntime {
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
-            grpc_spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
-                .await
-                .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+            grpc_spawn_blocking(&self.runtime, move || {
+                bulk_create_reply(&rt, request, create_node_reply)
+            })
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2519,9 +2535,10 @@ impl RedDb for GrpcRuntime {
         let request = request.into_inner();
         let rt = self.clone();
         let reply =
-            grpc_spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
-                .await
-                .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+            grpc_spawn_blocking(&self.runtime, move || {
+                bulk_create_reply(&rt, request, create_edge_reply)
+            })
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2532,11 +2549,10 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || {
+        let reply = grpc_spawn_blocking(&self.runtime, move || {
             bulk_create_reply(&rt, request, create_vector_reply)
         })
-        .await
-        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2547,11 +2563,10 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(move || {
+        let reply = grpc_spawn_blocking(&self.runtime, move || {
             bulk_create_reply(&rt, request, create_document_reply)
         })
-        .await
-        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2560,13 +2575,12 @@ impl RedDb for GrpcRuntime {
         let ask_query = ask_query_from_request(request.into_inner(), false)?;
         let runtime = self.runtime.clone();
 
-        let result = grpc_spawn_blocking(move || {
+        let result = grpc_spawn_blocking(&self.runtime, move || {
             runtime
                 .execute_ask("ASK via gRPC", &ask_query)
                 .map_err(to_status)
         })
-        .await
-        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        .await??;
         Ok(Response::new(ask_reply_from_runtime_result(&result)?))
     }
 
@@ -2576,14 +2590,13 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<Self::AskStreamStream>, Status> {
         let ask_query = ask_query_from_request(request.into_inner(), true)?;
         let runtime = self.runtime.clone();
-        let events = grpc_spawn_blocking(move || {
+        let events = grpc_spawn_blocking(&self.runtime, move || {
             let result = runtime
                 .execute_ask("ASK STREAM via gRPC", &ask_query)
                 .map_err(to_status)?;
             ask_stream_events_from_runtime_result(&result)
         })
-        .await
-        .map_err(|e| crate::grpc::control_support::internal_status(&e))??;
+        .await??;
         let stream = tokio_stream::iter(events.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream) as Self::AskStreamStream))
     }
@@ -2688,23 +2701,26 @@ impl RedDb for GrpcRuntime {
         request: Request<DeleteEntityRequest>,
     ) -> Result<Response<OperationReply>, Status> {
         let request = request.into_inner();
-        let output = self
-            .entity_use_cases()
-            .delete(DeleteEntityInput {
+        let rt = self.clone();
+        let request_id = request.id.clone();
+        let output = grpc_spawn_blocking(&self.runtime, move || {
+            rt.entity_use_cases().delete(DeleteEntityInput {
                 collection: request.collection,
                 id: EntityId::new(request.id),
             })
-            .map_err(entity_error_to_status)?;
+        })
+        .await?
+        .map_err(entity_error_to_status)?;
         if !output.deleted {
             return Err(Status::not_found(format!(
                 "entity not found: {}",
-                request.id
+                request_id
             )));
         }
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(OperationReply {
             ok: true,
-            message: format!("entity {} deleted", request.id),
+            message: format!("entity {request_id} deleted"),
         }))
     }
 
@@ -3046,11 +3062,10 @@ impl RedDb for GrpcRuntime {
         if await_data && current_lsn <= since_lsn {
             let repl_for_wait = repl.clone();
             let timeout = std::time::Duration::from_millis(await_timeout_ms);
-            grpc_spawn_blocking(move || {
+            grpc_spawn_blocking(&self.runtime, move || {
                 repl_for_wait.wait_for_logical_lsn_after(since_lsn, timeout)
             })
-            .await
-            .map_err(|err| Status::internal(format!("await-data worker failed: {err}")))?;
+            .await?;
             current_lsn = repl
                 .logical_wal_spool
                 .as_ref()

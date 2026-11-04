@@ -41,6 +41,23 @@ type Client struct {
 	userAgent string
 }
 
+// ResponseError preserves the server's machine-readable refusal contract.
+// RetryAfter is zero when the server did not provide a numeric delay.
+type ResponseError struct {
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
+	Body       any
+}
+
+func (e *ResponseError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("httpx: %d %s: %s", e.Status, e.Code, e.Message)
+	}
+	return fmt.Sprintf("httpx: %d: %s", e.Status, e.Message)
+}
+
 // NewClient builds a configured *Client; it does not perform any I/O.
 func NewClient(opts Options) (*Client, error) {
 	if opts.BaseURL == "" {
@@ -57,7 +74,9 @@ func NewClient(opts Options) (*Client, error) {
 	}
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		// Keep defaults for everything else; users can wrap if they need more.
+		// A custom Transport otherwise disables Go's automatic HTTP/2 attempt.
+		// Keep HTTP/1.1 fallback for clear-text and non-h2 TLS peers.
+		ForceAttemptHTTP2: true,
 	}
 	ua := opts.UserAgent
 	if ua == "" {
@@ -278,16 +297,35 @@ func parseEnvelope(resp *http.Response) (any, error) {
 	}
 	if resp.StatusCode >= 400 {
 		msg := fmt.Sprintf("status %d", resp.StatusCode)
+		code := ""
 		if obj, ok := body.(map[string]any); ok {
-			if s, ok := obj["error"].(string); ok {
+			if s, ok := obj["error_code"].(string); ok {
+				code = s
+			}
+			if detail, ok := obj["detail"].(string); ok {
+				msg = detail
+			} else if s, ok := obj["error"].(string); ok {
 				msg = s
+			} else if nested, ok := obj["error"].(map[string]any); ok {
+				if code == "" {
+					code, _ = nested["code"].(string)
+				}
+				if nestedMessage, ok := nested["message"].(string); ok {
+					msg = nestedMessage
+				}
 			} else if s, ok := obj["message"].(string); ok {
 				msg = s
 			}
 		} else if s, ok := body.(string); ok {
 			msg = s
 		}
-		return nil, fmt.Errorf("httpx: %d: %s", resp.StatusCode, msg)
+		return nil, &ResponseError{
+			Status:     resp.StatusCode,
+			Code:       code,
+			Message:    msg,
+			RetryAfter: retryAfterDuration(resp),
+			Body:       body,
+		}
 	}
 	// RedDB envelope: { ok, result, error? }. Unwrap when present.
 	if obj, ok := body.(map[string]any); ok {
@@ -305,6 +343,18 @@ func parseEnvelope(resp *http.Response) (any, error) {
 		}
 	}
 	return body, nil
+}
+
+func retryAfterDuration(resp *http.Response) time.Duration {
+	seconds, err := strconv.ParseUint(resp.Header.Get("Retry-After"), 10, 64)
+	if err != nil {
+		return 0
+	}
+	maxSeconds := uint64((1<<63 - 1) / int64(time.Second))
+	if seconds > maxSeconds {
+		return time.Duration(1<<63 - 1)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func normalizeExactJSONValue(value any) (any, error) {

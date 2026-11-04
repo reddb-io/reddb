@@ -45,22 +45,41 @@ env:
 
 The `_FILE` companion wins over the inline value when both are set.
 
-### HTTP capacity on small nodes
+### Server capacity on small nodes
 
 RedDB separates cheap async request admission from synchronous engine
-execution. `REDDB_HTTP_MAX_HANDLERS` bounds all admitted non-health HTTP
-requests, including queued requests. `REDDB_HTTP_EXECUTION_WORKERS` bounds the
-subset executing synchronously; it defaults to the detected CPU count and is
-clamped to `max_handlers`. The remaining admitted requests wait FIFO and their
-queue time consumes the existing handler deadline.
+execution. `REDDB_HTTP_MAX_HANDLERS` still bounds admitted non-health HTTP
+requests, but `REDDB_HTTP_EXECUTION_WORKERS` configures the runtime-wide engine
+slots shared by HTTP, HTTPS, gRPC, RedWire and PG-wire on the same
+`RedDBRuntime`. It defaults to the detected CPU count and is clamped to the HTTP
+request envelope. The remaining admitted operations wait FIFO in one bounded
+queue; queue time consumes the existing handler deadline.
 
 For a one-CPU pod, the defaults are one execution worker and an eight-request
 envelope. Do not raise execution workers merely to hide queueing: first inspect
-`http_execution_active`, `http_execution_queued` and
+`reddb_execution_active`, `reddb_execution_queued` and
 `http_execution_queue_wait_seconds`. Sustained `active == workers` with a rising
 queue identifies engine/storage saturation. A `server at capacity` response
 means the request envelope was exhausted; it is not, by itself, evidence of an
 out-of-memory condition.
+
+HTTP 503 capacity refusals retain the legacy `error: "server at capacity"` field and add a
+stable `error_code`, `stage`, `resource`, live limit/current values, an execution
+snapshot, `incident_id`, `retryable`, and both second/millisecond retry hints.
+Use the code, never the prose:
+
+| `error_code` | Meaning | Operator action |
+|--------------|---------|-----------------|
+| `global_inflight_exhausted` | HTTP request envelope is full. | Honor `Retry-After`; inspect active/queued gauges. |
+| `health_reserve_exhausted` | The separately bounded health reserve is full. | Check probe rate and stuck health handlers. |
+| `execution_queue_full` | Runtime-wide active slots plus FIFO queue are full. | Reduce offered concurrency; inspect slow queries/storage latency. |
+| `execution_queue_timeout` | Deadline expired before an execution slot opened. | Inspect queue p99 and lower upstream concurrency. |
+| `handler_deadline_exceeded` | Execution started but exceeded the total handler deadline. | Trace the `incident_id`; inspect query plan, locks and storage. |
+| `principal_inflight_exhausted` | One caller exhausted its share. | Back off that principal; do not scale the whole node from this signal alone. |
+
+gRPC maps full/expired execution admission to `RESOURCE_EXHAUSTED` /
+`DEADLINE_EXCEEDED`. RedWire includes the same stable code in its Error frame;
+PG-wire uses SQLSTATE `53000` and keeps the stable code in the message.
 
 ### Writer lease backend matrix
 
@@ -225,7 +244,8 @@ Exit codes:
 | `reddb_slo_lag_budget_remaining_seconds` | `< 0` | Replica lag exhausted `RED_SLO_REPLICA_LAG_BUDGET_SECONDS`. |
 | `reddb_commit_wait_total{outcome="timed_out"}` | rising | `ack_n` policy is too tight or replicas can't keep up. |
 | `reddb_quota_rejected_total{principal=...}` | sustained | Caller exceeded `RED_MAX_QPS_PER_CALLER` budget. |
-| `http_execution_queued` | sustained `> 0` | Buffered HTTP work is waiting for synchronous engine capacity. |
+| `reddb_execution_queued` | sustained `> 0` | Server work is waiting for runtime-wide synchronous engine capacity. |
+| `reddb_execution_active` | equals `reddb_execution_active_limit` with a rising queue | The engine/storage lane, not socket count, is saturated. |
 | `http_execution_queue_wait_seconds` | p99 rising | Engine/storage latency is consuming the request deadline. |
 | `http_handler_rejected_total{reason="cap_exhausted"}` | rising | The admitted-request envelope is full; clients should honor `Retry-After`. |
 

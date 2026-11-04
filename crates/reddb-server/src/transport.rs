@@ -5,6 +5,7 @@
 //! the other's implementation details.
 
 pub(crate) mod execution_admission;
+pub(crate) mod overload;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {

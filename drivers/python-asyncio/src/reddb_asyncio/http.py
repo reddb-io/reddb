@@ -61,7 +61,7 @@ class HttpClient:
                 base_url=self.base_url,
                 timeout=timeout,
                 verify=verify,
-                http2=False,
+                http2=True,
                 headers={"accept": "application/json"},
             )
         self._client = client
@@ -238,15 +238,39 @@ def _parse_response(response: httpx.Response) -> Any:
         except Exception:
             parsed = {"raw": text}
     if response.is_error:
+        error_value = parsed.get("error") if isinstance(parsed, dict) else None
+        nested_error = error_value if isinstance(error_value, dict) else {}
         code = (
-            parsed.get("error_code") if isinstance(parsed, dict) else None
-        ) or f"HTTP_{response.status_code}"
+            (parsed.get("error_code") if isinstance(parsed, dict) else None)
+            or nested_error.get("code")
+            or f"HTTP_{response.status_code}"
+        )
         message = (
-            (parsed.get("error") if isinstance(parsed, dict) else None)
+            (parsed.get("detail") if isinstance(parsed, dict) else None)
+            or (error_value if isinstance(error_value, str) else None)
+            or nested_error.get("message")
             or (parsed.get("message") if isinstance(parsed, dict) else None)
             or f"request failed with status {response.status_code}"
         )
-        raise HttpError(message, status=response.status_code, body=text)
+        retry_after_secs: float | None = None
+        retry_after = response.headers.get("retry-after")
+        if retry_after is not None:
+            try:
+                retry_after_secs = float(retry_after)
+            except ValueError:
+                pass
+        if retry_after_secs is None and isinstance(parsed, dict):
+            value = parsed.get("retry_after_secs")
+            if isinstance(value, (int, float)):
+                retry_after_secs = float(value)
+        raise HttpError(
+            str(message),
+            status=response.status_code,
+            body=text,
+            code=str(code),
+            retry_after_secs=retry_after_secs,
+            details=parsed,
+        )
     if isinstance(parsed, dict) and "ok" in parsed:
         if parsed["ok"] is False:
             raise EngineError(

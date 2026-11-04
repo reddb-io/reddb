@@ -48,6 +48,16 @@ pub(crate) struct ExecutionAdmission {
 }
 
 impl ExecutionAdmission {
+    /// Host-sized default shared by every server transport attached to one
+    /// runtime. Embedded calls do not acquire it.
+    pub(crate) fn for_host() -> Self {
+        let cores = std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1);
+        let total = (2 * cores).clamp(8, 256);
+        Self::new(cores.min(total), total.saturating_sub(cores))
+    }
+
     pub(crate) fn new(active_max: usize, queued_max: usize) -> Self {
         assert!(
             active_max > 0,
