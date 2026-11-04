@@ -8,10 +8,11 @@ historical physical allocation:
 red compact --source /preserved/data.rdb --destination-dir /new/compacted --json
 ```
 
-The source must be closed and fully checkpointed. The command takes an exclusive
-file lock, opens the source without write/recovery privileges, and refuses pending
-WAL, checkpoint or double-write recovery. Recover and checkpoint a separate
-preserved copy with its compatible engine first when necessary.
+The source must be closed and fully checkpointed. The command takes a shared
+read lock that excludes the writer's exclusive lock, opens the source without
+write/recovery privileges, and refuses pending WAL, checkpoint or double-write
+recovery. Recover and checkpoint a separate preserved copy with its compatible
+engine first when necessary.
 
 The destination directory must not exist. The command rebuilds current collection,
 key-index and secondary-index trees, preserving every persisted key/value byte,
