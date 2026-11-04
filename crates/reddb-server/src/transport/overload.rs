@@ -57,6 +57,10 @@ impl OverloadReason {
             Self::HandlerDeadlineExceeded => "request deadline expired during engine execution",
         }
     }
+
+    const fn retryable(self) -> bool {
+        !matches!(self, Self::HandlerDeadlineExceeded)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +75,9 @@ pub(crate) struct OverloadSnapshot {
 
 /// Build the additive HTTP problem body used by the REST edge.
 ///
-/// `error` and `retry_after_secs` retain the pre-existing contract. New
-/// clients should branch on `error_code`; all other fields are diagnostic.
+/// `error` retains the pre-existing contract. Retry hints are preserved for
+/// admission saturation but omitted for handler deadlines. New clients should
+/// branch on `error_code`; all other fields are diagnostic.
 pub(crate) fn problem_json(
     reason: OverloadReason,
     snapshot: OverloadSnapshot,
@@ -130,15 +135,17 @@ pub(crate) fn problem_json(
     insert_usize(&mut root, "limit", snapshot.limit);
     insert_usize(&mut root, "current", snapshot.current);
     root.insert("execution".to_string(), JsonValue::Object(execution));
-    root.insert("retryable".to_string(), JsonValue::Bool(true));
-    root.insert(
-        "retry_after_secs".to_string(),
-        JsonValue::Number(retry_after_secs as f64),
-    );
-    root.insert(
-        "retry_after_ms".to_string(),
-        JsonValue::Number(retry_after_secs.saturating_mul(1_000) as f64),
-    );
+    root.insert("retryable".to_string(), JsonValue::Bool(reason.retryable()));
+    if reason.retryable() {
+        root.insert(
+            "retry_after_secs".to_string(),
+            JsonValue::Number(retry_after_secs as f64),
+        );
+        root.insert(
+            "retry_after_ms".to_string(),
+            JsonValue::Number(retry_after_secs.saturating_mul(1_000) as f64),
+        );
+    }
     root.insert(
         "incident_id".to_string(),
         JsonValue::String(format!("overload-{}-{sequence}", std::process::id())),
@@ -182,5 +189,25 @@ mod tests {
         assert_eq!(parsed["retry_after_secs"].as_i64(), Some(5));
         assert_eq!(parsed["execution"]["active"].as_i64(), Some(2));
         assert_eq!(parsed["execution"]["queued"].as_i64(), Some(6));
+    }
+
+    #[test]
+    fn handler_deadline_is_not_advertised_as_retryable() {
+        let body = problem_json(
+            OverloadReason::HandlerDeadlineExceeded,
+            OverloadSnapshot {
+                limit: 200,
+                current: 201,
+                execution_active_limit: 2,
+                execution_active: 1,
+                execution_queue_limit: 6,
+                execution_queued: 0,
+            },
+            5,
+        );
+        let parsed: JsonValue = crate::json::from_str(&body).expect("valid problem JSON");
+        assert_eq!(parsed["retryable"], JsonValue::Bool(false));
+        assert!(parsed.get("retry_after_secs").is_none());
+        assert!(parsed.get("retry_after_ms").is_none());
     }
 }

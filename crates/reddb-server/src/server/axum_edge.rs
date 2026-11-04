@@ -574,8 +574,10 @@ impl RedDBServer {
         );
         let mut builder = Response::builder()
             .status(503)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .header(http::header::RETRY_AFTER, self.retry_after_secs.to_string());
+            .header(http::header::CONTENT_TYPE, "application/json");
+        if reason != OverloadReason::HandlerDeadlineExceeded {
+            builder = builder.header(http::header::RETRY_AFTER, self.retry_after_secs.to_string());
+        }
         for (name, value) in cors_header_pairs() {
             builder = builder.header(name, value);
         }
