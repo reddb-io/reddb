@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.2
+
+### Patch Changes
+
+- [#2614](https://github.com/reddb-io/reddb/pull/2614) [`4657304`](https://github.com/reddb-io/reddb/commit/4657304941f60a45a49feecc9b89bffb9d840b02) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use both engine workers on two-core instances so one blocked query cannot
+  serialize every database request and exhaust the HTTP admission limit.
+
 ## 1.28.1
 
 ### Patch Changes
