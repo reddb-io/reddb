@@ -2183,6 +2183,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cancelled_redwire_query_releases_shared_query_capacity() {
+        let _lock = env_lock().lock().expect("environment lock");
+        let _env = EnvGuard::set(&[("RED_MAX_CONCURRENT_QUERIES", "1")]);
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        let query = reddb_wire::redwire::build_query_frame(100, "SELECT 1 AS healthy")
+            .expect("query frame");
+
+        let cancellation = crate::runtime::query_budget::RequestCancellation::new();
+        let request_scope = cancellation.install();
+        cancellation.cancel();
+        let cancelled = run_query(&runtime, &prepared, &query);
+        assert_eq!(cancelled.kind, MessageKind::Error);
+        assert!(
+            String::from_utf8_lossy(&cancelled.payload).contains("duration:query_cancelled"),
+            "unexpected cancellation payload: {}",
+            String::from_utf8_lossy(&cancelled.payload)
+        );
+        drop(request_scope);
+
+        let recovered = run_query(&runtime, &prepared, &query);
+        assert_eq!(
+            recovered.kind,
+            MessageKind::Result,
+            "cancelled query must release the only shared admission slot"
+        );
+    }
+
     /// Issue #2139 AC1 — the prepared frames run on the connection's shared
     /// registry, so a prepared id is scoped to the connection that minted it,
     /// DDL invalidates the shape, and the kill switch closes both frames.
