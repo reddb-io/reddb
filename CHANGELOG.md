@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.28.1
+
+### Patch Changes
+
+- [#2611](https://github.com/reddb-io/reddb/pull/2611) [`9f46fe9`](https://github.com/reddb-io/reddb/commit/9f46fe9b820f68770b79815a794ac1bc1e2f056b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep health, liveness, readiness, and startup probes responsive when normal
+  HTTP query capacity is saturated by giving the exact GET probe routes a small,
+  independently bounded admission reserve.
+
 ## 1.28.0
 
 ### Minor Changes
