@@ -1,6 +1,7 @@
-//! Offline native rewrite. Source is exclusively locked and never opened by a
-//! recovering writer. A new directory owns all output; the main filename is
-//! published only after sync and a complete record-by-record readback.
+//! Offline native rewrite. Source is read-locked against writers and never
+//! opened by a recovering writer. A new directory owns all output; the main
+//! filename is published only after sync and a complete record-by-record
+//! readback.
 use crate::storage::engine::{Page, PageType, Pager, PagerConfig, HEADER_SIZE, PAGE_SIZE};
 use reddb_engine::storage::{
     btree::BTree,

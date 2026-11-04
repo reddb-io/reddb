@@ -2,7 +2,8 @@ use super::*;
 use reddb_engine::storage::{page_store::PageStore, pager::PagerError};
 use std::io::{Read, Seek, SeekFrom};
 
-/// The only source handle owns an exclusive lock and cannot write or recover.
+/// The source handle owns a shared read lock, which excludes the writer's
+/// exclusive lock while preserving an OS-enforced read-only descriptor.
 pub(super) struct Source {
     file: parking_lot::Mutex<File>,
     pub header: f::DatabaseHeader,
@@ -30,7 +31,11 @@ impl Source {
             validate_empty_directory(&support, 0)?;
         }
         let mut file = File::open(path)?;
-        fs2::FileExt::try_lock_exclusive(&file)?;
+        // Some network filesystems (including OCI FSS/NFS) reject an exclusive
+        // lock on an O_RDONLY descriptor with EBADF. A shared lock is the exact
+        // contract needed here: any number of immutable readers are harmless,
+        // while the server's lifetime exclusive lock remains excluded.
+        fs2::FileExt::try_lock_shared(&file)?;
         let bytes = file.metadata()?.len();
         let mut zero = [0; PAGE_SIZE];
         file.read_exact(&mut zero)?;
@@ -187,5 +192,35 @@ impl PageStore for Source {
     }
     fn free_page(&self, _: u32) -> std::result::Result<(), PagerError> {
         Err(PagerError::ReadOnly)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_locked_source_excludes_writer_until_drop() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("source.rdb");
+        {
+            let pager = Pager::open_default(&path).expect("create source");
+            pager.sync().expect("checkpoint source");
+        }
+
+        let source = Source::open(&path).expect("read-lock source");
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("writer descriptor");
+        assert!(
+            fs2::FileExt::try_lock_exclusive(&writer).is_err(),
+            "shared compaction lock must exclude a writer"
+        );
+
+        drop(source);
+        fs2::FileExt::try_lock_exclusive(&writer).expect("writer after compactor drop");
+        fs2::FileExt::unlock(&writer).expect("unlock writer");
     }
 }
