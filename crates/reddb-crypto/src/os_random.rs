@@ -28,7 +28,12 @@ pub fn fill_bytes(buf: &mut [u8]) -> Result<(), String> {
         fill_bytes_windows(buf)
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        getrandom::fill(buf).map_err(|_| "browser CSPRNG failed".to_string())
+    }
+
+    #[cfg(not(any(unix, windows, target_arch = "wasm32")))]
     {
         let _ = buf;
         Err("OS CSPRNG not supported on this platform".to_string())

@@ -22,6 +22,9 @@ use std::{
 };
 
 mod mutation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod service;
+pub mod vault;
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
@@ -108,6 +111,9 @@ impl<F: VfsFile> LocalDatabase<F> {
         tables.sort_by(|left, right| left.name.cmp(&right.name));
         let mut rows = Vec::new();
         for table in tables {
+            if table.declared_model != crate::catalog::CollectionModel::Table {
+                continue;
+            }
             for column in crate::catalog::schema::resolved_contract_columns(table)
                 .map_err(|error| LocalReadError::Catalog(error.to_string()))?
             {

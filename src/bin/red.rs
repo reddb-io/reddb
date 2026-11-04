@@ -1358,9 +1358,13 @@ fn main() {
     // copied into the process environment, where they showed up in
     // `/proc/<pid>/environ` and in every child process. A secret given
     // both ways is still a refusal, not a silent precedence.
-    if let Some(name) = reddb::utils::conflicting_secret_env() {
-        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
-        std::process::exit(2);
+    // The private local provider receives its credential only over its stdin
+    // bootstrap; a user's server credential environment does not configure it.
+    if std::env::args().nth(1).as_deref() != Some("workspace-store") {
+        if let Some(name) = reddb::utils::conflicting_secret_env() {
+            eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
+            std::process::exit(2);
+        }
     }
 
     // Owner-only permissions for everything created from here on: the .rdb,
@@ -1371,6 +1375,19 @@ fn main() {
     reddb::utils::file_mode::restrict_new_file_permissions();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Private desktop persistence service: fixed loopback binding, authenticated
+    // IPC-owned endpoint, and no user SQL/remote connection surface.
+    if args
+        .first()
+        .is_some_and(|argument| argument == "workspace-store")
+    {
+        if let Err(error) = reddb_engine::query::local_database::service::run(&args[1..]) {
+            eprintln!("workspace-store: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Handle empty args early.
     if args.is_empty() {

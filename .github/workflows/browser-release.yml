@@ -61,7 +61,7 @@ jobs:
       - name: Build bundled JS, worker and WASM
         run: pnpm --filter @reddb-io/browser build
       - name: Verify reusable Worker ownership and I/O failure boundaries
-        run: REDDB_BROWSER_BROWSERS=chromium,firefox node --test packages/browser/test/runtime.test.mjs packages/browser/test/session.test.mjs
+        run: REDDB_BROWSER_BROWSERS=chromium,firefox node --test packages/browser/test/runtime.test.mjs packages/browser/test/session.test.mjs packages/browser/test/local-vault.test.mjs
       - name: Verify packaged TypeScript/Vite application and offline OPFS restart
         run: pnpm --filter @reddb-io/browser test:distribution
       - name: Pack immutable release asset

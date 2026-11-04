@@ -161,6 +161,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.0",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2749,7 +2750,10 @@ name = "reddb-io-crypto"
 version = "1.27.13"
 dependencies = [
  "aes-gcm",
+ "argon2",
+ "getrandom 0.4.2",
  "reddb-io-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -2761,11 +2765,13 @@ dependencies = [
  "parking_lot",
  "proptest",
  "rayon",
+ "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
  "regex",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
