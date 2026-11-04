@@ -33,10 +33,10 @@
 #![allow(clippy::unwrap_used)]
 
 pub mod aes_gcm;
-pub mod vault;
 pub mod key;
 pub mod os_random;
 pub mod page_envelope;
+pub mod vault;
 
 /// Mandatory encrypt parameters for the canonical page envelope.
 ///
