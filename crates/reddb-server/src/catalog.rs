@@ -1047,10 +1047,12 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
             ) {
                 attention_reasons.push("requires_rebuild".to_string());
             }
-            let queryable = declared_present
-                && operational_present
-                && enabled
-                && matches!(build_state.as_deref().unwrap_or_default(), "ready");
+            let artifact_state = crate::physical::ArtifactState::from_build_state(
+                build_state.as_deref().unwrap_or("declared-unbuilt"),
+                enabled,
+            );
+            let queryable =
+                declared_present && operational_present && artifact_state.is_queryable();
             let requires_rebuild = matches!(
                 build_state.as_deref().unwrap_or_default(),
                 "declared-unbuilt" | "building" | "stale" | "failed"
@@ -1060,10 +1062,6 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
                 + usize::from(declared_present != operational_present)
                 + usize::from(!queryable);
 
-            let artifact_state = crate::physical::ArtifactState::from_build_state(
-                build_state.as_deref().unwrap_or("declared-unbuilt"),
-                enabled,
-            );
             CatalogIndexStatus {
                 name,
                 collection,
@@ -1104,13 +1102,11 @@ fn index_lifecycle_state(
     }
 
     match build_state.unwrap_or_default() {
-        "ready" => "ready".to_string(),
+        "ready" | "catalog-derived" | "registry-loaded" => "ready".to_string(),
         "failed" => "failed".to_string(),
         "stale" => "stale".to_string(),
         "declared-unbuilt" => "declared".to_string(),
-        "catalog-derived" | "metadata-only" | "artifact-published" | "registry-loaded" => {
-            "building".to_string()
-        }
+        "metadata-only" | "artifact-published" => "building".to_string(),
         _ => "building".to_string(),
     }
 }
@@ -1455,6 +1451,39 @@ pub fn analytics_job_attention(snapshot: &CatalogModelSnapshot) -> Vec<CatalogAn
 mod observation_tests {
     use super::*;
     use crate::storage::{CrossRef, EntityId, RefType};
+
+    fn btree_index(name: &str, build_state: &str) -> PhysicalIndexState {
+        PhysicalIndexState {
+            name: name.to_string(),
+            kind: IndexKind::BTree,
+            collection: Some("events".to_string()),
+            enabled: true,
+            entries: 1,
+            estimated_memory_bytes: 64,
+            last_refresh_ms: Some(1),
+            backend: "btree".to_string(),
+            artifact_kind: None,
+            artifact_root_page: None,
+            artifact_checksum: None,
+            build_state: build_state.to_string(),
+        }
+    }
+
+    #[test]
+    fn reopened_operational_btree_indexes_remain_queryable() {
+        for recovered_state in ["catalog-derived", "registry-loaded"] {
+            let statuses = index_statuses(Some(&CatalogDeclarations {
+                declared_indexes: vec![btree_index("idx_events_id", "ready")],
+                operational_indexes: vec![btree_index("idx_events_id", recovered_state)],
+                ..Default::default()
+            }));
+            let status = statuses.first().expect("index status");
+            assert_eq!(status.lifecycle_state, "ready", "{recovered_state}");
+            assert!(status.queryable, "{recovered_state}");
+            assert_eq!(status.artifact_state, crate::physical::ArtifactState::Ready);
+            assert!(!status.requires_rebuild, "{recovered_state}");
+        }
+    }
 
     #[test]
     fn borrowed_catalog_preserves_models_counts_and_cross_references() {
