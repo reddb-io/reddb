@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs test/session.test.mjs",
+    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs test/session.test.mjs test/local-vault.test.mjs",
     "prepack": "node scripts/verify-dist.mjs",
     "test:distribution": "node --test test/distribution.test.mjs",
     "build:interop": "node scripts/build-interop.mjs",

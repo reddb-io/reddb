@@ -1358,9 +1358,13 @@ fn main() {
     // copied into the process environment, where they showed up in
     // `/proc/<pid>/environ` and in every child process. A secret given
     // both ways is still a refusal, not a silent precedence.
-    if let Some(name) = reddb::utils::conflicting_secret_env() {
-        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
-        std::process::exit(2);
+    // The private local provider receives its credential only over its stdin
+    // bootstrap; a user's server credential environment does not configure it.
+    if std::env::args().nth(1).as_deref() != Some("workspace-store") {
+        if let Some(name) = reddb::utils::conflicting_secret_env() {
+            eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
+            std::process::exit(2);
+        }
     }
 
     // Owner-only permissions for everything created from here on: the .rdb,

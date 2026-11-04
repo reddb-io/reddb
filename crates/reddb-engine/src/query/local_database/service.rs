@@ -13,6 +13,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
 const REQUEST_BYTES_MAX: usize = 2 * 1024 * 1024;
@@ -27,7 +28,7 @@ pub fn run(arguments: &[String]) -> Result<()> {
     if flag != "--path" {
         return Err("expected --path <private.rdb>".into());
     }
-    let mut bootstrap = String::new();
+    let mut bootstrap = Zeroizing::new(String::new());
     std::io::stdin()
         .lock()
         .take(8192)
@@ -36,7 +37,16 @@ pub fn run(arguments: &[String]) -> Result<()> {
     if !bootstrap.ends_with('\n') {
         return Err("invalid bootstrap frame".into());
     }
-    let bootstrap: Json = reddb_types::serde_json::from_str(&bootstrap).map_err(error)?;
+    let frame: Json = reddb_types::serde_json::from_str(&bootstrap).map_err(error)?;
+    drop(bootstrap);
+    let password = match frame {
+        Json::Object(mut object) => match object.remove("password") {
+            Some(Json::String(password)) => Some(Zeroizing::new(password)),
+            Some(Json::Null) | None => None,
+            _ => return Err("invalid opening credential".into()),
+        },
+        _ => return Err("invalid bootstrap frame".into()),
+    };
     let path = Path::new(path);
     let _owner = EmbeddedRdbWriterLock::acquire(path).map_err(error)?;
     let existed = path.exists();
@@ -58,15 +68,16 @@ pub fn run(arguments: &[String]) -> Result<()> {
         key: None,
     };
     service.database.query("CREATE TABLE IF NOT EXISTS workspace_metadata (entry_key TEXT PRIMARY KEY, entry_value TEXT NOT NULL)", 0).map_err(error)?;
-    if let Some(password) = bootstrap.get("password").and_then(Json::as_str) {
+    if let Some(password) = &password {
         // A failed unlock leaves metadata accessible and never recreates a Vault.
         let create = !service.database.vault_initialized().map_err(error)?;
         service.key = service.database.vault_unlock(password, create).ok();
     }
+    drop(password);
     let listener = TcpListener::bind("127.0.0.1:0").map_err(error)?;
     listener.set_nonblocking(true).map_err(error)?;
     let token = private_token()?;
-    println!("{}", reddb_types::json!({ "port": listener.local_addr().map_err(error)?.port(), "token": token.clone() }).to_string_compact());
+    println!("{}", reddb_types::json!({ "protocol": 1, "port": listener.local_addr().map_err(error)?.port(), "token": token.clone() }).to_string_compact());
     std::io::stdout().flush().map_err(error)?;
     let alive = Arc::new(AtomicBool::new(true));
     let lifeline = alive.clone();
@@ -177,7 +188,7 @@ fn read_request(stream: &mut TcpStream, token: &str) -> Result<Json> {
     if !authenticated {
         return Err("unauthenticated".into());
     }
-    let mut body = vec![0; length];
+    let mut body = Zeroizing::new(vec![0; length]);
     stream.read_exact(&mut body).map_err(error)?;
     reddb_types::serde_json::from_slice(&body).map_err(error)
 }
@@ -272,9 +283,27 @@ impl Service {
             .get("metadata")
             .and_then(Json::as_object)
             .ok_or("missing metadata batch")?;
+        let if_absent = params
+            .get("ifAbsent")
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
         for (key, value) in metadata {
             if key.len() > 2048 {
                 return Err("metadata key too long".into());
+            }
+            if if_absent
+                && !self
+                    .database
+                    .query_with_params(
+                        "SELECT entry_key FROM workspace_metadata WHERE entry_key = $1",
+                        &[Value::text(key.as_str())],
+                        0,
+                    )
+                    .map_err(error)?
+                    .rows
+                    .is_empty()
+            {
+                continue;
             }
             self.database
                 .query_with_params(
@@ -296,6 +325,15 @@ impl Service {
         }
         if let Some(secrets) = params.get("secrets").and_then(Json::as_object) {
             for (name, value) in secrets {
+                if if_absent
+                    && self
+                        .database
+                        .vault_reveal(self.key.as_ref().ok_or("VAULT_LOCKED")?, name)
+                        .map_err(error)?
+                        .is_some()
+                {
+                    continue;
+                }
                 let value = if matches!(value, Json::Null) {
                     None
                 } else {
