@@ -148,9 +148,11 @@ impl ArtifactState {
             return Self::Disabled;
         }
         match s {
-            "ready" => Self::Ready,
-            "building" | "catalog-derived" | "metadata-only" | "artifact-published"
-            | "registry-loaded" => Self::Building,
+            // Both states are emitted only after the operational registry has
+            // found and loaded the physical index. Treating them as Building
+            // after reopen made the planner ignore every recovered B-tree.
+            "ready" | "catalog-derived" | "registry-loaded" => Self::Ready,
+            "building" | "metadata-only" | "artifact-published" => Self::Building,
             "stale" => Self::Stale,
             "failed" => Self::Failed,
             "requires_rebuild" | "requires-rebuild" => Self::RequiresRebuild,
