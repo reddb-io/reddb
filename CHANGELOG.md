@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.4
+
+### Patch Changes
+
+- [#2619](https://github.com/reddb-io/reddb/pull/2619) [`89d2076`](https://github.com/reddb-io/reddb/commit/89d2076669d73acbb8bfd87b1ee36aaba0e8bcc5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline physical compaction on read-only OCI FSS/NFS sources while still
+  excluding active writers through the database file lock.
+
 ## 1.28.3
 
 ### Patch Changes
