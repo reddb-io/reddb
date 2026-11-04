@@ -162,11 +162,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 / armv7: native compile on a Blacksmith 8-vCPU
-          # x86_64 runner. The armv7 target still needs the cross-gcc
-          # toolchain, but the underlying CPU is 2x faster than ubuntu-latest.
+          # Linux x86_64: native compile on a Blacksmith 8-vCPU runner.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
           # Linux aarch64: build natively on a Blacksmith ARM runner instead
           # of cross-compiling from x86_64. Removes the gcc-aarch64-linux-gnu
           # cross toolchain install + linker env vars + the QEMU smoke test
@@ -181,12 +178,8 @@ jobs:
           # version, unlike the glibc-linked `linux-x86_64`. Same Docker musl-
           # cross path as aarch64.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-musl, asset_name: linux-x86_64-static, cross: true }
-          # Build both macOS assets on the Blacksmith ARM pool already used by
-          # the full CI workflow. macos-14 brownouts cancel the matrix and skip
-          # dependent publication jobs.
-          # Cross-building still produces the x86_64-apple-darwin asset, but we
-          # cannot rely on Rosetta being available for a local smoke test.
-          - { os: blacksmith-6vcpu-macos-15,       target: x86_64-apple-darwin,       asset_name: macos-x86_64,  cross: true,  smoke: false, optional: true }
+          # Build Apple Silicon on the Blacksmith ARM pool already used by the
+          # full CI workflow.
           - { os: blacksmith-6vcpu-macos-15,       target: aarch64-apple-darwin,      asset_name: macos-aarch64, cross: false, optional: true }
           - { os: blacksmith-8vcpu-windows-2025,   target: x86_64-pc-windows-msvc,   asset_name: windows-x86_64, cross: false, optional: true }
     steps:
@@ -222,33 +215,12 @@ jobs:
             . -> target
             drivers/node -> target
 
-      - name: Add cross-compile target
-        if: matrix.cross
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Cross-compile tools
-        # Only `armv7` and the musl-via-docker target need apt-installed
-        # cross toolchains now. aarch64 builds natively on blacksmith-arm64.
-        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-
       - name: Build
         if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
         env:
           SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
           RUSTC_WRAPPER: ${{ !matrix.cross && 'sccache' || '' }}
-          # Cross-compile linker/CC overrides only apply when matrix.cross
-          # is true. aarch64-unknown-linux-gnu now builds natively on
-          # blacksmith-arm64, so the host gcc is the right answer for
-          # that target — setting `aarch64-linux-gnu-gcc` here would point
-          # cargo at a binary that isn't installed on the arm64 runner.
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CC_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CXX_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-g++' || '' }}
-          AR_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-ar' || '' }}
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
@@ -568,8 +540,6 @@ jobs:
           | Linux x86_64 (static musl) | \`red-linux-x86_64-static\` | \`red_client-linux-x86_64-static\` |
           | Linux aarch64 (glibc) | \`red-linux-aarch64\` | \`red_client-linux-aarch64\` |
           | Linux aarch64 (static musl) | \`red-linux-aarch64-static\` | \`red_client-linux-aarch64-static\` |
-          | Linux armv7 | \`red-linux-armv7\` | \`red_client-linux-armv7\` |
-          | macOS Intel | \`red-macos-x86_64\` | \`red_client-macos-x86_64\` |
           | macOS Apple Silicon | \`red-macos-aarch64\` | \`red_client-macos-aarch64\` |
           | Windows x86_64 | \`red-windows-x86_64.exe\` | \`red_client-windows-x86_64.exe\` |
 
@@ -1196,7 +1166,6 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  manylinux: '2014' }
           - { os: ubuntu-latest, target: blacksmith-4vcpu-ubuntu-2404-arm, manylinux: '2014' }
           - { os: macos-14,      target: aarch64-apple-darwin,      manylinux: 'auto' }
-          - { os: macos-13,      target: x86_64-apple-darwin,       manylinux: 'auto' }
           - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
     runs-on: ${{ matrix.os }}
     steps:

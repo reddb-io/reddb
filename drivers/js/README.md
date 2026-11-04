@@ -33,7 +33,7 @@ import { connect } from 'npm:@reddb-io/sdk'
 
 The `red` binary ships as a per-platform package
 (`@reddb-io/red-linux-x64`, `-linux-x64-musl`, `-linux-arm64`,
-`-linux-arm64-musl`, `-linux-arm`, `-darwin-x64`, `-darwin-arm64`,
+`-linux-arm64-musl`, `-darwin-arm64`,
 `-win32-x64`) listed as an `optionalDependency` of this package. Your package
 manager installs only the one matching your OS, CPU and libc, so there is **no
 install script and no download**: it works with `--ignore-scripts`, behind a
