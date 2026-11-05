@@ -641,6 +641,12 @@ fn authorize_binding(
     peer_auth: Option<AuthResult>,
 ) -> Result<GrpcDispatchContext, Status> {
     if let GrpcAuthClass::Replication(action) = binding.auth {
+        // `--no-auth` is an explicit operator choice that makes every server
+        // surface anonymous, including the internal primary/replica channel.
+        // Keep the capability gate unchanged whenever auth is enabled.
+        if !runtime.auth_store.is_enabled() {
+            return Ok(GrpcDispatchContext { identity: None });
+        }
         let resolved = peer_auth.map_or_else(
             || runtime.resolve_auth_with_identity(metadata),
             |result| {
@@ -1343,6 +1349,28 @@ mod tests {
             harness.decide(binding("AckReplicaLsn"), Principal::Read),
             Outcome::PermissionDenied,
         );
+    }
+
+    #[test]
+    fn replication_bindings_follow_explicit_no_auth_mode() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let grpc = GrpcRuntime {
+            runtime,
+            auth_store: Arc::new(AuthStore::new(crate::auth::AuthConfig {
+                enabled: false,
+                require_auth: false,
+                ..crate::auth::AuthConfig::default()
+            })),
+            prepared_registry: Arc::new(PreparedRegistry::new()),
+            oauth_validator: None,
+        };
+
+        for rpc in ["PullWalRecords", "ReplicationSnapshot", "AckReplicaLsn"] {
+            let context = authorize_binding(&grpc, binding(rpc), &MetadataMap::new(), None)
+                .unwrap_or_else(|error| panic!("{rpc} rejected in --no-auth mode: {error}"));
+            assert_eq!(context.identity, None, "{rpc} must stay anonymous");
+        }
     }
 
     /// Only the replication bindings accept an mTLS peer certificate as the

@@ -3022,7 +3022,7 @@ impl RedDb for GrpcRuntime {
         // retention cap is told to re-bootstrap (issue #832).
         let mut partial_resync = false;
         if let Some(id) = &replica_id {
-            repl.ensure_replica_registered(id);
+            repl.ensure_replica_registered(id, since_lsn);
             match repl.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
                 crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
                     let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
@@ -3138,7 +3138,11 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let authenticated_replica_id = authorized_principal(&request)?.to_string();
+        let authenticated_replica_id = if self.auth_store.is_enabled() {
+            Some(authorized_principal(&request)?.to_string())
+        } else {
+            None
+        };
         let db = self.runtime.db();
         db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3149,11 +3153,14 @@ impl RedDb for GrpcRuntime {
         )
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let replica_id = ack.replica_id;
-        if replica_id != authenticated_replica_id {
-            return Err(Status::permission_denied(
-                "replica_id does not match authenticated identity",
-            ));
+        if let Some(authenticated_replica_id) = &authenticated_replica_id {
+            if replica_id != *authenticated_replica_id {
+                return Err(Status::permission_denied(
+                    "replica_id does not match authenticated identity",
+                ));
+            }
         }
+        let effective_replica_id = authenticated_replica_id.unwrap_or(replica_id);
         let applied_lsn = ack.applied_lsn;
         let durable_lsn = ack.durable_lsn;
         let apply_errors_total = ack.apply_errors_total;
@@ -3161,7 +3168,7 @@ impl RedDb for GrpcRuntime {
 
         self.runtime
             .ack_primary_replica_lsn_and_prune(
-                &authenticated_replica_id,
+                &effective_replica_id,
                 applied_lsn,
                 durable_lsn,
                 apply_errors_total,
@@ -3171,7 +3178,7 @@ impl RedDb for GrpcRuntime {
 
         let reply = reddb_wire::replication::WalStreamAckReply::from_ack(
             &reddb_wire::replication::WalStreamAck {
-                replica_id: authenticated_replica_id,
+                replica_id: effective_replica_id,
                 applied_lsn,
                 durable_lsn,
                 apply_errors_total,
@@ -3188,7 +3195,17 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let replica_id = authorized_principal(&request)?.to_string();
+        let replica_id = if self.auth_store.is_enabled() {
+            authorized_principal(&request)?.to_string()
+        } else {
+            snapshot_metadata_string(request.metadata(), "x-reddb-replica-id")?
+                .filter(|replica_id| !replica_id.trim().is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "x-reddb-replica-id is required when authentication is disabled",
+                    )
+                })?
+        };
         // Issue #830 resumable transfer control headers (all optional — their
         // absence preserves the legacy whole-snapshot envelope).
         let snapshot_max_bytes =
