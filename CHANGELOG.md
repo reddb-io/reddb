@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.10
+
+### Patch Changes
+
+- [#2637](https://github.com/reddb-io/reddb/pull/2637) [`9ecb1f0`](https://github.com/reddb-io/reddb/commit/9ecb1f06beaae33b737fe13bf2616070268570e0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix predicates on omitted nullable fields and fields added by UPDATE, including indexed scans and reopened databases.
+
 ## 1.28.9
 
 ### Patch Changes
