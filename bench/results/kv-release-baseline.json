@@ -1,57 +1,157 @@
 {
   "config": {
-    "ops": 10000,
-    "redis": "127.0.0.1:6379",
-    "watch_events": 100000
+    "ops": 1000,
+    "watch_events": 1000
   },
-  "generated_at_unix_ms": 1778371200000,
-  "notes": "Initial issue #253 release baseline placeholder. Replace with release-run output from bench/kv/run.sh before publishing a performance claim.",
-  "reddb": {
+  "generated_at_unix_ms": 1793827653824,
+  "normalized": {
     "get": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 4.016032,
+      "p99_ratio_cv": 0.172569,
+      "throughput_ratio": 0.252076,
+      "throughput_ratio_cv": 0.064343
     },
     "incr": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 12.453884,
+      "p99_ratio_cv": 0.968907,
+      "throughput_ratio": 0.072519,
+      "throughput_ratio_cv": 0.180326
     },
     "put": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 16.63618,
+      "p99_ratio_cv": 0.735482,
+      "throughput_ratio": 0.069961,
+      "throughput_ratio_cv": 0.213744
+    }
+  },
+  "notes": "Temporary reviewed aggregate from release-candidate runs 41914027436, 41914966142, and 41915596678. Replace with the first complete post-fix aggregate before merge.",
+  "reddb": {
+    "get": {
+      "ops": 1000,
+      "p50_us": 350.579,
+      "p99_us": 411.929,
+      "throughput_ops_s": 2863.533,
+      "variation": {
+        "p50_us_cv": 0.273071,
+        "p50_us_max": 499.291,
+        "p50_us_min": 254.883,
+        "p99_us_cv": 0.652708,
+        "p99_us_max": 1430.378,
+        "p99_us_min": 389.286,
+        "throughput_ops_s_cv": 0.279157,
+        "throughput_ops_s_max": 3716.355,
+        "throughput_ops_s_min": 1808.067
+      }
+    },
+    "incr": {
+      "ops": 1000,
+      "p50_us": 1114.48,
+      "p99_us": 3717.696,
+      "throughput_ops_s": 710.698,
+      "variation": {
+        "p50_us_cv": 0.154152,
+        "p50_us_max": 1445.262,
+        "p50_us_min": 1015.634,
+        "p99_us_cv": 0.526058,
+        "p99_us_max": 6072.829,
+        "p99_us_min": 1306.493,
+        "throughput_ops_s_cv": 0.189965,
+        "throughput_ops_s_max": 973.653,
+        "throughput_ops_s_min": 630.46
+      }
+    },
+    "put": {
+      "ops": 1000,
+      "p50_us": 1017.956,
+      "p99_us": 4243.046,
+      "throughput_ops_s": 719.309,
+      "variation": {
+        "p50_us_cv": 0.147471,
+        "p50_us_max": 1288.284,
+        "p50_us_min": 912.591,
+        "p99_us_cv": 0.491602,
+        "p99_us_max": 5945.371,
+        "p99_us_min": 1360.224,
+        "throughput_ops_s_cv": 0.205651,
+        "throughput_ops_s_max": 1064.268,
+        "throughput_ops_s_min": 691.146
+      }
     }
   },
   "redis": {
     "get": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 77.154,
+      "p99_us": 96.933,
+      "throughput_ops_s": 12737.242,
+      "variation": {
+        "p50_us_cv": 0.272056,
+        "p50_us_max": 123.01,
+        "p50_us_min": 67.351,
+        "p99_us_cv": 0.793876,
+        "p99_us_max": 431.303,
+        "p99_us_min": 81.563,
+        "throughput_ops_s_cv": 0.290761,
+        "throughput_ops_s_max": 14742.972,
+        "throughput_ops_s_min": 6890.365
+      }
     },
     "incr": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 76.653,
+      "p99_us": 298.517,
+      "throughput_ops_s": 12790.675,
+      "variation": {
+        "p50_us_cv": 0.312208,
+        "p50_us_max": 130.794,
+        "p50_us_min": 65.778,
+        "p99_us_cv": 0.413169,
+        "p99_us_max": 319.95,
+        "p99_us_min": 100.118,
+        "throughput_ops_s_cv": 0.249807,
+        "throughput_ops_s_max": 13426.233,
+        "throughput_ops_s_min": 7226.674
+      }
     },
     "put": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 80.599,
+      "p99_us": 104.755,
+      "throughput_ops_s": 11905.614,
+      "variation": {
+        "p50_us_cv": 0.289149,
+        "p50_us_max": 127.188,
+        "p50_us_min": 65.298,
+        "p99_us_cv": 0.750325,
+        "p99_us_max": 408.122,
+        "p99_us_min": 81.763,
+        "throughput_ops_s_cv": 0.296975,
+        "throughput_ops_s_max": 15212.218,
+        "throughput_ops_s_min": 6993.139
+      }
     }
   },
-  "schema": "reddb.kv-bench.v1",
+  "sample_count": 3,
+  "schema": "reddb.kv-bench.aggregate.v1",
+  "source_runs": [
+    41914027436,
+    41914966142,
+    41915596678
+  ],
   "watch_delivery_lag": {
-    "drops": 0,
-    "events": 100000,
+    "complete_samples": 0,
+    "drops_total": 0,
+    "events_total": 3000,
     "p50_ms": 0.0,
     "p99_ms": 0.0,
-    "received": 0
+    "received_total": 0,
+    "variation": {
+      "p50_ms_cv": 0.0,
+      "p50_ms_max": 0.0,
+      "p50_ms_min": 0.0,
+      "p99_ms_cv": 0.0,
+      "p99_ms_max": 0.0,
+      "p99_ms_min": 0.0
+    }
   }
 }
