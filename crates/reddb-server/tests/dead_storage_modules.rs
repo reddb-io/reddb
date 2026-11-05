@@ -25,6 +25,10 @@ fn unreachable_storage_modules_stay_retired() {
         "engine/pq.rs",
         "engine/store_strategy.rs",
         "engine/tiered_search.rs",
+        "transaction/coordinator.rs",
+        "transaction/lock.rs",
+        "transaction/log.rs",
+        "transaction/savepoint.rs",
     ] {
         assert!(
             !root.join(retired).exists(),
