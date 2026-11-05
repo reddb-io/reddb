@@ -165,6 +165,9 @@ fn pg_binary_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<ParamValue, Stri
         PgOid::Float8 if bytes.len() == 8 => Ok(ParamValue::Float64(f64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))),
+        PgOid::Text | PgOid::Varchar => std::str::from_utf8(bytes)
+            .map(|text| ParamValue::Text(text.to_owned()))
+            .map_err(|_| "invalid UTF-8 binary text parameter".to_string()),
         PgOid::Bytea => Ok(ParamValue::Bytes(bytes.to_vec())),
         PgOid::Json | PgOid::Jsonb => Ok(ParamValue::Json(bytes.to_vec())),
         PgOid::Uuid if bytes.len() == 16 => {
@@ -370,6 +373,17 @@ mod tests {
             pg_param_to_param_value(PgOid::Vector.as_u32(), 1, Some(&vector)).unwrap(),
             ParamValue::Vector(vec![1.0, -0.5])
         );
+    }
+
+    #[test]
+    fn pg_binary_text_parameters_validate_utf8() {
+        for oid in [PgOid::Text, PgOid::Varchar] {
+            assert_eq!(
+                pg_param_to_param_value(oid.as_u32(), 1, Some("olá".as_bytes())).unwrap(),
+                ParamValue::Text("olá".to_string())
+            );
+            assert!(pg_param_to_param_value(oid.as_u32(), 1, Some(&[0xff])).is_err());
+        }
     }
 
     #[test]
