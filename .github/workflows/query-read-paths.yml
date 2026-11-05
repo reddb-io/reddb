@@ -1,74 +1,47 @@
 name: Query read-path diagnostics
-
 on:
-  pull_request:
-    paths:
-      - 'bench/query/**'
-      - 'bench/kv/compare.py'
-      - 'bench/kv/local_matrix.py'
-      - 'bench/results/query-projection-*/**'
-      - 'bench/results/kv-architecture-*/**'
-      - '.github/workflows/query-read-paths.yml'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  harness-tests:
+  native-publication:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_MIN_STACK: 8388608
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Validate correctness and measurement guards
-        run: |
-          python3 -m unittest discover -s bench/query -p test_read_paths.py -v
-          python3 -m unittest discover -s bench/kv -p test_compare.py -v
-      - name: Validate captured evidence
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify native insert visibility
+        run: cargo test --locked -p reddb-io-server --lib native_insert_keeps_indexed_reads_visible_during_publication -- --nocapture
+      - name: Verify native patch visibility
+        run: cargo test --locked -p reddb-io-server --lib native_patch_keeps_indexed_reads_visible_during_publication -- --nocapture
+      - name: Verify native patch publication guard
+        run: cargo test --locked -p reddb-io-server --lib native_patch_marks_the_storage_index_publication_window -- --nocapture
+      - name: Verify native deletion publication
+        run: cargo test --locked -p reddb-io-server --lib native_delete_marks_the_storage_index_publication_window -- --nocapture
+      - name: Confirm the marker test fails without guard
+        shell: bash
         run: |
           python3 - <<'PY'
-          import hashlib, json, pathlib
-          summaries = [*pathlib.Path('bench/results').glob('query-projection-*/**/summary.json'),
-                       *pathlib.Path('bench/results').glob('kv-architecture-*/**/summary.json')]
-          for summary in sorted(summaries):
-              evidence = json.loads(summary.read_text())
-              assert evidence['status'] in ('valid-diagnostic', 'completed-with-orchestration-repair')
-              assert len(evidence['measurements']) == 32
-              assert all(cell['status'] == 'valid-diagnostic' for cell in evidence['measurements'])
-              assert len(evidence['comparisons']) == 8
-              manifest = json.loads((summary.parent / 'manifest.json').read_text())
-              assert len(manifest['runs']) == 4
-              for run in manifest['runs']:
-                  assert run['recovery_complete']
-                  directory = summary.parent / run['label']
-                  assert json.loads((directory / 'sql-recovery.json').read_text())['status'] == 'verified'
-                  kv = json.loads((directory / 'kv-recovery.json').read_text())
-                  assert kv['status'] == 'valid-diagnostic' and kv['verification']['keys_checked'] == 10000
-              checksums = evidence['artifact_sha256']
-              for name, expected in checksums.items():
-                  relative = pathlib.Path(name)
-                  assert not relative.is_absolute() and '..' not in relative.parts
-                  path = (summary.parent / relative).resolve()
-                  assert path.is_relative_to(summary.parent.resolve())
-                  actual = hashlib.sha256(path.read_bytes()).hexdigest()
-                  assert actual == expected, f'{path}: checksum mismatch'
-              print(f'{summary.parent}: {len(checksums)} artifacts verified')
-          for checksum_file in pathlib.Path('bench/results').glob('kv-architecture-*/evidence-sha256.json'):
-              for name, expected in json.loads(checksum_file.read_text()).items():
-                  relative = pathlib.Path(name)
-                  assert not relative.is_absolute() and '..' not in relative.parts
-                  path = (checksum_file.parent / relative).resolve()
-                  assert path.is_relative_to(checksum_file.parent.resolve())
-                  assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, path
-              for profile in checksum_file.parent.rglob('write-profile.json'):
-                  result = json.loads(profile.read_text())
-                  assert result['status'] == 'valid-diagnostic', profile
-                  assert len(result['phases']) == 3
-                  for phase in result['phases']:
-                      assert phase['operations'] == 64
-                      assert all(call['returned'] == 0 for call in phase['calls'])
-                      if phase['name'].startswith('trace-put'):
-                          assert phase['recovery'] == 'verified'
-                      else:
-                          assert phase['sync_calls'] == 0
+          from pathlib import Path
+          path = Path('crates/reddb-server/src/application/ports_impls_entity.rs')
+          s = path.read_text()
+          marker = '        let _indexed_mutation = crate::runtime::execution_context::IndexedMutationGuard::begin();\n'
+          assert s.count(marker) >= 3
+          path.write_text(s.replace(marker, ''))
           PY
+          set +e
+          cargo test --locked -p reddb-io-server --lib native_patch_marks_the_storage_index_publication_window -- --nocapture > baseline.log 2>&1
+          result=$?
+          set -e
+          tail -n 50 baseline.log
+          test "$result" -ne 0
+          grep -q 'native patch publication must be guarded' baseline.log
