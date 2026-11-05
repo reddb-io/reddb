@@ -223,7 +223,7 @@ impl RedDBServer {
         let tenant_id = json_string_field(&payload, "tenant_id");
 
         let caller_id = UserId::from_parts(tenant_id.as_deref(), &username);
-        match auth_store.authenticate_in_tenant(tenant_id.as_deref(), &username, &password) {
+        match auth_store.authenticate_active(tenant_id.as_deref(), &username, &password) {
             Ok(session) => {
                 tracing::info!(
                     target: "reddb::http_auth",

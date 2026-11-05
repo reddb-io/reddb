@@ -467,9 +467,9 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_description("File containing cloud customer admin password"),
         FlagSchema::new("bootstrap-cert-out").with_description(
             "Write the first-boot unseal certificate to this file (e.g. /run/reddb/cert.pem) \
-             in addition to stderr, so a distroless init can read it back for the next boot's \
-             REDDB_CERTIFICATE_FILE unseal. Written only on the bootstrap-creating boot; a \
-             re-boot against the existing vault does not rewrite it.",
+             without emitting it to logs, so a distroless init can read it back for the next \
+             boot's REDDB_CERTIFICATE_FILE unseal. Written only on the bootstrap-creating boot; \
+             a re-boot against the existing vault does not rewrite it.",
         ),
         FlagSchema::boolean("ui")
             .with_description("Serve the pinned red-ui bundle as static assets"),

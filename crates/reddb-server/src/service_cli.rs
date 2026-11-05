@@ -180,8 +180,8 @@ pub struct BootstrapConfig {
     pub customer_admin_password: Option<String>,
     /// `--bootstrap-cert-out <path>` (issue #1589). When set and the
     /// first-boot self-bootstrap mints an unseal certificate, that
-    /// certificate hex is written to this file (in addition to the
-    /// stdout/stderr emission) so a distroless single-machine init can
+    /// certificate hex is written only to this file so a distroless
+    /// single-machine init can
     /// read it back for the subsequent unseal via `REDDB_CERTIFICATE_FILE`
     /// without scraping machine logs. Written only on the
     /// bootstrap-creating boot; a re-boot against an existing vault does
@@ -389,21 +389,13 @@ impl ServerCommandConfig {
         // "vault requires a paged database" error rather than a silently
         // created empty vault). `--no-auth` / `--dev` cleared `vault_enabled`
         // above, so the development carveout never triggers first-boot either.
-        let bootstrap_intent_present = !matches!(
-            self.bootstrap.auth_bootstrap_input(),
-            crate::cluster::AuthBootstrapInput::None
-        );
         let path_absent = self.path.as_ref().is_some_and(|path| !path.exists());
         // Mirrors `embedded_single_file_selected`: only this profile lacks a
         // pager, so it is the only one that needs promotion to create a vault.
         let embedded_single_file = options.storage_profile.deploy_profile
             == crate::storage::DeployProfile::Embedded
             && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
-        if options.auth.vault_enabled
-            && bootstrap_intent_present
-            && path_absent
-            && embedded_single_file
-        {
+        if options.auth.vault_enabled && path_absent && embedded_single_file {
             // Explicit disk residency already creates a native pager. Keep its
             // single-file selection instead of routing it through the legacy
             // snapshot factory's operational-directory bootstrap workaround.
@@ -414,7 +406,7 @@ impl ServerCommandConfig {
             options.create_if_missing = true;
             tracing::info!(
                 target: "reddb::bootstrap",
-                "first-boot self-bootstrap: creating paged vault in place for a fresh database with a bootstrap intent"
+                "first boot: creating paged vault in place for a fresh auth-enabled database"
             );
         }
 
@@ -1853,6 +1845,11 @@ fn build_runtime_with_bootstrap(
         .try_get_config(BOOTSTRAP_COMPLETED_KEY)
         .map_err(|error| error.to_string())?
         .is_some();
+    ensure_persisted_auth_state(
+        bootstrap_already_completed,
+        db_options.auth.require_auth,
+        auth_store.needs_bootstrap(),
+    )?;
     let disposition = crate::cluster::authorize_cluster_bootstrap(
         db_options.storage_profile.deploy_profile,
         no_auth,
@@ -2034,24 +2031,52 @@ fn apply_preset_from_config(
         return Ok(());
     }
 
-    let (first_admin_id, certificate) = match preset.as_str() {
+    // The encrypted auth state is independently durable. If it already says
+    // bootstrap completed, never reopen preset bootstrap merely because the
+    // adjacent config marker was not flushed before an abrupt process exit.
+    if !auth_store.needs_bootstrap() {
+        persist_bootstrap_state(runtime, &preset, None)?;
+        tracing::info!(preset = %preset, "durable auth state present, skipping preset bootstrap");
+        return Ok(());
+    }
+
+    // The simple preset does not create an administrator. With required auth,
+    // leave the completion marker absent until a durable vault user exists so
+    // a crash before the first HTTP/gRPC bootstrap does not turn into a
+    // permanent lockout. Older volatile-auth installs that already carry the
+    // marker still fail closed in `ensure_persisted_auth_state` above.
+    if preset == PRESET_SIMPLE && auth_store.config().require_auth && auth_store.needs_bootstrap() {
+        tracing::info!("required-auth simple preset is awaiting durable first-admin bootstrap");
+        return Ok(());
+    }
+
+    let mut certificate_output = if matches!(preset.as_str(), PRESET_PRODUCTION | PRESET_CLOUD) {
+        require_bootstrap_certificate_output(bootstrap, &preset)?;
+        Some(open_bootstrap_certificate_output(bootstrap)?)
+    } else {
+        None
+    };
+    let first_admin_id = match preset.as_str() {
         PRESET_SIMPLE => {
             // `simple` is the default low-friction preset. Auth knobs
             // remain whatever the CLI/env set; we only persist the
             // bootstrap state so subsequent boots are idempotent.
-            (None, None)
+            None
         }
-        PRESET_PRODUCTION => {
-            let (id, cert) = apply_production_preset_from_config(auth_store, bootstrap)?;
-            (Some(id), cert)
-        }
-        PRESET_CLOUD => {
-            let (id, cert) = apply_cloud_preset(runtime, auth_store, bootstrap)?;
-            (Some(id), cert)
-        }
+        PRESET_PRODUCTION => Some(apply_production_preset_from_config(
+            auth_store,
+            bootstrap,
+            &mut certificate_output,
+        )?),
+        PRESET_CLOUD => Some(apply_cloud_preset(
+            runtime,
+            auth_store,
+            bootstrap,
+            &mut certificate_output,
+        )?),
         PRESET_REGULATED => {
             apply_regulated_preset(runtime, auth_store)?;
-            (None, None)
+            None
         }
         other => {
             return Err(format!(
@@ -2060,45 +2085,152 @@ fn apply_preset_from_config(
         }
     };
 
-    // Issue #1589 — write the freshly minted unseal certificate to the
-    // caller-specified file so a distroless single-machine init can read
-    // it back for the next boot's `REDDB_CERTIFICATE_FILE` unseal. This
-    // path runs only on the bootstrap-creating boot (the completion
-    // marker short-circuits above before any cert is minted), so the file
-    // is written exactly once and a re-boot never churns it.
-    if let Some(cert) = certificate.as_deref() {
-        write_bootstrap_certificate(bootstrap, cert)?;
-    }
-
     persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref())?;
     tracing::info!(preset = %preset, "bootstrap preset applied");
     Ok(())
 }
 
-/// Write the unseal certificate to `--bootstrap-cert-out` when that
-/// target is set (issue #1589). No-op when the flag/env is absent, so
-/// the certificate is still emitted on stderr by the preset as before.
-fn write_bootstrap_certificate(
+struct BootstrapCertificateOutput {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    committed: bool,
+}
+
+impl Drop for BootstrapCertificateOutput {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Reserve the secure certificate destination before mutating bootstrap state.
+/// A failed preset application removes the empty reservation on drop.
+fn open_bootstrap_certificate_output(
     bootstrap: &BootstrapConfig,
+) -> Result<BootstrapCertificateOutput, String> {
+    let Some(path) = bootstrap.selected_cert_out() else {
+        return Err("bootstrap certificate output is not configured".to_string());
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|err| format!("create --bootstrap-cert-out {}: {err}", path.display()))?;
+    Ok(BootstrapCertificateOutput {
+        path,
+        file: Some(file),
+        committed: false,
+    })
+}
+
+fn stage_bootstrap_certificate(
+    output: &mut BootstrapCertificateOutput,
     certificate_hex: &str,
 ) -> Result<(), String> {
-    let Some(path) = bootstrap.selected_cert_out() else {
-        return Ok(());
-    };
-    std::fs::write(&path, certificate_hex)
+    use std::io::Write;
+    let path = output.path.clone();
+    let file = output
+        .file
+        .as_mut()
+        .ok_or_else(|| "bootstrap certificate output is closed".to_string())?;
+    writeln!(file, "{certificate_hex}")
         .map_err(|err| format!("write --bootstrap-cert-out {}: {err}", path.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("sync --bootstrap-cert-out {}: {err}", path.display()))?;
+    Ok(())
+}
+
+fn commit_bootstrap_certificate(mut output: BootstrapCertificateOutput) {
+    let path = output.path.clone();
+    output.committed = true;
     tracing::info!(
         target: "reddb::bootstrap",
         path = %path.display(),
         "first-boot self-bootstrap: wrote unseal certificate to --bootstrap-cert-out (consume via REDDB_CERTIFICATE_FILE on the next boot)"
     );
+}
+
+fn bootstrap_with_certificate_output(
+    auth_store: &Arc<AuthStore>,
+    username: &str,
+    password: &str,
+    certificate_output: &mut Option<BootstrapCertificateOutput>,
+) -> Result<crate::auth::store::BootstrapResult, String> {
+    let mut certificate_staged = false;
+    let result = auth_store
+        .bootstrap_with_certificate_delivery(username, password, |certificate| {
+            let output = certificate_output.as_mut().ok_or_else(|| {
+                crate::auth::AuthError::Internal(
+                    "bootstrap certificate output was not prepared".to_string(),
+                )
+            })?;
+            stage_bootstrap_certificate(output, certificate)
+                .map_err(crate::auth::AuthError::Internal)?;
+            certificate_staged = true;
+            Ok(())
+        })
+        .map_err(|err| format!("bootstrap first admin: {err}"))?;
+
+    // When the store was opened with an operator-supplied certificate there
+    // is no newly generated seal to deliver before activation. Mirror that
+    // existing credential into the requested file after bootstrap.
+    if !certificate_staged {
+        if let Some(certificate) = result.certificate.as_deref() {
+            let output = certificate_output
+                .as_mut()
+                .ok_or_else(|| "bootstrap certificate output was not prepared".to_string())?;
+            stage_bootstrap_certificate(output, certificate)?;
+            certificate_staged = true;
+        }
+    }
+    if certificate_staged {
+        let output = certificate_output
+            .take()
+            .ok_or_else(|| "bootstrap certificate output was not prepared".to_string())?;
+        commit_bootstrap_certificate(output);
+    }
+    Ok(result)
+}
+
+fn ensure_persisted_auth_state(
+    bootstrap_completed: bool,
+    require_auth: bool,
+    needs_bootstrap: bool,
+) -> Result<(), String> {
+    if bootstrap_completed && require_auth && needs_bootstrap {
+        return Err(
+            "persistent database is marked bootstrapped but its authentication state is empty; refusing to reopen public bootstrap"
+                .to_string(),
+        );
+    }
     Ok(())
+}
+
+fn require_bootstrap_certificate_output(
+    bootstrap: &BootstrapConfig,
+    preset: &str,
+) -> Result<(), String> {
+    if bootstrap.selected_cert_out().is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "bootstrap preset `{preset}` requires --bootstrap-cert-out (or REDDB_BOOTSTRAP_CERT_OUT); vault certificates are never written to logs"
+    ))
 }
 
 fn apply_production_preset_from_config(
     auth_store: &Arc<AuthStore>,
     bootstrap: &BootstrapConfig,
-) -> Result<(String, Option<String>), String> {
+    certificate_output: &mut Option<BootstrapCertificateOutput>,
+) -> Result<String, String> {
     use crate::auth::store::PrincipalRef;
     use crate::auth::UserId;
 
@@ -2114,14 +2246,11 @@ fn apply_production_preset_from_config(
     // (1) Create the first admin as an ordinary platform-scoped user.
     // Managed guardrails are policy-derived; bootstrap does not stamp a
     // parallel ownership flag.
-    let result = auth_store
-        .bootstrap(&username, &password)
-        .map_err(|err| format!("bootstrap first admin: {err}"))?;
-    let certificate = result.certificate.clone();
-    if let Some(cert) = certificate.as_deref() {
-        eprintln!("[reddb] CERTIFICATE: {}", cert);
+    let result =
+        bootstrap_with_certificate_output(auth_store, &username, &password, certificate_output)?;
+    if result.certificate.is_some() {
         tracing::warn!(
-            "vault certificate issued by REDDB_PRESET=production -- save it and update the runtime secret before restart"
+            "vault certificate issued by REDDB_PRESET=production and written to the configured certificate output"
         );
     }
     let first_admin = UserId::platform(result.user.username.clone());
@@ -2137,14 +2266,15 @@ fn apply_production_preset_from_config(
         )
         .map_err(|err| format!("attach allow-all policy: {err}"))?;
 
-    Ok((first_admin.to_string(), certificate))
+    Ok(first_admin.to_string())
 }
 
 fn apply_cloud_preset(
     runtime: &RedDBRuntime,
     auth_store: &Arc<AuthStore>,
     bootstrap: &BootstrapConfig,
-) -> Result<(String, Option<String>), String> {
+    certificate_output: &mut Option<BootstrapCertificateOutput>,
+) -> Result<String, String> {
     use crate::auth::store::PrincipalRef;
     use crate::auth::{Role, UserId};
 
@@ -2167,10 +2297,13 @@ fn apply_cloud_preset(
         return Err("cloud preset requires distinct head and customer admin usernames".to_string());
     }
 
-    let head = auth_store
-        .bootstrap_system_admin(&head_username, &head_password)
-        .map_err(|err| format!("bootstrap cloud head admin: {err}"))?;
-    let certificate = head.certificate.clone();
+    let head = bootstrap_with_certificate_output(
+        auth_store,
+        &head_username,
+        &head_password,
+        certificate_output,
+    )
+    .map_err(|err| format!("bootstrap cloud head admin: {err}"))?;
     let head_id = UserId::platform(head.user.username.clone());
 
     auth_store
@@ -2195,7 +2328,7 @@ fn apply_cloud_preset(
         )
         .map_err(|err| format!("attach cloud guardrail policy: {err}"))?;
 
-    Ok((head_id.to_string(), certificate))
+    Ok(head_id.to_string())
 }
 
 pub(crate) fn install_allow_all_policy(auth_store: &AuthStore) -> Result<(), String> {
@@ -2883,6 +3016,101 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    fn bootstrap_cert_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "reddb-{label}-{}-{}.cert",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn secure_presets_require_certificate_file_delivery() {
+        let _guard = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var(BOOTSTRAP_CERT_OUT_ENV);
+        }
+        let missing = BootstrapConfig::default();
+        assert!(require_bootstrap_certificate_output(&missing, PRESET_PRODUCTION).is_err());
+
+        let configured = BootstrapConfig {
+            cert_out: Some(bootstrap_cert_path("required-output")),
+            ..BootstrapConfig::default()
+        };
+        assert!(require_bootstrap_certificate_output(&configured, PRESET_PRODUCTION).is_ok());
+    }
+
+    #[test]
+    fn official_images_enable_persistent_vault_auth() {
+        for dockerfile in [
+            include_str!("../../../Dockerfile"),
+            include_str!("../../../docker/Dockerfile.release"),
+            include_str!("../../../docker/Dockerfile.musl"),
+        ] {
+            assert!(dockerfile.contains("REDDB_AUTH=true"));
+            assert!(dockerfile.contains("REDDB_REQUIRE_AUTH=true"));
+            assert!(dockerfile.contains("REDDB_VAULT=true"));
+            assert!(!dockerfile.contains("REDDB_VAULT=false"));
+        }
+    }
+
+    #[test]
+    fn completed_required_auth_database_cannot_reenter_bootstrap() {
+        let error = ensure_persisted_auth_state(true, true, true)
+            .expect_err("empty auth state after durable completion must fail closed");
+        assert!(error.contains("refusing to reopen public bootstrap"));
+
+        assert!(ensure_persisted_auth_state(false, true, true).is_ok());
+        assert!(ensure_persisted_auth_state(true, false, true).is_ok());
+        assert!(ensure_persisted_auth_state(true, true, false).is_ok());
+    }
+
+    #[test]
+    fn failed_certificate_delivery_reservation_is_removed() {
+        let path = bootstrap_cert_path("failed-reservation");
+        let bootstrap = BootstrapConfig {
+            cert_out: Some(path.clone()),
+            ..BootstrapConfig::default()
+        };
+
+        let output = open_bootstrap_certificate_output(&bootstrap).expect("reserve output");
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("certificate metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        drop(output);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn required_auth_simple_preset_waits_for_durable_admin() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            vault_enabled: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+
+        apply_preset(&runtime, &auth_store).expect("pending simple preset");
+        assert!(runtime
+            .db()
+            .store()
+            .try_get_config(BOOTSTRAP_COMPLETED_KEY)
+            .expect("completion lookup")
+            .is_none());
+    }
+
     #[test]
     fn server_options_preserve_explicit_disk_residency() {
         let _guard = no_auth_env_lock().lock().unwrap();
@@ -3047,6 +3275,7 @@ mod tests {
             std::env::remove_var("REDDB_PASSWORD");
             std::env::remove_var("REDDB_USERNAME_FILE");
             std::env::remove_var("REDDB_PASSWORD_FILE");
+            std::env::remove_var(BOOTSTRAP_CERT_OUT_ENV);
             std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN");
             std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD");
             std::env::remove_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD_FILE");
@@ -3187,11 +3416,13 @@ mod tests {
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
+        let cert_out = bootstrap_cert_path("production-admin");
         // SAFETY: env serialised by `no_auth_env_lock`.
         unsafe {
             std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
             std::env::set_var("REDDB_USERNAME", "ops");
             std::env::set_var("REDDB_PASSWORD", "hunter2");
+            std::env::set_var(BOOTSTRAP_CERT_OUT_ENV, &cert_out);
         }
 
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -3250,6 +3481,7 @@ mod tests {
         }
 
         clear_preset_env();
+        let _ = std::fs::remove_file(cert_out);
     }
 
     #[test]
@@ -3281,6 +3513,7 @@ mod tests {
 
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
+        let cert_out = bootstrap_cert_path("cloud-admins");
         // SAFETY: env serialised by `no_auth_env_lock`.
         unsafe {
             std::env::set_var(BOOTSTRAP_PRESET_ENV, PRESET_CLOUD);
@@ -3288,6 +3521,7 @@ mod tests {
             std::env::set_var("REDDB_CLOUD_HEAD_ADMIN_PASSWORD", "head-pass");
             std::env::set_var("REDDB_CUSTOMER_ADMIN", "customer");
             std::env::set_var("REDDB_CUSTOMER_ADMIN_PASSWORD", "customer-pass");
+            std::env::set_var(BOOTSTRAP_CERT_OUT_ENV, &cert_out);
         }
 
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -3368,6 +3602,7 @@ mod tests {
         }
 
         clear_preset_env();
+        let _ = std::fs::remove_file(cert_out);
     }
 
     #[test]
@@ -3384,6 +3619,7 @@ mod tests {
             cloud_head_admin_password: Some("head-pass".to_string()),
             customer_admin: Some("admin".to_string()),
             customer_admin_password: Some("customer-pass".to_string()),
+            cert_out: Some(bootstrap_cert_path("cloud-guardrail")),
             ..BootstrapConfig::default()
         };
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -3432,6 +3668,7 @@ mod tests {
             "normal capability should still apply outside the reserved head admin"
         );
 
+        let _ = bootstrap.cert_out.as_ref().map(std::fs::remove_file);
         clear_preset_env();
     }
 
@@ -3450,6 +3687,7 @@ mod tests {
             admin_password: Some("cli-head-pass".to_string()),
             customer_admin: Some("customer".to_string()),
             customer_admin_password: Some("customer-pass".to_string()),
+            cert_out: Some(bootstrap_cert_path("cloud-alias")),
             ..BootstrapConfig::default()
         };
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -3464,6 +3702,7 @@ mod tests {
             "cloud-specific env password must not beat CLI alias"
         );
 
+        let _ = bootstrap.cert_out.as_ref().map(std::fs::remove_file);
         clear_preset_env();
     }
 
@@ -3992,10 +4231,12 @@ mod tests {
     fn production_preset_refuses_to_start_without_password() {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
+        let cert_out = bootstrap_cert_path("production-missing-password");
         // SAFETY: env serialised by `no_auth_env_lock`.
         unsafe {
             std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
             std::env::set_var("REDDB_USERNAME", "ops");
+            std::env::set_var(BOOTSTRAP_CERT_OUT_ENV, &cert_out);
         }
 
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -4012,6 +4253,7 @@ mod tests {
             .store()
             .get_config(BOOTSTRAP_COMPLETED_KEY)
             .is_none());
+        assert!(!cert_out.exists());
 
         clear_preset_env();
     }
@@ -4020,11 +4262,13 @@ mod tests {
     fn re_running_production_after_first_boot_is_a_silent_skip() {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
+        let cert_out = bootstrap_cert_path("production-rerun");
         // SAFETY: env serialised by `no_auth_env_lock`.
         unsafe {
             std::env::set_var(PRESET_ENV, PRESET_PRODUCTION);
             std::env::set_var("REDDB_USERNAME", "ops");
             std::env::set_var("REDDB_PASSWORD", "hunter2");
+            std::env::set_var(BOOTSTRAP_CERT_OUT_ENV, &cert_out);
         }
 
         let (runtime, auth_store) = fresh_runtime_and_store();
@@ -4049,6 +4293,7 @@ mod tests {
         );
 
         clear_preset_env();
+        let _ = std::fs::remove_file(cert_out);
     }
 
     #[test]

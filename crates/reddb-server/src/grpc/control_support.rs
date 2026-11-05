@@ -22,8 +22,9 @@ impl GrpcRuntime {
             let log_prefix = bearer_token_fingerprint_prefix(token_str);
             if is_jwt_shape(token_str) {
                 if let Some(validator) = self.oauth_validator() {
-                    match crate::wire::redwire::auth::validate_oauth_jwt(&validator, token_str) {
-                        Ok((username, role)) => {
+                    match crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token_str)
+                    {
+                        Ok((tenant, username, role)) => {
                             // F-04: `username` is JWT-claim controlled
                             // (federated case), `role` is a stable enum
                             // string. Strip CR/LF/control bytes from
@@ -41,7 +42,7 @@ impl GrpcRuntime {
                             // right tag (service_impl.rs:2886).
                             let identity = crate::auth::OAuthIdentity {
                                 username,
-                                tenant: None,
+                                tenant,
                                 role,
                                 issuer: validator.config().issuer.clone(),
                                 subject: None,
@@ -79,8 +80,8 @@ impl GrpcRuntime {
         // 2. Try AuthStore (session tokens / API keys) when auth is enabled.
         if self.auth_store.is_enabled() {
             if let Some(token) = token {
-                if let Some((username, role)) = self.auth_store.validate_token(token) {
-                    return AuthResult::password(username, role);
+                if let Some((principal, role)) = self.auth_store.validate_token_full(token) {
+                    return AuthResult::password_principal(principal, role);
                 }
                 // A presented-but-invalid credential is always a hard
                 // reject: degrading a revoked or forged token to

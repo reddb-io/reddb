@@ -1713,8 +1713,9 @@ pub mod mvcc {
         capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
         clear_current_snapshot, clear_current_tenant, current_connection_id, current_tenant,
         entity_visible_under_current_snapshot, entity_visible_with_context,
-        set_current_auth_identity, set_current_connection_id, set_current_snapshot,
-        set_current_tenant, snapshot_bundle, with_snapshot_bundle, SnapshotBundle, SnapshotContext,
+        set_current_auth_identity, set_current_auth_principal, set_current_connection_id,
+        set_current_snapshot, set_current_tenant, snapshot_bundle, with_snapshot_bundle,
+        SnapshotBundle, SnapshotContext,
     };
 }
 

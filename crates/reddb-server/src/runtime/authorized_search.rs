@@ -172,6 +172,7 @@ fn with_read_frame<R>(runtime: &RedDBRuntime, frame: &dyn ReadFrame, run: impl F
         auth: frame
             .identity()
             .map(|(name, role)| (name.to_string(), role)),
+        auth_principal: None,
         tenant: frame.effective_scope().map(str::to_string),
     };
     super::execution_context::with_snapshot_bundle(&bundle, run)
@@ -646,6 +647,7 @@ mod frame_regression_tests {
         frame.snapshot = rt.current_snapshot();
         let outer = SnapshotBundle {
             auth: Some(("bob".into(), Role::Admin)),
+            auth_principal: Some(crate::auth::UserId::platform("bob")),
             tenant: Some("other".into()),
             snapshot: None,
         };

@@ -87,7 +87,8 @@ before changing the image or path.
 
 The production pattern has four moving parts:
 
-1. **Bootstrap once** in a one-off container. Capture the certificate.
+1. **Bootstrap once** in a one-off container. Write the certificate directly
+   to an owner-only file.
 2. **Store the certificate** in your secret manager.
 3. **Materialize the cert** as a Docker secret on a tmpfs mount.
 4. **Run the real container** with `REDDB_CERTIFICATE_FILE` pointing at
@@ -98,7 +99,9 @@ The production pattern has four moving parts:
 ```bash
 mkdir -p ./reddb-data ./secrets
 
-# Run bootstrap in a one-off container; capture stdout
+# Run bootstrap in a one-off container; redirect the certificate straight to
+# its secret file rather than copying it through a terminal or log collector.
+umask 077
 docker run --rm \
   -v "$(pwd)/reddb-data:/data" \
   ghcr.io/reddb-io/reddb:latest \
@@ -108,19 +111,13 @@ docker run --rm \
     --username admin \
     --password "$(openssl rand -base64 24)" \
     --print-certificate \
-  | tee /tmp/reddb-bootstrap.log
+  > ./secrets/reddb_certificate.txt
 
-# Extract the cert
-CERT=$(grep '^certificate:' /tmp/reddb-bootstrap.log | awk '{print $2}')
-
-echo "$CERT" > ./secrets/reddb_certificate.txt
 chmod 0400 ./secrets/reddb_certificate.txt
-
-shred -u /tmp/reddb-bootstrap.log
 ```
 
-The cert is 64 hex chars. The bootstrap also creates `admin` and prints
-its initial API key — capture both.
+The cert is 64 hex chars. The bootstrap also creates `admin`; keep the chosen
+password in your secret manager.
 
 Bootstrap must run against the same mounted data volume that the server will
 use. A certificate minted from a scratch DB will not unseal a different DB.
@@ -420,8 +417,8 @@ with the shared cert.
 
 ## 6. Local dev shortcut
 
-For development on your laptop, the image default keeps `REDDB_VAULT=false`
-and saves you from managing certs. Use this only when:
+For development on your laptop, explicitly disable auth with
+`REDDB_NO_AUTH=true`. Use this only when:
 
 - You're running on `127.0.0.1` only.
 - The data has no privacy implications.
@@ -429,6 +426,7 @@ and saves you from managing certs. Use this only when:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -439,6 +437,7 @@ Or, to keep data across restarts:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -446,8 +445,10 @@ docker run --rm \
   ghcr.io/reddb-io/reddb:latest
 ```
 
-The image sets `REDDB_VAULT=false` by default for local bootability. Set
-`-e REDDB_VAULT=true` and provide `REDDB_CERTIFICATE_FILE` for vault mode.
+The image enables the persistent auth vault by default. On first boot,
+bootstrap an admin and save the returned certificate; on every later boot,
+provide it through `REDDB_CERTIFICATE_FILE`. For a throwaway local container,
+set `REDDB_NO_AUTH=true` explicitly.
 
 ---
 

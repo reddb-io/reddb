@@ -292,37 +292,21 @@ impl RedDBServer {
     }
 
     /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
-    /// under so a minted cursor can be scoped to it. Precedence mirrors the
-    /// metrics surface: explicit `x-reddb-tenant` header, then the tenant
-    /// carried by the bearer credential (validated JWT or auth-store token),
-    /// then the ambient connection tenant, falling back to `"default"`.
+    /// under so a minted cursor can be scoped to it. A tenant-qualified
+    /// credential is authoritative; only platform or anonymous callers may
+    /// select an explicit header tenant.
     pub(crate) fn stream_tenant_for(&self, headers: &BTreeMap<String, String>) -> String {
+        if let Some(tenant) = super::handlers_auth::resolve_auth_caller(self, headers)
+            .and_then(|caller| caller.id.tenant)
+        {
+            return tenant;
+        }
         headers
             .get("x-reddb-tenant")
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.trim().to_string())
-            .or_else(|| self.stream_tenant_from_bearer(headers))
             .or_else(crate::runtime::impl_core::current_tenant)
             .unwrap_or_else(|| "default".to_string())
-    }
-
-    fn stream_tenant_from_bearer(&self, headers: &BTreeMap<String, String>) -> Option<String> {
-        let token = headers
-            .get("authorization")
-            .and_then(|value| value.strip_prefix("Bearer "))?;
-        if looks_like_jwt(token) {
-            if let Some(validator) = self.runtime.oauth_validator() {
-                if let Ok((tenant, _username, _role)) =
-                    crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token)
-                {
-                    return tenant;
-                }
-            }
-        }
-        let auth_store = self.auth_store.as_ref()?;
-        auth_store
-            .validate_token_full(token)
-            .and_then(|(id, _role)| id.tenant)
     }
 
     /// Dispatch one HTTP request and record its method/route/status into
@@ -1187,6 +1171,24 @@ mod tests {
         runtime.set_auth_store(std::sync::Arc::clone(&store));
         let server = RedDBServer::new(runtime).with_auth(std::sync::Arc::clone(&store));
         (server, store)
+    }
+
+    #[test]
+    fn tenant_bearer_is_authoritative_for_query_stream_scope() {
+        let (server, store) = server_with_open_store();
+        store
+            .create_user_in_tenant(Some("acme"), "alice", "pw", crate::auth::Role::Read)
+            .expect("tenant user");
+        let key = store
+            .create_api_key_in_tenant(Some("acme"), "alice", "stream", crate::auth::Role::Read)
+            .expect("tenant key")
+            .key;
+        let headers = BTreeMap::from([
+            ("authorization".to_string(), format!("Bearer {key}")),
+            ("x-reddb-tenant".to_string(), "globex".to_string()),
+        ]);
+
+        assert_eq!(server.stream_tenant_for(&headers), "acme");
     }
 
     #[test]

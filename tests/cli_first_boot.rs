@@ -125,23 +125,23 @@ fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -
     false
 }
 
-/// Poll until `path` exists (the spawned server is still alive), or the
-/// process exits / the timeout elapses. Returns `true` only when the file
-/// appeared while the server was running. More robust than a bare TCP
+/// Poll until `path` contains data (the spawned server is still alive), or
+/// the process exits / the timeout elapses. Returns `true` only when the file
+/// was written while the server was running. More robust than a bare TCP
 /// probe: it ties the wait to the artifact under test and cannot be fooled
 /// by a stale listener on the same ephemeral port.
 fn wait_for_file(server: &mut ServerChild, path: &Path, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if path.exists() {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
             return true;
         }
         if let Ok(Some(_status)) = server.child.try_wait() {
-            return path.exists(); // exited — accept only if the file landed
+            return std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    path.exists()
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
 }
 
 /// Poll the server's stderr until it contains `needle` (proof the boot
@@ -341,8 +341,8 @@ fn no_intent_fresh_path_keeps_vault_gate_error() {
 }
 
 /// Issue #1589 — first boot with `--bootstrap-cert-out <path>` writes the
-/// freshly minted unseal certificate to `<path>` (in addition to the
-/// stdout/stderr emission). The written file is consumable via
+/// freshly minted unseal certificate to `<path>` without emitting it to
+/// stdout/stderr. The written file is consumable via
 /// `REDDB_CERTIFICATE_FILE` to unseal on a subsequent boot, and a re-boot
 /// against the existing vault does not rewrite/churn the file.
 #[test]
@@ -384,10 +384,15 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
     );
     assert!(
+        wait_until_serving(&mut server, &http_addr, Duration::from_secs(30)),
+        "first boot did not reach its listener.\nstderr:\n{}",
+        server.stderr()
+    );
+    drop(server); // kill + reap so Windows releases and flushes the DB file
+    assert!(
         wait_for_paged_vault(&db_path),
         "first boot must create the paged vault in place.\nstderr:\n{stderr}"
     );
-    drop(server); // kill + reap
 
     // The certificate holds a usable 32-byte (64 hex chars) unseal cert.
     let cert_first = std::fs::read_to_string(&cert_out).expect("read cert-out");
@@ -427,8 +432,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         &stderr_path2,
         &cert_out,
     );
-    let serving2 =
-        wait_for_stderr_contains(&mut server2, "listener online", Duration::from_secs(30));
+    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
@@ -443,8 +447,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
     // env unseals the existing vault so the boot reaches that point. ----
     let stderr_path3 = dir.join("server3.stderr");
     let mut server3 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path3, &cert_out);
-    let rebooted =
-        wait_for_stderr_contains(&mut server3, "listener online", Duration::from_secs(30));
+    let rebooted = wait_until_serving(&mut server3, &http_addr, Duration::from_secs(30));
     let stderr3 = server3.stderr();
     assert!(
         rebooted,

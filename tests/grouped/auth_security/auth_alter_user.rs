@@ -151,10 +151,10 @@ fn valid_until_in_future_allows_login() {
 
 #[test]
 fn connection_limit_blocks_login_past_quota() {
-    let store = AuthStore::new(AuthConfig {
+    let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
         enabled: true,
         ..AuthConfig::default()
-    });
+    }));
     store.create_user("alice", "secret", Role::Read).unwrap();
     let id = UserId::platform("alice");
 
@@ -165,7 +165,7 @@ fn connection_limit_blocks_login_past_quota() {
     store.set_user_attributes(&id, attrs).unwrap();
 
     // First login fits within the quota.
-    let _first = store
+    let first = store
         .authenticate_with_attrs(None, "alice", "secret")
         .expect("first login should succeed");
     // Second login exceeds the limit.
@@ -178,11 +178,98 @@ fn connection_limit_blocks_login_past_quota() {
         "expected CONNECTION LIMIT error, got {s}"
     );
 
-    // After decrementing, the second login should succeed.
-    store.decrement_session_count(&id);
+    // Revoking the owning session releases the slot.
+    store.revoke_session(&first.token);
     let _second = store
         .authenticate_with_attrs(None, "alice", "secret")
         .expect("second login should succeed after slot frees");
+}
+
+#[test]
+fn connection_limit_admission_is_atomic_and_lease_releases_on_drop() {
+    use std::sync::{mpsc, Arc, Barrier};
+
+    let store = Arc::new(AuthStore::new(AuthConfig {
+        enabled: true,
+        ..AuthConfig::default()
+    }));
+    store.create_user("alice", "secret", Role::Read).unwrap();
+    let id = UserId::platform("alice");
+    store
+        .set_user_attributes(
+            &id,
+            UserAttributes {
+                connection_limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let start = Arc::new(Barrier::new(9));
+    let release = Arc::new(Barrier::new(9));
+    let (tx, rx) = mpsc::channel();
+    let mut threads = Vec::new();
+    for _ in 0..8 {
+        let store = Arc::clone(&store);
+        let id = id.clone();
+        let start = Arc::clone(&start);
+        let release = Arc::clone(&release);
+        let tx = tx.clone();
+        threads.push(std::thread::spawn(move || {
+            start.wait();
+            let lease = store.acquire_connection_lease(&id).ok();
+            tx.send(lease.is_some()).unwrap();
+            release.wait();
+            drop(lease);
+        }));
+    }
+    start.wait();
+    let admitted = (0..8).filter(|_| rx.recv().unwrap()).count();
+    assert_eq!(admitted, 1, "exactly one concurrent connection may enter");
+    release.wait();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let lease = store
+        .acquire_connection_lease(&id)
+        .expect("disconnect must release the slot");
+    drop(lease);
+}
+
+#[test]
+fn wire_lease_is_not_released_by_session_revocation_or_purge() {
+    let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+        enabled: true,
+        session_ttl_secs: 0,
+        ..AuthConfig::default()
+    }));
+    store.create_user("alice", "secret", Role::Read).unwrap();
+    let id = UserId::platform("alice");
+    store
+        .set_user_attributes(
+            &id,
+            UserAttributes {
+                connection_limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let (session, lease) = store
+        .authenticate_connection(None, "alice", "secret")
+        .expect("first wire connection");
+    store.revoke_session(&session.token);
+    store.purge_expired_sessions();
+    assert!(store
+        .authenticate_connection(None, "alice", "secret")
+        .is_err());
+
+    drop(lease);
+    let (_session, replacement) = store
+        .authenticate_connection(None, "alice", "secret")
+        .expect("disconnect releases the wire slot");
+    drop(replacement);
 }
 
 #[test]

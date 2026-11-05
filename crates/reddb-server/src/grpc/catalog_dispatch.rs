@@ -537,7 +537,7 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
 
 #[derive(Clone, Debug)]
 pub(super) struct GrpcDispatchContext {
-    pub(super) principal: Option<String>,
+    pub(super) principal: Option<crate::auth::UserId>,
 }
 
 #[derive(Clone)]
@@ -625,15 +625,15 @@ fn authorize_binding(
 ) -> Result<GrpcDispatchContext, Status> {
     if let GrpcAuthClass::Replication(action) = binding.auth {
         let auth = peer_auth.unwrap_or_else(|| runtime.resolve_auth(metadata));
-        let username = authorize_replication_capability(runtime, &auth, action)?;
+        let principal = authorize_replication_capability(runtime, &auth, action)?;
         return Ok(GrpcDispatchContext {
-            principal: Some(username),
+            principal: Some(principal),
         });
     }
 
     let auth = runtime.resolve_auth(metadata);
     let principal = match &auth {
-        AuthResult::Authenticated { username, .. } => Some(username.clone()),
+        AuthResult::Authenticated { principal, .. } => Some(principal.clone()),
         AuthResult::Anonymous | AuthResult::Denied(_) => None,
     };
 
@@ -644,18 +644,18 @@ fn authorize_binding(
             .map_err(Status::permission_denied)?;
     }
 
-    let (tenant, username) = principal
-        .as_deref()
-        .and_then(|principal| principal.split_once('/'))
-        .map_or((None, principal.as_deref()), |(tenant, username)| {
-            (Some(tenant), Some(username))
-        });
+    let tenant = principal
+        .as_ref()
+        .and_then(|principal| principal.tenant.as_deref());
+    let username = principal
+        .as_ref()
+        .map(|principal| principal.username.as_str());
     let operation_context = OperationContextFactory::build(OperationContextInput {
         request_id: metadata
             .get("x-request-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string),
-        principal: principal.clone(),
+        principal: principal.as_ref().map(ToString::to_string),
         tenant: tenant.map(str::to_string),
         ..OperationContextInput::default()
     });
@@ -692,14 +692,13 @@ fn authorize_replication_capability(
     runtime: &GrpcRuntime,
     auth: &AuthResult,
     action: &str,
-) -> Result<String, Status> {
-    let username = match auth {
-        AuthResult::Authenticated { username, .. } => username.clone(),
+) -> Result<crate::auth::UserId, Status> {
+    let principal = match auth {
+        AuthResult::Authenticated { principal, .. } => principal.clone(),
         AuthResult::Denied(reason) => return Err(Status::unauthenticated(reason.clone())),
         AuthResult::Anonymous => return Err(Status::unauthenticated("authentication required")),
     };
 
-    let principal = crate::auth::UserId::platform(username.clone());
     let resource = ResourceRef::new("cluster", "replication");
     let outcome = runtime.auth_store.simulate(
         &principal,
@@ -708,9 +707,9 @@ fn authorize_replication_capability(
         crate::auth::store::SimCtx::default(),
     );
     match outcome.decision {
-        policies::Decision::Allow { .. } | policies::Decision::AdminBypass => Ok(username),
+        policies::Decision::Allow { .. } | policies::Decision::AdminBypass => Ok(principal),
         _ => Err(Status::permission_denied(format!(
-            "policy: principal '{username}' is not allowed to perform '{action}'"
+            "policy: principal '{principal}' is not allowed to perform '{action}'"
         ))),
     }
 }
@@ -731,7 +730,7 @@ fn resolve_peer_auth<B>(request: &http::Request<B>) -> Result<Option<AuthResult>
     let identity = crate::cluster::NodeIdentity::from_peer_certificate_der(cert)
         .map_err(|error| Status::unauthenticated(format!("mTLS peer identity: {error}")))?;
     Ok(Some(AuthResult::Authenticated {
-        username: identity.to_string(),
+        principal: crate::auth::UserId::platform(identity.to_string()),
         role: Role::Read,
         source: AuthSource::ClientCert,
     }))
@@ -814,11 +813,13 @@ fn command_audience(command: &CommandSpec) -> &'static str {
     }
 }
 
-pub(super) fn authorized_principal<T>(request: &Request<T>) -> Result<&str, Status> {
+pub(super) fn authorized_principal<T>(
+    request: &Request<T>,
+) -> Result<&crate::auth::UserId, Status> {
     request
         .extensions()
         .get::<GrpcDispatchContext>()
-        .and_then(|context| context.principal.as_deref())
+        .and_then(|context| context.principal.as_ref())
         .ok_or_else(|| Status::unauthenticated("authenticated principal missing from dispatch"))
 }
 
@@ -1115,6 +1116,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tenant_bearer_remains_structured_in_grpc_dispatch() {
+        let harness = Harness::new();
+        harness
+            .grpc
+            .auth_store
+            .create_user_in_tenant(Some("acme"), "alice", "p", Role::Read)
+            .expect("tenant user");
+        let key = harness
+            .grpc
+            .auth_store
+            .create_api_key_in_tenant(Some("acme"), "alice", "grpc", Role::Read)
+            .expect("tenant key")
+            .key;
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            "authorization",
+            format!("Bearer {key}").parse().expect("metadata value"),
+        );
+
+        let context = authorize_binding(&harness.grpc, binding("Query"), &metadata, None)
+            .expect("tenant query authorization");
+        assert_eq!(
+            context.principal,
+            Some(crate::auth::UserId::scoped("acme", "alice"))
+        );
+    }
+
     fn outcome(result: Result<GrpcDispatchContext, Status>) -> Outcome {
         match result {
             Ok(_) => Outcome::Allow,
@@ -1270,7 +1299,7 @@ mod tests {
 
         let harness = Harness::new();
         let peer_auth = AuthResult::Authenticated {
-            username: "node-a".into(),
+            principal: crate::auth::UserId::platform("node-a"),
             role: Role::Read,
             source: AuthSource::ClientCert,
         };

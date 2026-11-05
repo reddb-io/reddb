@@ -3370,7 +3370,7 @@ impl RedDb for GrpcRuntime {
 
         let session = self
             .auth_store
-            .authenticate(&username, &password)
+            .authenticate_active(None, &username, &password)
             .map_err(|e| Status::unauthenticated(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3410,15 +3410,14 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
 
         if let AuthResult::Authenticated {
-            username: actor,
+            principal: actor,
             role: actor_role,
             ..
         } = &auth
         {
-            let actor = crate::auth::UserId::platform(actor.clone());
             let target = crate::auth::UserId::platform(username.clone());
             if !self.auth_store.check_user_lifecycle_authz(
-                &actor,
+                actor,
                 *actor_role,
                 "user:create",
                 &target,
@@ -3466,15 +3465,14 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
 
         if let AuthResult::Authenticated {
-            username: actor,
+            principal: actor,
             role: actor_role,
             ..
         } = &auth
         {
-            let actor = crate::auth::UserId::platform(actor.clone());
             let target = crate::auth::UserId::platform(username.clone());
             if !self.auth_store.check_user_lifecycle_authz(
-                &actor,
+                actor,
                 *actor_role,
                 "user:delete",
                 &target,
@@ -3621,8 +3619,8 @@ impl RedDb for GrpcRuntime {
         }
 
         let auth = self.resolve_auth(request.metadata());
-        let caller_username = match &auth {
-            AuthResult::Authenticated { username, .. } => username.clone(),
+        let caller = match &auth {
+            AuthResult::Authenticated { principal, .. } => principal.clone(),
             _ => {
                 return Err(Status::unauthenticated(
                     "authentication required".to_string(),
@@ -3632,19 +3630,21 @@ impl RedDb for GrpcRuntime {
 
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let target_username =
-            json_string_field(&payload, "username").unwrap_or_else(|| caller_username.clone());
+            json_string_field(&payload, "username").unwrap_or_else(|| caller.username.clone());
         let old_password = json_string_field(&payload, "old_password")
             .ok_or_else(|| Status::invalid_argument("missing field: old_password"))?;
         let new_password = json_string_field(&payload, "new_password")
             .ok_or_else(|| Status::invalid_argument("missing field: new_password"))?;
 
-        if target_username != caller_username {
+        if target_username != caller.username {
             check_permission(&auth, false, true).map_err(Status::permission_denied)?;
             if let AuthResult::Authenticated { role, .. } = &auth {
-                let actor = crate::auth::UserId::platform(caller_username.clone());
-                let target = crate::auth::UserId::platform(target_username.clone());
+                let target = crate::auth::UserId::from_parts(
+                    caller.tenant.as_deref(),
+                    &target_username,
+                );
                 if !self.auth_store.check_user_lifecycle_authz(
-                    &actor,
+                    &caller,
                     *role,
                     "user:password:change",
                     &target,
@@ -3657,7 +3657,12 @@ impl RedDb for GrpcRuntime {
         }
 
         self.auth_store
-            .change_password(&target_username, &old_password, &new_password)
+            .change_password_in_tenant(
+                caller.tenant.as_deref(),
+                &target_username,
+                &old_password,
+                &new_password,
+            )
             .map_err(|e| Status::unauthenticated(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3676,12 +3681,18 @@ impl RedDb for GrpcRuntime {
         let mut map = Map::new();
         match &auth {
             AuthResult::Authenticated {
-                username,
+                principal,
                 role,
                 source,
             } => {
                 map.insert("authenticated".into(), JsonValue::Bool(true));
-                map.insert("username".into(), JsonValue::String(username.clone()));
+                map.insert(
+                    "username".into(),
+                    JsonValue::String(principal.username.clone()),
+                );
+                if let Some(tenant) = &principal.tenant {
+                    map.insert("tenant".into(), JsonValue::String(tenant.clone()));
+                }
                 map.insert("role".into(), JsonValue::String(role.as_str().to_string()));
                 let method = match source {
                     crate::auth::middleware::AuthSource::Password => "token",
