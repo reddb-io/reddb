@@ -576,10 +576,10 @@ impl RedDBRuntime {
         Ok(promoted)
     }
 
-    pub fn record_replica_relay_batch(
+    pub fn record_replica_relay_batch<T: AsRef<[u8]>>(
         &self,
         replica_id: &str,
-        records: &[(u64, &[u8])],
+        records: &[(u64, T)],
         applied_lsn: u64,
     ) -> RedDBResult<()> {
         let Some(plan) = self.primary_replica_file_plan_result()? else {
@@ -633,7 +633,7 @@ impl RedDBRuntime {
                 .iter()
                 .filter(|(lsn, _)| *lsn > manifest.flushed_lsn)
                 .map(|(lsn, payload)| {
-                    reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.to_vec())
+                    reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.as_ref().to_vec())
                 })
                 .collect::<Vec<_>>();
             let segment = reddb_file::ReplicaRelayLogSegment::from_records(
