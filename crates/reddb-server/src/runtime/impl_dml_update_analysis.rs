@@ -206,7 +206,12 @@ pub(super) fn ordered_update_target_ids(
         })?;
     let mut keys = Vec::with_capacity(key_count);
     let mut targets = Vec::with_capacity(entity_ids.len());
+    let mut budget_failure = None;
     manager.try_for_each_id(entity_ids, usize::MAX, |_, entity| {
+        if let Err(error) = super::query_budget::charge(1) {
+            budget_failure = Some(error);
+            return false;
+        }
         // Borrowed resident visitors retain the compact positional row. Restore
         // names on one temporary row, as the previous owned batch read did.
         let mut restored;
@@ -230,6 +235,13 @@ pub(super) fn ordered_update_target_ids(
         );
         true
     })?;
+    if let Some(error) = budget_failure {
+        return Err(error);
+    }
+    // Sorting itself cannot return an error from its comparator. Check both
+    // sides so cancellation that arrives while extracting or ordering keys is
+    // still observed before the caller begins durable publication.
+    super::query_budget::charge(0)?;
     let compare = |left: &Target, right: &Target| {
         for (position, clause) in order_by.iter().enumerate() {
             let ordering = compare_update_order_values(
@@ -251,6 +263,7 @@ pub(super) fn ordered_update_target_ids(
         Some(limit) => partial_top_k(&mut targets, limit, compare),
         None => targets.sort_by(compare),
     }
+    super::query_budget::charge(0)?;
     Ok(targets.into_iter().map(|target| target.id).collect())
 }
 

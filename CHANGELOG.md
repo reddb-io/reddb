@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.8
+
+### Patch Changes
+
+- [#2633](https://github.com/reddb-io/reddb/pull/2633) [`18e0425`](https://github.com/reddb-io/reddb/commit/18e0425c782273c8b20467d25c3af412071d356a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stop deadline-expired UPDATE and DELETE workers before durable publication so timed-out requests release CPU and memory without leaving partial mutations.
+
 ## 1.28.7
 
 ### Patch Changes
