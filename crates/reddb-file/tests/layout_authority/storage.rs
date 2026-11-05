@@ -355,44 +355,14 @@ fn server_wal_tests_use_reddb_file_temp_wal_names() {
 #[test]
 fn server_does_not_own_transaction_wal_record_envelope() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
-    let non_test = text
-        .split("#[cfg(test)]")
-        .next()
-        .expect("transaction/log.rs has non-test source");
+    assert!(
+        !root
+            .join("crates/reddb-server/src/storage/transaction/log.rs")
+            .exists(),
+        "retired server transaction WAL implementation must stay removed"
+    );
     let file = read(root.join("crates/reddb-file/src/transaction_wal.rs"));
     let layout = read(root.join("crates/reddb-file/src/layout.rs"));
-
-    for forbidden in [
-        "PathBuf::from(\"wal.log\")",
-        "buf.extend(&self.lsn.to_le_bytes())",
-        "buf.extend(&self.txn_id.to_le_bytes())",
-        "buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes())",
-        "buf.extend(&self.timestamp.to_le_bytes())",
-        "buf.extend(&(type_bytes.len() as u32).to_le_bytes())",
-        "buf.push(0)",
-        "buf.push(1)",
-        "buf.push(2)",
-        "buf.push(3)",
-        "buf.push(4)",
-        "buf.push(5)",
-        "buf.push(6)",
-        "buf.push(7)",
-        "buf.push(8)",
-        "buf.push(9)",
-        "buf.push(10)",
-        "read_u32(data, &mut offset",
-        "read_u64(data, &mut offset",
-        "let computed: u8 = data[..offset].iter().fold(0",
-        "Checksum mismatch",
-        "Missing WAL entry checksum",
-        "Missing WAL entry LSN",
-    ] {
-        assert!(
-            !non_test.contains(forbidden),
-            "transaction WAL record envelope belongs in reddb-file, found {forbidden:?}"
-        );
-    }
 
     for required in [
         "pub const TRANSACTION_WAL_FILE_NAME",
@@ -416,22 +386,6 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         assert!(
             file.contains(required),
             "reddb-file should own transaction WAL contract {required}"
-        );
-    }
-
-    for required in [
-        "reddb_file::TransactionWalRecordFrame",
-        "reddb_file::layout::default_transaction_wal_path",
-        "reddb_file::encode_transaction_wal_record_frame",
-        "reddb_file::decode_transaction_wal_record_frame",
-        "reddb_file::transaction_wal_record_encoded_len",
-        "reddb_file::TransactionWalEntryPayload",
-        "reddb_file::encode_transaction_wal_entry_payload",
-        "reddb_file::decode_transaction_wal_entry_payload",
-    ] {
-        assert!(
-            non_test.contains(required),
-            "transaction WAL runtime should route persisted contract through {required}"
         );
     }
 }
