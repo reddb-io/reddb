@@ -44,13 +44,9 @@ jobs:
             throw new Error('Browser releases require a matching stable package version, latest channel and browser-v tag')
           }
           JS
-      - name: Install test tools
+      - name: Install build dependencies
         run: |
           pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          pnpm --filter @reddb-io/browser exec playwright install --with-deps chromium firefox
       - name: Install checksummed wasm-bindgen
         env:
           BINDGEN_SHA256: ceb6f0b9fea9d2868f258215a1d7f86a4c28330a0d64432cc7d53674618772d6
@@ -62,10 +58,6 @@ jobs:
           printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Build bundled JS, worker and WASM
         run: pnpm --filter @reddb-io/browser build
-      - name: Verify reusable Worker ownership and I/O failure boundaries
-        run: REDDB_BROWSER_BROWSERS=chromium,firefox node --test packages/browser/test/runtime.test.mjs packages/browser/test/session.test.mjs packages/browser/test/local-vault.test.mjs
-      - name: Verify packaged TypeScript/Vite application and offline OPFS restart
-        run: pnpm --filter @reddb-io/browser test:distribution
       - name: Pack immutable release asset
         working-directory: packages/browser
         run: |

@@ -46,6 +46,7 @@ identity and version requirements; this policy does not publish anything itself.
 | `drill-nightly.yml` | workflow_dispatch |
 | `dst-nightly.yml` | workflow_dispatch |
 | `file-coverage.yml` | workflow_dispatch |
+| `grpc-runtime-checks.yml` | workflow_dispatch |
 | `grpc-runtime-release.yml` | workflow_dispatch |
 | `kv-bench.yml` | workflow_dispatch |
 | `kv-compare-tests.yml` | workflow_dispatch |
@@ -67,3 +68,6 @@ identity and version requirements; this policy does not publish anything itself.
 | `tla-check.yml` | workflow_dispatch |
 | `types-coverage.yml` | workflow_dispatch |
 | `wire-coverage.yml` | workflow_dispatch |
+
+Browser behavior/distribution checks run independently in `browser.yml`.
+Compatibility runtime behavior checks run in `grpc-runtime-checks.yml`.
