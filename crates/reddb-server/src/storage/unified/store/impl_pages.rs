@@ -1070,11 +1070,13 @@ impl UnifiedStore {
         ) {
             pager_config.double_write = false;
         }
+        let pager_open_started = std::time::Instant::now();
         let pager = Pager::open(path, pager_config)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         pager
             .enable_deferred_reclamation()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        trace_startup_phase(path, "paged_pager_open", pager_open_started);
 
         if config.resident_memory_bytes_max.is_none()
             && pager
@@ -1126,16 +1128,27 @@ impl UnifiedStore {
 
         // An interrupted structural edit may have reached home pages without
         // publishing its catalog. Restore those pages before following roots.
+        let checkpoint_recovery_started = std::time::Instant::now();
         if let Some(commit) = &store.commit {
             commit
                 .restore_checkpoint_page_images(&store)
                 .map_err(StoreError::Io)?;
         }
+        trace_startup_phase(
+            path,
+            "paged_checkpoint_recovery",
+            checkpoint_recovery_started,
+        );
         // Load existing data from pages if database exists
+        let page_load_started = std::time::Instant::now();
         store.load_from_pages()?;
+        trace_startup_phase(path, "paged_catalog_and_roots", page_load_started);
+        let wal_replay_started = std::time::Instant::now();
         if let Some(commit) = &store.commit {
             commit.replay_into(&store).map_err(StoreError::Io)?;
         }
+        trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
+        let manifest_recovery_started = std::time::Instant::now();
         store.recover_operational_manifest()?;
         if store.config.resident_memory_bytes_max.is_some() {
             let missing_key_index = {
@@ -1151,6 +1164,11 @@ impl UnifiedStore {
                 store.persist()?;
             }
         }
+        trace_startup_phase(
+            path,
+            "paged_manifest_and_derived_roots",
+            manifest_recovery_started,
+        );
 
         Ok(store)
     }

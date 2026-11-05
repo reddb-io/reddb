@@ -41,6 +41,16 @@ use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFile
 use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
 
+pub(crate) fn trace_startup_phase(path: &Path, phase: &'static str, started: std::time::Instant) {
+    tracing::debug!(
+        target: "reddb::storage::startup",
+        path = %path.display(),
+        phase,
+        elapsed = ?started.elapsed(),
+        "database startup phase completed"
+    );
+}
+
 pub use reddb_file::{
     is_supported_store_version, NativeCatalogCollectionSummary, NativeCatalogSummary,
     NativeExportSummary, NativeManifestEntrySummary, NativeManifestSummary,
