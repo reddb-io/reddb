@@ -499,13 +499,12 @@ pub struct CompiledEntityFilter {
     table_name: String,
     table_alias: String,
     has_fallback: bool,
-    /// OR of `field_name_bloom(name)` for every non-system user field
-    /// referenced by any predicate in this filter. 0 means no user fields
-    /// (pure system-field query — bloom gate skipped).
+    /// Bloom bits for user fields that must be present for this filter to
+    /// match. 0 means presence cannot be proved from the filter shape.
     ///
     /// At evaluate time: if `entity.field_bloom & required_bloom != required_bloom`
-    /// the entity cannot satisfy any user-field predicate and is skipped before
-    /// any HashMap probe.
+    /// the entity cannot satisfy the whole filter and is skipped before any
+    /// HashMap probe.
     required_bloom: u64,
 }
 
@@ -616,8 +615,8 @@ impl CompiledEntityFilter {
         &self,
         entity: &UnifiedEntity,
     ) -> RedDBResult<CompiledEntityFilterDecision> {
-        // Field-name bloom gate: if the entity is missing a required field,
-        // it cannot satisfy any user-field predicate. Skip before any HashMap.
+        // Field-name bloom gate: skip only when the filter shape proves that
+        // the whole predicate requires a field that this entity lacks.
         // Only fires when entity.field_bloom is non-zero (named/document entities).
         // Schema-based bulk rows have field_bloom == 0 (bloom tracked at segment
         // level for those) so the gate is a no-op for the table hot path.
@@ -890,10 +889,11 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
 /// semantics. This keeps document-path queries on the slow path
 /// without breaking them — a future iteration can teach the
 /// classifier to walk paths too.
-/// Walk the filter AST and OR together `field_name_bloom(name)` for every
-/// non-system user field referenced. System fields (entity_id, created_at…)
-/// are always present on every entity so they don't need the bloom gate.
-/// Returns 0 when no user fields are referenced (pure system-field query).
+/// Compute field-name bloom bits whose presence is necessary for the whole
+/// filter to match. A positive leaf needs its field, `AND` needs both sides,
+/// and `OR` can require only fields common to both alternatives. `IS NULL`
+/// and `NOT` intentionally contribute no bits because missing fields can make
+/// those predicates true under the runtime filter semantics.
 fn collect_required_bloom(filter: &Filter) -> u64 {
     const SYSTEM_FIELDS: &[&str] = &[
         "rid",
@@ -928,11 +928,11 @@ fn collect_required_bloom(filter: &Filter) -> u64 {
         Filter::StartsWith { field, .. } => bloom_for_field(field),
         Filter::EndsWith { field, .. } => bloom_for_field(field),
         Filter::Contains { field, .. } => bloom_for_field(field),
-        Filter::IsNull(field) => bloom_for_field(field),
+        Filter::IsNull(_) => 0,
         Filter::IsNotNull(field) => bloom_for_field(field),
         Filter::And(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
-        Filter::Or(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
-        Filter::Not(inner) => collect_required_bloom(inner),
+        Filter::Or(l, r) => collect_required_bloom(l) & collect_required_bloom(r),
+        Filter::Not(_) => 0,
         _ => 0,
     }
 }
@@ -1392,6 +1392,61 @@ mod tests {
         assert_eq!(
             compiled.evaluate(&entity),
             CompiledEntityFilterDecision::NeedsFallback
+        );
+    }
+
+    #[test]
+    fn missing_field_bloom_does_not_override_null_or_boolean_semantics() {
+        let marker = FieldRef::TableColumn {
+            table: String::new(),
+            column: "marker".to_string(),
+        };
+        let id = FieldRef::TableColumn {
+            table: String::new(),
+            column: "id".to_string(),
+        };
+        let entity = make_row_entity(1, vec![("id".to_string(), Value::Integer(1))]);
+
+        let is_null =
+            CompiledEntityFilter::compile(&Filter::IsNull(marker.clone()), "users", "users");
+        assert_eq!(
+            is_null.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
+
+        let alternative = CompiledEntityFilter::compile(
+            &Filter::Or(
+                Box::new(Filter::Compare {
+                    field: marker.clone(),
+                    op: CompareOp::Eq,
+                    value: Value::text("present"),
+                }),
+                Box::new(Filter::Compare {
+                    field: id,
+                    op: CompareOp::Eq,
+                    value: Value::Integer(1),
+                }),
+            ),
+            "users",
+            "users",
+        );
+        assert_eq!(
+            alternative.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
+
+        let negated = CompiledEntityFilter::compile(
+            &Filter::Not(Box::new(Filter::Compare {
+                field: marker,
+                op: CompareOp::Eq,
+                value: Value::text("present"),
+            })),
+            "users",
+            "users",
+        );
+        assert_eq!(
+            negated.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
         );
     }
 
