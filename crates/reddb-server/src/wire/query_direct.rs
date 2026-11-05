@@ -43,6 +43,23 @@ pub(crate) fn try_handle_query_binary_direct(
     runtime: &RedDBRuntime,
     sql: &str,
 ) -> Option<BinaryQueryResponse> {
+    let generation = crate::runtime::execution_context::indexed_mutation_generation();
+    if crate::runtime::execution_context::indexed_mutation_active() {
+        return None;
+    }
+    let response = try_handle_query_binary_direct_inner(runtime, sql);
+    if crate::runtime::execution_context::indexed_mutation_active()
+        || generation != crate::runtime::execution_context::indexed_mutation_generation()
+    {
+        return None;
+    }
+    response
+}
+
+fn try_handle_query_binary_direct_inner(
+    runtime: &RedDBRuntime,
+    sql: &str,
+) -> Option<BinaryQueryResponse> {
     // Cheap prefix gate. Avoid parse for anything not a plain SELECT
     // (WITHIN, EXPLAIN, SET, BEGIN, …).
     let trimmed = sql.trim_start();

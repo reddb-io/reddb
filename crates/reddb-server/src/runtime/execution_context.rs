@@ -4,11 +4,42 @@
 //! config/secret resolvers, and MVCC snapshot visibility helpers.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::storage::RedDB;
 use reddb_types::Value;
+
+// Experimental guard for SQL mutation publication. Separate from transaction
+// visibility: an autocommit xid may be committed before its indexes are updated.
+static INDEXED_MUTATIONS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static INDEXED_MUTATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct IndexedMutationGuard;
+
+impl IndexedMutationGuard {
+    pub(crate) fn begin() -> Self {
+        INDEXED_MUTATIONS_ACTIVE.fetch_add(1, Ordering::SeqCst);
+        INDEXED_MUTATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for IndexedMutationGuard {
+    fn drop(&mut self) {
+        INDEXED_MUTATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+        INDEXED_MUTATIONS_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn indexed_mutation_generation() -> u64 {
+    INDEXED_MUTATION_GENERATION.load(Ordering::SeqCst)
+}
+
+pub(crate) fn indexed_mutation_active() -> bool {
+    INDEXED_MUTATIONS_ACTIVE.load(Ordering::SeqCst) != 0
+}
 
 thread_local! {
     /// Current connection id for the executing statement. Set by the
