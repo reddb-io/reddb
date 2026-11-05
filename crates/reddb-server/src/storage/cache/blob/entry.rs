@@ -8,7 +8,7 @@ use super::{BlobCacheHit, BlobCachePolicy};
 #[derive(Debug)]
 pub(super) struct Entry {
     pub(super) bytes: Arc<[u8]>,
-    pub(super) content_metadata: BTreeMap<String, String>,
+    pub(super) content_metadata: Option<Arc<BTreeMap<String, String>>>,
     pub(super) tags: BTreeSet<String>,
     pub(super) dependencies: BTreeSet<String>,
     pub(super) size: usize,
@@ -44,7 +44,11 @@ impl Entry {
         let size = bytes.len();
         Self {
             bytes: Arc::<[u8]>::from(bytes),
-            content_metadata,
+            content_metadata: if content_metadata.is_empty() {
+                None
+            } else {
+                Some(Arc::new(content_metadata))
+            },
             tags,
             dependencies,
             size,

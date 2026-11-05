@@ -684,6 +684,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_snapshot_does_not_copy_superseded_values() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let observe = |payload_bytes| {
+            let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+            let manager = runtime.db().store().get_or_create_collection("red_config");
+            // Insertion and segment traversal can disagree. Only candidates
+            // that advance the selected version may copy the value.
+            for id in (1..=64).rev() {
+                let mut entity = UnifiedEntity::table_row(
+                    EntityId::new(1_000_000 + id),
+                    "red_config",
+                    id,
+                    vec![],
+                );
+                entity.data = EntityData::Row(RowData {
+                    columns: vec![],
+                    schema: None,
+                    named: Some(HashMap::from([
+                        ("key".into(), Value::text("fixture.copy")),
+                        ("value".into(), Value::Blob(vec![id as u8; payload_bytes])),
+                    ])),
+                });
+                manager.insert(entity).expect("config history");
+            }
+            let mut newest = 0;
+            let mut replacements = 0;
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                if matches!(entity.data.as_row().and_then(|row| row.get_field("key")), Some(Value::Text(key)) if key.as_ref() == "fixture.copy")
+                    && entity.id.raw() >= newest {
+                    newest = entity.id.raw();
+                    replacements += 1;
+                }
+                true
+            }).expect("scan order");
+            let (snapshot, allocations) =
+                measure_allocations(|| latest_config_snapshot(runtime.db().as_ref()));
+            assert_eq!(
+                snapshot.expect("snapshot").get("fixture.copy"),
+                Some(&Value::Blob(vec![64; payload_bytes]))
+            );
+            (allocations, replacements)
+        };
+        let (empty, _) = observe(0);
+        let (large, replacements) = observe(64 * 1024);
+        assert!(
+            large.allocated_bytes <= empty.allocated_bytes + replacements * 64 * 1024 + 64 * 1024,
+            "superseded config payload copies: {empty:?} -> {large:?}"
+        );
+        eprintln!(
+            "config snapshot allocated bytes, empty/64 KiB values: {} / {}",
+            empty.allocated_bytes, large.allocated_bytes
+        );
+    }
+
     fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
         CURRENT_KV_RESOLVER.with(|cell| {
             cell.replace(Some(KvResolver {
@@ -772,10 +828,10 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                 let Some(Value::Text(key)) = row.get_field("key") else {
                     return true;
                 };
-                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+                let value = row.get_field("value").unwrap_or(&Value::Null);
                 let id = entity.id.raw();
                 let key = key.to_ascii_lowercase();
-                insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
+                insert_latest_config_value(&mut latest, key.clone(), id, value);
                 if let Some(rest) = key.strip_prefix("red.config.") {
                     insert_latest_config_value(
                         &mut latest,
@@ -802,7 +858,7 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                 let Some(Value::Text(key)) = row.get_field("key") else {
                     return true;
                 };
-                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+                let value = row.get_field("value").unwrap_or(&Value::Null);
                 insert_latest_config_value(
                     &mut latest,
                     format!("red.config/{}", key.to_ascii_lowercase()),
@@ -824,12 +880,12 @@ fn insert_latest_config_value(
     latest: &mut HashMap<String, (u64, Value)>,
     key: String,
     id: u64,
-    value: Value,
+    value: &Value,
 ) {
     match latest.get(&key) {
         Some((prev_id, _)) if *prev_id > id => {}
         _ => {
-            latest.insert(key, (id, value));
+            latest.insert(key, (id, value.clone()));
         }
     }
 }

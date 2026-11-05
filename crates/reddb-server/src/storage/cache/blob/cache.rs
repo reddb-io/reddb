@@ -117,7 +117,7 @@ impl ScopedLabel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheHit {
     pub(super) bytes: Arc<[u8]>,
-    pub(super) content_metadata: BTreeMap<String, String>,
+    pub(super) content_metadata: Option<Arc<BTreeMap<String, String>>>,
     pub(super) version: Option<u64>,
     /// `Some(remaining_ms)` when the hit came from the stale-while-revalidate
     /// window of an `ExtendedTtlPolicy`; `None` when the entry was fresh.
@@ -128,7 +128,7 @@ pub struct BlobCacheHit {
 impl BlobCacheHit {
     pub(crate) fn new(
         bytes: Arc<[u8]>,
-        content_metadata: BTreeMap<String, String>,
+        content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
     ) -> Self {
         Self {
@@ -141,7 +141,7 @@ impl BlobCacheHit {
 
     pub(crate) fn new_stale(
         bytes: Arc<[u8]>,
-        content_metadata: BTreeMap<String, String>,
+        content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
         window_remaining_ms: u64,
     ) -> Self {
@@ -165,7 +165,8 @@ impl BlobCacheHit {
 
     /// Opaque content metadata captured on `put`.
     pub fn content_metadata(&self) -> &BTreeMap<String, String> {
-        &self.content_metadata
+        static EMPTY: BTreeMap<String, String> = BTreeMap::new();
+        self.content_metadata.as_deref().unwrap_or(&EMPTY)
     }
 
     /// Optional CAS / freshness version stamped on `put`.
@@ -790,7 +791,8 @@ impl BlobCache {
                 L2Compression::On => {
                     let content_type = entry
                         .content_metadata
-                        .get("content-type")
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("content-type"))
                         .map(String::as_str);
                     L2BlobCompressor::compress(
                         entry.bytes.as_ref(),

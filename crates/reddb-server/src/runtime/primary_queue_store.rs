@@ -142,9 +142,9 @@ impl PrimaryQueueStore {
         manager
             .query_all(|entity| entity.data.as_row().is_some_and(&predicate))
             .into_iter()
-            .filter_map(|entity| {
-                let row = entity.data.as_row()?.clone();
-                Some((entity.id, row))
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
             })
             .collect()
     }
@@ -414,19 +414,14 @@ impl PrimaryQueueStore {
         // applies. Without this, a committed lifecycle ack still surfaces
         // the message on subsequent reads.
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-        let mut out: Vec<QueueMessageOrdered> = manager
-            .scan(snap_ctx.as_ref(), |entity| {
-                matches!(entity.kind, EntityKind::QueueMessage { .. })
-                    && matches!(entity.data, EntityData::QueueMessage(_))
-            })
-            .into_iter()
-            .filter_map(|entity| {
+        let (mut out, _) =
+            manager.scan_project_zoned_with_stats(snap_ctx.as_ref(), &[], |entity| {
                 let position = match &entity.kind {
                     EntityKind::QueueMessage { position, .. } => *position,
                     _ => return None,
                 };
                 let data = match &entity.data {
-                    EntityData::QueueMessage(d) => d.clone(),
+                    EntityData::QueueMessage(d) => d,
                     _ => return None,
                 };
                 if data.acked {
@@ -435,10 +430,8 @@ impl PrimaryQueueStore {
                 Some(QueueMessageOrdered {
                     id: entity.id,
                     position,
-                    payload: data.payload,
                 })
-            })
-            .collect();
+            });
         out.sort_by_key(|m| m.position);
         out
     }
@@ -448,14 +441,13 @@ impl PrimaryQueueStore {
         let Some(manager) = store.get_collection(queue) else {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
         };
-        let max = manager
-            .query_all(|e| matches!(e.kind, EntityKind::QueueMessage { .. }))
-            .into_iter()
-            .filter_map(|e| match e.kind {
-                EntityKind::QueueMessage { position, .. } => Some(position),
-                _ => None,
-            })
-            .max();
+        let mut max = None;
+        manager.for_each_entity(|entity| {
+            if let EntityKind::QueueMessage { position, .. } = entity.kind {
+                max = Some(max.map_or(position, |previous: u64| previous.max(position)));
+            }
+            true
+        });
         Ok(max.map(|p| p + 1).unwrap_or(1 << 32))
     }
 }
@@ -562,7 +554,6 @@ impl PendingRow {
 struct QueueMessageOrdered {
     id: EntityId,
     position: u64,
-    payload: Value,
 }
 
 impl QueueStore for PrimaryQueueStore {
@@ -1182,6 +1173,58 @@ mod tests {
     }
 
     #[test]
+    fn queue_selection_and_next_position_do_not_copy_payloads() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        let observe = |payload_bytes| {
+            let runtime = boot();
+            let store = runtime.db().store();
+            let manager = store.get_or_create_collection("projection");
+            for id in (1..=128).rev() {
+                manager
+                    .insert(UnifiedEntity::new(
+                        EntityId::new(id),
+                        EntityKind::QueueMessage {
+                            queue: "projection".into(),
+                            position: id * 10,
+                        },
+                        EntityData::QueueMessage(QueueMessageData {
+                            payload: Value::Blob(vec![7; payload_bytes]),
+                            priority: None,
+                            enqueued_at_ns: 0,
+                            attempts: 0,
+                            max_attempts: 0,
+                            acked: id == 64,
+                        }),
+                    ))
+                    .expect("queue message");
+            }
+            let adapter = PrimaryQueueStore::new(runtime);
+            let ((left, right, next), allocations) = measure_allocations(|| {
+                (
+                    adapter.available_messages("projection", QueueSide::Left),
+                    adapter.available_messages("projection", QueueSide::Right),
+                    adapter.next_position("projection").expect("position"),
+                )
+            });
+            let expected: Vec<_> = (1..=128).filter(|id| *id != 64).collect();
+            assert_eq!(left, expected);
+            assert_eq!(right, expected.into_iter().rev().collect::<Vec<_>>());
+            assert_eq!(next, 1281);
+            allocations
+        };
+        let empty = observe(0);
+        let large = observe(32 * 1024);
+        assert!(
+            large.allocated_bytes <= empty.allocated_bytes + 64 * 1024,
+            "queue selection copied payloads: {empty:?} -> {large:?}"
+        );
+        eprintln!(
+            "queue selection allocated bytes, empty/32 KiB payload: {} / {}",
+            empty.allocated_bytes, large.allocated_bytes
+        );
+    }
+
+    #[test]
     fn lifecycle_config_reads_from_descriptor() {
         let rt = boot();
         rt.execute_query(
@@ -1307,7 +1350,11 @@ mod tests {
         // DLQ has the original payload.
         let dlq_msgs = lc.store_ref().list_queue_messages("qdlq_dlq");
         assert_eq!(dlq_msgs.len(), 1);
-        assert_eq!(dlq_msgs[0].payload, Value::text("payload"));
+        assert_eq!(
+            lc.store_ref()
+                .read_message("qdlq_dlq", dlq_msgs[0].id.raw()),
+            Some(Value::text("payload"))
+        );
     }
 
     #[test]

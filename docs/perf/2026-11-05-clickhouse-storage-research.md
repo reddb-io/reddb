@@ -194,6 +194,46 @@ result are excluded. The final topology is still fully materialized; adapting
 the search reader's local adjacency path to these APIs remains a separate
 change because selection, identity deduplication, and output order differ.
 
+## Queue, cache, and keyed-model follow-up
+
+Queue lifecycle selection now projects only message identity and position,
+sorting those small records before delivery loads a payload. Finding the next
+position also borrows source records. Pending metadata rows move out of their
+owned entities instead of cloning a second time. A 128-message fixture allocates
+8,184 bytes for left/right availability and next-position reads with either
+empty or 32 KiB payloads. This does not add a durable queue index: message and
+pending-row scans remain, and ACK/NACK, delayed availability, WORK/FANOUT,
+ordering keys, and transaction handling retain their existing paths.
+
+Blob-cache hits share immutable content metadata through `Arc`, as the bytes
+already do. The metadata accessor still returns a borrowed map; old hits retain
+their original bytes/metadata through replacement and invalidation. A warmed
+L1 test with nonempty metadata performs 1,000 hits without allocating. Only
+nonempty metadata allocates a shared owner; empty hits need no extra reference
+counter. TTL, stale serving, generation
+checks, L2 compression, and L2 serialization are unchanged.
+
+Plain KV listing retains only the lexicographically smallest `offset + limit`
+keys, plus a transient insertion candidate, while keeping the original per-key
+version-selection rule. The source scan continues to completion, preserving
+late read errors and budget checks even with LIMIT 0. Prefix filtering and
+snapshot visibility still run on source records. Source order can cause
+intermediate retained candidates to be replaced; this is bounded retention,
+not a promise to read or copy only the final page. Unlimited lists and large
+offsets still need correspondingly larger retained state.
+The regression fixture with 128 keys holding 32 KiB values measured a retained
+read peak of 4,333,424 bytes for the former full materialization and 135,552
+bytes for a three-key window, before result formatting.
+
+Statement-local config snapshots borrow candidate values until their physical
+version wins selection, avoiding eager copies of rejected values. Full snapshot
+construction and normalization/authorization rules remain. Native Vault history
+and list reads consume an already-owned row's value instead of cloning its
+sealed bytes again; named and compact rows use the same version decoder. Tests
+verify a 64 KiB sealed value keeps the same buffer address. Encryption, reveal
+authorization, tenant filtering, audit events, version history, and publication
+ordering are unchanged; no new plaintext cache or encryption format is added.
+
 ## Recommended next steps
 
 1. **Establish an end-to-end baseline before choosing a format.** Use the same
