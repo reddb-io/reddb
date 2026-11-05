@@ -99,6 +99,28 @@ fn native_patch_keeps_indexed_reads_visible_during_publication() {
 }
 
 #[test]
+fn native_patch_marks_the_storage_index_publication_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            marked.store(
+                super::execution_context::indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    mutate(&runtime, "native_patch", id).expect("patch");
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "native patch publication must be guarded"
+    );
+}
+
+#[test]
 fn native_delete_marks_the_storage_index_publication_window() {
     let runtime = RedDBRuntime::in_memory().expect("runtime");
     let id = seed(&runtime, "table");
