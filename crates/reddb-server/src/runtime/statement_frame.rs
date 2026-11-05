@@ -415,7 +415,13 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention) =
             runtime.statement_snapshot(query, identity_source)?;
-        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
+        // Every statement holds a snapshot. A writer may publish a newer physical
+        // version to the current index after that snapshot was captured, even for
+        // an autocommit reader that saw no writer at capture time. A current-index
+        // candidate set cannot prove it contains the versions visible to the
+        // reader. Prefer the snapshot-aware scan until indexes retain versions or
+        // expose an atomic snapshot-consistent publication protocol.
+        let requires_index_fallback = true;
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
                 result_cache_key(query),
@@ -1367,6 +1373,46 @@ mod tests {
         assert!(f.as_of_floor().is_none(), "live read has no AS OF floor");
         assert_eq!(f.snapshot().xid, rt.snapshot_manager().peek_next_xid() - 1);
         assert!(!f.snapshot().sees(rt.snapshot_manager().peek_next_xid(), 0));
+    }
+
+    #[test]
+    fn autocommit_snapshot_does_not_lose_rows_after_index_publication() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_index_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_index_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_status_hash ON frame_index_race (status) USING HASH")
+            .expect("create index");
+        let sql = "SELECT id FROM frame_index_race WHERE status = 'old'";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture autocommit snapshot");
+        rt.execute_query("UPDATE frame_index_race SET status = 'new' WHERE id = 1")
+            .expect("publish changed index entry");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(sql).expect("parse")
+        else {
+            panic!("expected table query");
+        };
+        let _guards = frame.install(&rt);
+        let records =
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &rt.db(),
+                &query,
+                Some(rt.index_store_ref()),
+            )
+            .expect("read captured snapshot");
+        let mut ids = records
+            .iter()
+            .map(|record| record.get("id").expect("id").to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["1", "2"],
+            "current index omitted a visible historical row"
+        );
     }
 
     #[test]
