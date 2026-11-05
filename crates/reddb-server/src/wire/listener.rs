@@ -1640,6 +1640,7 @@ mod tests {
         let reader = crate::runtime::mvcc::SnapshotBundle {
             snapshot: None,
             auth: Some(("reader".to_string(), crate::auth::Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
             tenant: None,
         };
 
@@ -1675,6 +1676,7 @@ mod tests {
         let reader = crate::runtime::mvcc::SnapshotBundle {
             snapshot: None,
             auth: Some(("reader".to_string(), crate::auth::Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
             tenant: None,
         };
         let response = crate::runtime::mvcc::with_snapshot_bundle(&reader, || {

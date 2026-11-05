@@ -50,12 +50,42 @@ enum QueryResponse {
     Legacy(crate::wire::listener::LegacyQueryResponse, u64),
 }
 
-#[derive(Debug)]
 struct AuthedSession {
     username: String,
     role: Role,
     tenant: Option<String>,
     session_id: String,
+    _lease: Option<crate::auth::store::ConnectionLease>,
+}
+
+fn acquire_local_connection_lease(
+    auth_store: Option<&Arc<AuthStore>>,
+    tenant: Option<&str>,
+    username: &str,
+) -> Result<Option<crate::auth::store::ConnectionLease>, String> {
+    let Some(store) = auth_store else {
+        return Ok(None);
+    };
+    let principal = crate::auth::UserId::from_parts(tenant, username);
+    if store.get_user(tenant, username).is_none() {
+        return Ok(None);
+    }
+    store
+        .acquire_connection_lease(&principal)
+        .map(Some)
+        .map_err(|_| "authentication refused".to_string())
+}
+
+async fn send_auth_refusal<S>(stream: &mut S, correlation_id: u64, reason: &str) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let frame = encode_frame(&reply_frame_or_io_error(
+        correlation_id,
+        MessageKind::AuthFail,
+        build_auth_fail_payload(reason),
+    )?);
+    stream.write_all(&frame).await
 }
 
 struct RedWireAuthenticatedSessionPolicy;
@@ -165,6 +195,7 @@ struct RedWireExecutionContextGuard {
     previous_connection_id: u64,
     previous_tenant: Option<String>,
     previous_identity: Option<(String, Role)>,
+    previous_principal: Option<crate::auth::UserId>,
 }
 
 impl RedWireExecutionContextGuard {
@@ -175,6 +206,7 @@ impl RedWireExecutionContextGuard {
         }
         let previous_tenant = crate::runtime::execution_context::current_tenant();
         let previous_identity = crate::runtime::execution_context::current_auth_identity();
+        let previous_principal = crate::runtime::execution_context::current_auth_principal();
         match &ctx.tenant {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
             None => crate::runtime::execution_context::clear_current_tenant(),
@@ -187,8 +219,8 @@ impl RedWireExecutionContextGuard {
         if ctx.audit_principal == "anonymous" {
             crate::runtime::execution_context::clear_current_auth_identity();
         } else {
-            crate::runtime::execution_context::set_current_auth_identity(
-                ctx.audit_principal.clone(),
+            crate::runtime::execution_context::set_current_auth_principal(
+                crate::auth::UserId::from_parts(ctx.tenant.as_deref(), &ctx.audit_principal),
                 role,
             );
         }
@@ -196,6 +228,7 @@ impl RedWireExecutionContextGuard {
             previous_connection_id,
             previous_tenant,
             previous_identity,
+            previous_principal,
         }
     }
 }
@@ -203,11 +236,14 @@ impl RedWireExecutionContextGuard {
 impl Drop for RedWireExecutionContextGuard {
     fn drop(&mut self) {
         crate::runtime::execution_context::set_current_connection_id(self.previous_connection_id);
-        match self.previous_identity.take() {
-            Some((username, role)) => {
-                crate::runtime::execution_context::set_current_auth_identity(username, role)
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => {
+                crate::runtime::execution_context::set_current_auth_principal(principal, role)
             }
-            None => crate::runtime::execution_context::clear_current_auth_identity(),
+            _ => crate::runtime::execution_context::clear_current_auth_identity(),
         }
         match self.previous_tenant.take() {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant),
@@ -341,7 +377,7 @@ where
     let session = perform_handshake(
         &mut stream,
         runtime.as_ref(),
-        auth_store.as_deref(),
+        auth_store.as_ref(),
         oauth.as_deref(),
     )
     .await?;
@@ -908,6 +944,10 @@ where
                 let queue_name = req.queue.clone();
                 let wait_ms = req.wait_ms;
                 let auth_identity = Some((session.username.clone(), session.role));
+                let auth_principal = Some(crate::auth::UserId::from_parts(
+                    session.tenant.as_deref(),
+                    &session.username,
+                ));
                 let tenant = session.tenant.clone();
                 // Owned by the connection-scoped `JoinSet` so a client
                 // disconnect (frame loop return) aborts a still-parked
@@ -922,6 +962,7 @@ where
                             req.count,
                             req.wait_ms,
                             auth_identity,
+                            auth_principal,
                             tenant,
                         )
                         .await
@@ -1177,7 +1218,7 @@ async fn queue_send(out_tx: &super::output_stream::FrameTx, frame: Frame) -> io:
 async fn perform_handshake<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
-    auth_store: Option<&AuthStore>,
+    auth_store: Option<&Arc<AuthStore>>,
     oauth: Option<&crate::auth::oauth::OAuthValidator>,
 ) -> io::Result<Option<AuthedSession>>
 where
@@ -1325,6 +1366,17 @@ where
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             if let Ok(identity) = authority.validate_access(&raw, now) {
+                let lease = match acquire_local_connection_lease(
+                    auth_store,
+                    identity.tenant.as_deref(),
+                    &identity.username,
+                ) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
@@ -1342,6 +1394,7 @@ where
                     role: identity.role,
                     tenant: identity.tenant,
                     session_id,
+                    _lease: lease,
                 }));
             }
         }
@@ -1363,6 +1416,17 @@ where
         };
         match super::auth::validate_oauth_jwt_full(validator, &raw) {
             Ok((tenant, username, role)) => {
+                let lease = match acquire_local_connection_lease(
+                    auth_store,
+                    tenant.as_deref(),
+                    &username,
+                ) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
@@ -1375,6 +1439,7 @@ where
                     role,
                     tenant,
                     session_id,
+                    _lease: lease,
                 }));
             }
             Err(reason) => {
@@ -1389,13 +1454,21 @@ where
         }
     }
 
-    match validate_auth_response(chosen, auth_payload, auth_store) {
+    match validate_auth_response(chosen, auth_payload, auth_store.map(AsRef::as_ref)) {
         AuthOutcome::Authenticated {
             username,
             role,
             tenant,
             session_id,
         } => {
+            let lease =
+                match acquire_local_connection_lease(auth_store, tenant.as_deref(), &username) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
             let ok_frame = build_auth_ok_frame_from_payload(
                 resp.correlation_id,
                 build_auth_ok(&session_id, &username, role, server_features),
@@ -1408,6 +1481,7 @@ where
                 role,
                 tenant,
                 session_id,
+                _lease: lease,
             }))
         }
         AuthOutcome::Refused(reason) => {
@@ -1432,7 +1506,7 @@ where
 /// ```
 async fn perform_scram_handshake<S>(
     stream: &mut S,
-    auth_store: Option<&AuthStore>,
+    auth_store: Option<&Arc<AuthStore>>,
     initial_correlation: u64,
     server_features: u32,
 ) -> io::Result<Option<AuthedSession>>
@@ -1532,6 +1606,13 @@ where
         .as_ref()
         .map(|u| u.role)
         .unwrap_or(crate::auth::Role::Read);
+    let lease = match acquire_local_connection_lease(auth_store, None, &username) {
+        Ok(Some(lease)) => lease,
+        Ok(None) | Err(_) => {
+            send_auth_refusal(stream, final_correlation_id, "authentication refused").await?;
+            return Ok(None);
+        }
+    };
     let session_id = super::auth::new_session_id_for_scram();
     let ok_payload = super::auth::build_scram_auth_ok(
         &session_id,
@@ -1551,6 +1632,7 @@ where
         role,
         tenant: user.and_then(|u| u.tenant_id),
         session_id,
+        _lease: Some(lease),
     }))
 }
 
@@ -2033,6 +2115,47 @@ mod tests {
                 command_id: "query.execute"
             }
         );
+    }
+
+    #[test]
+    fn redwire_local_admission_enforces_expiry_and_connection_limit() {
+        let store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+        store
+            .create_user("alice", "secret", Role::Read)
+            .expect("user");
+        let id = crate::auth::UserId::platform("alice");
+        store
+            .set_user_attributes(
+                &id,
+                crate::auth::UserAttributes {
+                    valid_until: Some(1),
+                    ..crate::auth::UserAttributes::default()
+                },
+            )
+            .expect("expired attributes");
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice").is_err());
+
+        store
+            .set_user_attributes(
+                &id,
+                crate::auth::UserAttributes {
+                    connection_limit: Some(1),
+                    ..crate::auth::UserAttributes::default()
+                },
+            )
+            .expect("limited attributes");
+        let first = acquire_local_connection_lease(Some(&store), None, "alice")
+            .expect("first admission")
+            .expect("local lease");
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice").is_err());
+        drop(first);
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice")
+            .expect("slot released")
+            .is_some());
     }
 
     #[test]

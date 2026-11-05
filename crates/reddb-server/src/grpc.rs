@@ -426,6 +426,7 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
 /// The executor is synchronous, so the thread-local holds for the call.
 struct GrpcIdentityGuard {
     previous_identity: Option<(String, crate::auth::Role)>,
+    previous_principal: Option<crate::auth::UserId>,
     previous_tenant: Option<String>,
 }
 
@@ -433,14 +434,15 @@ impl GrpcIdentityGuard {
     fn install(identity: Option<(crate::auth::UserId, crate::auth::Role)>) -> Self {
         use crate::runtime::execution_context as ctx;
         let previous_identity = ctx::current_auth_identity_for_audit();
+        let previous_principal = ctx::current_auth_principal();
         let previous_tenant = ctx::current_tenant();
         match identity {
             Some((id, role)) => {
-                match id.tenant {
-                    Some(tenant) => ctx::set_current_tenant(tenant),
+                match &id.tenant {
+                    Some(tenant) => ctx::set_current_tenant(tenant.clone()),
                     None => ctx::clear_current_tenant(),
                 }
-                ctx::set_current_auth_identity(id.username, role);
+                ctx::set_current_auth_principal(id, role);
             }
             None => {
                 ctx::clear_current_auth_identity();
@@ -449,6 +451,7 @@ impl GrpcIdentityGuard {
         }
         Self {
             previous_identity,
+            previous_principal,
             previous_tenant,
         }
     }
@@ -457,9 +460,12 @@ impl GrpcIdentityGuard {
 impl Drop for GrpcIdentityGuard {
     fn drop(&mut self) {
         use crate::runtime::execution_context as ctx;
-        match self.previous_identity.take() {
-            Some((username, role)) => ctx::set_current_auth_identity(username, role),
-            None => ctx::clear_current_auth_identity(),
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => ctx::set_current_auth_principal(principal, role),
+            _ => ctx::clear_current_auth_identity(),
         }
         match self.previous_tenant.take() {
             Some(tenant) => ctx::set_current_tenant(tenant),

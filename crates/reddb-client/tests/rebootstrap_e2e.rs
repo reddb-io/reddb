@@ -40,7 +40,7 @@ const NOW_MS: u128 = 1_700_000_000_000;
 
 fn authed() -> AuthResult {
     AuthResult::Authenticated {
-        username: "operator".into(),
+        principal: reddb_server::auth::UserId::platform("operator"),
         role: Role::Admin,
         source: AuthSource::Password,
     }

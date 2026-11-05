@@ -95,7 +95,7 @@ impl GrpcRuntime {
             if let Some(token) = token {
                 if let Some((id, role)) = self.auth_store.validate_token_full(token) {
                     return ResolvedGrpcAuth {
-                        result: AuthResult::password(id.username.clone(), role),
+                        result: AuthResult::password_principal(id.clone(), role),
                         identity: Some((id, role)),
                     };
                 }

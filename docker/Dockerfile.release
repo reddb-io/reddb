@@ -30,6 +30,8 @@ ENV REDDB_BOOTSTRAP_PRESET=production
 # First boot fails closed until REDDB_USERNAME, REDDB_PASSWORD, and
 # REDDB_VAULT_PASSPHRASE are supplied (prefer their *_FILE forms). Auth state
 # then lives in the mounted database and survives container restarts.
+# Certificate-backed bootstrap instead requires REDDB_BOOTSTRAP_CERT_OUT and
+# the resulting certificate must be supplied through REDDB_CERTIFICATE_FILE.
 ENV REDDB_AUTH=true
 ENV REDDB_REQUIRE_AUTH=true
 ENV RUST_MIN_STACK=8388608

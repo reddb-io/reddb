@@ -354,6 +354,24 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "any user lifecycle verb",
     },
+    ActionEntry {
+        name: "tenant:assume",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "assume or clear a tenant routing scope",
+    },
+    ActionEntry {
+        name: "identity:assume",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "project another user or role into statement scope",
+    },
+    ActionEntry {
+        name: "metrics:cross-tenant",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read or write Prometheus data for another tenant",
+    },
     // -- KV --------------------------------------------------------------
     ActionEntry {
         name: "kv:invalidate",

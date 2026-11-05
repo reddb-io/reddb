@@ -3400,7 +3400,7 @@ impl RedDb for GrpcRuntime {
 
         let session = self
             .auth_store
-            .authenticate(&username, &password)
+            .authenticate_active(None, &username, &password)
             .map_err(|e| Status::unauthenticated(e.to_string()))?;
 
         let mut map = Map::new();
@@ -3695,22 +3695,21 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let identity = grpc_request_identity(&request);
         let auth = self.resolve_auth(request.metadata());
 
         let mut map = Map::new();
         match &auth {
             AuthResult::Authenticated {
-                username,
+                principal,
                 role,
                 source,
             } => {
                 map.insert("authenticated".into(), JsonValue::Bool(true));
-                map.insert("username".into(), JsonValue::String(username.clone()));
-                if let Some(tenant) = identity
-                    .as_ref()
-                    .and_then(|(id, _)| id.tenant.as_ref())
-                {
+                map.insert(
+                    "username".into(),
+                    JsonValue::String(principal.username.clone()),
+                );
+                if let Some(tenant) = &principal.tenant {
                     map.insert("tenant_id".into(), JsonValue::String(tenant.clone()));
                 }
                 map.insert("role".into(), JsonValue::String(role.as_str().to_string()));

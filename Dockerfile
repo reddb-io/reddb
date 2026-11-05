@@ -57,7 +57,8 @@ ENV REDDB_BOOTSTRAP_PRESET=production
 # All listeners bind every interface, so the image requires durable
 # authentication by default. First boot must receive REDDB_USERNAME,
 # REDDB_PASSWORD, and REDDB_VAULT_PASSPHRASE (prefer their *_FILE forms).
-# The persisted vault is reopened with the same passphrase after restart.
+# Certificate-backed bootstrap instead requires REDDB_BOOTSTRAP_CERT_OUT and
+# the resulting certificate must be supplied through REDDB_CERTIFICATE_FILE.
 # Set REDDB_NO_AUTH=true only for a throwaway, network-isolated container.
 ENV REDDB_AUTH=true
 ENV REDDB_REQUIRE_AUTH=true

@@ -26,6 +26,11 @@ thread_local! {
     static CURRENT_AUTH_IDENTITY: std::cell::RefCell<Option<(String, crate::auth::Role)>> =
         const { std::cell::RefCell::new(None) };
 
+    /// Immutable principal produced by credential validation. Unlike
+    /// `CURRENT_TENANT_ID`, this value is never changed by routing/scope SQL.
+    static CURRENT_AUTH_PRINCIPAL: std::cell::RefCell<Option<crate::auth::UserId>> =
+        const { std::cell::RefCell::new(None) };
+
     /// MVCC snapshot scoped to the currently-executing statement (Phase
     /// 2.3.2d PG parity). `execute_query` captures it on entry and drops
     /// it on exit; every scan consults it via
@@ -106,6 +111,20 @@ pub fn current_connection_id() -> u64 {
 /// RLS enforcement). Transport layers call this right after resolving
 /// auth so the query dispatch can fold RLS policies into the filter.
 pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
+    set_current_auth_principal(crate::auth::UserId::platform(username), role);
+}
+
+/// Install the structured principal returned by credential validation.
+pub fn set_current_auth_principal(principal: crate::auth::UserId, role: crate::auth::Role) {
+    CURRENT_AUTH_IDENTITY.with(|cell| {
+        *cell.borrow_mut() = Some((principal.username.clone(), role));
+    });
+    CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = Some(principal));
+}
+
+/// Replace only the SQL/RLS projection while preserving the immutable
+/// credential principal used by authorization.
+pub(crate) fn set_current_auth_projection(username: String, role: crate::auth::Role) {
     CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = Some((username, role)));
 }
 
@@ -114,12 +133,18 @@ pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
 /// requests.
 pub fn clear_current_auth_identity() {
     CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = None);
+    CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = None);
 }
 
 /// Read the current-thread auth identity. `None` when no transport
 /// installed one (embedded mode / anonymous access).
 pub(crate) fn current_auth_identity() -> Option<(String, crate::auth::Role)> {
     CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone())
+}
+
+/// Read the immutable credential principal, independently of mutable scope.
+pub(crate) fn current_auth_principal() -> Option<crate::auth::UserId> {
+    CURRENT_AUTH_PRINCIPAL.with(|cell| cell.borrow().clone())
 }
 
 /// Public probe of the thread-local auth identity for callers outside
@@ -1105,6 +1130,7 @@ pub(crate) fn current_snapshot_requires_index_fallback() -> bool {
 pub struct SnapshotBundle {
     pub snapshot: Option<SnapshotContext>,
     pub auth: Option<(String, crate::auth::Role)>,
+    pub auth_principal: Option<crate::auth::UserId>,
     pub tenant: Option<String>,
 }
 
@@ -1114,6 +1140,7 @@ pub fn snapshot_bundle() -> SnapshotBundle {
     SnapshotBundle {
         snapshot: capture_current_snapshot(),
         auth: current_auth_identity(),
+        auth_principal: current_auth_principal(),
         tenant: CURRENT_TENANT_ID.with(|cell| cell.borrow().clone()),
     }
 }
@@ -1126,6 +1153,7 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
     struct Guard {
         prev_snapshot: Option<SnapshotContext>,
         prev_auth: Option<(String, crate::auth::Role)>,
+        prev_auth_principal: Option<crate::auth::UserId>,
         prev_tenant: Option<String>,
     }
     impl Drop for Guard {
@@ -1135,6 +1163,8 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
             CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = snap);
             HAS_SNAPSHOT.with(|c| c.set(has));
             CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = self.prev_auth.take());
+            CURRENT_AUTH_PRINCIPAL
+                .with(|cell| *cell.borrow_mut() = self.prev_auth_principal.take());
             CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = self.prev_tenant.take());
         }
     }
@@ -1142,6 +1172,7 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
     let _guard = {
         let prev_snapshot = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
         let prev_auth = CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone());
+        let prev_auth_principal = CURRENT_AUTH_PRINCIPAL.with(|cell| cell.borrow().clone());
         let prev_tenant = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
 
         match bundle.snapshot.clone() {
@@ -1149,11 +1180,13 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
             None => clear_current_snapshot(),
         }
         CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = bundle.auth.clone());
+        CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = bundle.auth_principal.clone());
         CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = bundle.tenant.clone());
 
         Guard {
             prev_snapshot,
             prev_auth,
+            prev_auth_principal,
             prev_tenant,
         }
     };

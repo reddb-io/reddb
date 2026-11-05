@@ -4141,6 +4141,7 @@ mod tests {
         let bundle = SnapshotBundle {
             snapshot: None,
             auth: Some(("alice".to_string(), Role::Write)),
+            auth_principal: Some(crate::auth::UserId::platform("alice")),
             tenant: None,
         };
         with_snapshot_bundle(&bundle, || {

@@ -1815,7 +1815,7 @@ impl McpServer {
 
         let session = self
             .auth_store
-            .authenticate(username, password)
+            .authenticate_active(None, username, password)
             .map_err(|e| e.to_string())?;
 
         let mut result = Map::new();

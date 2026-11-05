@@ -53,11 +53,11 @@ pub struct PgWireConfig {
 /// connection flows through the same IAM/policy gates as native
 /// transports. `None` connections (loopback trust) run under the ambient
 /// embedded identity, preserving the pre-auth behaviour.
-#[derive(Debug, Clone)]
 struct PgAuthContext {
     username: String,
     role: Role,
     tenant: Option<String>,
+    _lease: crate::auth::store::ConnectionLease,
 }
 
 #[derive(Debug, Clone)]
@@ -213,27 +213,43 @@ fn execute_with_pg_auth_context<T>(
 /// current thread and restores the previous state on drop, so pooled
 /// runtime threads never leak an identity across statements.
 struct PgAuthContextGuard {
+    previous_principal: Option<crate::auth::UserId>,
+    previous_identity: Option<(String, Role)>,
     previous_tenant: Option<String>,
 }
 
 impl PgAuthContextGuard {
     fn install(auth_context: &PgAuthContext) -> Self {
         let previous_tenant = crate::runtime::execution_context::current_tenant();
+        let previous_principal = crate::runtime::execution_context::current_auth_principal();
+        let previous_identity = crate::runtime::execution_context::current_auth_identity();
         match &auth_context.tenant {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
             None => crate::runtime::execution_context::clear_current_tenant(),
         }
-        crate::runtime::execution_context::set_current_auth_identity(
-            auth_context.username.clone(),
+        crate::runtime::execution_context::set_current_auth_principal(
+            crate::auth::UserId::from_parts(auth_context.tenant.as_deref(), &auth_context.username),
             auth_context.role,
         );
-        Self { previous_tenant }
+        Self {
+            previous_principal,
+            previous_identity,
+            previous_tenant,
+        }
     }
 }
 
 impl Drop for PgAuthContextGuard {
     fn drop(&mut self) {
-        crate::runtime::execution_context::clear_current_auth_identity();
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => {
+                crate::runtime::execution_context::set_current_auth_principal(principal, role)
+            }
+            _ => crate::runtime::execution_context::clear_current_auth_identity(),
+        }
         match self.previous_tenant.take() {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant),
             None => crate::runtime::execution_context::clear_current_tenant(),
@@ -1247,8 +1263,8 @@ where
     };
     // A missing user and a wrong password both surface as the same error
     // class below — no user-existence oracle leaks over the wire.
-    let session = match auth_store.authenticate_in_tenant(tenant, username, &password) {
-        Ok(session) => session,
+    let (session, lease) = match auth_store.authenticate_connection(tenant, username, &password) {
+        Ok(authenticated) => authenticated,
         Err(_) => {
             send_error(stream, "28P01", "password authentication failed").await?;
             return Ok(None);
@@ -1260,6 +1276,7 @@ where
         username: session.username,
         role: session.role,
         tenant: session.tenant_id,
+        _lease: lease,
     })))
 }
 
@@ -1791,11 +1808,36 @@ fn classify_sqlstate(msg: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::api::RedDBOptions;
-    use crate::auth::{AuthConfig, AuthStore};
+    use crate::auth::{AuthConfig, AuthStore, UserAttributes, UserId};
     use crate::runtime::RuntimeQueryResult;
     use crate::storage::query::unified::UnifiedResult;
     use reddb_rql::modes::QueryMode;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    async fn assert_pg_password_rejected(auth: Arc<AuthStore>, username: &str, password: &str) {
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        runtime.set_auth_store(auth);
+        let config = Arc::new(PgWireConfig::default());
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
+        });
+
+        write_startup_params(&mut client_io, &[("user", username)]).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'R');
+        assert_eq!(i32::from_be_bytes(body[..4].try_into().unwrap()), 3);
+        write_frontend_frame(&mut client_io, b'p', cstring_body(password)).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'E');
+        assert_eq!(error_response_field(&body, b'C'), Some("28P01"));
+
+        let mut eof = [0u8; 1];
+        assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn response_writer_releases_execution_slot_before_socket_write() {
@@ -1849,6 +1891,50 @@ mod tests {
         let mut eof = [0u8; 1];
         assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pgwire_rejects_expired_accounts() {
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        auth.set_user_attributes(
+            &UserId::platform("alice"),
+            UserAttributes {
+                valid_until: Some(1),
+                ..UserAttributes::default()
+            },
+        )
+        .unwrap();
+
+        assert_pg_password_rejected(auth, "alice", "secret").await;
+    }
+
+    #[tokio::test]
+    async fn pgwire_rejects_accounts_at_connection_limit() {
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        let id = UserId::platform("alice");
+        auth.set_user_attributes(
+            &id,
+            UserAttributes {
+                connection_limit: Some(1),
+                ..UserAttributes::default()
+            },
+        )
+        .unwrap();
+        let _held = auth
+            .acquire_connection_lease(&id)
+            .expect("occupy the only connection slot");
+
+        assert_pg_password_rejected(auth, "alice", "secret").await;
     }
 
     #[tokio::test]

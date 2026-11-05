@@ -23,8 +23,8 @@
 
 use crate::auth::{Role, UserId};
 use crate::runtime::execution_context::{
-    clear_current_auth_identity, clear_current_tenant, current_auth_identity, current_tenant,
-    set_current_auth_identity, set_current_tenant,
+    clear_current_auth_identity, clear_current_tenant, current_auth_identity,
+    current_auth_principal, current_tenant, set_current_auth_principal, set_current_tenant,
 };
 
 /// RAII guard that scopes the thread-local execution identity to one HTTP
@@ -32,6 +32,7 @@ use crate::runtime::execution_context::{
 /// identity and tenant are restored when the guard drops.
 pub(crate) struct RequestIdentityGuard {
     previous_identity: Option<(String, Role)>,
+    previous_principal: Option<UserId>,
     previous_tenant: Option<String>,
 }
 
@@ -40,14 +41,15 @@ impl RequestIdentityGuard {
     /// identity and tenant (anonymous request).
     pub(crate) fn install(caller: Option<(UserId, Role)>) -> Self {
         let previous_identity = current_auth_identity();
+        let previous_principal = current_auth_principal();
         let previous_tenant = current_tenant();
         match caller {
             Some((id, role)) => {
-                match id.tenant {
-                    Some(tenant) => set_current_tenant(tenant),
+                match &id.tenant {
+                    Some(tenant) => set_current_tenant(tenant.clone()),
                     None => clear_current_tenant(),
                 }
-                set_current_auth_identity(id.username, role);
+                set_current_auth_principal(id, role);
             }
             None => {
                 clear_current_auth_identity();
@@ -56,6 +58,7 @@ impl RequestIdentityGuard {
         }
         Self {
             previous_identity,
+            previous_principal,
             previous_tenant,
         }
     }
@@ -63,9 +66,12 @@ impl RequestIdentityGuard {
 
 impl Drop for RequestIdentityGuard {
     fn drop(&mut self) {
-        match self.previous_identity.take() {
-            Some((username, role)) => set_current_auth_identity(username, role),
-            None => clear_current_auth_identity(),
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => set_current_auth_principal(principal, role),
+            _ => clear_current_auth_identity(),
         }
         match self.previous_tenant.take() {
             Some(tenant) => set_current_tenant(tenant),
@@ -99,7 +105,10 @@ mod tests {
 
     #[test]
     fn anonymous_request_clears_leaked_tenant_and_identity() {
-        set_current_auth_identity("leaked".to_string(), Role::Admin);
+        crate::runtime::execution_context::set_current_auth_identity(
+            "leaked".to_string(),
+            Role::Admin,
+        );
         set_current_tenant("leaked-tenant".to_string());
         {
             let _guard = RequestIdentityGuard::install(None);

@@ -2,7 +2,9 @@
 //! #1619): [`RedDBRuntime::check_query_privilege`] and the per-domain
 //! privilege gates it dispatches to. Behaviour-preserving move; the free
 //! IAM/policy-column helpers these consume live in [`super::policy_columns`].
-use super::super::execution_context::{current_auth_identity, current_tenant};
+use super::super::execution_context::{
+    current_auth_identity, current_auth_principal, current_tenant,
+};
 use super::super::*;
 use super::policy_columns::*;
 
@@ -1857,21 +1859,108 @@ impl RedDBRuntime {
     /// through the victim tenant's RLS predicates. Platform-scoped
     /// principals (no tenant) and embedded callers keep the old behaviour.
     pub(crate) fn check_set_tenant_privilege(&self, target: Option<&str>) -> RedDBResult<()> {
-        if self.inner.auth_store.read().is_none() {
+        self.check_scope_tenant_privilege(target)
+    }
+
+    /// Authorize a routing-scope mutation against the immutable credential
+    /// principal, never against a tenant already projected by SQL.
+    pub(crate) fn check_scope_override_privilege(
+        &self,
+        scope: &crate::runtime::within_clause::ScopeOverride,
+    ) -> RedDBResult<()> {
+        use crate::runtime::within_clause::FieldOverride;
+
+        if let FieldOverride::Set(target) = &scope.tenant {
+            self.check_scope_tenant_privilege(Some(target))?;
+        } else if matches!(scope.tenant, FieldOverride::Clear) {
+            self.check_scope_tenant_privilege(None)?;
+        }
+
+        let Some((_, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let Some(principal) = current_auth_principal() else {
+            return Ok(());
+        };
+        let user_changes = match &scope.user {
+            FieldOverride::Inherit => false,
+            FieldOverride::Set(user) => user != &principal.username,
+            FieldOverride::Clear => true,
+        };
+        let role_changes = match &scope.role {
+            FieldOverride::Inherit => false,
+            FieldOverride::Set(candidate) => {
+                crate::auth::Role::from_str(candidate).is_none_or(|candidate| candidate != role)
+            }
+            FieldOverride::Clear => true,
+        };
+        if !user_changes && !role_changes {
             return Ok(());
         }
-        let Some((username, role)) = current_auth_identity() else {
+        if principal.tenant.is_some() {
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{principal}` cannot override credential user or role"
+            )));
+        }
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
             return Ok(());
         };
-        let Some(own_tenant) = current_tenant() else {
-            return Ok(());
+        let target = match &scope.user {
+            FieldOverride::Set(user) => user.as_str(),
+            _ => principal.username.as_str(),
         };
-        if target == Some(own_tenant.as_str()) {
+        let resource = crate::auth::policies::ResourceRef::new("user", target);
+        let ctx = runtime_iam_context(role, principal.tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "identity:assume",
+            &resource,
+            &ctx,
+            role,
+        ) {
             return Ok(());
         }
         Err(RedDBError::Query(format!(
-            "permission denied: principal=`{}` role=`{:?}` is scoped to tenant `{}` and cannot switch tenant",
-            username, role, own_tenant
+            "permission denied: principal=`{principal}` action=`identity:assume` resource=`user:{target}` denied by IAM policy"
+        )))
+    }
+
+    pub(crate) fn check_scope_tenant_privilege(&self, target: Option<&str>) -> RedDBResult<()> {
+        if self.inner.auth_store.read().is_none() {
+            return Ok(());
+        }
+        let Some((_, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let Some(principal) = current_auth_principal() else {
+            return Ok(());
+        };
+        if let Some(own_tenant) = principal.tenant.as_deref() {
+            if target == Some(own_tenant) {
+                return Ok(());
+            }
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{principal}` role=`{role:?}` is scoped to tenant `{own_tenant}` and cannot switch tenant"
+            )));
+        }
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        let resource =
+            crate::auth::policies::ResourceRef::new("tenant", target.unwrap_or("platform"));
+        let ctx = runtime_iam_context(role, None);
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "tenant:assume",
+            &resource,
+            &ctx,
+            role,
+        ) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{principal}` action=`tenant:assume` resource=`tenant:{}` denied by IAM policy",
+            target.unwrap_or("platform")
         )))
     }
 
@@ -2199,6 +2288,7 @@ mod collection_boundary_tests {
         let writer = SnapshotBundle {
             snapshot: None,
             auth: Some(("alice".to_string(), Role::Write)),
+            auth_principal: Some(crate::auth::UserId::scoped("acme", "alice")),
             tenant: Some("acme".to_string()),
         };
         with_snapshot_bundle(&writer, || {
@@ -2215,6 +2305,7 @@ mod collection_boundary_tests {
         let reader = SnapshotBundle {
             snapshot: None,
             auth: Some(("reader".to_string(), Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
             tenant: None,
         };
         with_snapshot_bundle(&reader, || {

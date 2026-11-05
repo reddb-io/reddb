@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::impl_core::{
     clear_current_auth_identity, clear_current_tenant, current_auth_identity,
-    current_connection_id, current_tenant, set_current_auth_identity, set_current_tenant,
+    current_connection_id, current_tenant, set_current_auth_principal, set_current_tenant,
 };
 use crate::runtime::queue_telemetry::NackOutcomeLabel;
 use crate::storage::queue::QueueMode;
@@ -93,27 +93,29 @@ pub(super) fn queue_wait_scope() -> String {
 
 fn with_redwire_wait_context<T>(
     auth_identity: &Option<(String, crate::auth::Role)>,
+    auth_principal: &Option<crate::auth::UserId>,
     tenant: &Option<String>,
     f: impl FnOnce() -> T,
 ) -> T {
     let previous_auth = current_auth_identity();
+    let previous_principal = super::execution_context::current_auth_principal();
     let previous_tenant = current_tenant();
     match tenant {
         Some(t) => set_current_tenant(t.clone()),
         None => clear_current_tenant(),
     }
-    match auth_identity {
-        Some((username, role)) => set_current_auth_identity(username.clone(), *role),
-        None => clear_current_auth_identity(),
+    match (auth_identity, auth_principal) {
+        (Some((_, role)), Some(principal)) => set_current_auth_principal(principal.clone(), *role),
+        _ => clear_current_auth_identity(),
     }
     let result = f();
     match previous_tenant {
         Some(t) => set_current_tenant(t),
         None => clear_current_tenant(),
     }
-    match previous_auth {
-        Some((username, role)) => set_current_auth_identity(username, role),
-        None => clear_current_auth_identity(),
+    match (previous_auth, previous_principal) {
+        (Some((_, role)), Some(principal)) => set_current_auth_principal(principal, role),
+        _ => clear_current_auth_identity(),
     }
     result
 }
@@ -401,10 +403,11 @@ impl RedDBRuntime {
         count: usize,
         wait_ms: u64,
         auth_identity: Option<(String, crate::auth::Role)>,
+        auth_principal: Option<crate::auth::UserId>,
         tenant: Option<String>,
     ) -> RedDBResult<RedwireWaitOutcome> {
         let group_owned: RedDBResult<String> =
-            with_redwire_wait_context(&auth_identity, &tenant, || {
+            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
                 let expr = reddb_rql::ast::QueryExpr::QueueCommand(
                     reddb_rql::ast::QueueCommand::GroupRead {
                         queue: queue.to_string(),
@@ -426,7 +429,7 @@ impl RedDBRuntime {
 
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-                with_redwire_wait_context(&auth_identity, &tenant, || {
+                with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
                     let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
                     lifecycle
                         .group_read(&txn, queue, group_ref, consumer, count)
@@ -447,7 +450,8 @@ impl RedDBRuntime {
         }
 
         let registry = self.queue_wait_registry();
-        let scope = with_redwire_wait_context(&auth_identity, &tenant, queue_wait_scope);
+        let scope =
+            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, queue_wait_scope);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         let telemetry = self.queue_telemetry();
         telemetry.record_wait_started(&scope, queue);
