@@ -27,16 +27,47 @@ impl RedDBServer {
         match exec_result {
             Ok(result) => {
                 if stream_ask {
-                    return ask_sse_response(&result);
+                    let response = ask_sse_response(&result);
+                    if self
+                        .runtime
+                        .resource_limits()
+                        .max_result_bytes
+                        .is_some_and(|limit| limit > 0 && response.body.len() as u64 > limit)
+                    {
+                        return json_error(413, "query result exceeds max_result_bytes");
+                    }
+                    return response;
                 }
-                json_response(
-                    200,
-                    crate::presentation::query_result_json::runtime_query_json(
-                        &result,
-                        &entity_types,
-                        &capabilities,
-                    ),
-                )
+                let value = crate::presentation::query_result_json::runtime_query_json(
+                    &result,
+                    &entity_types,
+                    &capabilities,
+                );
+                if result.statement_type == "select" {
+                    use crate::runtime::memory_buffers::QueryBufferError;
+                    return match self.runtime.serialize_query_json(&value) {
+                        Ok(body) => HttpResponse {
+                            status: 200,
+                            body,
+                            content_type: "application/json",
+                            extra_headers: Vec::new(),
+                        },
+                        Err(QueryBufferError::ResultLimit) => {
+                            json_error(413, "query result exceeds max_result_bytes")
+                        }
+                        Err(QueryBufferError::MemoryBudget) => HttpResponse {
+                            status: 507,
+                            body: bytes::Bytes::from_static(
+                                br#"{"ok":false,"error":{"code":"memory_limit_exceeded","message":"query response exceeds the shared memory budget"}}"#,
+                            ),
+                            content_type: "application/json",
+                            extra_headers: Vec::new(),
+                        },
+                    };
+                }
+                // Acknowledgements follow committed DML/DDL. Do not turn a
+                // successful write into a late memory-admission failure.
+                json_response(200, value)
             }
             Err(err) => {
                 if stream_ask {
@@ -87,7 +118,16 @@ impl RedDBServer {
                     let mut error_obj = crate::json::Map::new();
                     error_obj.insert(
                         "code".to_string(),
-                        crate::json::Value::String("materialization_limit_exceeded".to_string()),
+                        crate::json::Value::String(
+                            if *executor
+                                == crate::runtime::owned_query_result::SHARED_RESULT_EXECUTOR
+                            {
+                                "memory_limit_exceeded"
+                            } else {
+                                "materialization_limit_exceeded"
+                            }
+                            .to_string(),
+                        ),
                     );
                     error_obj.insert(
                         "executor".to_string(),
@@ -432,6 +472,7 @@ impl RedDBServer {
         &self,
         body: Vec<u8>,
         ctx: &crate::server::routing::StreamAuditCtx,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -442,7 +483,7 @@ impl RedDBServer {
         let request = match extract_query_request(&body) {
             Ok(req) => req,
             Err(response) => {
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -452,6 +493,25 @@ impl RedDBServer {
             capabilities,
             ..
         } = request;
+
+        // This transport also accepts DML. Do not turn a committed mutation's
+        // acknowledgement into a read-budget failure. The executor retains its
+        // own canonical result check for reads that require special lowering.
+        let limits = self.runtime.resource_limits();
+        let enabled = limits.read_execution_limits_enabled()
+            || limits.max_result_bytes.is_some_and(|value| value > 0);
+        let _query_budget = if enabled && is_budgeted_stream_read(&query) {
+            match self.runtime.query_budget_scope() {
+                Ok(scope) => Some(scope),
+                Err(cause) => {
+                    let (status, message) = map_runtime_error(&cause);
+                    json_error(status, message).write_to(writer)?;
+                    return writer.flush();
+                }
+            }
+        } else {
+            None
+        };
 
         // Issue #766 / S7 — resume coordinator. Parse the optional
         // `resume` block from the body. When present, the request is
@@ -470,12 +530,19 @@ impl RedDBServer {
         if self.runtime.connection_in_transaction(conn_id) {
             let err = OpenStreamError::TransactionActive;
             let response = json_error_code(409, err.code(), err.message());
-            writer.write_all(&response.to_http_bytes())?;
+            response.write_to(writer)?;
             return writer.flush();
         }
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
+                return writer.flush();
+            }
+        };
         let resumable = output_stream::assess_resumability(&query);
 
         // For a resume request, the snapshot_lsn comes from the client
@@ -576,6 +643,7 @@ impl RedDBServer {
 
             if stream_error.is_none() {
                 let exec = self.runtime.execute_query(&(query.clone()));
+                drop(execution_permit.take());
                 match exec {
                     Ok(result) => {
                         let mut records = crate::presentation::query_view::filter_query_records(
@@ -589,7 +657,9 @@ impl RedDBServer {
                         // both the original stream and any resume re-
                         // execution produce rows in the same sequence.
                         if resumable {
-                            records.sort_by_key(|r| record_rid(r).unwrap_or(u64::MAX));
+                            records
+                                .to_mut()
+                                .sort_by_key(|r| record_rid(r).unwrap_or(u64::MAX));
                         }
 
                         if let Some(rp) = resume_params.as_ref() {
@@ -600,7 +670,7 @@ impl RedDBServer {
                             let mut prefix_hash_check = PrefixHasher::new();
                             let mut crossed = false;
                             let mut hash_mismatch = false;
-                            for record in &records {
+                            for record in records.iter() {
                                 let rid = record_rid(record).unwrap_or(0);
                                 let values =
                                     crate::presentation::query_result_json::unified_record_json(
@@ -663,7 +733,7 @@ impl RedDBServer {
                             // Fresh open — emit every row, hashing as
                             // we go so the `end` envelope can carry
                             // `prefix_hash` for future resume.
-                            for record in &records {
+                            for record in records.iter() {
                                 if lease.snapshot_expired(clock.now_ms()) {
                                     stream_error = Some((
                                         "snapshot_expired".to_string(),
@@ -695,6 +765,7 @@ impl RedDBServer {
                     }
                 }
             }
+            drop(execution_permit.take());
 
             if let Some((code, message)) = stream_error.as_ref() {
                 let mut envelope = crate::json::Map::new();
@@ -776,6 +847,7 @@ impl RedDBServer {
         &self,
         body: Vec<u8>,
         ctx: &crate::server::routing::StreamAuditCtx,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -789,7 +861,7 @@ impl RedDBServer {
         if self.runtime.connection_in_transaction(conn_id) {
             let err = OpenStreamError::TransactionActive;
             let response = json_error_code(409, err.code(), err.message());
-            writer.write_all(&response.to_http_bytes())?;
+            response.write_to(writer)?;
             return writer.flush();
         }
 
@@ -802,7 +874,7 @@ impl RedDBServer {
             Some(b) if !b.is_empty() => b,
             _ => {
                 let response = json_error(400, "input stream requires open frame as line 0");
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
@@ -810,27 +882,35 @@ impl RedDBServer {
             Ok(parsed) => parsed,
             Err(message) => {
                 let response = json_error(400, message);
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
+                return writer.flush();
+            }
+        };
         // Issue #765 / S6 — opt-in end-to-end SHA-256. The open frame may
         // request `verify` ("sha256" / "none"); absent that, the
         // `stream.integrity.default_verify` config applies. When disabled
         // (the default) no rolling hash is computed and the row path is
         // byte-identical to the S4 baseline.
         let verify_mode = parse_open_verify(open_line, config.default_verify);
-        // Capture the table's highest RID before any chunk commits so a
-        // later digest mismatch can tombstone exactly the rows this stream
-        // appended. Only paid when verification is enabled.
-        let pre_max_rid = if verify_mode.is_enabled() {
-            table_max_rid(&self.runtime, &target)
-        } else {
-            0
-        };
+        // Resolve quarantine state before accepting any verified write. An
+        // unavailable authority cannot be treated as an empty table/list.
+        if verify_mode.is_enabled() {
+            if let Err(error) = self.runtime.ensure_integrity_tombstones_loaded() {
+                let (status, message) = map_runtime_error(&error);
+                json_error_code(status, "integrity_state_unavailable", message).write_to(writer)?;
+                return writer.flush();
+            }
+        }
         let snapshot_lsn = self.runtime.cdc_current_lsn();
         let lease = output_stream::open_stream(config, snapshot_lsn, false, &clock)
             .expect("OpenStream succeeds once the in-transaction gate has passed");
@@ -863,6 +943,8 @@ impl RedDBServer {
             .is_enabled()
             .then(crate::server::output_stream::PrefixHasher::new);
         let mut expected_digest: Option<String> = None;
+        let mut committed_ranges =
+            Vec::<crate::runtime::integrity_tombstone::TombstoneRange>::new();
 
         let mut producer = ChunkProducer::new(&config, &clock);
         {
@@ -874,20 +956,46 @@ impl RedDBServer {
                                 rows: &mut Vec<Vec<crate::json::Value>>,
                                 committed_rid: &mut u64,
                                 row_count: &mut u64,
-                                chunk_seq: &mut u64|
+                                chunk_seq: &mut u64,
+                                committed_ranges: &mut Vec<
+                crate::runtime::integrity_tombstone::TombstoneRange,
+            >|
              -> Result<(), (String, String)> {
                 if rows.is_empty() {
                     return Ok(());
                 }
-                let sql = match build_insert_sql(&target, &columns, rows) {
+                let mut sql = match build_insert_sql(&target, &columns, rows) {
                     Ok(sql) => sql,
                     Err(message) => return Err(("invalid_row".to_string(), message)),
                 };
+                if verify_mode.is_enabled() {
+                    sql.push_str(" RETURNING rid");
+                }
                 match runtime.execute_query(&sql) {
-                    Ok(_) => {
+                    Ok(result) => {
                         *row_count += rows.len() as u64;
                         *committed_rid = runtime.cdc_current_lsn();
                         *chunk_seq += 1;
+                        if verify_mode.is_enabled() {
+                            if result.result.records.len() != rows.len()
+                                || result
+                                    .result
+                                    .records
+                                    .iter()
+                                    .any(|record| record_rid(record).is_none())
+                            {
+                                return Err((
+                                    "integrity_identity_unavailable".to_string(),
+                                    "verified INSERT did not return every committed row identity"
+                                        .to_string(),
+                                ));
+                            }
+                            for record in &result.result.records {
+                                let rid = record_rid(record)
+                                    .expect("invariant: returned identities validated above");
+                                retain_integrity_rid(committed_ranges, &target, rid);
+                            }
+                        }
                         rows.clear();
                         Ok(())
                     }
@@ -943,6 +1051,7 @@ impl RedDBServer {
                         &mut committed_rid,
                         &mut row_count,
                         &mut chunk_seq,
+                        &mut committed_ranges,
                     ) {
                         stream_error = Some(err);
                         close_reason = crate::server::output_stream::CloseReason::Error;
@@ -958,6 +1067,7 @@ impl RedDBServer {
                     &mut committed_rid,
                     &mut row_count,
                     &mut chunk_seq,
+                    &mut committed_ranges,
                 ) {
                     stream_error = Some(err);
                     close_reason = crate::server::output_stream::CloseReason::Error;
@@ -967,10 +1077,10 @@ impl RedDBServer {
             // Issue #765 / S6 — integrity verification outcome. Only when
             // verification was requested and the ingest itself did not fail.
             // `integrity_ok` flips the terminal `end` envelope's `integrity`
-            // field to "ok"; `integrity_failure` carries (expected, actual,
-            // tombstoned RID range) for the dedicated error envelope.
+            // field to "ok"; `integrity_failure` carries the expected and
+            // actual digests for the dedicated quarantine error envelope.
             let mut integrity_ok = false;
-            let mut integrity_failure: Option<(String, String, Option<(u64, u64)>)> = None;
+            let mut integrity_failure: Option<(String, String)> = None;
             if stream_error.is_none() && verify_mode.is_enabled() {
                 match (expected_digest.take(), hasher.take()) {
                     (Some(expected), Some(h)) => {
@@ -978,23 +1088,22 @@ impl RedDBServer {
                         if constant_time_str_eq(&expected, &actual) {
                             integrity_ok = true;
                         } else {
-                            // PRD #759: rows already committed per chunk, so
-                            // rollback is impossible — tombstone the RID
-                            // range this stream appended instead. RIDs are
-                            // monotonic, so (pre_max, post_max] is exactly the
-                            // committed set absent a concurrent writer.
-                            let post_max = table_max_rid(&self.runtime, &target);
-                            let range = if post_max > pre_max_rid {
-                                let lo = pre_max_rid + 1;
-                                self.runtime
-                                    .record_integrity_tombstone(&target, lo, post_max);
-                                Some((lo, post_max))
-                            } else {
-                                None
-                            };
-                            close_reason =
-                                crate::server::output_stream::CloseReason::IntegrityFailed;
-                            integrity_failure = Some((expected, actual, range));
+                            // Quarantine only identities returned by this stream's
+                            // INSERTs. Global RID intervals can include other writers.
+                            match self.runtime.record_integrity_tombstones(&committed_ranges) {
+                                Ok(()) => {
+                                    close_reason =
+                                        crate::server::output_stream::CloseReason::IntegrityFailed;
+                                    integrity_failure = Some((expected, actual));
+                                }
+                                Err(error) => {
+                                    stream_error = Some((
+                                        "integrity_tombstone_persistence_failed".to_string(),
+                                        error.to_string(),
+                                    ));
+                                    close_reason = crate::server::output_stream::CloseReason::Error;
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -1012,6 +1121,8 @@ impl RedDBServer {
                     }
                 }
             }
+
+            drop(execution_permit.take());
 
             if let Some((code, message)) = stream_error.as_ref() {
                 let mut envelope = crate::json::Map::new();
@@ -1033,7 +1144,7 @@ impl RedDBServer {
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
                 producer.push_line(line.as_bytes(), &mut flush)?;
-            } else if let Some((expected, actual, range)) = integrity_failure.as_ref() {
+            } else if let Some((expected, actual)) = integrity_failure.as_ref() {
                 // Issue #765 / S6 — integrity mismatch envelope. Rows are
                 // already durable (auto-commit); the RID range was tombstoned
                 // above and is reported so the client can correlate.
@@ -1051,14 +1162,27 @@ impl RedDBServer {
                     "actual".to_string(),
                     crate::json::Value::String(actual.clone()),
                 );
-                let range_value = match range {
-                    Some((lo, hi)) => crate::json::Value::Array(vec![
-                        crate::json::Value::Number(*lo as f64),
-                        crate::json::Value::Number(*hi as f64),
-                    ]),
-                    None => crate::json::Value::Null,
+                let ranges: Vec<_> = committed_ranges
+                    .iter()
+                    .map(|range| {
+                        crate::json::Value::Array(vec![
+                            crate::json::Value::Decimal(range.lo.to_string()),
+                            crate::json::Value::Decimal(range.hi.to_string()),
+                        ])
+                    })
+                    .collect();
+                // Keep the existing optional single-range field for contiguous
+                // streams; report every exact range in an additive field.
+                let range_value = if ranges.len() == 1 {
+                    ranges[0].clone()
+                } else {
+                    crate::json::Value::Null
                 };
                 payload.insert("tombstoned_rid_range".to_string(), range_value);
+                payload.insert(
+                    "tombstoned_rid_ranges".to_string(),
+                    crate::json::Value::Array(ranges),
+                );
                 envelope.insert("error".to_string(), crate::json::Value::Object(payload));
                 let mut line = crate::json::Value::Object(envelope).to_string_compact();
                 line.push('\n');
@@ -1117,8 +1241,18 @@ impl RedDBServer {
     pub(crate) fn handle_query_sse_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
+        execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                json_error(status, message).write_to(writer)?;
+                return writer.flush();
+            }
+        };
+
         let request = match extract_query_request(&body) {
             Ok(request) => request,
             Err(response) => return write_sse_http_response(&response, writer),
@@ -1152,6 +1286,7 @@ impl RedDBServer {
                     emitted_answer_tokens.set(emitted_answer_tokens.get().saturating_add(1));
                 }
                 let encoded = crate::runtime::ai::sse_frame_encoder::encode(&frame);
+                crate::runtime::query_budget::charge_output(encoded.len())?;
                 writer
                     .write_all(encoded.as_bytes())
                     .and_then(|_| writer.flush())
@@ -1194,6 +1329,7 @@ impl RedDBServer {
                     .map_err(reddb_error_to_io)?;
             }
         }
+        drop(execution_permit);
         Ok(())
     }
 
@@ -1255,12 +1391,29 @@ impl RedDBServer {
         body: Vec<u8>,
         principal: &str,
         tenant: &str,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
+        let _query_budget = match self.runtime.query_budget_scope() {
+            Ok(scope) => scope,
+            Err(cause) => {
+                let (status, message) = map_runtime_error(&cause);
+                json_error(status, message).write_to(writer)?;
+                return writer.flush();
+            }
+        };
+
         use crate::server::output_stream::{self, ChunkProducer, Clock, StreamConfig, SystemClock};
 
         let clock = SystemClock;
-        let config = StreamConfig::load(&self.runtime);
+        let config = match StreamConfig::load(&self.runtime) {
+            Ok(config) => config,
+            Err(error) => {
+                let (status, message) = map_runtime_error(&error);
+                json_error_code(status, "stream_config_unavailable", message).write_to(writer)?;
+                return writer.flush();
+            }
+        };
 
         // Issue #807 / 750c — resume vs fresh open. A body carrying
         // `{"cursor":"<token>"}` resumes a prior stream: the pinned query
@@ -1288,7 +1441,7 @@ impl RedDBServer {
                         // failure, and an unauthorized caller cannot learn
                         // the cursor exists.
                         let response = cursor_reject_response(&reject);
-                        writer.write_all(&response.to_http_bytes())?;
+                        response.write_to(writer)?;
                         return writer.flush();
                     }
                 }
@@ -1296,7 +1449,7 @@ impl RedDBServer {
                 let request = match extract_query_request(&body) {
                     Ok(req) => req,
                     Err(response) => {
-                        writer.write_all(&response.to_http_bytes())?;
+                        response.write_to(writer)?;
                         return writer.flush();
                     }
                 };
@@ -1348,13 +1501,13 @@ impl RedDBServer {
                         ),
                         kind,
                     );
-                    writer.write_all(&response.to_http_bytes())?;
+                    response.write_to(writer)?;
                     return writer.flush();
                 }
             }
             Err(err) => {
                 let response = json_error_code(400, "query_error", err.to_string());
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         }
@@ -1377,15 +1530,16 @@ impl RedDBServer {
                     );
                     object.insert("validation".to_string(), validation.clone());
                     let response = json_response(422, crate::json::Value::Object(object));
-                    writer.write_all(&response.to_http_bytes())?;
+                    response.write_to(writer)?;
                     return writer.flush();
                 }
                 let (status, msg) = map_runtime_error(&err);
                 let response = json_error(status, msg);
-                writer.write_all(&response.to_http_bytes())?;
+                response.write_to(writer)?;
                 return writer.flush();
             }
         };
+        drop(execution_permit.take());
 
         let records = crate::presentation::query_view::filter_query_records(
             &result.result.records,
@@ -1464,7 +1618,7 @@ impl RedDBServer {
             //    cancel raised mid-stream stops production promptly rather
             //    than draining the remaining rows to a client that asked to
             //    stop (or has gone away).
-            for record in &records {
+            for record in records.iter() {
                 if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                     cancelled_midstream = true;
                     break;
@@ -1574,6 +1728,15 @@ impl RedDBServer {
     }
 }
 
+fn is_budgeted_stream_read(query: &str) -> bool {
+    let inner = crate::runtime::within_clause::try_strip_within_prefix(query)
+        .ok()
+        .flatten()
+        .map_or(query, |(_, inner)| inner);
+    reddb_rql::modes::parse_multi(inner)
+        .is_ok_and(|expr| crate::runtime::query_budget::is_materialized_read(&expr))
+}
+
 /// Issue #808 / 750d — does this write error mean the client went away
 /// mid-stream? A disconnected peer surfaces as a broken pipe or a reset /
 /// aborted connection; those are the signals that the rows we are
@@ -1634,7 +1797,7 @@ fn with_statement_kind(response: HttpResponse, kind: &str) -> HttpResponse {
         );
     }
     let mut updated = response;
-    updated.body = value.to_string_compact().into_bytes();
+    updated.body = value.to_string_compact().into_bytes().into();
     updated
 }
 
@@ -1839,21 +2002,22 @@ pub(crate) fn parse_client_end_digest(line: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Issue #765 / S6 — highest RID currently present in `table`, or `0` when
-/// the table is empty / unreadable. Used to bracket the RID range an input
-/// stream appends so a digest mismatch can tombstone exactly those rows.
-fn table_max_rid(runtime: &crate::runtime::RedDBRuntime, table: &str) -> u64 {
-    let sql = format!("SELECT rid FROM {table}");
-    match runtime.execute_query(&sql) {
-        Ok(result) => result
-            .result
-            .records
-            .iter()
-            .filter_map(record_rid)
-            .max()
-            .unwrap_or(0),
-        Err(_) => 0,
+/// Coalesce only adjacent identities actually returned by this stream. Gaps
+/// can belong to concurrent writers or other collections and stay visible.
+fn retain_integrity_rid(
+    ranges: &mut Vec<crate::runtime::integrity_tombstone::TombstoneRange>,
+    table: &str,
+    rid: u64,
+) {
+    if let Some(last) = ranges.last_mut() {
+        if last.table == table && last.hi.checked_add(1) == Some(rid) {
+            last.hi = rid;
+            return;
+        }
     }
+    ranges.push(crate::runtime::integrity_tombstone::TombstoneRange::new(
+        table, rid, rid,
+    ));
 }
 
 /// Issue #763 — parse a row frame `{"row":{"c1":v1,...}}` into the
@@ -2038,7 +2202,7 @@ fn write_sse_http_response<W: std::io::Write>(
     writer: &mut W,
 ) -> io::Result<()> {
     if response.content_type != "text/event-stream" {
-        writer.write_all(&response.to_http_bytes())?;
+        response.write_to(writer)?;
         writer.flush()?;
         return Ok(());
     }
@@ -2092,7 +2256,7 @@ fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse
     match ask_sse_body(result) {
         Some(body) => HttpResponse {
             status: 200,
-            body: body.into_bytes(),
+            body: body.into_bytes().into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         },
@@ -2104,7 +2268,8 @@ fn ask_sse_response(result: &crate::runtime::RuntimeQueryResult) -> HttpResponse
                     message: "ASK STREAM result missing ASK row".to_string(),
                 },
             )
-            .into_bytes(),
+            .into_bytes()
+            .into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         },
@@ -2121,7 +2286,8 @@ fn ask_sse_error_response(err: &crate::api::RedDBError) -> HttpResponse {
         body: crate::runtime::ai::sse_frame_encoder::encode(
             &crate::runtime::ai::sse_frame_encoder::Frame::Error { code, message },
         )
-        .into_bytes(),
+        .into_bytes()
+        .into(),
         content_type: "text/event-stream",
         extra_headers: Vec::new(),
     }
@@ -2319,6 +2485,20 @@ fn schema_json_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_read_budget_classifies_scoped_reads_and_excludes_mutation_acks() {
+        assert!(super::is_budgeted_stream_read("SELECT id FROM t"));
+        assert!(super::is_budgeted_stream_read(
+            "WITHIN TENANT 'acme' SELECT id FROM t"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "INSERT INTO t (id) VALUES (1)"
+        ));
+        assert!(!super::is_budgeted_stream_read(
+            "CREATE TABLE t (id INTEGER)"
+        ));
+        assert!(!super::is_budgeted_stream_read("not a query"));
+    }
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::RedDBRuntime;
@@ -2332,6 +2512,269 @@ mod tests {
 
     static ASK_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    const VERIFIED_INGEST: &[u8] = b"{\"open\":{\"target\":\"cold_ingest\",\"columns\":[\"value\"],\"verify\":\"sha256\"}}\n{\"row\":{\"value\":1}}\n{\"end\":{\"sha256\":\"incorrect\"}}\n";
+
+    fn cold_integrity_ingest_runtime(read_bytes_max: usize) -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("cold integrity fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("ingest.rdb"))
+                .with_memory_budget(128 * 1024 * 1024)
+                .with_storage_profile(
+                    crate::storage::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                )
+                .expect("profile"),
+        )
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE cold_ingest (value INT)")
+            .expect("table");
+        let store = runtime.db().store();
+        store
+            .try_set_config_tree(
+                crate::runtime::integrity_tombstone::TOMBSTONE_KEY,
+                &crate::serde_json::Value::String("[]".to_string()),
+            )
+            .expect("tombstones");
+        store
+            .try_set_config_tree(
+                "stream.integrity.default_verify",
+                &crate::serde_json::Value::String("sha256".into()),
+            )
+            .expect("persisted verification default");
+        store.persist().expect("publish tombstones");
+        let manager = store.get_collection("red_config").expect("config");
+        let pager = Arc::clone(store.pager().expect("pager"));
+        let data = Arc::new(crate::storage::engine::BTree::new(pager));
+        manager
+            .try_for_each_entity(usize::MAX, |entity| {
+                let bytes = reddb_engine::storage::metadata_codec::serialize_entity_record(
+                    entity,
+                    None,
+                    store.format_version(),
+                );
+                data.insert(&entity.id.raw().to_be_bytes(), &bytes)
+                    .expect("private native config");
+                true
+            })
+            .expect("copy native config");
+        let root = data.root_page_id();
+        manager.install_backing(
+            Arc::new(reddb_engine::storage::collection_read::PagedCollection::new(data)),
+            root,
+            store.format_version(),
+            read_bytes_max,
+            manager.count() as u64,
+        );
+        (directory, runtime)
+    }
+
+    #[test]
+    fn cold_integrity_unavailable_refuses_verified_ingest_before_commit() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(1);
+        let store = runtime.db().store();
+        let server = crate::RedDBServer::new(runtime.clone());
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                None,
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(response.contains("stream_config_unavailable"), "{response}");
+        assert!(
+            !response.starts_with("HTTP/1.1 200"),
+            "unavailable integrity state must reject ingress"
+        );
+        assert_eq!(
+            store.get_collection("cold_ingest").expect("table").count(),
+            0,
+            "no rows can commit after failed pre-ingest integrity read"
+        );
+    }
+
+    #[test]
+    fn cold_integrity_failed_digest_quarantines_committed_rows_and_persists_ranges() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let store = runtime.db().store();
+        let server = RedDBServer::new(runtime.clone());
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                None,
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("integrity_failed"), "{response}");
+        assert!(
+            !response.contains("integrity_tombstone_persistence_failed"),
+            "{response}"
+        );
+        assert_eq!(
+            store.get_collection("cold_ingest").expect("table").count(),
+            1,
+            "quarantine must preserve the physical row"
+        );
+        assert!(runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("quarantined read")
+            .result
+            .records
+            .is_empty());
+        let persisted =
+            crate::runtime::integrity_tombstone::load_ranges(&store).expect("durable ranges");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].table, "cold_ingest");
+        assert_eq!(persisted[0].lo, persisted[0].hi);
+    }
+
+    #[test]
+    fn cold_integrity_quarantine_does_not_hide_interleaved_rows() {
+        struct InterleavedWriter {
+            runtime: RedDBRuntime,
+            response: Vec<u8>,
+            inserted: bool,
+        }
+        impl Write for InterleavedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.inserted {
+                    self.inserted = true;
+                    self.runtime
+                        .execute_query("INSERT INTO cold_ingest (value) VALUES (99)")
+                        .expect("other writer commits after integrity admission");
+                }
+                self.response.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let server = RedDBServer::new(runtime.clone());
+        let mut writer = InterleavedWriter {
+            runtime: runtime.clone(),
+            response: Vec::new(),
+            inserted: false,
+        };
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                None,
+                &mut writer,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(writer.response).expect("HTTP text");
+        assert!(response.contains("integrity_failed"), "{response}");
+        runtime.invalidate_result_cache();
+        let visible = runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("unrelated row remains readable");
+        assert_eq!(
+            visible.result.records.len(),
+            1,
+            "quarantine must exclude the other writer's committed row"
+        );
+        assert_eq!(
+            visible.result.records[0].get("value"),
+            Some(&reddb_types::Value::Integer(99))
+        );
+    }
+
+    #[test]
+    fn cold_integrity_exact_large_ids_survive_the_terminal_envelope() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let store = runtime.db().store();
+        let high_water = 1_u64 << 60;
+        store.register_entity_id(crate::storage::EntityId::new(high_water));
+        let server = RedDBServer::new(runtime);
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                VERIFIED_INGEST.to_vec(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                None,
+                &mut response,
+            )
+            .expect("HTTP response");
+        let ranges =
+            crate::runtime::integrity_tombstone::load_ranges(&store).expect("durable exact range");
+        assert_eq!(ranges.len(), 1);
+        let range = &ranges[0];
+        assert!(
+            range.lo > high_water && range.lo < high_water + 128,
+            "insert identity near seeded high water: {}",
+            range.lo
+        );
+        let response = String::from_utf8(response).expect("HTTP text");
+        let expected = format!("\"tombstoned_rid_range\":[{},{}]", range.lo, range.hi);
+        assert!(
+            response.contains(&expected),
+            "large quarantine IDs must not round through f64: {response}"
+        );
+    }
+
+    #[test]
+    fn cold_stream_config_http_ingest_honors_persisted_verification_default() {
+        let (_directory, runtime) = cold_integrity_ingest_runtime(128 * 1024);
+        let server = RedDBServer::new(runtime.clone());
+        let body = String::from_utf8(VERIFIED_INGEST.to_vec())
+            .expect("fixture text")
+            .replace(",\"verify\":\"sha256\"", "");
+        let mut response = Vec::new();
+        server
+            .handle_query_ndjson_input_stream(
+                body.into_bytes(),
+                &crate::server::routing::StreamAuditCtx {
+                    principal: "fixture",
+                    token: None,
+                },
+                None,
+                &mut response,
+            )
+            .expect("HTTP response");
+        let response = String::from_utf8(response).expect("HTTP text");
+        assert!(
+            response.contains("integrity_failed"),
+            "cold persisted default must enable digest verification: {response}"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("cold_ingest")
+                .expect("table")
+                .count(),
+            1,
+            "quarantine preserves the committed physical row"
+        );
+        assert!(runtime
+            .execute_query("SELECT * FROM cold_ingest")
+            .expect("filtered read")
+            .result
+            .records
+            .is_empty());
+    }
+
     fn make_server() -> RedDBServer {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         RedDBServer::new(rt)
@@ -2339,6 +2782,211 @@ mod tests {
 
     fn body_str(resp: &HttpResponse) -> String {
         String::from_utf8_lossy(&resp.body).to_string()
+    }
+
+    #[test]
+    fn http_query_unique_rejections_preserve_client_error_and_batch_atomicity() {
+        for method in ["HASH", "BTREE"] {
+            let server = make_server();
+            for query in [
+                "CREATE TABLE unique_http (id INTEGER, payload TEXT)".to_string(),
+                format!("CREATE UNIQUE INDEX unique_http_id ON unique_http (id) USING {method}"),
+                "INSERT INTO unique_http (id, payload) VALUES (1, 'original')".to_string(),
+            ] {
+                let body = format!(r#"{{"query":"{query}"}}"#);
+                let response = server.handle_query(body.into_bytes());
+                assert_eq!(response.status, 200, "{}", body_str(&response));
+            }
+
+            for body in [
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES (1,'duplicate')"}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES ($1,$2)","params":[1,"duplicate"]}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES (2,'new'),(1,'duplicate')"}"#,
+                r#"{"query":"INSERT INTO unique_http (id,payload) VALUES ($1,$2),($3,$4)","params":[2,"new",2,"duplicate"]}"#,
+            ] {
+                let response = server.handle_query(body.as_bytes().to_vec());
+                assert_eq!(response.status, 400, "{method}: {}", body_str(&response));
+                assert!(body_str(&response).contains("duplicate key violates unique index"));
+                let rows = server
+                    .runtime
+                    .execute_query("SELECT id, payload FROM unique_http")
+                    .expect("read after rejected insert")
+                    .result
+                    .records;
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "a rejected batch must not install its prefix"
+                );
+                assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
+                assert_eq!(rows[0].get("payload"), Some(&Value::text("original")));
+            }
+
+            let response = server.handle_query(
+                br#"{"query":"INSERT INTO unique_http (id,payload) VALUES (2,'retry')"}"#.to_vec(),
+            );
+            assert_eq!(response.status, 200, "{}", body_str(&response));
+        }
+    }
+
+    #[test]
+    fn http_query_prevalidated_unique_rejection_preserves_native_error() {
+        use crate::application::ports::RuntimeEntityPort;
+        use crate::application::{CreateRowInput, CreateRowsBatchInput};
+
+        let server = make_server();
+        for query in [
+            "CREATE TABLE unique_prevalidated (id INTEGER)",
+            "CREATE UNIQUE INDEX unique_prevalidated_id ON unique_prevalidated (id) USING BTREE",
+            "INSERT INTO unique_prevalidated (id) VALUES (1)",
+        ] {
+            server.runtime.execute_query(query).expect("fixture");
+        }
+        let error = server
+            .runtime
+            .create_rows_batch_prevalidated_with_outputs(CreateRowsBatchInput {
+                collection: "unique_prevalidated".to_string(),
+                rows: vec![CreateRowInput {
+                    collection: "unique_prevalidated".to_string(),
+                    fields: vec![("id".to_string(), Value::Integer(1))],
+                    metadata: Vec::new(),
+                    node_links: Vec::new(),
+                    vector_links: Vec::new(),
+                }],
+                suppress_events: false,
+            })
+            .err()
+            .expect("prevalidated input must still enforce standalone UNIQUE indexes");
+        assert!(matches!(error, crate::RedDBError::Query(_)), "{error}");
+        assert_eq!(map_runtime_error(&error).0, 400);
+    }
+
+    #[test]
+    fn http_query_buffers_share_the_budget_until_the_last_transport_owner_drops() {
+        assert_http_query_buffer_ownership(1024 * 1024, false);
+    }
+
+    #[test]
+    fn http_query_buffers_compete_with_storage_growth_and_release_it_for_retry() {
+        // The 256KiB insert also reserves its complete storage/WAL workspace.
+        // This larger control budget admits that write when responses are gone.
+        assert_http_query_buffer_ownership(2 * 1024 * 1024, true);
+    }
+
+    fn assert_http_query_buffer_ownership(budget: u64, check_writes: bool) {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(budget))
+                .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE response_buffers (payload TEXT)")
+            .expect("table");
+        let payload = "x".repeat(64 * 1024);
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO response_buffers (payload) VALUES ($1)",
+                &[Value::text(payload.clone())],
+            )
+            .expect("seed fits budget");
+        let servers = [
+            RedDBServer::new(runtime.clone()),
+            RedDBServer::new(runtime.clone()),
+        ];
+        let request = br#"{"query":"SELECT payload FROM response_buffers"}"#;
+        assert_eq!(servers[0].handle_query(request.to_vec()).status, 200);
+        let mut responses = Vec::new();
+        let mut refused = false;
+        for request_id in 0..32 {
+            let response = servers[request_id % 2].handle_query(request.to_vec());
+            if response.status != 200 {
+                assert_eq!(response.status, 507, "{}", body_str(&response));
+                assert!(body_str(&response).contains("memory_limit_exceeded"));
+                refused = true;
+                break;
+            }
+            responses.push(response);
+        }
+        assert!(
+            refused,
+            "retained responses must compete for the shared runtime budget"
+        );
+        assert!(
+            !responses.is_empty(),
+            "a fitting response must succeed first"
+        );
+        runtime.refresh_memory_accounting();
+        assert!(runtime.memory_accounting().total_used_bytes() <= budget);
+
+        let copies: Vec<_> = responses
+            .iter()
+            .map(|response| response.body.clone())
+            .collect();
+        for (response, copy) in responses.iter().zip(&copies) {
+            assert_eq!(
+                response.body.as_ptr(),
+                copy.as_ptr(),
+                "transport clones share their allocation"
+            );
+        }
+        let outgoing: Vec<_> = responses
+            .into_iter()
+            .map(super::super::axum_edge::buffered_response_to_axum)
+            .collect();
+        assert_eq!(servers[0].handle_query(request.to_vec()).status, 507);
+        let competing_payload = Value::text("y".repeat(256 * 1024));
+        let insert = "INSERT INTO response_buffers (payload) VALUES ($1)";
+        if check_writes {
+            let refused_write = runtime
+                .execute_query_with_params(insert, std::slice::from_ref(&competing_payload))
+                .expect_err("retained responses and writes compete for the same budget");
+            assert!(
+                refused_write.to_string().contains("over budget"),
+                "{refused_write}"
+            );
+        }
+        drop(copies);
+        assert_eq!(
+            servers[0].handle_query(request.to_vec()).status,
+            507,
+            "queued transport still owns responses"
+        );
+        assert_eq!(
+            servers[1]
+                .handle_query(br#"{"query":"SELECT 1 AS healthy"}"#.to_vec())
+                .status,
+            200
+        );
+        drop(outgoing);
+
+        let retried = servers[0].handle_query(request.to_vec());
+        assert_eq!(retried.status, 200, "last owner returns headroom");
+        assert!(
+            body_str(&retried).contains(&payload),
+            "response retains the complete value"
+        );
+        assert_eq!(
+            runtime
+                .execute_query("SELECT COUNT(*) AS n FROM response_buffers")
+                .expect("read after refusal")
+                .result
+                .records[0]
+                .get("n"),
+            Some(&Value::Integer(1))
+        );
+        drop(retried);
+        if check_writes {
+            runtime
+                .execute_query_with_params(insert, &[competing_payload])
+                .expect("the identical write fits after transport releases its buffers");
+            assert_eq!(
+                runtime
+                    .execute_query("SELECT COUNT(*) AS n FROM response_buffers")
+                    .expect("count after retry")
+                    .result
+                    .records[0]
+                    .get("n"),
+                Some(&Value::Integer(2))
+            );
+        }
     }
 
     #[test]

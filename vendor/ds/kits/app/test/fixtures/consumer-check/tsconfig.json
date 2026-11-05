@@ -1,0 +1,4 @@
+{
+  "extends": "../../../tsconfig.consumer.json",
+  "include": ["Unfixed.svelte"]
+}

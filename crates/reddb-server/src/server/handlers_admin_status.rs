@@ -245,6 +245,12 @@ impl RedDBServer {
         if let Some(v) = limits.max_result_bytes {
             limits_obj.insert("max_result_bytes".to_string(), JsonValue::Number(v as f64));
         }
+        if let Some(value) = limits.max_concurrent_queries {
+            limits_obj.insert(
+                "max_concurrent_queries".to_string(),
+                JsonValue::Number(value as f64),
+            );
+        }
         object.insert("limits".to_string(), JsonValue::Object(limits_obj));
 
         if let Some(report) = lifecycle.shutdown_report() {

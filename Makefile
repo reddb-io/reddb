@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms test-chaos test-chaos-drills test-chaos-replication test-chaos-all test-dst-storage test-dst-sweep drill-nightly clean run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
+.PHONY: help build build-fast release warm test test-fast test-full test-nextest test-nextest-lib test-nextest-e2e test-persistent test-persistent-grimms test-chaos test-chaos-drills test-chaos-replication test-chaos-all test-storage-apocalypse test-dst-storage test-dst-sweep drill-nightly clean clean-package run run-grpc install fmt lint check check-helm check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust perf-bench
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -24,6 +24,7 @@ help:
 	@echo "  make test-persistent-grimms - Run the Grimms-scale persistent storage fixture"
 	@echo "  make test-chaos    - Run local chaos tests"
 	@echo "  make test-chaos-all - Run local chaos, drill, replication harness, and storage fault tests"
+	@echo "  make test-storage-apocalypse - Run page reuse, crash, growth and transaction regressions"
 	@echo "  make test-dst-storage - Run seeded storage fault recovery tests"
 	@echo "  make test-dst-sweep - Run ignored DST replication seed sweep"
 	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
@@ -31,6 +32,7 @@ help:
 	@echo "  make test-env-shell PROFILE=replica - Bring up a dedicated test environment and run shell checks only"
 	@echo "  make test-env-rust PROFILE=replica - Run Rust external-env tests against an already running environment"
 	@echo "  make clean         - Clean build artifacts"
+	@echo "  make clean-package PACKAGE=reddb-io-server - Remove one package's build artifacts"
 	@echo "  make run           - Run HTTP server (ARGS='--path ... --bind ...')"
 	@echo "  make run-grpc      - Run gRPC server (ARGS='--path ... --bind ...')"
 	@echo ""
@@ -62,11 +64,11 @@ build:
 	./scripts/cargo-fast.sh build
 
 build-fast:
-	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --profile release-fast --bin red
+	./scripts/cargo-fast.sh build --profile release-fast --bin red
 
 # Build release version (optimized)
 release:
-	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --release
+	./scripts/cargo-fast.sh build --release
 
 warm:
 	./scripts/cargo-fast.sh build
@@ -87,57 +89,80 @@ test-full:
 # and a hard per-test timeout (see .config/nextest.toml) so a hung test is
 # killed and reported instead of stalling the run. See docs/testing/nextest-lanes.md.
 test-nextest:
-	cargo nextest run --workspace --locked
+	./scripts/cargo-fast.sh nextest run --workspace --locked
 
 # Lib lane: fast in-crate unit tests only.
 test-nextest-lib:
-	cargo nextest run --workspace --locked --lib
+	./scripts/cargo-fast.sh nextest run --workspace --locked --lib
 
 # e2e lane: the top-level integration-test binaries. Shard across N runners with
 # `scripts/nextest-e2e-shard.sh <index> <total>`.
 test-nextest-e2e:
-	cargo nextest run --workspace --locked -E 'kind(test)'
+	./scripts/cargo-fast.sh nextest run --workspace --locked -E 'kind(test)'
 
 test-persistent:
-	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_multimodel -- --ignored
+	./scripts/cargo-fast.sh test --locked --test grouped_general_multimodel integration_persistent_multimodel -- --ignored
 
 test-persistent-grimms:
-	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test grouped_runtime_persistence integration_persistent_grimms_scale -- --ignored --nocapture
+	./scripts/cargo-fast.sh test --locked --test grouped_general_multimodel integration_persistent_grimms_scale -- --ignored --nocapture
 
 test-chaos:
-	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast chaos_
+	./scripts/cargo-fast.sh test --locked --test grouped_chaos_drill_persistence --no-fail-fast chaos_
 
 test-chaos-drills:
-	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast drill_
+	./scripts/cargo-fast.sh test --locked --test grouped_chaos_drill_persistence --no-fail-fast drill_
 
 test-chaos-replication:
-	cargo test --locked --test grouped_replication jepsen_black_box_harness_self_test_exercises_replay_artifacts_and_checkers
+	./scripts/cargo-fast.sh test --locked --test grouped_replication jepsen_black_box_harness_self_test_exercises_replay_artifacts_and_checkers
 
 test-chaos-all:
-	cargo test --locked --test grouped_chaos_drill_persistence --no-fail-fast
+	./scripts/cargo-fast.sh test --locked --test grouped_chaos_drill_persistence --no-fail-fast
 	$(MAKE) test-chaos-replication
 	$(MAKE) test-dst-storage
 
+# Storage regressions are deliberately non-ignored and fail this target on any loss,
+# duplicate allocation, growth beyond the warmup plateau, or checkpoint regression.
+test-storage-apocalypse:
+	cargo test --locked -p reddb-io-engine --lib storage::page_cache::tests -- --test-threads=1
+	cargo test --locked -p reddb-io-engine --test portable -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib storage::unified::store::commit:: -- --test-threads=1 --nocapture
+	cargo test --locked -p reddb-io-server --lib inline_ -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib storage::engine:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --test cold_control_events --test offline_compaction --test pager_allocation_recovery --test pager_freelist_flush_recovery --test pager_flush_transaction --test paged_checkpoint_rebuild --test single_file_collection_model_recovery --test btree_delete_stack --test btree_mixed_width_split --test checkpoint_open_transaction --test checkpoint_concurrent_transaction --test checkpoint_gc_provenance --test checkpoint_sparse_update --test vacuum_snapshot_horizon --no-fail-fast -- --test-threads=1
+
+.PHONY: test-memory-regressions
+test-memory-regressions:
+	cargo test --locked -p reddb-io-engine --test recovery_memory -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib runtime::mutation_memory_tests:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib scoped_stats_memory_tests -- --test-threads=1 --nocapture
+	cargo test --locked -p reddb-io-server --lib artifact_memory_tests -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias -- --test-threads=1
+
 test-dst-storage:
-	cargo test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery --test tm_commit_path_recovery --test store_fork_lifecycle_recovery --test superblock_manifest_zone_recovery
+	./scripts/cargo-fast.sh test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery --test tm_commit_path_recovery --test store_fork_lifecycle_recovery --test superblock_manifest_zone_recovery
 
 test-dst-sweep:
-	cargo test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored
+	./scripts/cargo-fast.sh test --locked -p reddb-io-server replication::dst::tests::dst_seed_sweep -- --ignored
 
 drill-nightly:
 	@./scripts/drill-nightly.sh
 
 # Clean artifacts
 clean:
-	cargo clean
+	./scripts/cargo-fast.sh clean
+
+# Preserve the other packages' caches when reclaiming stale build variants.
+clean-package:
+	@test -n "$(PACKAGE)" || { echo 'Set PACKAGE, e.g. reddb-io-server' >&2; exit 2; }
+	./scripts/cargo-fast.sh clean -p "$(PACKAGE)"
 
 # Run debug HTTP server
 run:
-	cargo run -- $(ARGS)
+	./scripts/cargo-fast.sh run -- $(ARGS)
 
 # Run debug gRPC server
 run-grpc:
-	cargo run --bin reddb-grpc -- $(ARGS)
+	./scripts/cargo-fast.sh run --bin reddb-grpc -- $(ARGS)
 
 # Format code
 fmt:
@@ -145,7 +170,7 @@ fmt:
 
 # Clippy
 lint:
-	cargo clippy -- -D warnings
+	./scripts/cargo-fast.sh clippy -- -D warnings
 
 # Quick compile check
 check:
@@ -161,7 +186,7 @@ check-driver-python:
 	./scripts/cargo-fast.sh check --manifest-path drivers/python/Cargo.toml
 
 timings:
-	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --profile release-fast --bin red --timings
+	./scripts/cargo-fast.sh build --profile release-fast --bin red --timings
 
 cold-start-bench:
 	@./scripts/cold-start-bench.sh
@@ -177,11 +202,11 @@ artifact-size:
 
 # Install from source
 install:
-	cargo install --path .
+	./scripts/cargo-fast.sh install --path .
 
 # Link local release binary
 link:
-	cargo build --release
+	./scripts/cargo-fast.sh build --release
 	@mkdir -p $(LOCAL_BIN)
 	@ln -sf "$(LOCAL_BINARY)" "$(LOCAL_BIN)/reddb"
 	@ln -sf "$(LOCAL_GRPC_BINARY)" "$(LOCAL_BIN)/reddb-grpc"
@@ -310,7 +335,7 @@ perf-bench:
 		exit 1; \
 	fi; \
 	echo "==> building red with frame pointers"; \
-	RUSTFLAGS="-Cforce-frame-pointers=yes" cargo build --release --bin red; \
+	RUSTFLAGS="-Cforce-frame-pointers=yes" ./scripts/cargo-fast.sh build --release --bin red; \
 	mkdir -p $(PERF_OUT_DIR); \
 	rm -f $(PERF_DB_PATH); \
 	echo "==> starting red on $(PERF_BIND) (db=$(PERF_DB_PATH))"; \

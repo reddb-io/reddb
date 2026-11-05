@@ -29,35 +29,51 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(layout.size()));
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        COUNTER.with(|counter| counter.borrow_mut().record_dealloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_dealloc(layout.size()));
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(layout.size()));
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        COUNTER.with(|counter| counter.borrow_mut().record_alloc());
-        unsafe { System.realloc(ptr, layout, new_size) }
+        COUNTER.with(|counter| counter.borrow_mut().record_alloc(new_size));
+        let result = unsafe { System.realloc(ptr, layout, new_size) };
+        if !result.is_null() {
+            // A successful resize replaces the old requested allocation even
+            // when the allocator can grow it in place. Keep dealloc counts
+            // unchanged; released bytes let scoped tests measure retention.
+            COUNTER.with(|counter| counter.borrow_mut().record_released_bytes(layout.size()));
+        }
+        result
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AllocationCount {
-    allocs: usize,
+pub(crate) struct AllocationCount {
+    pub(crate) allocs: usize,
+    pub(crate) allocated_bytes: usize,
+    pub(crate) largest_allocation_bytes: usize,
+    pub(crate) peak_live_bytes: usize,
+    pub(crate) deallocated_bytes: usize,
     deallocs: usize,
 }
 
 struct AllocationCounter {
     enabled: Cell<bool>,
     allocs: Cell<usize>,
+    allocated_bytes: Cell<usize>,
+    largest_allocation_bytes: Cell<usize>,
+    live_bytes: Cell<usize>,
+    peak_live_bytes: Cell<usize>,
+    deallocated_bytes: Cell<usize>,
     deallocs: Cell<usize>,
 }
 
@@ -66,19 +82,42 @@ impl AllocationCounter {
         Self {
             enabled: Cell::new(false),
             allocs: Cell::new(0),
+            allocated_bytes: Cell::new(0),
+            largest_allocation_bytes: Cell::new(0),
+            live_bytes: Cell::new(0),
+            peak_live_bytes: Cell::new(0),
+            deallocated_bytes: Cell::new(0),
             deallocs: Cell::new(0),
         }
     }
 
-    fn record_alloc(&mut self) {
+    fn record_alloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.allocs.set(self.allocs.get() + 1);
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_add(bytes));
+            self.peak_live_bytes
+                .set(self.peak_live_bytes.get().max(self.live_bytes.get()));
+            self.largest_allocation_bytes
+                .set(self.largest_allocation_bytes.get().max(bytes));
+            self.allocated_bytes
+                .set(self.allocated_bytes.get().saturating_add(bytes));
         }
     }
 
-    fn record_dealloc(&mut self) {
+    fn record_dealloc(&mut self, bytes: usize) {
         if self.enabled.get() {
             self.deallocs.set(self.deallocs.get() + 1);
+            self.record_released_bytes(bytes);
+        }
+    }
+
+    fn record_released_bytes(&mut self, bytes: usize) {
+        if self.enabled.get() {
+            self.deallocated_bytes
+                .set(self.deallocated_bytes.get().saturating_add(bytes));
+            self.live_bytes
+                .set(self.live_bytes.get().saturating_sub(bytes));
         }
     }
 
@@ -88,12 +127,21 @@ impl AllocationCounter {
             "allocation counter cannot be nested"
         );
         self.allocs.set(0);
+        self.allocated_bytes.set(0);
+        self.largest_allocation_bytes.set(0);
+        self.live_bytes.set(0);
+        self.peak_live_bytes.set(0);
+        self.deallocated_bytes.set(0);
         self.deallocs.set(0);
     }
 
     fn finish(&self) -> AllocationCount {
         let count = AllocationCount {
             allocs: self.allocs.get(),
+            allocated_bytes: self.allocated_bytes.get(),
+            largest_allocation_bytes: self.largest_allocation_bytes.get(),
+            peak_live_bytes: self.peak_live_bytes.get(),
+            deallocated_bytes: self.deallocated_bytes.get(),
             deallocs: self.deallocs.get(),
         };
         self.enabled.set(false);
@@ -113,7 +161,7 @@ impl Drop for CounterGuard {
     }
 }
 
-fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
+pub(crate) fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
     COUNTER.with(|counter| counter.borrow().begin());
     let _guard = CounterGuard;
     let result = operation();
@@ -134,6 +182,18 @@ struct CoveredOperation {
 }
 
 const COVERED_OPERATIONS: &[CoveredOperation] = &[
+    CoveredOperation {
+        name: "manager-key-lookup-projection-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_manager_key_lookup_projection_hit,
+    },
+    CoveredOperation {
+        name: "segment-key-lookup-hit",
+        allowed_allocs: 0,
+        exception: None,
+        measure: measure_segment_key_lookup_hit,
+    },
     CoveredOperation {
         name: "hash-index-point-read-hit",
         allowed_allocs: 0,
@@ -235,6 +295,21 @@ fn counting_allocator_measures_a_known_allocating_fixture() {
         count.deallocs, 1,
         "dropping the Box inside the measured closure should register exactly one deallocation"
     );
+    assert_eq!(count.allocated_bytes, count.deallocated_bytes);
+    assert_eq!(count.peak_live_bytes, 8);
+}
+
+#[test]
+fn counting_allocator_accounts_for_released_bytes_during_resize() {
+    let ((), count) = measure_allocations(|| {
+        let mut value = Vec::<u8>::with_capacity(8);
+        value.extend_from_slice(&[0; 8]);
+        value.reserve_exact(24);
+        assert_eq!(value.capacity(), 32);
+    });
+    assert_eq!(count.allocated_bytes, 40);
+    assert_eq!(count.peak_live_bytes, 40);
+    assert_eq!(count.deallocated_bytes, 40);
 }
 
 #[test]
@@ -275,6 +350,157 @@ fn measure_hash_index_point_read_hit() -> AllocationCount {
 
     assert_eq!(ids, &[EntityId::new(42)]);
     count
+}
+
+fn measure_segment_key_lookup_hit() -> AllocationCount {
+    use super::unified::{EntityData, RowData};
+    let mut segment = GrowingSegment::new(1, "keys");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1), "keys", 1, Vec::new());
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![reddb_types::Value::text("wanted")],
+        vec!["key".into()],
+    ));
+    segment.insert(entity).expect("keyed row");
+    let (entity, count) =
+        measure_allocations(|| segment.find_key_entity("wanted", true, &mut |_| true));
+    assert_eq!(entity.map(|entity| entity.id), Some(EntityId::new(1)));
+    count
+}
+
+#[test]
+fn segment_key_lookup_hit_allocates_nothing() {
+    assert_eq!(measure_segment_key_lookup_hit().allocs, 0);
+}
+
+fn measure_manager_key_lookup_projection_hit() -> AllocationCount {
+    use super::unified::{EntityData, RowData, SegmentManager};
+    use reddb_types::Value;
+    let manager = SegmentManager::new("keys");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1), "keys", 1, Vec::new());
+    entity.data = EntityData::Row(RowData::with_names(
+        vec![Value::text("wanted"), Value::Integer(42)],
+        vec!["key".into(), "value".into()],
+    ));
+    manager.insert(entity).expect("row");
+    let (value, count) = measure_allocations(|| {
+        manager.project_key_entity("wanted", None, false, |entity| {
+            let super::unified::EntityData::Row(row) = &entity.data else {
+                panic!("row");
+            };
+            row.get_field("value").cloned()
+        })
+    });
+    assert_eq!(value, Some(Some(Value::Integer(42))));
+    count
+}
+
+#[test]
+fn manager_key_lookup_projection_allocates_nothing() {
+    assert_eq!(measure_manager_key_lookup_projection_hit().allocs, 0);
+}
+
+#[test]
+fn runtime_key_lookup_hit_avoids_row_clone() {
+    use crate::catalog::CollectionModel;
+    use crate::runtime::impl_kv::KvAtomicOps;
+    use reddb_types::Value;
+
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let ops = KvAtomicOps::new(&runtime);
+    for expected in [
+        Value::Integer(42),
+        Value::text("payload"),
+        Value::Array(vec![
+            Value::Integer(7),
+            Value::Array(vec![Value::text("nested")]),
+        ]),
+    ] {
+        ops.set(
+            CollectionModel::Kv,
+            "lookup_allocations",
+            "wanted",
+            expected.clone(),
+            None,
+            false,
+        )
+        .expect("seed");
+        for _ in 0..3 {
+            assert_eq!(
+                ops.get(CollectionModel::Kv, "lookup_allocations", "wanted")
+                    .expect("hit"),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                ops.get(CollectionModel::Kv, "lookup_allocations", "absent")
+                    .expect("miss"),
+                None
+            );
+        }
+        let (hit, hit_count) =
+            measure_allocations(|| ops.get(CollectionModel::Kv, "lookup_allocations", "wanted"));
+        let (miss, miss_count) =
+            measure_allocations(|| ops.get(CollectionModel::Kv, "lookup_allocations", "absent"));
+        let (_, value_count) = measure_allocations(|| expected.clone());
+        eprintln!("KV GET allocations: hit={hit_count:?}, miss={miss_count:?}, returned value={value_count:?}");
+        assert_eq!(hit.expect("hit"), Some(expected));
+        assert_eq!(miss.expect("miss"), None);
+        assert_eq!(
+        hit_count.allocs, miss_count.allocs + value_count.allocs,
+        "hits must allocate only their returned value: hit={hit_count:?}, miss={miss_count:?}, value={value_count:?}"
+    );
+    }
+}
+
+#[test]
+fn rql_get_projection_does_not_clone_unreturned_fields() {
+    use crate::catalog::CollectionModel;
+    use reddb_rql::ast::KvCommand;
+    use reddb_types::Value;
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("KV PUT projected.item = 'payload'")
+        .expect("seed");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("projected")
+        .expect("collection");
+    let original = manager.query_all(|_| true).pop().expect("row");
+    let command = KvCommand::Get {
+        model: CollectionModel::Kv,
+        collection: "projected".into(),
+        key: "item".into(),
+    };
+    let mut baseline = None;
+    for extra_values in [0, 128] {
+        let mut entity = original.clone();
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            panic!("row");
+        };
+        row.named.as_mut().expect("named row").insert(
+            "not_returned".into(),
+            Value::Array(
+                (0..extra_values)
+                    .map(|_| Value::Array(vec![Value::Integer(1)]))
+                    .collect(),
+            ),
+        );
+        manager.update(entity).expect("update");
+        let (result, count) =
+            measure_allocations(|| runtime.execute_kv_command("KV GET projected.item", &command));
+        assert_eq!(
+            result.expect("GET").result.records[0].get("value"),
+            Some(&Value::text("payload"))
+        );
+        if let Some(expected) = baseline {
+            assert_eq!(
+                count.allocs, expected,
+                "unprojected data must not allocate on GET"
+            );
+        } else {
+            baseline = Some(count.allocs);
+        }
+    }
 }
 
 fn measure_growing_segment_flat_row_insert() -> AllocationCount {
@@ -774,4 +1000,86 @@ fn row_topology_lock_reuse_does_not_allocate() {
         "warmed row topology must not allocate per batch"
     );
     assert_eq!(count.deallocs, 0);
+}
+
+#[test]
+fn catalog_snapshot_allocations_do_not_scale_with_collection_rows() {
+    let runtime = crate::RedDBRuntime::in_memory().expect("runtime");
+    let db = runtime.db();
+    let store = db.store();
+    store
+        .create_collection("catalog_payloads")
+        .expect("collection");
+    let manager = store.get_collection("catalog_payloads").expect("manager");
+    let insert = |id: u64| {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(100_000 + id),
+                "catalog_payloads",
+                id,
+                (0..64).map(reddb_types::Value::Integer).collect(),
+            ))
+            .expect("row");
+    };
+    for id in 0..100 {
+        insert(id);
+    }
+    let (small, baseline) = measure_allocations(|| db.catalog_snapshot());
+    assert_eq!(small.stats_by_collection["catalog_payloads"].entities, 100);
+    for id in 100..2_000 {
+        insert(id);
+    }
+    let (large, measured) = measure_allocations(|| db.catalog_snapshot());
+    assert_eq!(
+        large.stats_by_collection["catalog_payloads"].entities,
+        2_000
+    );
+    assert_eq!(large.stats_by_collection["catalog_payloads"].cross_refs, 0);
+    assert!(
+        measured.allocs <= baseline.allocs + 128,
+        "catalog observation must allocate by collection count, not payload rows: {baseline:?} -> {measured:?}"
+    );
+}
+
+#[test]
+fn health_observation_does_not_rebuild_artifacts_from_collection_rows() {
+    use crate::{RedDBOptions, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("temporary database");
+    let runtime = crate::RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("health.rdb"))
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("paged profile"),
+    )
+    .expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE health_payloads (value INT)")
+        .expect("table");
+    let db = runtime.db();
+    let manager = db
+        .store()
+        .get_collection("health_payloads")
+        .expect("manager");
+    let insert = |id: u64| {
+        manager
+            .insert(UnifiedEntity::table_row(
+                EntityId::new(100_000 + id),
+                "health_payloads",
+                id,
+                (0..64).map(reddb_types::Value::Integer).collect(),
+            ))
+            .expect("row");
+    };
+    for id in 0..100 {
+        insert(id);
+    }
+    runtime.checkpoint().expect("published metadata");
+    let (_, baseline) = measure_allocations(|| db.health());
+    for id in 100..2_000 {
+        insert(id);
+    }
+    let (_, measured) = measure_allocations(|| db.health());
+    assert!(
+        measured.allocs <= baseline.allocs + 128,
+        "health observation must not rebuild artifacts from payload rows: {baseline:?} -> {measured:?}"
+    );
 }

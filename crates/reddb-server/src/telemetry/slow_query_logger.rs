@@ -110,9 +110,9 @@ impl SlowQueryLogger {
     }
 
     /// Resolve a [`crate::storage::layout::LogDestination`] into a concrete
-    /// slow-query sink. `File(p)` writes to that exact path; `Stderr` and
-    /// `Syslog` fall back to `<fallback_log_dir>/red-slow.log` until the
-    /// dedicated sinks are wired (ADR 0018).
+    /// slow-query sink. `File(p)` writes to that exact path and `Stderr`
+    /// writes to stderr. `Syslog` falls back to a file until its dedicated
+    /// sink is wired (ADR 0018). Unavailable files fall back to stderr.
     pub fn for_destination(
         dest: &crate::storage::layout::LogDestination,
         fallback_log_dir: &std::path::Path,
@@ -123,7 +123,7 @@ impl SlowQueryLogger {
         let path = match dest {
             LogDestination::File(p) => p.clone(),
             LogDestination::Stderr => {
-                reddb_file::layout::legacy_slow_query_log_path(fallback_log_dir)
+                return Self::from_writer(std::io::stderr(), threshold_ms, sample_pct);
             }
             LogDestination::Syslog => {
                 tracing::warn!(
@@ -137,19 +137,38 @@ impl SlowQueryLogger {
     }
 
     fn open_at(path: PathBuf, threshold_ms: u64, sample_pct: u8) -> Arc<Self> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let file = (|| -> std::io::Result<std::fs::File> {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })();
+        match file {
+            Ok(file) => Self::from_writer(file, threshold_ms, sample_pct),
+            Err(error) => {
+                tracing::warn!(
+                    target: "reddb::slow",
+                    path = %path.display(),
+                    %error,
+                    "slow-query file sink unavailable; using stderr"
+                );
+                Self::from_writer(std::io::stderr(), threshold_ms, sample_pct)
+            }
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|e| panic!("SlowQueryLogger: cannot open {}: {e}", path.display()));
+    }
 
+    fn from_writer(
+        sink: impl Write + Send + 'static,
+        threshold_ms: u64,
+        sample_pct: u8,
+    ) -> Arc<Self> {
         let (writer, guard) = NonBlockingBuilder::default()
             .buffered_lines_limit(65_536)
             .lossy(true)
-            .finish(file);
+            .finish(sink);
 
         Arc::new(Self {
             writer: Mutex::new(writer),
@@ -262,7 +281,8 @@ impl SlowQueryLogger {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::Instant;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
     use crate::runtime::EffectiveScope;
@@ -321,10 +341,44 @@ mod tests {
         }
     }
 
-    fn flush(_log: &Arc<SlowQueryLogger>) {
-        // NonBlocking sends bytes to a background thread; sleep gives the
-        // worker time to drain the channel and write to disk.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    #[test]
+    fn unavailable_log_directory_does_not_panic_or_drop_store_events() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let blocked = directory.path().join("not-a-directory");
+        std::fs::write(&blocked, b"file").expect("unavailable directory fixture");
+        let logger = SlowQueryLogger::new(SlowQueryOpts {
+            log_dir: blocked.join("slow"),
+            threshold_ms: 0,
+            sample_pct: 100,
+        });
+        let store = super::super::slow_query_store::SlowQueryStore::new(4);
+        logger.attach_store(Arc::clone(&store));
+        logger.record(QueryKind::Select, 42, "SELECT ?".into(), &empty_scope());
+        assert_eq!(store.len(), 1);
+        assert!(blocked.is_file());
+    }
+
+    #[test]
+    fn stderr_destination_does_not_create_a_fallback_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let fallback = directory.path().join("unused");
+        let logger = SlowQueryLogger::for_destination(
+            &crate::storage::layout::LogDestination::Stderr,
+            &fallback,
+            100,
+            100,
+        );
+        drop(logger);
+        assert!(
+            !fallback.exists(),
+            "stderr logging created filesystem artifacts"
+        );
+    }
+
+    fn flush(log: Arc<SlowQueryLogger>) {
+        // Dropping the final WorkerGuard drains and joins the non-blocking
+        // writer. A fixed sleep is racy under parallel CI load.
+        drop(log);
     }
 
     fn read_log_lines(dir: &TempSlowDir) -> Vec<crate::json::Value> {
@@ -350,7 +404,7 @@ mod tests {
             log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
         }
 
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert!(
             lines.is_empty(),
@@ -360,20 +414,30 @@ mod tests {
     }
 
     #[test]
-    fn below_threshold_wall_time_under_10ms() {
+    fn below_threshold_fast_path_does_not_wait_for_writer() {
         let dir = tmp_dir();
         let log = logger(&dir, 1000, 100);
-        let scope = empty_scope();
 
-        let start = Instant::now();
-        for _ in 0..10_000 {
-            log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
-        }
-        let elapsed = start.elapsed();
+        // Hold the slow sink lock. The below-threshold path must complete
+        // without consulting it; this verifies the hot-path property without
+        // a wall-clock microbenchmark that flakes under parallel CI load.
+        let writer_guard = log.writer.lock().expect("writer lock");
+        let worker_log = Arc::clone(&log);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let scope = empty_scope();
+            for _ in 0..10_000 {
+                worker_log.record(QueryKind::Select, 5, "SELECT 1".into(), &scope);
+            }
+            let _ = done_tx.send(());
+        });
+
+        let completed_without_writer = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(writer_guard);
+        worker.join().expect("below-threshold worker");
         assert!(
-            elapsed.as_millis() < 10,
-            "10k below-threshold calls took {}ms (>10ms budget)",
-            elapsed.as_millis()
+            completed_without_writer,
+            "below-threshold calls waited for the slow-query writer"
         );
     }
 
@@ -388,7 +452,7 @@ mod tests {
         let scope = empty_scope();
 
         log.record(QueryKind::Select, 100, "SELECT * FROM t".into(), &scope);
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1, "expected 1 line");
@@ -411,7 +475,7 @@ mod tests {
             "INSERT INTO t VALUES (1)".into(),
             &scope,
         );
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1);
@@ -456,7 +520,7 @@ mod tests {
         for i in 0..calls {
             log.record(QueryKind::Select, 1, format!("SELECT {i}"), &scope);
         }
-        flush(&log);
+        flush(log);
 
         let lines = read_log_lines(&dir);
         let emitted = lines.len() as u64;
@@ -488,7 +552,7 @@ mod tests {
             let scope = empty_scope();
 
             log.record(QueryKind::Select, 1, sql.to_string(), &scope);
-            flush(&log);
+            flush(log);
 
             let path = reddb_file::layout::legacy_slow_query_log_path(&dir);
             let body = std::fs::read_to_string(&path).unwrap_or_default();
@@ -525,7 +589,7 @@ mod tests {
 
         // Exactly at threshold: duration_ms < threshold_ms is false → emits.
         log.record(QueryKind::Select, 50, "SELECT 1".into(), &scope);
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert_eq!(lines.len(), 1, "duration == threshold should emit");
     }
@@ -537,7 +601,7 @@ mod tests {
         let scope = empty_scope();
 
         log.record(QueryKind::Select, 49, "SELECT 1".into(), &scope);
-        flush(&log);
+        flush(log);
         let lines = read_log_lines(&dir);
         assert!(lines.is_empty(), "duration < threshold must not emit");
     }

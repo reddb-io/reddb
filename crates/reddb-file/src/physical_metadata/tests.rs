@@ -49,6 +49,69 @@ fn physical_metadata_journal_paths_are_listed_and_pruned_by_file_contract() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// #2376: a plain truncate-then-write let a concurrent reader observe an
+/// empty or half-written document. Saves must publish atomically.
+#[test]
+fn physical_metadata_saves_are_atomic_for_concurrent_readers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let root =
+        std::env::temp_dir().join(format!("reddb-file-physical-atomic-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let binary_path = crate::layout::physical_metadata_binary_path(&root.join("main.rdb"));
+    let json_path = crate::layout::physical_metadata_json_path(&root.join("main.rdb"));
+    let small = r#"{"sequence":1}"#.to_string();
+    let large = format!(r#"{{"sequence":2,"pad":"{}"}}"#, "x".repeat(256 * 1024));
+    write_physical_metadata_binary_document(&binary_path, &small).unwrap();
+    write_physical_metadata_json_document(&json_path, &small).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let readers: Vec<_> = [binary_path.clone(), json_path.clone()]
+        .into_iter()
+        .map(|path| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut torn_reads = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    if read_physical_metadata_document(&path).is_err() {
+                        torn_reads += 1;
+                    }
+                }
+                torn_reads
+            })
+        })
+        .collect();
+    for i in 0..200 {
+        let document = if i % 2 == 0 { &large } else { &small };
+        write_physical_metadata_binary_document(&binary_path, document).unwrap();
+        write_physical_metadata_json_document(&json_path, document).unwrap();
+    }
+    stop.store(true, Ordering::Release);
+    let torn_reads: usize = readers
+        .into_iter()
+        .map(|reader| reader.join().expect("reader thread"))
+        .sum();
+    assert_eq!(torn_reads, 0, "readers observed a torn metadata document");
+
+    let mut leftovers: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    leftovers.sort();
+    assert_eq!(
+        leftovers,
+        vec![
+            "main.rdb.meta.json".to_string(),
+            "main.rdb.meta.rdbx".to_string()
+        ],
+        "no temporary file may outlive a save"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn physical_metadata_document_root_envelope_round_trips() {
     let mut ttl = BTreeMap::new();

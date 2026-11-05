@@ -704,21 +704,35 @@ fn secret_reference_masks_projection_and_updates_vault_value() {
     let projected = rt
         .execute_query("SELECT $secret.my.attack AS secret_value FROM tokens LIMIT 1")
         .expect("secret projection executes");
-    assert_eq!(
+    assert!(matches!(
         projected.result.records[0].get("secret_value"),
-        Some(&Value::Text("***".into()))
-    );
+        Some(Value::Secret(_))
+    ));
+    assert_eq!(display_at(&projected, 0, "secret_value"), "***");
+    let revealed = rt
+        .execute_query("VAULT REVEAL red.vault.my.attack")
+        .expect("reveal canonical vault entry");
+    assert_eq!(text_at(&revealed, 0, "value"), "1=1 OR 1=1");
+    assert!(auth_store.vault_kv_get("my.attack").is_none());
     assert_eq!(
-        auth_store.vault_kv_get("my.attack").as_deref(),
-        Some("1=1 OR 1=1")
+        rt.execute_query("SELECT id FROM tokens WHERE token = $secret.my.attack")
+            .expect("compare injection-shaped secret as data")
+            .result
+            .len(),
+        0
     );
 
     rt.execute_query("SET SECRET my.attack = 'normal_id'")
         .expect("store matching secret");
-    assert_eq!(
-        auth_store.vault_kv_get("my.attack").as_deref(),
-        Some("normal_id")
-    );
+    let revealed = rt
+        .execute_query("VAULT REVEAL red.vault.my.attack")
+        .expect("reveal updated canonical vault entry");
+    assert_eq!(text_at(&revealed, 0, "value"), "normal_id");
+    let matched = rt
+        .execute_query("SELECT id FROM tokens WHERE token = $secrets.default.my.attack")
+        .expect("filter by updated secret");
+    assert_eq!(matched.result.len(), 1);
+    assert_eq!(int_at(&matched, 0, "id"), 1);
 
     drop(rt);
 }

@@ -1,124 +1,17 @@
 use super::*;
-use crate::storage::query::unified::{
-    sys_key_collection, sys_key_created_at, sys_key_kind, sys_key_red_capabilities,
-    sys_key_red_collection, sys_key_red_entity_type, sys_key_red_kind, sys_key_red_sequence_id,
-    sys_key_rid, sys_key_row_id, sys_key_tenant, sys_key_updated_at,
+use crate::storage::query::unified::{sys_key_collection, sys_key_created_at, sys_key_updated_at};
+pub(super) use reddb_engine::query::records::{
+    apply_runtime_identity_hints, fill_document_body_fields, runtime_any_record_from_entity,
+    runtime_any_record_from_entity_ref, runtime_documentish_value,
+    runtime_entity_type_and_capabilities, runtime_record_capability_list, runtime_row_capabilities,
+    runtime_row_capabilities_str, runtime_row_entity_type, runtime_row_has_document_capability,
+    runtime_table_record_from_entity, runtime_table_record_from_entity_projected,
+    runtime_table_record_from_entity_ref, runtime_table_record_from_entity_ref_projected,
+    runtime_table_record_from_entity_ref_with_schema, runtime_table_record_lean,
+    runtime_table_record_lean_in_collection, runtime_table_record_lean_ref,
+    runtime_table_record_with_col_indices, set_runtime_entity_metadata,
 };
 use reddb_rql::sql_lowering::effective_table_projections;
-
-/// Per-thread cache of composite schemas `[<user columns…>, rid, collection,
-/// kind, tenant, created_at, updated_at]`, keyed on the `Arc<Vec<String>>`
-/// identity of the underlying row schema. A 4.5k-row scan hits this
-/// cache on every row after the first, so the Arc<Vec<Arc<str>>>
-/// result is refcount-cloned instead of rebuilt.
-fn sys_schema_with_row_columns(
-    schema: &std::sync::Arc<Vec<String>>,
-) -> std::sync::Arc<Vec<std::sync::Arc<str>>> {
-    use std::cell::RefCell;
-    thread_local! {
-        static CACHE: RefCell<Option<(usize, std::sync::Arc<Vec<std::sync::Arc<str>>>)>> =
-            const { RefCell::new(None) };
-    }
-    let key = std::sync::Arc::as_ptr(schema) as usize;
-    CACHE.with(|c| {
-        let mut slot = c.borrow_mut();
-        if let Some((k, v)) = slot.as_ref() {
-            if *k == key {
-                return std::sync::Arc::clone(v);
-            }
-        }
-        let mut out: Vec<std::sync::Arc<str>> = Vec::with_capacity(6 + schema.len());
-        for name in schema.iter() {
-            out.push(std::sync::Arc::from(name.as_str()));
-        }
-        out.push(sys_key_rid());
-        out.push(sys_key_collection());
-        out.push(sys_key_kind());
-        out.push(sys_key_tenant());
-        out.push(sys_key_created_at());
-        out.push(sys_key_updated_at());
-        let arc = std::sync::Arc::new(out);
-        *slot = Some((key, std::sync::Arc::clone(&arc)));
-        arc
-    })
-}
-
-fn runtime_row_tenant_value(row: &crate::storage::RowData) -> Value {
-    for key in ["tenant_id", "tenant"] {
-        if let Some(value) = row.get_field(key) {
-            return value.clone();
-        }
-    }
-    Value::Null
-}
-
-fn set_public_row_envelope(
-    record: &mut UnifiedRecord,
-    entity: &UnifiedEntity,
-    row: &crate::storage::RowData,
-) {
-    record.set_arc(
-        sys_key_rid(),
-        Value::UnsignedInteger(entity.logical_id().raw()),
-    );
-    record.set_arc(
-        sys_key_collection(),
-        Value::text(entity.kind.collection().to_string()),
-    );
-    record.set_arc(
-        sys_key_kind(),
-        Value::text(public_row_kind(row).to_string()),
-    );
-    record.set_arc(sys_key_tenant(), runtime_row_tenant_value(row));
-    // Managed `created_at` / `updated_at` row columns (WITH timestamps =
-    // true) take precedence over the second-precision envelope values.
-    record.set_arc_if_absent(
-        sys_key_created_at(),
-        Value::UnsignedInteger(entity.created_at),
-    );
-    record.set_arc_if_absent(
-        sys_key_updated_at(),
-        Value::UnsignedInteger(entity.updated_at),
-    );
-}
-
-fn set_public_graph_envelope(record: &mut UnifiedRecord, entity: &UnifiedEntity, kind: &str) {
-    record.set_arc(
-        sys_key_rid(),
-        Value::UnsignedInteger(entity.logical_id().raw()),
-    );
-    record.set_arc(
-        sys_key_collection(),
-        Value::text(entity.kind.collection().to_string()),
-    );
-    record.set_arc(sys_key_kind(), Value::text(kind.to_string()));
-    record.set_arc(sys_key_tenant(), Value::Null);
-    record.set_arc(
-        sys_key_created_at(),
-        Value::UnsignedInteger(entity.created_at),
-    );
-    record.set_arc(
-        sys_key_updated_at(),
-        Value::UnsignedInteger(entity.updated_at),
-    );
-}
-
-fn graph_endpoint_rid_value(endpoint: &str) -> Value {
-    endpoint
-        .parse::<u64>()
-        .map(Value::UnsignedInteger)
-        .unwrap_or_else(|_| Value::text(endpoint.to_string()))
-}
-
-fn public_row_kind(row: &crate::storage::RowData) -> &'static str {
-    if runtime_row_is_kv(row) {
-        "kv"
-    } else if runtime_row_has_document_capability(row) {
-        "document"
-    } else {
-        "row"
-    }
-}
 
 fn set_source_collection(record: &mut UnifiedRecord, collection: &str) {
     record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
@@ -145,32 +38,35 @@ pub(super) fn scan_runtime_table_source_records_limited(
     if is_universal_entity_source(table) {
         return scan_runtime_universal_source_records_limited(db, None, limit);
     }
+    if let Some(limit) = limit {
+        return scan_runtime_table_source_records_window(db, table, 0, limit);
+    }
 
     let manager = db
         .store()
         .get_collection(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    if manager.has_backing() {
+        return scan_runtime_table_source_records_window(db, table, 0, usize::MAX);
+    }
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
 
     // A5 — parallel scan: for large unfiltered tables, collect entities once
     // then convert to records in parallel using the thread-pool coordinator.
     // The threshold guards against spawn overhead dominating on small tables.
-    // When a LIMIT is supplied and it's below the parallel threshold, prefer
-    // the sequential path so we can stop scanning as soon as we have enough.
+    // Finite windows have already taken the bounded sequential path above.
     use crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
     let entity_count = manager.count();
-    let sequential_cap = limit.unwrap_or(usize::MAX);
-    let go_parallel = !crate::runtime::function_budget::active()
-        && entity_count >= MIN_PARALLEL_ROWS
-        && sequential_cap >= MIN_PARALLEL_ROWS;
+    let go_parallel =
+        !crate::runtime::function_budget::active() && entity_count >= MIN_PARALLEL_ROWS;
     if go_parallel {
         let schema = manager.column_schema();
         let table_name = table.to_string();
         let hydrate_store = db.store();
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
-        crate::runtime::function_budget::scan(
-            |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+        crate::runtime::function_budget::try_scan(
+            |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |e| {
                 if db.replica_allows_entity_at_read(table, e) {
                     entities.push(e.clone());
@@ -178,7 +74,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
                 true
             },
         )?;
-        let mut records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
+        let records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
             &entities,
             move |chunk| {
                 chunk
@@ -198,9 +94,6 @@ pub(super) fn scan_runtime_table_source_records_limited(
                     .collect()
             },
         );
-        if let Some(n) = limit {
-            records.truncate(n);
-        }
         return Ok(records);
     }
 
@@ -208,44 +101,68 @@ pub(super) fn scan_runtime_table_source_records_limited(
     // bounded-memory streaming channel. Collecting the stream reproduces
     // the previous `Vec` exactly (same materializer, same scan order)
     // while giving streaming consumers an O(chunk) resident set. The
-    // limited path below keeps its early-stop loop so `SELECT * … LIMIT N`
+    // limited path above keeps its early-stop loop so `SELECT * … LIMIT N`
     // still stops scanning as soon as it has N rows.
-    if limit.is_none() {
-        return stream_runtime_table_source_scan(
+    stream_runtime_table_source_scan(
+        db,
+        table,
+        crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK,
+    )?
+    .collect_records()
+}
+
+/// Materialize only the requested visible window. Skipped rows are visited in
+/// storage scan order and released before the next row, without buffering a
+/// prefix proportional to OFFSET or reserving the caller's entire LIMIT.
+pub(super) fn scan_runtime_table_source_records_window(
+    db: &RedDB,
+    table: &str,
+    offset: usize,
+    limit: usize,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if is_universal_entity_source(table) {
+        return Ok(scan_runtime_universal_source_records_limited(
             db,
-            table,
-            crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK,
+            None,
+            Some(offset.saturating_add(limit)),
         )?
-        .collect_records();
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect());
     }
 
-    // Sequential path — short-circuits at `limit` rows so an unfiltered
-    // SELECT * LIMIT 100 on a 1M-row table doesn't build the whole set
-    // before truncating.
-    let mut records: Vec<UnifiedRecord> = match limit {
-        Some(n) => Vec::with_capacity(n),
-        None => Vec::new(),
-    };
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    let store = db.store();
+    let manager = store
+        .get_collection(table)
+        .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+    let mut records =
+        Vec::with_capacity(limit.min(crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK));
+    if limit == 0 {
+        return Ok(records);
+    }
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let schema = manager.column_schema();
+    let mut remaining_offset = offset;
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if !db.replica_allows_entity_at_read(table, entity) {
                 return true;
             }
-            let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
-                db.store().as_ref(),
-                entity,
-            );
-            if let Some(mut record) = runtime_table_record_from_entity_ref_with_schema(
-                &hydrated,
-                manager.column_schema().as_ref(),
-            ) {
+            let hydrated =
+                crate::runtime::impl_timeseries::hydrate_timeseries_entity(store.as_ref(), entity);
+            if let Some(mut record) =
+                runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())
+            {
+                if remaining_offset > 0 {
+                    remaining_offset -= 1;
+                    return true;
+                }
                 set_source_collection(&mut record, table);
                 records.push(record);
-                if let Some(n) = limit {
-                    if records.len() >= n {
-                        return false; // stop scan early
-                    }
+                if records.len() >= limit {
+                    return false;
                 }
             }
             true
@@ -265,20 +182,23 @@ pub(super) fn scan_runtime_universal_source_records_limited(
     // the snapshot so worker threads see the same MVCC view instead of
     // defaulting to "no snapshot" (every row visible).
     let snapshot = capture_current_snapshot();
-    let budget_collections =
-        crate::runtime::function_budget::active().then(|| db.store().list_collections());
+    let budget_collections = (crate::runtime::function_budget::active()
+        || db.store().config().resident_memory_bytes_max.is_some())
+    .then(|| db.store().list_collections());
     if let Some(collections) = candidate_collections.or(budget_collections.as_deref()) {
         let store = db.store();
         let mut records = match limit {
-            Some(n) => Vec::with_capacity(n),
+            Some(n) => {
+                Vec::with_capacity(n.min(crate::runtime::query_exec::DEFAULT_HIGH_WATER_MARK))
+            }
             None => Vec::new(),
         };
         for collection in collections {
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };
-            crate::runtime::function_budget::scan(
-                |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+            crate::runtime::function_budget::try_scan(
+                |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
                 |entity| {
                     if records.len() >= limit.unwrap_or(usize::MAX) {
                         return false;
@@ -350,9 +270,66 @@ pub(crate) fn stream_runtime_table_source_scan(
     let table_name = table.to_string();
 
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    if manager.has_backing() && !crate::runtime::function_budget::active() {
+        let store = db.store();
+        let cursor = {
+            let _publication = store.vault_publication_lock.lock();
+            manager.try_paged_entity_cursor(snapshot.clone())?
+        };
+        if let Some(cursor) = cursor {
+            let is_replica = db.is_replica_role();
+            let schema = schema.clone();
+            let table = table_name.clone();
+            let mut source = cursor.filter_map(move |entry| {
+                let (entity, metadata) = match entry {
+                    Ok(record) => record,
+                    Err(error) => return Some(Err(RedDBError::from(error))),
+                };
+                if let Err(error) = crate::runtime::function_budget::charge(1) {
+                    return Some(Err(error));
+                }
+                if is_replica
+                    && metadata.as_ref().is_some_and(|metadata| {
+                        RedDB::entity_metadata_expired_at(
+                            &entity,
+                            metadata,
+                            crate::utils::now_unix_millis(),
+                        )
+                    })
+                {
+                    return None;
+                }
+                let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
+                    store.as_ref(),
+                    &entity,
+                );
+                let mut record =
+                    runtime_table_record_from_entity_ref_with_schema(&hydrated, schema.as_ref())?;
+                set_source_collection(&mut record, &table);
+                Some(Ok(record))
+            });
+            let first = source.next().transpose()?;
+            let columns = first
+                .as_ref()
+                .map(|record| {
+                    record
+                        .column_names()
+                        .into_iter()
+                        .map(|name| name.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Ok(super::query_exec::RowStream::from_lazy(
+                columns,
+                crate::storage::query::unified::QueryStats::default(),
+                high_water_mark,
+                Box::new(first.into_iter().map(Ok).chain(source)),
+            ));
+        }
+    }
     let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> = Vec::new();
-    crate::runtime::function_budget::scan(
-        |visit| manager.scan_for_each(snapshot.as_ref(), visit),
+    crate::runtime::function_budget::try_scan(
+        |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
             if db.replica_allows_entity_at_read(table, entity) {
                 entities.push(entity.clone());
@@ -406,936 +383,6 @@ pub(crate) fn stream_runtime_table_source_scan(
 
 pub(super) fn is_universal_entity_source(table: &str) -> bool {
     is_universal_query_source(table)
-}
-
-/// Lean materialization for the index scan hot path.
-///
-/// Emits `rid`, `created_at`, `updated_at`, plus the raw user data
-/// columns. Skips the heavier red_* metadata fields (collection, kind, type,
-/// capabilities, sequence_id, row_id). Each skipped field is one fewer string
-/// clone and one fewer HashMap insert per entity.
-///
-/// Used when the caller already knows the collection name and doesn't need
-/// the full metadata in the result (e.g. SELECT * range/filtered scans).
-/// Borrow-based variant of `runtime_table_record_lean` — used by scan
-/// hot paths (via `SegmentManager::for_each_id`) that can't afford the
-/// full `UnifiedEntity::clone`. Copies only the field values that land
-/// in the output record.
-#[inline]
-pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
-    let created_at = entity.created_at;
-    let updated_at = entity.updated_at;
-    let row = match &entity.data {
-        EntityData::Row(row) => row,
-        // Issue #414: graph/vector/queue/etc. entities must surface in
-        // SELECT scans. Lean path can't construct a "pure row" for them,
-        // so delegate to the universal materializer.
-        _ => return runtime_any_record_from_entity_ref(entity),
-    };
-    if let Some(named) = &row.named {
-        let mut record = UnifiedRecord::with_capacity(6 + named.len());
-        for (key, value) in named.iter() {
-            record.set(key, value.clone());
-        }
-        set_public_row_envelope(&mut record, entity, row);
-        Some(record)
-    } else if let Some(schema) = &row.schema {
-        // Columnar fast-path: build the record with the schema-shared
-        // Vec<Arc<str>> side-channel so 4.5k rows × N fields deallocate
-        // as one contiguous Vec each instead of a HashMap per record.
-        let sys_schema = sys_schema_with_row_columns(schema);
-        let mut values: Vec<Value> = Vec::with_capacity(sys_schema.len());
-        values.extend(row.columns.iter().cloned());
-        values.push(Value::UnsignedInteger(entity.logical_id().raw()));
-        values.push(Value::text(entity.kind.collection().to_string()));
-        values.push(Value::text(public_row_kind(row).to_string()));
-        values.push(runtime_row_tenant_value(row));
-        values.push(Value::UnsignedInteger(created_at));
-        values.push(Value::UnsignedInteger(updated_at));
-        Some(UnifiedRecord::from_columnar(sys_schema, values))
-    } else {
-        let mut record = UnifiedRecord::with_capacity(6 + row.columns.len());
-        for (i, value) in row.columns.iter().enumerate() {
-            record.set(&format!("c{i}"), value.clone());
-        }
-        set_public_row_envelope(&mut record, entity, row);
-        Some(record)
-    }
-}
-
-#[inline]
-pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<UnifiedRecord> {
-    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
-    if !matches!(entity.data, EntityData::Row(_)) {
-        return runtime_any_record_from_entity(entity);
-    }
-    let created_at = entity.created_at;
-    let updated_at = entity.updated_at;
-    let logical_id = entity.logical_id().raw();
-    let row = match entity.data {
-        EntityData::Row(row) => row,
-        _ => unreachable!(),
-    };
-    let collection = entity.kind.collection().to_string();
-    let tenant = runtime_row_tenant_value(&row);
-    let kind = public_row_kind(&row).to_string();
-    // Capture the document body before `named` is consumed below.
-    let doc_body = document_row_body_bytes(&row);
-    if let Some(named) = row.named {
-        let mut record = UnifiedRecord::with_capacity(6 + named.len());
-        // `set_owned` consumes the already-heap-allocated String key
-        // instead of `&str → String` clone. For SELECT * on a wide
-        // result set this saves ~15k allocations per query.
-        for (key, value) in named {
-            record.set_owned(key, value);
-        }
-        record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-        record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text(kind));
-        record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        // Lean SELECT * over a single-source document — expand body fields.
-        fill_document_body_fields(&mut record, None, doc_body.as_deref());
-        Some(record)
-    } else if let Some(ref schema) = row.schema {
-        let mut record = UnifiedRecord::with_capacity(6 + schema.len());
-        for (name, value) in schema.iter().zip(row.columns) {
-            record.set(name, value);
-        }
-        record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-        record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text(kind));
-        record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        Some(record)
-    } else {
-        let mut record = UnifiedRecord::with_capacity(6 + row.columns.len());
-        for (i, value) in row.columns.into_iter().enumerate() {
-            record.set(&format!("c{i}"), value);
-        }
-        record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-        record.set_arc(sys_key_collection(), Value::text(collection));
-        record.set_arc(sys_key_kind(), Value::text(kind));
-        record.set_arc(sys_key_tenant(), tenant);
-        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        Some(record)
-    }
-}
-
-pub(super) fn runtime_table_record_lean_in_collection(
-    entity: UnifiedEntity,
-    collection: &str,
-) -> Option<UnifiedRecord> {
-    let is_graph = matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
-    let mut record = runtime_table_record_lean(entity)?;
-    if is_graph {
-        record.set_arc(sys_key_collection(), Value::text(collection.to_string()));
-    }
-    Some(record)
-}
-
-#[inline(never)]
-/// Clone a row's stored binary document `body` bytes, if any.
-///
-/// Sourced from the row rather than the record because a projection that does
-/// not SELECT `body` would never place it on the record — yet the promoted
-/// fields still have to be read out of it.
-fn document_row_body_bytes(row: &crate::storage::unified::entity::RowData) -> Option<Vec<u8>> {
-    match row.get_field("body") {
-        Some(Value::Json(bytes)) if crate::document_body::is_binary_container(bytes) => {
-            Some(bytes.clone())
-        }
-        _ => None,
-    }
-}
-
-/// Fill a single-source document's top-level fields into `record` by reading
-/// them from the binary `body` (`body` = the row's container bytes).
-///
-/// `columns = None` expands every top-level body field (SELECT *); `Some(cols)`
-/// offset-reads only the requested fields. A no-op when `body` is `None`.
-pub(super) fn fill_document_body_fields(
-    record: &mut UnifiedRecord,
-    columns: Option<&[String]>,
-    body: Option<&[u8]>,
-) {
-    let Some(bytes) = body else {
-        return;
-    };
-    if let Some(body_json) = crate::document_body::decode_container_to_json(bytes) {
-        if let Ok(json_bytes) = crate::json::to_vec(&body_json) {
-            record.set("body", Value::Json(json_bytes));
-        }
-    }
-    let fields: Vec<(String, Value)> = match columns {
-        None => match crate::document_body::body_fields(bytes) {
-            Some(fields) => fields,
-            None => return,
-        },
-        Some(cols) => cols
-            .iter()
-            .filter_map(|col| {
-                crate::document_body::read_body_field(bytes, col).map(|value| (col.clone(), value))
-            })
-            .collect(),
-    };
-    for (name, value) in fields {
-        record.set(&name, value);
-    }
-}
-
-pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
-    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
-    if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
-        return runtime_any_record_from_entity(entity);
-    }
-    let logical_id = entity.logical_id().raw();
-    match entity.data {
-        EntityData::Row(row) => {
-            // Capture the document body before `named` is consumed below.
-            let doc_body = document_row_body_bytes(&row);
-            // Pre-allocate: ~9 system fields + user fields
-            let user_field_count = row
-                .named
-                .as_ref()
-                .map(|n| n.len())
-                .unwrap_or(row.columns.len());
-            let mut record = UnifiedRecord::with_capacity(6 + user_field_count);
-            let collection = entity.kind.collection().to_string();
-            let tenant = runtime_row_tenant_value(&row);
-            let kind = public_row_kind(&row).to_string();
-
-            if let Some(named) = row.named {
-                for (key, value) in named {
-                    record.set(&key, value);
-                }
-            } else if let Some(ref schema) = row.schema {
-                // Columnar storage: use shared schema for field names
-                for (name, value) in schema.iter().zip(row.columns) {
-                    record.set(name, value);
-                }
-            } else {
-                for (index, value) in row.columns.into_iter().enumerate() {
-                    record.set(&format!("c{index}"), value);
-                }
-            }
-            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-            record.set_arc(sys_key_collection(), Value::text(collection));
-            record.set_arc(sys_key_kind(), Value::text(kind));
-            record.set_arc(sys_key_tenant(), tenant);
-            record.set_arc_if_absent(
-                sys_key_created_at(),
-                Value::UnsignedInteger(entity.created_at),
-            );
-            record.set_arc_if_absent(
-                sys_key_updated_at(),
-                Value::UnsignedInteger(entity.updated_at),
-            );
-
-            // SELECT * over a single-source document: expand fields from the body.
-            fill_document_body_fields(&mut record, None, doc_body.as_deref());
-
-            Some(record)
-        }
-        EntityData::TimeSeries(ts) => {
-            let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-            record.set(
-                "red_collection",
-                Value::text(entity.kind.collection().to_string()),
-            );
-            record.set(
-                "red_kind",
-                Value::text(entity.kind.storage_type().to_string()),
-            );
-            record.set_arc(
-                sys_key_created_at(),
-                Value::UnsignedInteger(entity.created_at),
-            );
-            record.set_arc(
-                sys_key_updated_at(),
-                Value::UnsignedInteger(entity.updated_at),
-            );
-            record.set(
-                "red_sequence_id",
-                Value::UnsignedInteger(entity.sequence_id),
-            );
-            record.set_arc(
-                sys_key_red_entity_type(),
-                Value::text("timeseries".to_string()),
-            );
-            record.set(
-                "red_capabilities",
-                Value::text("document,timeseries,metric,temporal".to_string()),
-            );
-            append_timeseries_record_fields(&mut record, &ts);
-            Some(record)
-        }
-        _ => None,
-    }
-}
-
-/// Borrowed version of `runtime_table_record_from_entity` — avoids cloning the full entity.
-/// Only the field values inserted into the record are cloned, not the entity struct itself.
-#[inline(never)]
-pub(super) fn runtime_table_record_from_entity_ref(
-    entity: &UnifiedEntity,
-) -> Option<UnifiedRecord> {
-    runtime_table_record_from_entity_ref_with_schema(entity, None)
-}
-
-pub(super) fn runtime_table_record_from_entity_ref_with_schema(
-    entity: &UnifiedEntity,
-    fallback_schema: Option<&std::sync::Arc<Vec<String>>>,
-) -> Option<UnifiedRecord> {
-    // Issue #414: surface graph/vector/queue/etc. entities in SELECT scans.
-    if !matches!(&entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
-        return runtime_any_record_from_entity_ref(entity);
-    }
-    match &entity.data {
-        EntityData::Row(row) => {
-            let user_field_count = row
-                .named
-                .as_ref()
-                .map(|n| n.len())
-                .unwrap_or(row.columns.len());
-            let mut record = UnifiedRecord::with_capacity(6 + user_field_count);
-
-            if let Some(named) = &row.named {
-                for (key, value) in named {
-                    record.set(key, value.clone());
-                }
-            } else if let Some(schema) = row.schema.as_ref().or(fallback_schema) {
-                for (name, value) in schema.iter().zip(row.columns.iter()) {
-                    record.set(name, value.clone());
-                }
-            } else {
-                for (index, value) in row.columns.iter().enumerate() {
-                    record.set(&format!("c{index}"), value.clone());
-                }
-            }
-            set_public_row_envelope(&mut record, entity, row);
-
-            // SELECT * over a single-source document — expand body fields.
-            fill_document_body_fields(&mut record, None, document_row_body_bytes(row).as_deref());
-
-            Some(record)
-        }
-        EntityData::TimeSeries(ts) => {
-            let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(
-                sys_key_rid(),
-                Value::UnsignedInteger(entity.logical_id().raw()),
-            );
-            record.set(
-                "red_collection",
-                Value::text(entity.kind.collection().to_string()),
-            );
-            record.set(
-                "red_kind",
-                Value::text(entity.kind.storage_type().to_string()),
-            );
-            record.set_arc(
-                sys_key_created_at(),
-                Value::UnsignedInteger(entity.created_at),
-            );
-            record.set_arc(
-                sys_key_updated_at(),
-                Value::UnsignedInteger(entity.updated_at),
-            );
-            record.set(
-                "red_sequence_id",
-                Value::UnsignedInteger(entity.sequence_id),
-            );
-            record.set_arc(
-                sys_key_red_entity_type(),
-                Value::text("timeseries".to_string()),
-            );
-            record.set(
-                "red_capabilities",
-                Value::text("document,timeseries,metric,temporal".to_string()),
-            );
-            append_timeseries_record_fields(&mut record, ts);
-            Some(record)
-        }
-        _ => None,
-    }
-}
-
-/// Projected version — only materializes requested columns for better performance.
-/// Falls back to full materialization if columns is empty (SELECT *).
-#[inline(never)]
-pub(super) fn runtime_table_record_from_entity_projected(
-    entity: UnifiedEntity,
-    columns: &[String],
-) -> Option<UnifiedRecord> {
-    if columns.is_empty() {
-        return runtime_table_record_from_entity(entity);
-    }
-    // Issue #414: graph/vector/queue/etc. — produce a full record so SELECT
-    // can project named graph properties. Extra fields are harmless; the
-    // outer projection layer keeps only the requested ones.
-    if !matches!(entity.data, EntityData::Row(_) | EntityData::TimeSeries(_)) {
-        return runtime_any_record_from_entity(entity);
-    }
-    let logical_id = entity.logical_id().raw();
-
-    match entity.data {
-        EntityData::Row(row) => {
-            // Capture the document body before `named` is consumed below.
-            let doc_body = document_row_body_bytes(&row);
-            let mut record = UnifiedRecord::with_capacity(6 + columns.len());
-            let collection = entity.kind.collection().to_string();
-            let tenant = runtime_row_tenant_value(&row);
-            let kind = public_row_kind(&row).to_string();
-
-            if let Some(named) = row.named {
-                // Named path (single-insert entities): O(1) HashMap lookup per column.
-                for col in columns {
-                    if let Some(value) = named.get(col) {
-                        record.set(col, value.clone());
-                    }
-                }
-            } else if let Some(ref schema) = row.schema {
-                // Columnar path (bulk-insert entities): resolve column name → index
-                // in schema, then access row.columns[idx]. O(n_schema * n_projected)
-                // but n_projected is small (explicit SELECT list).
-                for col in columns {
-                    if let Some(idx) = schema.iter().position(|s| s == col) {
-                        if let Some(value) = row.columns.get(idx) {
-                            record.set(col, value.clone());
-                        }
-                    }
-                }
-            } else {
-                // Positional-only (no schema, no names): map c0/c1/... or fallback
-                for col in columns {
-                    if let Some(idx) = col.strip_prefix('c').and_then(|s| s.parse::<usize>().ok()) {
-                        if let Some(value) = row.columns.get(idx) {
-                            record.set(col, value.clone());
-                        }
-                    }
-                }
-            }
-            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-            record.set_arc(sys_key_collection(), Value::text(collection));
-            record.set_arc(sys_key_kind(), Value::text(kind));
-            record.set_arc(sys_key_tenant(), tenant);
-            record.set_arc_if_absent(
-                sys_key_created_at(),
-                Value::UnsignedInteger(entity.created_at),
-            );
-            record.set_arc_if_absent(
-                sys_key_updated_at(),
-                Value::UnsignedInteger(entity.updated_at),
-            );
-
-            // Single-source document: offset-read just the projected fields
-            // from the body.
-            fill_document_body_fields(&mut record, Some(columns), doc_body.as_deref());
-
-            Some(record)
-        }
-        EntityData::TimeSeries(ts) => {
-            let mut record = UnifiedRecord::new();
-            record.set_arc(sys_key_rid(), Value::UnsignedInteger(logical_id));
-
-            for col in columns {
-                match col.as_str() {
-                    "metric" => record.set("metric", Value::text(ts.metric.clone())),
-                    "timestamp_ns" => {
-                        record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns))
-                    }
-                    "timestamp" => record.set("timestamp", Value::UnsignedInteger(ts.timestamp_ns)),
-                    "time" => record.set("time", Value::UnsignedInteger(ts.timestamp_ns)),
-                    "value" => record.set("value", Value::Float(ts.value)),
-                    "tags" if !ts.tags.is_empty() => {
-                        record.set("tags", timeseries_tags_value(&ts.tags));
-                    }
-                    _ => {
-                        if let Some(value) = ts.fields.get(col) {
-                            record.set(col, value.clone());
-                        }
-                    }
-                }
-            }
-
-            Some(record)
-        }
-        _ => None,
-    }
-}
-
-/// Ref-based projected materialization — avoids cloning the whole entity.
-/// Only clones the K projected field values, not the N-K ignored ones.
-/// Pre-computed index path for columnar (bulk-inserted) entities.
-///
-/// `idx_map` is `&[(col_pos_in_columns, schema_idx)]` — precomputed once
-/// before the scan loop so every row does O(k) direct indexed access instead
-/// of O(schema_len × k) linear searches.
-///
-/// Returns `None` when the entity is not a columnar Row (schema = None).
-pub(super) fn runtime_table_record_with_col_indices(
-    entity: &UnifiedEntity,
-    columns: &[String],
-    idx_map: &[(usize, usize)],
-) -> Option<UnifiedRecord> {
-    if idx_map.is_empty() {
-        return None;
-    }
-    let row = entity.data.as_row()?;
-    // Applies to columnar entities. After a persistent reopen, rows written in
-    // compact positional form may not carry row.schema; callers can still pass
-    // an idx_map derived from the persisted collection contract.
-    if row.named.is_some() || row.columns.is_empty() {
-        return None;
-    }
-    let mut record = UnifiedRecord::with_capacity(6 + idx_map.len());
-    for &(ci, si) in idx_map {
-        if let Some(value) = row.columns.get(si) {
-            // Use set_owned to skip the hidden to_string() clone.
-            record.set_owned(columns[ci].clone(), value.clone());
-        }
-    }
-    set_public_row_envelope(&mut record, entity, row);
-    Some(record)
-}
-
-/// Used by the fast-path scan when `select_cols` is non-empty.
-///
-/// Returns `None` for non-Row entities (caller falls back to owned path).
-pub(super) fn runtime_table_record_from_entity_ref_projected(
-    entity: &UnifiedEntity,
-    columns: &[String],
-) -> Option<UnifiedRecord> {
-    if columns.is_empty() {
-        return None; // caller should use full materialization for SELECT *
-    }
-    // Issue #414: non-Row entities (graph/vector/queue) must be surfaced in
-    // SELECT scans. Fall back to the universal materializer; the outer
-    // projection layer keeps only the requested columns.
-    if !matches!(&entity.data, EntityData::Row(_)) {
-        return runtime_any_record_from_entity_ref(entity);
-    }
-    let row = entity.data.as_row()?;
-
-    let mut record = UnifiedRecord::with_capacity(6 + columns.len());
-
-    if let Some(ref named) = row.named {
-        for col in columns {
-            if let Some(value) = named.get(col.as_str()) {
-                record.set(col, value.clone());
-            }
-        }
-    } else if let Some(ref schema) = row.schema {
-        for col in columns {
-            if let Some(idx) = schema.iter().position(|s| s == col) {
-                if let Some(value) = row.columns.get(idx) {
-                    record.set(col, value.clone());
-                }
-            }
-        }
-    } else {
-        for col in columns {
-            if let Some(idx) = col.strip_prefix('c').and_then(|s| s.parse::<usize>().ok()) {
-                if let Some(value) = row.columns.get(idx) {
-                    record.set(col, value.clone());
-                }
-            }
-        }
-    }
-    set_public_row_envelope(&mut record, entity, row);
-    // Single-source document: offset-read the projected body fields.
-    fill_document_body_fields(
-        &mut record,
-        Some(columns),
-        document_row_body_bytes(row).as_deref(),
-    );
-    Some(record)
-}
-
-#[inline(never)]
-pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
-    let identity_entity = entity.clone();
-    let kind = entity.kind.clone();
-    let collection = kind.collection().to_string();
-    let storage_type = kind.storage_type().to_string();
-    let entity_id = entity.logical_id().raw();
-    let created_at = entity.created_at;
-    let updated_at = entity.updated_at;
-    let sequence_id = entity.sequence_id;
-
-    let (entity_type, capabilities, mut record) = match (kind, entity.data) {
-        (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
-            let capabilities = runtime_row_capabilities(&row);
-            let entity_type = runtime_row_entity_type(&row);
-            let doc_body = document_row_body_bytes(&row);
-            let mut record = UnifiedRecord::new();
-            record.set_arc(sys_key_row_id(), Value::UnsignedInteger(row_id));
-            if let Some(named) = row.named {
-                for (key, value) in named {
-                    record.set(&key, value);
-                }
-            } else {
-                for (index, value) in row.columns.into_iter().enumerate() {
-                    record.set(&format!("c{index}"), value);
-                }
-            }
-            fill_document_body_fields(&mut record, None, doc_body.as_deref());
-            (entity_type, capabilities, record)
-        }
-        (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
-            let mut record = UnifiedRecord::new();
-            record.set("label", Value::text(node.label));
-            record.set("node_type", Value::text(node.node_type));
-            for (key, value) in node_data.properties {
-                record.set(&key, value);
-            }
-            set_public_graph_envelope(&mut record, &identity_entity, "node");
-            (
-                "graph_node",
-                runtime_record_capability_list(["graph", "graph_node"]),
-                record,
-            )
-        }
-        (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
-            let mut record = UnifiedRecord::new();
-            record.set("label", Value::text(edge_kind.label));
-            record.set("from_rid", graph_endpoint_rid_value(&edge_kind.from_node));
-            record.set("to_rid", graph_endpoint_rid_value(&edge_kind.to_node));
-            record.set("weight", Value::Float(edge.weight as f64));
-            for (key, value) in edge.properties {
-                record.set(&key, value);
-            }
-            set_public_graph_envelope(&mut record, &identity_entity, "edge");
-            (
-                "graph_edge",
-                runtime_record_capability_list(["graph", "graph_edge"]),
-                record,
-            )
-        }
-        (EntityKind::Vector { .. }, EntityData::Vector(vector)) => {
-            let mut record = UnifiedRecord::new();
-            record.set(
-                "dimension",
-                Value::UnsignedInteger(vector.dense.len() as u64),
-            );
-            if let Some(content) = vector.content {
-                record.set("content", Value::text(content));
-            }
-            (
-                "vector",
-                runtime_record_capability_list(["vector", "similarity", "embedding"]),
-                record,
-            )
-        }
-        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(ts)) => {
-            let mut record = UnifiedRecord::new();
-            append_timeseries_record_fields(&mut record, &ts);
-            (
-                "timeseries",
-                runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
-                record,
-            )
-        }
-        (EntityKind::QueueMessage { position, .. }, EntityData::QueueMessage(msg)) => {
-            // Phase 2.5.5 RLS universal: queue messages surface their
-            // `payload` Value, priority, attempts, ack state, and
-            // position so policies like
-            // `USING (payload.tenant = CURRENT_TENANT())` can reach
-            // the JSON payload via the dotted-path resolver.
-            let mut record = UnifiedRecord::new();
-            record.set("position", Value::UnsignedInteger(position));
-            record.set("payload", msg.payload);
-            record.set("attempts", Value::UnsignedInteger(msg.attempts as u64));
-            record.set("acked", Value::Boolean(msg.acked));
-            if let Some(priority) = msg.priority {
-                record.set("priority", Value::Integer(priority as i64));
-            }
-            (
-                "queue_message",
-                runtime_record_capability_list(["document", "queue", "message"]),
-                record,
-            )
-        }
-        _ => return None,
-    };
-
-    if let EntityData::Row(row) = &identity_entity.data {
-        set_public_row_envelope(&mut record, &identity_entity, row);
-    } else if matches!(
-        identity_entity.data,
-        EntityData::Node(_) | EntityData::Edge(_)
-    ) {
-        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
-        apply_runtime_identity_hints(&mut record, &identity_entity);
-    } else {
-        // #1369 — every entity model exposes its entity-id as `rid`
-        // (vector / time-series / queue rows). `rid` is mandatory for
-        // every model, never optional.
-        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
-        record.set_arc(sys_key_red_collection(), Value::text(collection));
-        record.set_arc(sys_key_red_kind(), Value::text(storage_type));
-        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        record.set_arc(
-            sys_key_red_sequence_id(),
-            Value::UnsignedInteger(sequence_id),
-        );
-        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
-        apply_runtime_identity_hints(&mut record, &identity_entity);
-    }
-
-    Some(record)
-}
-
-pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
-    let kind = &entity.kind;
-    let collection = kind.collection().to_string();
-    let storage_type = kind.storage_type().to_string();
-    let entity_id = entity.logical_id().raw();
-    let created_at = entity.created_at;
-    let updated_at = entity.updated_at;
-    let sequence_id = entity.sequence_id;
-
-    let (entity_type, capabilities, mut record) = match (kind, &entity.data) {
-        (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
-            let capabilities = runtime_row_capabilities(row);
-            let entity_type = runtime_row_entity_type(row);
-            let doc_body = document_row_body_bytes(row);
-            let mut record = UnifiedRecord::new();
-            record.set_arc(sys_key_row_id(), Value::UnsignedInteger(*row_id));
-            if let Some(named) = row.named.as_ref() {
-                for (key, value) in named {
-                    record.set(key, value.clone());
-                }
-            } else if let Some(schema) = row.schema.as_ref() {
-                for (name, value) in schema.iter().zip(row.columns.iter()) {
-                    record.set(name, value.clone());
-                }
-            } else {
-                for (index, value) in row.columns.iter().enumerate() {
-                    record.set(&format!("c{index}"), value.clone());
-                }
-            }
-            fill_document_body_fields(&mut record, None, doc_body.as_deref());
-            (entity_type, capabilities, record)
-        }
-        (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
-            let mut record = UnifiedRecord::new();
-            record.set("label", Value::text(node.label.clone()));
-            record.set("node_type", Value::text(node.node_type.clone()));
-            for (key, value) in &node_data.properties {
-                record.set(key, value.clone());
-            }
-            set_public_graph_envelope(&mut record, entity, "node");
-            (
-                "graph_node",
-                runtime_record_capability_list(["graph", "graph_node"]),
-                record,
-            )
-        }
-        (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
-            let mut record = UnifiedRecord::new();
-            record.set("label", Value::text(edge_kind.label.clone()));
-            record.set("from_rid", graph_endpoint_rid_value(&edge_kind.from_node));
-            record.set("to_rid", graph_endpoint_rid_value(&edge_kind.to_node));
-            record.set("weight", Value::Float(edge.weight as f64));
-            for (key, value) in &edge.properties {
-                record.set(key, value.clone());
-            }
-            // #1369 — graph edges surface their endpoints as `from_rid`/`to_rid`
-            // (the canonical rid references), NOT raw `from`/`to`, so the public
-            // envelope stays rid-based and never leaks the internal endpoint text
-            // the INSERT stored in properties.
-            set_public_graph_envelope(&mut record, entity, "edge");
-            (
-                "graph_edge",
-                runtime_record_capability_list(["graph", "graph_edge"]),
-                record,
-            )
-        }
-        (EntityKind::Vector { .. }, EntityData::Vector(vector)) => {
-            let mut record = UnifiedRecord::new();
-            record.set(
-                "dimension",
-                Value::UnsignedInteger(vector.dense.len() as u64),
-            );
-            if let Some(content) = vector.content.as_ref() {
-                record.set("content", Value::text(content.clone()));
-            }
-            (
-                "vector",
-                runtime_record_capability_list(["vector", "similarity", "embedding"]),
-                record,
-            )
-        }
-        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(ts)) => {
-            let mut record = UnifiedRecord::new();
-            append_timeseries_record_fields(&mut record, ts);
-            (
-                "timeseries",
-                runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
-                record,
-            )
-        }
-        (EntityKind::QueueMessage { position, .. }, EntityData::QueueMessage(msg)) => {
-            let mut record = UnifiedRecord::new();
-            record.set("position", Value::UnsignedInteger(*position));
-            record.set("payload", msg.payload.clone());
-            record.set("attempts", Value::UnsignedInteger(msg.attempts as u64));
-            record.set("acked", Value::Boolean(msg.acked));
-            if let Some(priority) = msg.priority {
-                record.set("priority", Value::Integer(priority as i64));
-            }
-            (
-                "queue_message",
-                runtime_record_capability_list(["document", "queue", "message"]),
-                record,
-            )
-        }
-        _ => return None,
-    };
-
-    if let EntityData::Row(row) = &entity.data {
-        set_public_row_envelope(&mut record, entity, row);
-    } else if matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_)) {
-        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
-        apply_runtime_identity_hints(&mut record, entity);
-    } else {
-        // #1369 — every entity model exposes its entity-id as `rid`
-        // (vector / time-series / queue rows). `rid` is mandatory for
-        // every model, never optional.
-        record.set_arc(sys_key_rid(), Value::UnsignedInteger(entity_id));
-        record.set_arc(sys_key_red_collection(), Value::text(collection));
-        record.set_arc(sys_key_red_kind(), Value::text(storage_type));
-        record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        record.set_arc(
-            sys_key_red_sequence_id(),
-            Value::UnsignedInteger(sequence_id),
-        );
-        set_runtime_entity_metadata(&mut record, entity_type, capabilities);
-        apply_runtime_identity_hints(&mut record, entity);
-    }
-
-    Some(record)
-}
-
-fn append_timeseries_record_fields(
-    record: &mut UnifiedRecord,
-    ts: &crate::storage::TimeSeriesData,
-) {
-    record.set("metric", Value::text(ts.metric.clone()));
-    record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns));
-    record.set("timestamp", Value::UnsignedInteger(ts.timestamp_ns));
-    record.set("time", Value::UnsignedInteger(ts.timestamp_ns));
-    record.set("value", Value::Float(ts.value));
-    if !ts.tags.is_empty() {
-        record.set("tags", timeseries_tags_value(&ts.tags));
-    }
-    for (key, value) in &ts.fields {
-        record.set(key, value.clone());
-    }
-}
-
-fn timeseries_tags_value(tags: &std::collections::HashMap<String, String>) -> Value {
-    let object = tags
-        .iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                super::query_exec::decode_stored_tag_value(value),
-            )
-        })
-        .collect();
-    let json = crate::json::Value::Object(object);
-    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
-}
-
-#[inline(never)]
-pub(super) fn set_runtime_entity_metadata(
-    record: &mut UnifiedRecord,
-    entity_type: &str,
-    capabilities: BTreeSet<String>,
-) {
-    let capabilities_text = capabilities.into_iter().collect::<Vec<_>>().join(",");
-    record.set_arc(
-        sys_key_red_entity_type(),
-        Value::text(entity_type.to_string()),
-    );
-    record.set_arc(sys_key_red_capabilities(), Value::text(capabilities_text));
-}
-
-pub(super) fn runtime_record_capability_list<const N: usize>(
-    values: [&str; N],
-) -> BTreeSet<String> {
-    values.into_iter().map(|value| value.to_string()).collect()
-}
-
-pub(super) fn runtime_row_capabilities(row: &crate::storage::RowData) -> BTreeSet<String> {
-    let mut capabilities = runtime_record_capability_list(["table", "structured"]);
-    if runtime_row_is_kv(row) {
-        capabilities.insert("kv".to_string());
-    }
-    if runtime_row_has_document_capability(row) {
-        capabilities.insert("document".to_string());
-    }
-    capabilities
-}
-
-/// Fast capability string for table rows — avoids BTreeSet allocation.
-/// Returns a pre-computed comma-separated capabilities string.
-pub(super) fn runtime_row_capabilities_str(row: &crate::storage::RowData) -> &'static str {
-    let is_kv = runtime_row_is_kv(row);
-    let is_doc = runtime_row_has_document_capability(row);
-    match (is_kv, is_doc) {
-        (false, false) => "structured,table",
-        (true, false) => "kv,structured,table",
-        (false, true) => "document,structured,table",
-        (true, true) => "document,kv,structured,table",
-    }
-}
-
-pub(super) fn runtime_row_entity_type(row: &crate::storage::RowData) -> &'static str {
-    if runtime_row_is_kv(row) {
-        return "kv";
-    }
-
-    if runtime_row_has_document_capability(row) {
-        "document"
-    } else {
-        "table"
-    }
-}
-
-fn runtime_row_is_kv(row: &crate::storage::RowData) -> bool {
-    let Some(named) = row.named.as_ref() else {
-        return false;
-    };
-
-    if named.len() == 2 {
-        named.contains_key("key") && named.contains_key("value")
-    } else if named.len() == 1 {
-        named.contains_key("key") || named.contains_key("value")
-    } else {
-        false
-    }
-}
-
-pub(super) fn runtime_row_has_document_capability(row: &crate::storage::RowData) -> bool {
-    row.named
-        .as_ref()
-        .map(|named| named.values().any(runtime_documentish_value))
-        .unwrap_or(false)
-        || row.columns.iter().any(runtime_documentish_value)
-}
-
-pub(super) fn runtime_documentish_value(value: &Value) -> bool {
-    matches!(value, Value::Json(_) | Value::Blob(_))
 }
 
 pub(super) fn runtime_search_collections(
@@ -1414,37 +461,6 @@ pub(super) fn normalize_runtime_dsl_result_scores(result: &mut DslQueryResult) {
     });
 }
 
-pub(super) fn runtime_entity_type_and_capabilities(
-    entity: &UnifiedEntity,
-) -> (&'static str, BTreeSet<String>) {
-    match (&entity.kind, &entity.data) {
-        (EntityKind::TableRow { .. }, EntityData::Row(row)) => {
-            (runtime_row_entity_type(row), runtime_row_capabilities(row))
-        }
-        (EntityKind::GraphNode(_), EntityData::Node(_)) => (
-            "graph_node",
-            runtime_record_capability_list(["graph", "graph_node"]),
-        ),
-        (EntityKind::GraphEdge(_), EntityData::Edge(_)) => (
-            "graph_edge",
-            runtime_record_capability_list(["graph", "graph_edge"]),
-        ),
-        (EntityKind::Vector { .. }, EntityData::Vector(_)) => (
-            "vector",
-            runtime_record_capability_list(["vector", "similarity", "embedding"]),
-        ),
-        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(_)) => (
-            "timeseries",
-            runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
-        ),
-        (EntityKind::QueueMessage { .. }, EntityData::QueueMessage(_)) => (
-            "queue_message",
-            runtime_record_capability_list(["document", "queue", "message"]),
-        ),
-        _ => ("unknown", BTreeSet::new()),
-    }
-}
-
 pub(super) fn resolve_runtime_vector_source(
     runtime: &RedDBRuntime,
     source: &VectorSource,
@@ -1474,13 +490,14 @@ pub(super) fn resolve_runtime_vector_source(
         }
         VectorSource::Text(text) => {
             eprintln!("DEBUG resolve_runtime_vector_source Text({text:?})");
-            embed_runtime_vector_text(db, text)
+            embed_runtime_vector_text(runtime, text)
         }
         VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(runtime, expr.as_ref()),
     }
 }
 
-fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
+fn embed_runtime_vector_text(runtime: &RedDBRuntime, text: &str) -> RedDBResult<Vec<f32>> {
+    let db = &runtime.inner.db;
     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
         match db.get_kv("red_config", key) {
             Some((Value::Text(value), _)) => Ok(Some(value.to_string())),
@@ -1513,7 +530,8 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         });
     }
 
-    let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter)?;
+    let crate::ai::AiConnection { api_key, api_base } =
+        crate::ai::resolve_connection_from_runtime(&provider, None, runtime)?;
     let transport = crate::runtime::ai::transport::AiTransport::new(
         crate::runtime::ai::transport::AiTransportConfig::default(),
     );
@@ -1522,7 +540,7 @@ fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
         model,
         inputs: vec![text.to_string()],
         dimensions: None,
-        api_base: provider.resolve_api_base(),
+        api_base,
     };
     let response = crate::runtime::ai::block_on_ai(async move {
         crate::ai::openai_embeddings_async(&transport, request).await
@@ -1953,54 +971,6 @@ pub(super) fn runtime_identity_fragment(value: &Value) -> Option<String> {
         Value::RowRef(table, row_id) => Some(format!("{table}:{row_id}")),
         Value::VectorRef(collection, vector_id) => Some(format!("{collection}:{vector_id}")),
         _ => runtime_value_text(value),
-    }
-}
-
-pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &UnifiedEntity) {
-    for cross_ref in entity.cross_refs() {
-        let value = match cross_ref.ref_type {
-            RefType::VectorToRow | RefType::NodeToRow => Some(Value::RowRef(
-                cross_ref.target_collection.clone(),
-                cross_ref.target.raw(),
-            )),
-            RefType::VectorToNode | RefType::RowToNode => Some(Value::NodeRef(format!(
-                "{}:{}",
-                cross_ref.target_collection, cross_ref.target
-            ))),
-            RefType::RowToEdge | RefType::EdgeToVector => Some(Value::EdgeRef(format!(
-                "{}:{}",
-                cross_ref.target_collection, cross_ref.target
-            ))),
-            _ => Some(Value::text(format!(
-                "{}:{}",
-                cross_ref.target_collection, cross_ref.target
-            ))),
-        };
-
-        if let Some(value) = value {
-            let link_key: std::sync::Arc<str> = std::sync::Arc::from("_linked_identity");
-            match cross_ref.ref_type {
-                RefType::VectorToRow | RefType::NodeToRow => {
-                    record.set_arc(std::sync::Arc::from("_source_row"), value.clone());
-                    record.overflow_entry_or_insert(link_key, value);
-                }
-                RefType::VectorToNode | RefType::RowToNode => {
-                    record.set_arc(std::sync::Arc::from("_source_node"), value.clone());
-                    record.overflow_entry_or_insert(link_key, value);
-                }
-                RefType::RowToEdge | RefType::EdgeToVector => {
-                    record.set_arc(std::sync::Arc::from("_source_edge"), value.clone());
-                    record.overflow_entry_or_insert(link_key, value);
-                }
-                _ => {
-                    record.overflow_entry_or_insert(
-                        std::sync::Arc::from("_source_entity"),
-                        value.clone(),
-                    );
-                    record.overflow_entry_or_insert(link_key, value);
-                }
-            }
-        }
     }
 }
 

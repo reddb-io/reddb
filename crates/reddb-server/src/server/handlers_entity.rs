@@ -24,24 +24,11 @@ impl RedDBServer {
         let collection = collection.to_string();
         crate::server::transport::run_use_case(
             move || {
-                self.runtime
-                    .scan_collection(&collection, None, limit + offset)
-                    .map(|page| {
-                        // The legacy scan use-case applied offset client-side
-                        // before this migration; preserve that semantic by
-                        // slicing the cursor-based page. A beyond-end offset
-                        // must collapse to an empty page (issue #550) — the
-                        // earlier `offset < items.len()` guard accidentally
-                        // returned the full page when the offset skipped
-                        // past everything.
-                        let mut page = page;
-                        if offset >= page.items.len() {
-                            page.items.clear();
-                        } else if offset > 0 {
-                            page.items = page.items.split_off(offset);
-                        }
-                        page
-                    })
+                self.runtime.scan_collection(
+                    &collection,
+                    Some(crate::runtime::ScanCursor { offset }),
+                    limit,
+                )
             },
             crate::presentation::entity_json::scan_page_json,
         )
@@ -247,15 +234,6 @@ impl RedDBServer {
         if fields.is_empty() {
             return json_error(400, "auto_embed.fields cannot be empty");
         }
-        let model = auto_embed_json
-            .get("model")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                    .ok()
-                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
-            });
 
         let provider = match crate::ai::parse_provider(provider_str) {
             Ok(p) => p,
@@ -266,11 +244,19 @@ impl RedDBServer {
             let (status, msg) = crate::server::transport::map_runtime_error(&err);
             return json_error(status, msg);
         }
-        let api_key = match crate::ai::resolve_api_key_from_runtime(&provider, None, &self.runtime)
-        {
-            Ok(k) => k,
-            Err(e) => return json_error(400, e.to_string()),
-        };
+        if let Err(err) = crate::ai::ensure_provider_supports_embeddings(&provider) {
+            return json_error(400, err.to_string());
+        }
+        let model = crate::ai::resolve_embeddings_model_from_runtime(
+            &self.runtime,
+            &provider,
+            auto_embed_json.get("model").and_then(JsonValue::as_str),
+        );
+        let crate::ai::AiConnection { api_key, api_base } =
+            match crate::ai::resolve_connection_from_runtime(&provider, None, &self.runtime) {
+                Ok(k) => k,
+                Err(e) => return json_error(400, e.to_string()),
+            };
 
         // Collect one text per row by joining the requested fields.
         let texts: Vec<String> = rows
@@ -297,10 +283,11 @@ impl RedDBServer {
             crate::runtime::ai::batch_client::AiBatchClient::from_runtime(&self.runtime);
         let embeddings = match tokio::runtime::Handle::try_current() {
             Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(batch_client.embed_batch(
+                handle.block_on(batch_client.embed_batch_at(
                     &provider,
                     &model,
                     &api_key,
+                    &api_base,
                     texts.clone(),
                 ))
             }),
@@ -681,8 +668,7 @@ impl RedDBServer {
     }
 
     pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
-        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
-        match ops.delete(crate::catalog::CollectionModel::Kv, collection, key) {
+        match self.entity_use_cases().delete_kv(collection, key) {
             Ok(true) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -739,7 +725,7 @@ impl RedDBServer {
 
         HttpResponse {
             status: 200,
-            body,
+            body: body.into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         }
@@ -781,11 +767,15 @@ impl RedDBServer {
     }
 
     pub(crate) fn handle_get_entity(&self, collection: &str, id: u64) -> HttpResponse {
-        match self.runtime.db().store().get(collection, EntityId::new(id)) {
-            Some(entity) => {
+        match self
+            .runtime
+            .get_collection_entity(collection, EntityId::new(id))
+        {
+            Ok(Some(entity)) => {
                 json_response(200, crate::presentation::entity_json::entity_json(&entity))
             }
-            None => json_error(404, format!("entity not found: {id}")),
+            Ok(None) => json_error(404, format!("entity not found: {id}")),
+            Err(err) => json_error(403, err.to_string()),
         }
     }
 
@@ -1102,7 +1092,7 @@ impl BatchOutcome {
 fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
     HttpResponse {
         status: outcome.status,
-        body: outcome.body,
+        body: outcome.body.into(),
         content_type: "application/json",
         extra_headers: Vec::new(),
     }
@@ -1409,6 +1399,233 @@ mod tests {
     fn make_server() -> RedDBServer {
         let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         RedDBServer::new(rt)
+    }
+
+    fn kv_response(server: &RedDBServer, collection: &str, key: &str) -> JsonValue {
+        let response = server.handle_get_kv(collection, key);
+        assert_eq!(response.status, 200, "{:?}", response.body);
+        crate::json::parse_json(std::str::from_utf8(&response.body).expect("UTF-8 response"))
+            .expect("JSON response")
+            .into()
+    }
+
+    #[test]
+    fn rest_kv_index_preserves_response_and_collection_scope() {
+        let server = make_server();
+        for (collection, value) in [("first", "one"), ("second", "two")] {
+            let body = format!(r#"{{"value":"{value}"}}"#);
+            assert_eq!(
+                server
+                    .handle_put_kv(collection, "app:flag", body.into_bytes())
+                    .status,
+                201
+            );
+            let response = kv_response(&server, collection, "app:flag");
+            assert_eq!(response.get("ok"), Some(&JsonValue::Bool(true)));
+            assert_eq!(
+                response.get("collection").and_then(JsonValue::as_str),
+                Some(collection)
+            );
+            assert_eq!(
+                response.get("key").and_then(JsonValue::as_str),
+                Some("app:flag")
+            );
+            assert_eq!(
+                response.get("value").and_then(JsonValue::as_str),
+                Some(value)
+            );
+            assert!(response.get("id").and_then(JsonValue::as_f64).is_some());
+        }
+        assert_eq!(server.handle_get_kv("first", "absent").status, 404);
+        assert_eq!(server.handle_get_kv("missing", "app:flag").status, 404);
+        assert!(server
+            .runtime
+            .db()
+            .store()
+            .get_collection("missing")
+            .is_none());
+        assert_eq!(
+            server
+                .handle_put_kv("first", "app:flag", br#"{"value":null}"#.to_vec())
+                .status,
+            200
+        );
+        assert_eq!(
+            kv_response(&server, "first", "app:flag").get("value"),
+            Some(&JsonValue::Null)
+        );
+        assert!(server
+            .entity_use_cases()
+            .delete_kv("first", "app:flag")
+            .expect("delete"));
+        assert_eq!(server.handle_get_kv("first", "app:flag").status, 404);
+        assert_eq!(
+            kv_response(&server, "second", "app:flag")
+                .get("value")
+                .and_then(JsonValue::as_str),
+            Some("two")
+        );
+    }
+
+    #[test]
+    fn rest_kv_index_reads_compact_rows_and_missing_values_after_seal() {
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let server = make_server();
+        let db = server.runtime.db();
+        let store = db.store();
+        store.create_collection("compact_keys").expect("collection");
+        let manager = store.get_collection("compact_keys").expect("manager");
+        for (id, key, values, names) in [
+            (
+                1,
+                "present",
+                vec![Value::Integer(42)],
+                vec!["value".to_string()],
+            ),
+            (2, "without_value", Vec::new(), Vec::new()),
+        ] {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(id), "compact_keys", 1, Vec::new());
+            let mut fields = vec![Value::text(key)];
+            fields.extend(values);
+            let mut field_names = vec!["key".to_string()];
+            field_names.extend(names);
+            entity.data = EntityData::Row(RowData::with_names(fields, field_names));
+            manager.insert(entity).expect("compact keyed row");
+        }
+        manager.force_seal().expect("seal");
+        assert_eq!(
+            kv_response(&server, "compact_keys", "present")
+                .get("value")
+                .and_then(JsonValue::as_f64),
+            Some(42.0)
+        );
+        assert_eq!(
+            kv_response(&server, "compact_keys", "without_value").get("value"),
+            Some(&JsonValue::Null)
+        );
+    }
+
+    #[test]
+    fn rest_kv_index_retains_read_contract_validation() {
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("CREATE TABLE typed (item TEXT)")
+            .expect("table");
+        let response = server.handle_get_kv("typed", "missing");
+        assert_eq!(response.status, 400);
+        assert!(String::from_utf8_lossy(&response.body).contains("does not allow 'kv' reads"));
+
+        // Legacy implicit dynamic contracts remain permissive for REST reads.
+        server
+            .runtime
+            .execute_query("KV PUT legacy.'key' = 'value'")
+            .expect("seed");
+        let db = server.runtime.db();
+        let mut contract = db.collection_contract("legacy").expect("implicit contract");
+        contract.declared_model = crate::catalog::CollectionModel::Document;
+        db.save_collection_contract(contract)
+            .expect("legacy contract");
+        assert_eq!(
+            kv_response(&server, "legacy", "key")
+                .get("value")
+                .and_then(JsonValue::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn rest_kv_index_resolves_latest_version_and_tombstone() {
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("KV PUT versioned.'key' = 'initial'")
+            .expect("seed");
+        crate::application::VcsUseCases::new(&server.runtime)
+            .set_versioned("versioned", true)
+            .expect("versioning");
+        server
+            .runtime
+            .execute_query("KV PUT versioned.'key' = 'latest'")
+            .expect("update");
+        assert_eq!(
+            kv_response(&server, "versioned", "key")
+                .get("value")
+                .and_then(JsonValue::as_str),
+            Some("latest")
+        );
+        server
+            .runtime
+            .execute_query("KV DELETE versioned.'key'")
+            .expect("tombstone");
+        assert_eq!(server.handle_get_kv("versioned", "key").status, 404);
+    }
+
+    #[test]
+    fn rest_kv_index_applies_snapshot_before_projecting_values() {
+        use crate::runtime::execution_context::{CurrentSnapshotGuard, SnapshotContext};
+        use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let server = make_server();
+        server
+            .runtime
+            .execute_query("KV PUT snapshots.seed = 0")
+            .expect("seed");
+        crate::application::VcsUseCases::new(&server.runtime)
+            .set_versioned("snapshots", true)
+            .expect("versioning");
+        let db = server.runtime.db();
+        let store = db.store();
+        let manager = store.get_collection("snapshots").expect("manager");
+        for (id, key, value, xmin, xmax) in [
+            (1000, "changed", "old", 3, 12),
+            (1001, "deleted", "old", 3, 12),
+            (1002, "changed", "new", 12, 0),
+            (1003, "pending", "uncommitted", 4, 0),
+        ] {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(id), "snapshots", id, Vec::new());
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::text(key), Value::text(value)],
+                vec!["key".into(), "value".into()],
+            ));
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+            manager.insert(entity).expect("version");
+            manager.force_seal().expect("seal version");
+        }
+        {
+            let _snapshot = CurrentSnapshotGuard::install(SnapshotContext {
+                snapshot: Snapshot {
+                    xid: 10,
+                    in_progress: HashSet::from([4]),
+                },
+                manager: Arc::new(SnapshotManager::new()),
+                own_xids: HashSet::new(),
+                requires_index_fallback: false,
+                serializable_reader: None,
+            });
+            for key in ["changed", "deleted"] {
+                assert_eq!(
+                    kv_response(&server, "snapshots", key)
+                        .get("value")
+                        .and_then(JsonValue::as_str),
+                    Some("old")
+                );
+            }
+            assert_eq!(server.handle_get_kv("snapshots", "pending").status, 404);
+        }
+        assert_eq!(
+            kv_response(&server, "snapshots", "changed")
+                .get("value")
+                .and_then(JsonValue::as_str),
+            Some("new")
+        );
+        assert_eq!(server.handle_get_kv("snapshots", "deleted").status, 404);
     }
 
     fn post_bulk_rows(server: &RedDBServer, collection: &str, body: &str) -> HttpResponse {

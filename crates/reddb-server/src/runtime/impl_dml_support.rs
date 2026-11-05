@@ -22,13 +22,15 @@ use super::impl_dml::{
 
 pub(super) fn split_insert_metadata(
     runtime: &RedDBRuntime,
+    secret_columns: &[bool],
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<(Vec<(String, Value)>, Vec<(String, MetadataValue)>)> {
     let mut fields = Vec::new();
     let mut metadata = Vec::new();
+    assert_eq!(columns.len(), secret_columns.len());
 
-    for (column, value) in columns.iter().zip(values.iter()) {
+    for ((column, value), secret_column) in columns.iter().zip(values.iter()).zip(secret_columns) {
         // Still support legacy _ttl columns for backward compat
         if let Some(metadata_key) = resolve_sql_ttl_metadata_key(column) {
             let raw_value = sql_literal_to_metadata_value(metadata_key, value)?;
@@ -39,7 +41,7 @@ pub(super) fn split_insert_metadata(
         }
         fields.push((
             column.clone(),
-            runtime.resolve_crypto_sentinel(value.clone())?,
+            runtime.resolve_secret_column_value(value.clone(), *secret_column)?,
         ));
     }
 
@@ -163,7 +165,7 @@ pub(super) fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<
     Ok(())
 }
 
-pub(super) fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
+pub(crate) fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
     let mut columns = Vec::with_capacity(pairs.len());
     let mut values = Vec::with_capacity(pairs.len());
 
@@ -208,7 +210,7 @@ pub(super) fn find_column_value_string(
     }
 }
 
-pub(super) fn find_document_body_json(
+pub(crate) fn find_document_body_json(
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<crate::json::Value> {
@@ -861,6 +863,46 @@ pub(super) fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
         }
     }
     !matches!(cursor, crate::json::Value::Null)
+}
+
+pub(super) fn dotted_tenant_text(value: &Value, tail: &str) -> RedDBResult<Option<String>> {
+    let json = match value {
+        Value::Null => return Ok(None),
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            crate::json::from_slice(bytes).map_err(|err| {
+                RedDBError::Query(format!(
+                    "tenant discriminator: root column is not valid JSON ({err})"
+                ))
+            })?
+        }
+        Value::Text(text) => crate::json::from_str(text).map_err(|err| {
+            RedDBError::Query(format!(
+                "tenant discriminator: text root is not valid JSON ({err})"
+            ))
+        })?,
+        other => {
+            return Err(RedDBError::Query(format!(
+                "tenant discriminator: root column must be JSON / NULL, got {other:?}"
+            )))
+        }
+    };
+    let mut cursor = &json;
+    for segment in tail.split('.') {
+        let crate::json::Value::Object(map) = cursor else {
+            return Ok(None);
+        };
+        let Some(value) = map.get(segment) else {
+            return Ok(None);
+        };
+        cursor = value;
+    }
+    match cursor {
+        crate::json::Value::Null => Ok(None),
+        crate::json::Value::String(value) => Ok(Some(value.clone())),
+        _ => Err(RedDBError::Query(
+            "tenant discriminator must be a string".to_string(),
+        )),
+    }
 }
 
 /// Phase 2 PG parity: take a column value (possibly Null / Text /

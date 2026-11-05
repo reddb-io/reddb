@@ -707,11 +707,10 @@ impl RedDBServer {
         &self,
         headers: &std::collections::BTreeMap<String, String>,
     ) -> (Option<crate::auth::Role>, bool) {
-        let auth_store = match self.auth_store.as_ref() {
-            Some(store) => store,
-            None => return (None, false),
-        };
-        if !auth_store.is_enabled() {
+        let auth_store = self.auth_store.as_deref();
+        let auth_enabled = self.runtime.oauth_validator().is_some()
+            || auth_store.is_some_and(|store| store.is_enabled());
+        if !auth_enabled {
             return (None, false);
         }
         let token = headers
@@ -719,7 +718,7 @@ impl RedDBServer {
             .and_then(|v| v.strip_prefix("Bearer "));
         match token {
             Some(tok) => {
-                match super::routing::resolve_bearer_role(tok, &self.runtime, auth_store.as_ref()) {
+                match super::routing::resolve_bearer_role(tok, &self.runtime, auth_store) {
                     super::routing::BearerOutcome::Valid(role) => (Some(role), true),
                     _ => (None, true),
                 }

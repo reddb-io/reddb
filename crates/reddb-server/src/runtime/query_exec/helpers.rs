@@ -493,59 +493,96 @@ pub(crate) fn resolve_entity_document_path(
     None
 }
 
-/// Try to resolve a simple equality filter (`WHERE col = val`) via hash index.
-///
-/// Returns `Some(entity_ids)` when:
-/// - The filter contains a simple `col = val` equality predicate
-/// - A hash index exists for that column on the given table
-/// - The lookup succeeds
-///
-/// Returns `None` when any condition isn't met — caller falls back to full scan.
-/// Only extracts the first equality predicate; compound filters with extra
-/// predicates still need post-fetch filtering.
+// Integer keys stay inline and text borrows the parsed value; preparing an IN
+// iterator must not allocate an unbudgeted vector of keys.
+enum HashLookupKey<'a> {
+    Borrowed(&'a [u8]),
+    Inline([u8; 8]),
+}
+
+impl AsRef<[u8]> for HashLookupKey<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Inline(bytes) => bytes,
+        }
+    }
+}
+
+fn hash_lookup_key(value: &Value) -> Option<HashLookupKey<'_>> {
+    match value {
+        Value::Text(text) => Some(HashLookupKey::Borrowed(text.as_bytes())),
+        Value::Integer(value) => Some(HashLookupKey::Inline(value.to_le_bytes())),
+        Value::UnsignedInteger(value) => Some(HashLookupKey::Inline(value.to_le_bytes())),
+        _ => None,
+    }
+}
+
+/// Resolve an equality via HASH. Absence permits a scan; read/admission failures
+/// are authoritative and must reach SELECT/UPDATE/DELETE unchanged.
 pub(crate) fn try_hash_eq_lookup(
     filter: &reddb_rql::ast::Filter,
     table: &str,
     idx_store: &super::super::index_store::IndexStore,
-) -> Option<Vec<crate::storage::unified::entity::EntityId>> {
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
+    hash_eq_lookup(filter, table, idx_store, false)
+}
+
+fn hash_eq_lookup(
+    filter: &reddb_rql::ast::Filter,
+    table: &str,
+    idx_store: &super::super::index_store::IndexStore,
+    resident_only: bool,
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
     use reddb_rql::ast::{FieldRef, Filter};
-
-    // `WHERE col IN (v1, v2, ...)` — one hash lookup per value, union the
-    // id sets. Cheap per-value because each lookup is O(1) in the HashMap
-    // bucket. Without this path `WHERE id IN (...)` falls through to a
-    // full scan, which is catastrophic for bulk_update batches.
     if let Filter::In { field, values } = filter {
-        let col = match field {
-            FieldRef::TableColumn { column, .. } => column.as_str(),
-            _ => return None,
+        let FieldRef::TableColumn { column, .. } = field else {
+            return Ok(None);
         };
-        let idx = idx_store.find_index_for_column(table, col)?;
-        let lookup_name = idx.hash_lookup_name();
-        let mut ids = Vec::with_capacity(values.len());
-        for value in values {
-            let lookup = match value {
-                Value::Text(s) => idx_store.hash_lookup(table, lookup_name.as_ref(), s.as_bytes()),
-                Value::Integer(n) => {
-                    let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
-                }
-                Value::UnsignedInteger(n) => {
-                    let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
-                }
-                _ => return None,
-            }
-            .ok()?;
-            ids.extend(lookup);
+        let Some(idx) = idx_store.find_hash_index_for_column(table, column) else {
+            return Ok(None);
+        };
+        let name = idx.hash_lookup_name();
+        if values.iter().any(|value| hash_lookup_key(value).is_none()) {
+            return Ok(None);
         }
-        return Some(ids);
+        let keys = values
+            .iter()
+            .map(|value| hash_lookup_key(value).expect("invariant: every IN key was validated"));
+        return idx_store
+            .hash
+            .lookup_union_owned(table, &name, keys)
+            .map_err(|error| crate::RedDBError::Internal(error.to_string()));
     }
-
-    let (col, val_bytes) = extract_index_candidate(filter)?;
-    let idx = idx_store.find_index_for_column(table, &col)?;
+    let Some((column, key)) = extract_index_candidate(filter) else {
+        return Ok(None);
+    };
+    let Some(index) = idx_store.find_hash_index_for_column(table, &column) else {
+        return Ok(None);
+    };
+    if resident_only {
+        return idx_store
+            .hash
+            .lookup_union_owned(
+                table,
+                &index.hash_lookup_name(),
+                std::iter::once(key.as_slice()),
+            )
+            .map_err(|error| crate::RedDBError::Internal(error.to_string()));
+    }
     idx_store
-        .hash_lookup(table, idx.hash_lookup_name().as_ref(), &val_bytes)
-        .ok()
+        .hash_lookup(table, &index.hash_lookup_name(), &key)
+        .map(Some)
+        .map_err(crate::RedDBError::Internal)
+}
+
+/// Resident intersections retain candidate owners and propagate admission errors.
+pub(crate) fn try_resident_hash_eq_lookup(
+    filter: &reddb_rql::ast::Filter,
+    table: &str,
+    idx_store: &super::super::index_store::IndexStore,
+) -> Result<Option<crate::storage::unified::hash_index::HashCandidates>, crate::RedDBError> {
+    hash_eq_lookup(filter, table, idx_store, true)
 }
 
 /// Evaluate a SQL Filter directly against a UnifiedEntity without creating a
@@ -566,18 +603,46 @@ pub(crate) fn evaluate_entity_filter_with_db(
     table_name: &str,
     table_alias: &str,
 ) -> bool {
-    match filter {
+    evaluate_entity_filter_result_with_db(db, entity, filter, table_name, table_alias)
+        .unwrap_or(false)
+}
+
+fn try_resolve_entity_filter_field<'a>(
+    entity: &'a crate::storage::unified::entity::UnifiedEntity,
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<Option<std::borrow::Cow<'a, Value>>> {
+    match resolve_entity_field(entity, field, table_name, table_alias) {
+        Some(value) if matches!(value.as_ref(), Value::Secret(_)) => {
+            try_secret_runtime_input(value.into_owned())
+                .map(|value| value.map(std::borrow::Cow::Owned))
+        }
+        value => Ok(value),
+    }
+}
+
+pub(crate) fn evaluate_entity_filter_result_with_db(
+    db: Option<&RedDB>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+    filter: &Filter,
+    table_name: &str,
+    table_alias: &str,
+) -> RedDBResult<bool> {
+    Ok(match filter {
         Filter::Compare { field, op, value } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
-                .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
+                .map(|candidate| try_compare_runtime_values(candidate.as_ref(), value, *op))
+                .transpose()?
                 .unwrap_or(false)
         }
         Filter::CompareFields { left, op, right } => {
-            let left_val = resolve_entity_field(entity, left, table_name, table_alias);
-            let right_val = resolve_entity_field(entity, right, table_name, table_alias);
+            let left_val = try_resolve_entity_filter_field(entity, left, table_name, table_alias)?;
+            let right_val =
+                try_resolve_entity_filter_field(entity, right, table_name, table_alias)?;
             match (left_val, right_val) {
-                (Some(l), Some(r)) => compare_runtime_values(l.as_ref(), r.as_ref(), *op),
+                (Some(l), Some(r)) => try_compare_runtime_values(l.as_ref(), r.as_ref(), *op)?,
                 _ => false,
             }
         }
@@ -596,81 +661,104 @@ pub(crate) fn evaluate_entity_filter_with_db(
             // the `any` record builder so policy predicates can reach
             // their native fields (node.properties, edge props,
             // message.payload, vector.metadata, timeseries.tags).
-            let Some(db) = db else { return true };
+            let Some(db) = db else { return Ok(true) };
             let table_record = runtime_table_record_from_entity(entity.clone());
             let record = match table_record {
                 Some(r) => Some(r),
                 None => super::super::record_search_helpers::any_record_from_entity(entity.clone()),
             };
             let Some(record) = record else {
-                return false;
+                return Ok(false);
             };
-            super::super::join_filter::evaluate_runtime_filter_with_db(
+            return super::super::join_filter::evaluate_runtime_filter_result_with_db(
                 Some(db),
                 &record,
                 filter,
                 Some(table_name),
                 Some(table_alias),
-            )
+            );
         }
         Filter::And(left, right) => {
-            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
-                && evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
+            evaluate_entity_filter_result_with_db(db, entity, left, table_name, table_alias)?
+                && evaluate_entity_filter_result_with_db(
+                    db,
+                    entity,
+                    right,
+                    table_name,
+                    table_alias,
+                )?
         }
         Filter::Or(left, right) => {
-            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
-                || evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
+            evaluate_entity_filter_result_with_db(db, entity, left, table_name, table_alias)?
+                || evaluate_entity_filter_result_with_db(
+                    db,
+                    entity,
+                    right,
+                    table_name,
+                    table_alias,
+                )?
         }
         Filter::Not(inner) => {
-            !evaluate_entity_filter_with_db(db, entity, inner, table_name, table_alias)
+            !evaluate_entity_filter_result_with_db(db, entity, inner, table_name, table_alias)?
         }
-        Filter::IsNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
-            .map(|value| value.as_ref() == &Value::Null)
-            .unwrap_or(true),
-        Filter::IsNotNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
-            .map(|value| value.as_ref() != &Value::Null)
-            .unwrap_or(false),
+        Filter::IsNull(field) => {
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+                .map(|value| value.as_ref() == &Value::Null)
+                .unwrap_or(true)
+        }
+        Filter::IsNotNull(field) => {
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+                .map(|value| value.as_ref() != &Value::Null)
+                .unwrap_or(false)
+        }
         Filter::In { field, values } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
-                .as_ref()
-                .is_some_and(|candidate| {
-                    values.iter().any(|value| {
-                        compare_runtime_values(candidate.as_ref(), value, CompareOp::Eq)
-                    })
-                })
+            let Some(candidate) =
+                try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+            else {
+                return Ok(false);
+            };
+            let mut matched = false;
+            for value in values {
+                if try_compare_runtime_values(candidate.as_ref(), value, CompareOp::Eq)? {
+                    matched = true;
+                    break;
+                }
+            }
+            matched
         }
         Filter::Between { field, low, high } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
-                .as_ref()
-                .is_some_and(|candidate| {
-                    compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
-                        && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
-                })
+            let Some(candidate) =
+                try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
+            else {
+                return Ok(false);
+            };
+            try_compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)?
+                && try_compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)?
         }
         Filter::Like { field, pattern } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| like_matches(value.as_ref(), pattern))
         }
         Filter::StartsWith { field, prefix } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| value.starts_with(prefix.as_str()))
         }
         Filter::EndsWith { field, suffix } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .and_then(|v| runtime_value_text_cow(v.as_ref()))
                 .is_some_and(|value| value.ends_with(suffix.as_str()))
         }
         Filter::Contains { field, substring } => {
-            resolve_entity_field(entity, field, table_name, table_alias)
+            try_resolve_entity_filter_field(entity, field, table_name, table_alias)?
                 .as_ref()
                 .is_some_and(|value| runtime_value_contains(value.as_ref(), substring))
         }
-    }
+    })
 }
 
 fn runtime_value_contains(value: &Value, needle: &str) -> bool {

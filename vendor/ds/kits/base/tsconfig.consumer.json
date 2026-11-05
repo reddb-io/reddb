@@ -1,0 +1,19 @@
+{
+  "//": "The tsconfig a consumer's own svelte-check stands in for: strict, no DS base config behind it, `src` and nothing else. It is what the Kit is compiled against out there, so it is what the Kit is checked against here. `vite/client` is the one thing it adds over the application Kit's, and it is the point: the Logo reaches a Mark by importing the .svg, and a consumer's own bundler is what declares that module — which is exactly why this Kit ships no declaration of its own (types/marks.d.ts).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src"]
+}

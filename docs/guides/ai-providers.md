@@ -20,14 +20,22 @@ embeddings](#anthropic-embeddings-policy) section first.
 | Anthropic   | `anthropic`   | yes     | ✅              | **rejected** (see below) | ✅    | —       | Anthropic Messages    |
 | MiniMax     | `minimax`     | yes     | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
 | Groq        | `groq`        | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
-| OpenRouter  | `openrouter`  | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
+| OpenRouter  | `openrouter`  | yes     | ✅              | ✅                       | ✅    | —       | OpenAI-compat         |
 | Together    | `together`    | yes     | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
-| Venice      | `venice`      | yes     | ✅              | —                       | ✅    | —       | OpenAI-compat         |
+| Venice      | `venice`      | yes     | ✅              | ✅                       | ✅    | —       | OpenAI-compat         |
 | DeepSeek    | `deepseek`    | yes     | ✅              | —                       | —     | —       | OpenAI-compat         |
 | HuggingFace | `huggingface` | yes     | ✅              | ✅                      | —     | —       | HF feature-extraction |
 | Ollama      | `ollama`      | no      | ✅              | ✅                      | ✅    | —       | OpenAI-compat         |
 | Local       | `local`       | no      | —               | feature-gated            | —     | —       | in-process backend    |
-| Custom URL  | `https://...` | depends | ✅              | ✅                      | —     | —       | OpenAI-compat         |
+| Custom URL  | `https://...` | yes     | ✅              | ✅                      | —     | —       | OpenAI-compat         |
+| OpenAI-compatible gateway | `openai-compat` | yes | ✅ | ✅¹ | — | — | OpenAI-compat |
+| RedRouter | `red-router` | yes | ✅ | ✅¹ | — | — | OpenAI-compat |
+
+¹ Gateway support depends on the upstream model. Configure an embedding model
+available at your endpoint; chat and embedding model IDs are distinct.
+OpenRouter and Venice expose documented [OpenRouter embeddings](https://openrouter.ai/docs/api/api-reference/embeddings/create-embeddings)
+and [Venice embeddings](https://docs.venice.ai/api-reference/endpoint/embeddings/generate)
+endpoints. Groq and DeepSeek are rejected for embedding tasks.
 
 The **Generate / Embed / Vision / Moderate** columns are the provider's
 [modality capabilities](../api/ai-provider-modes.md#modality-matrix). They gate a
@@ -168,6 +176,69 @@ there is no silent re-route.
 > `red.config.ai.default.model`, and the old
 > `red.config.ai.{provider}.{alias}.base_url` base-URL shape were removed.
 > Writing any of them is rejected with an error naming the new key.
+
+---
+
+## BYOK gateways and RedRouter
+
+Register `openai-compat`, `red-router`, or a custom URL with **both** an API key
+and an endpoint. The credential handler validates the complete pair before
+writing it; supplying only one returns HTTP 400. Named vendors such as OpenAI
+have built-in endpoints and can be registered with only their API key.
+
+```bash
+curl -X POST http://127.0.0.1:5000/ai/credentials \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "red-router",
+    "alias": "mine",
+    "api_key": "YOUR_ROUTER_KEY",
+    "endpoint": "https://your-router.example/v1",
+    "model": "YOUR_CHAT_MODEL_ID",
+    "default": true
+  }'
+```
+
+`endpoint`, `api_base`, and `base_url` name the same setting. Use one field.
+The endpoint is per provider at `red.config.ai.providers.<provider>.base_url`;
+keys are per credential alias in the encrypted Vault. `default: true` sets
+`red.config.ai.providers.<provider>.credential` to the registered alias, so
+calls without `credential` use that key. An explicit alias overrides it.
+For another endpoint, configure another database deployment; aliases under the
+same provider share its endpoint.
+
+HTTP prompt/ASK, HTTP/gRPC embeddings, SQL ASK, and AUTO EMBED resolve the
+endpoint from the provider environment variable, then the provider config,
+then the built-in vendor URL. A named gateway has no built-in endpoint and
+fails when the endpoint or key is absent. Invalid provider selections return
+an error instead of falling back to another vendor. Model IDs and endpoint
+paths retain their case. Batch deduplication partitions cached vectors by
+provider, endpoint, model, and a digest of the credential.
+
+For environment-based bootstrap, provide the pair:
+
+```bash
+export REDDB_AI_PROVIDER=red-router
+export REDDB_RED_ROUTER_API_BASE=https://your-router.example/v1
+export REDDB_RED_ROUTER_API_KEY=YOUR_ROUTER_KEY
+export REDDB_RED_ROUTER_PROMPT_MODEL=YOUR_CHAT_MODEL_ID
+```
+
+The equivalent prefix for `openai-compat` is `REDDB_OPENAI_COMPAT_`.
+Quoted provider tokens work in SQL, for example `USING 'red-router'` or
+`USING 'openai-compat'`. Set the embedding model separately in
+`red.config.ai.providers.red-router.models.embeddings`.
+Endpoints must be absolute HTTP(S) URLs without userinfo, query, or fragment.
+Plain HTTP is allowed for loopback services; private-network deployments can
+opt in with `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1`. URL syntax validation always
+applies, including when private networks are enabled.
+
+The open-source engine starts without any supplied API key. The reddb.io
+provisioning service must supply **its own RedRouter endpoint and scoped key**
+when no user connection exists; it must preserve an explicit BYOK connection.
+The engine does not create a managed key or substitute one after a BYOK error.
+This configuration enables chat and embeddings; a native SystemOne/decisions
+adapter is a separate integration.
 
 ---
 

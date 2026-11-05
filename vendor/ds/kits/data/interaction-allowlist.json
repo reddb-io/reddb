@@ -1,0 +1,10 @@
+{
+  "$comment": "kit-lint rule 8 (wave 6A): interactive elements that draw their own states instead of the quietControl() contract, each with the reason it is not a quiet control. An entry that matches nothing fails as stale.",
+  "allow": [
+    {
+      "file": "src/Graph.svelte",
+      "element": "role=button",
+      "reason": "Graph nodes and edges are SVG marks inside the drawing (a <g> and a <circle>), not boxes with a background: a fill would repaint the node's series colour. Their state is the stroke (ink at 3px for the focused node) and the shared ink focus outline (GRAPH_FOCUS_OUTLINE)."
+    }
+  ]
+}

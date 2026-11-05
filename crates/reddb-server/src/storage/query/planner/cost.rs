@@ -18,44 +18,7 @@ use reddb_rql::ast::{
 };
 use reddb_types::Value;
 
-/// Cardinality estimate for a query result
-#[derive(Debug, Clone, Default)]
-pub struct CardinalityEstimate {
-    /// Estimated row/record count
-    pub rows: f64,
-    /// Selectivity factor (0.0 - 1.0)
-    pub selectivity: f64,
-    /// Confidence in the estimate (0.0 - 1.0)
-    pub confidence: f64,
-}
-
-impl CardinalityEstimate {
-    /// Create a new cardinality estimate
-    pub fn new(rows: f64, selectivity: f64) -> Self {
-        Self {
-            rows,
-            selectivity,
-            confidence: 1.0,
-        }
-    }
-
-    /// Full table scan estimate
-    pub fn full_scan(table_size: f64) -> Self {
-        Self {
-            rows: table_size,
-            selectivity: 1.0,
-            confidence: 1.0,
-        }
-    }
-
-    /// Apply a filter to reduce cardinality
-    pub fn with_filter(mut self, filter_selectivity: f64) -> Self {
-        self.rows *= filter_selectivity;
-        self.selectivity *= filter_selectivity;
-        self.confidence *= 0.9; // Reduce confidence with each estimate
-        self
-    }
-}
+pub use reddb_engine::query::logical_plan::CardinalityEstimate;
 
 /// Cost of executing a query plan.
 ///
@@ -753,8 +716,6 @@ impl CostEstimator {
     // =========================================================================
 
     fn estimate_path(&self, query: &PathQuery) -> PlanCost {
-        let cardinality = self.estimate_path_cardinality(query);
-
         // BFS/DFS cost
         let max_hops = query.max_length;
         let branching_factor: f64 = 5.0; // Average edges per node
@@ -767,7 +728,7 @@ impl CostEstimator {
         PlanCost::new(cpu, io, memory)
     }
 
-    fn estimate_path_cardinality(&self, query: &PathQuery) -> CardinalityEstimate {
+    fn estimate_path_cardinality(&self, _query: &PathQuery) -> CardinalityEstimate {
         // Path queries typically return few results
         let max_paths = 10.0;
         CardinalityEstimate::new(max_paths, 0.001)
@@ -1241,8 +1202,6 @@ mod tests {
 
     #[test]
     fn test_filter_selectivity() {
-        let estimator = CostEstimator::new();
-
         let eq_filter = AstFilter::Compare {
             field: FieldRef::column("hosts", "id"),
             op: CompareOp::Eq,
@@ -1260,8 +1219,6 @@ mod tests {
 
     #[test]
     fn test_and_selectivity() {
-        let estimator = CostEstimator::new();
-
         let and_filter = AstFilter::And(
             Box::new(AstFilter::Compare {
                 field: FieldRef::column("hosts", "a"),

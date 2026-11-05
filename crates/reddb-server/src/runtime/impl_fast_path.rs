@@ -13,6 +13,10 @@ impl RedDBRuntime {
         &self,
         query: &str,
     ) -> Option<RedDBResult<RuntimeQueryResult>> {
+        // Budgeted reads use the normal typed execution path and checkpoints.
+        if self.resource_limits().read_execution_limits_enabled() {
+            return None;
+        }
         // Pattern: "SELECT * FROM <table> WHERE _entity_id = <id>"
         // or "SELECT * FROM <table> WHERE _entity_id =<id>"
         let q = query.trim();

@@ -1,6 +1,16 @@
 use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
+#[cfg(test)]
+fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_metadata name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 impl RedDB {
     pub fn is_replica_role(&self) -> bool {
         matches!(
@@ -21,6 +31,7 @@ impl RedDB {
                 return Ok(());
             };
 
+            let _publication = self.store.vault_publication_lock.lock();
             let Ok(mut metadata) = self.load_or_bootstrap_physical_metadata(true) else {
                 return Ok(());
             };
@@ -99,6 +110,14 @@ impl RedDB {
             return false;
         };
 
+        Self::entity_metadata_expired_at(entity, &metadata, now_ms)
+    }
+
+    pub(crate) fn entity_metadata_expired_at(
+        entity: &crate::storage::UnifiedEntity,
+        metadata: &crate::storage::unified::metadata::Metadata,
+        now_ms: u64,
+    ) -> bool {
         if metadata
             .get("_expires_at")
             .and_then(Self::metadata_u64)
@@ -345,23 +364,57 @@ impl RedDB {
 
     /// Get a key-value pair by key, returning the value and entity id
     ///
-    /// Scans the collection for an entity whose named field `key` matches.
+    /// Clone only the selected value. Legacy positional rows without an
+    /// indexed key use their collection schema in the borrowed fallback scan.
     pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
         let manager = self.store.get_collection(collection)?;
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if let EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            let value = named.get("value").cloned().unwrap_or(Value::Null);
-                            return Some((value, entity.id));
-                        }
-                    }
-                }
-            }
+        if let Some(value) = manager.project_key_entity(key, None, false, |entity| {
+            (
+                entity
+                    .data
+                    .as_row()
+                    .and_then(|row| row.get_field("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                entity.id,
+            )
+        }) {
+            return Some(value);
         }
-        None
+        let columns = manager.column_schema();
+        let key_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "key"));
+        let value_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "value"));
+        let mut found = None;
+        manager.for_each_entity(|entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            let legacy = row.named.is_none() && row.schema.is_none();
+            let stored_key = row.get_field("key").or_else(|| {
+                if legacy {
+                    key_index.and_then(|index| row.columns.get(index))
+                } else {
+                    None
+                }
+            });
+            if matches!(stored_key, Some(Value::Text(stored)) if stored.as_ref() == key) {
+                let value = row.get_field("value").or_else(|| {
+                    if legacy {
+                        value_index.and_then(|index| row.columns.get(index))
+                    } else {
+                        None
+                    }
+                });
+                found = Some((value.cloned().unwrap_or(Value::Null), entity.id));
+                return false;
+            }
+            true
+        });
+        found
     }
 
     /// Delete a key-value pair by key, returning whether it was found and removed
@@ -410,6 +463,7 @@ impl RedDB {
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
             self.seed_contract_cache_from_store_aux()?;
         }
@@ -417,7 +471,9 @@ impl RedDB {
         // API opens so chunk routing / pruning / TTL work immediately
         // after a restart.
         self.load_hypertables_from_metadata();
-        self.recover_queue_pending_state();
+        // Pending deliveries retain their persisted lock deadlines on recovery
+        // (ADR 0020). The lifecycle lazily reclaims expired locks on delivery;
+        // deleting every pending row here would redeliver still-owned work.
         Ok(self)
     }
 
@@ -425,7 +481,11 @@ impl RedDB {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
-        if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
+        // Default embedded options can reopen an existing paged file. Its
+        // native headers and index artifacts still require publication.
+        if !self.paged_mode
+            && self.options.storage_profile.deploy_profile
+                == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
         {
@@ -435,12 +495,59 @@ impl RedDB {
             return Ok(());
         };
 
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
+        let _publication = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "publication-lock");
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "previous-metadata");
         let collection_roots = self.physical_collection_roots();
-        let indexes = self
-            .native_physical_state()
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "collection-roots");
+        let native_state = self.native_physical_state();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-state");
+        let mut indexes = native_state
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
+        if let Some(previous) = previous.as_ref() {
+            // Legacy paged contract edits publish the sidecar first. Do not
+            // resurrect a dropped collection from the older native registry.
+            // Preserve unrelated orphan descriptors without a removal proof.
+            let absent = |name: &str| {
+                !collection_roots.contains_key(name)
+                    && !previous
+                        .collection_contracts
+                        .iter()
+                        .any(|contract| contract.name == name)
+            };
+            let mut removed: BTreeSet<&str> = previous
+                .superblock
+                .collection_roots
+                .keys()
+                .map(String::as_str)
+                .filter(|name| absent(name))
+                .collect();
+            let mut seen = BTreeSet::new();
+            for event in previous.manifest_events.iter().rev() {
+                if seen.insert(event.collection.as_str())
+                    && matches!(&event.kind, crate::physical::ManifestEventKind::Remove)
+                    && absent(&event.collection)
+                {
+                    removed.insert(event.collection.as_str());
+                }
+            }
+            indexes.retain(|index| {
+                !index
+                    .collection
+                    .as_deref()
+                    .is_some_and(|collection| removed.contains(collection))
+            });
+        }
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "index-state");
         let mut metadata = PhysicalMetadataFile::from_state(
             self.options.clone(),
             self.catalog_snapshot(),
@@ -453,8 +560,14 @@ impl RedDB {
         // chunk bounds / routing / TTL) onto the same metadata path as
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "metadata-assembled");
         metadata.save_for_data_path(path)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "sidecar-save");
         self.persist_native_physical_header(&metadata)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-header");
         Ok(())
     }
 
@@ -472,6 +585,7 @@ impl RedDB {
             return Ok(false);
         }
 
+        let _publication = self.store.vault_publication_lock.lock();
         let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
         metadata.save_for_data_path(path)?;
@@ -519,9 +633,15 @@ impl RedDB {
         let Some(path) = self.path() else {
             return Err("database path is not available".into());
         };
+        let _publication = self.store.vault_publication_lock.lock();
         let native_state = self.native_physical_state();
 
-        match PhysicalMetadataFile::load_for_data_path(path) {
+        let metadata = if persist_bootstrapped && !self.options.read_only {
+            PhysicalMetadataFile::load_for_data_path(path)
+        } else {
+            PhysicalMetadataFile::inspect_for_data_path(path)
+        };
+        match metadata {
             Ok(metadata) => {
                 if let Some(native_state) = native_state.as_ref() {
                     let inspection = Self::inspect_native_header_against_metadata(
@@ -584,7 +704,7 @@ impl RedDB {
     pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
         let path = self.path()?;
         let native_state = self.native_physical_state();
-        let metadata = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let metadata = PhysicalMetadataFile::inspect_for_data_path(path).ok();
 
         match (metadata, native_state) {
             (Some(metadata), Some(native_state)) => {
@@ -615,7 +735,7 @@ impl RedDB {
         let catalog_name = catalog.name.clone();
         let catalog_total_entities = catalog.total_entities;
         let catalog_total_collections = catalog.total_collections;
-        let indexes = self.physical_index_state();
+        let indexes = self.physical_index_state_from_native_state(native_state, previous);
 
         let mut manifest =
             crate::api::SchemaManifest::now(self.options.clone(), catalog.total_collections);
@@ -864,11 +984,15 @@ impl RedDB {
         &self,
         mut indexes: Vec<PhysicalIndexState>,
     ) -> Vec<PhysicalIndexState> {
-        let native_artifacts = self
-            .native_physical_state()
-            .and_then(|state| state.registry)
-            .map(|registry| registry.vector_artifacts)
+        let native_state = self.native_physical_state();
+        let native_artifacts = native_state
+            .as_ref()
+            .and_then(|state| state.registry.as_ref())
+            .map(|registry| registry.vector_artifacts.as_slice())
             .unwrap_or_default();
+        let artifact_pages = native_state
+            .as_ref()
+            .and_then(|state| state.vector_artifact_pages.as_ref());
         for index in &mut indexes {
             let Some(collection) = index.collection.as_deref() else {
                 continue;
@@ -879,7 +1003,12 @@ impl RedDB {
             let Some(artifact) = native_artifacts.iter().find(|artifact| {
                 artifact.collection == collection && artifact.artifact_kind == artifact_kind
             }) else {
-                index.build_state = "metadata-only".to_string();
+                index.build_state = if index.backend == "memory-budget-deferred" {
+                    "deferred-memory-budget"
+                } else {
+                    "metadata-only"
+                }
+                .to_string();
                 continue;
             };
             index.entries = artifact.vector_count as usize;
@@ -888,9 +1017,9 @@ impl RedDB {
             index.artifact_kind = Some(artifact.artifact_kind.clone());
             index.artifact_checksum = Some(artifact.checksum);
             index.build_state = "artifact-published".to_string();
-            if let Some(pages) = self.native_vector_artifact_pages() {
+            if let Some(pages) = artifact_pages {
                 index.artifact_root_page = pages
-                    .into_iter()
+                    .iter()
                     .find(|page| {
                         page.collection == artifact.collection
                             && page.artifact_kind == artifact.artifact_kind
@@ -982,6 +1111,18 @@ impl RedDB {
                 if index.build_state == "catalog-derived" {
                     index.build_state = "registry-loaded".to_string();
                 }
+            }
+            if index.backend == "memory-budget-deferred"
+                || previous.is_some_and(|metadata| {
+                    metadata.indexes.iter().any(|previous| {
+                        previous.name == index.name && previous.backend == "memory-budget-deferred"
+                    })
+                })
+            {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
             }
         }
 
@@ -1250,10 +1391,20 @@ impl RedDB {
             return Err("database path is not available".into());
         };
 
+        // #2376: the metadata sidecar and the native header pages are
+        // published read-modify-write. Two unserialised publishers lost each
+        // other's collection contracts and double-freed the header pages
+        // (a freed page came back as a B-tree page). Every publisher takes
+        // the store's reentrant publication lock, which `persist()` already
+        // takes, so this adds no lock-order edge.
+        let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
 
         if metadata.indexes.is_empty() {
-            metadata.indexes = self.physical_index_state();
+            metadata.indexes = self
+                .native_physical_state()
+                .map(|state| self.physical_index_state_from_native_state(&state, Some(&metadata)))
+                .unwrap_or_else(|| self.physical_index_state());
         }
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
@@ -1271,6 +1422,7 @@ impl RedDB {
             return Ok(());
         }
 
+        let _publication = self.store.vault_publication_lock.lock();
         let existing_page = self
             .store
             .physical_file_header()
@@ -1314,7 +1466,45 @@ impl RedDB {
         let (collection_roots_page, collection_roots_checksum) = self
             .store
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
-        let registry_summary = self.native_registry_summary_from_metadata(metadata);
+        // Build payload artifacts once, on the publication path. Observers use
+        // the persisted summaries instead of rebuilding search indexes.
+        let build = self.native_vector_artifact_records()?;
+        let vector_artifact_records = build.records;
+        let mut metadata = metadata.clone();
+        for index in &mut metadata.indexes {
+            let Some(kind) = Self::native_artifact_kind_for_index(index.kind) else {
+                continue;
+            };
+            let Some(collection) = &index.collection else {
+                continue;
+            };
+            if build.deferred_collections.contains(collection) {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
+            } else if let Some((summary, _)) =
+                vector_artifact_records.iter().find(|(summary, _)| {
+                    &summary.collection == collection && summary.artifact_kind == kind
+                })
+            {
+                index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+                index.build_state = "artifact-published".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_checksum = Some(summary.checksum);
+            }
+        }
+        let metadata = &metadata;
+        let artifact_summaries = vector_artifact_records
+            .iter()
+            .map(|(summary, _)| summary.clone())
+            .collect::<Vec<_>>();
+        let registry_summary = self.native_registry_summary_from_metadata(
+            metadata,
+            &artifact_summaries,
+            artifact_summaries.len(),
+        );
         let (registry_page, registry_checksum) = self
             .store
             .write_native_registry_summary(&registry_summary, existing_registry_page)?;
@@ -1332,7 +1522,6 @@ impl RedDB {
                 &metadata_state_summary,
                 existing_metadata_state_page,
             )?;
-        let vector_artifact_records = self.native_vector_artifact_records();
         let vector_artifact_payloads = vector_artifact_records
             .iter()
             .map(|(summary, bytes)| {
@@ -1363,8 +1552,12 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
+        if let Some(path) = self.path() {
+            metadata.save_for_data_path(path)?;
+        }
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
+        self.store.publish_detached_native_blob_pages()?;
         Ok(())
     }
 
@@ -1402,28 +1595,6 @@ impl RedDB {
             vector_artifact_checksum: 0,
         }
     }
-
-    fn recover_queue_pending_state(&self) {
-        const QUEUE_META_COLLECTION: &str = "red_queue_meta";
-
-        let Some(manager) = self.store.get_collection(QUEUE_META_COLLECTION) else {
-            return;
-        };
-
-        let pending_rows = manager.query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                matches!(
-                    row.get_field("kind"),
-                    Some(reddb_types::Value::Text(kind))
-                        if matches!(&**kind, "queue_pending" | "queue_pending_lc")
-                )
-            })
-        });
-
-        for row in pending_rows {
-            let _ = self.store.delete(QUEUE_META_COLLECTION, row.id);
-        }
-    }
 }
 
 fn current_unix_ms() -> u64 {
@@ -1432,4 +1603,247 @@ fn current_unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod catalog_observation_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_paged_drop_does_not_resurrect_derived_index_descriptors() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("drop-descriptors.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        {
+            let runtime = crate::RedDBRuntime::with_options(options).expect("paged runtime");
+            runtime
+                .execute_query("CREATE TABLE retained_source (value INTEGER)")
+                .expect("retained table");
+            runtime
+                .execute_query("INSERT INTO retained_source (value) VALUES (17)")
+                .expect("retained row");
+            runtime.checkpoint().expect("initial checkpoint");
+        }
+        // Managed legacy files also reopen with the default embedded options.
+        // That path edits contracts without rebuilding every native artifact.
+        let options = RedDBOptions::persistent(&path).with_memory_budget(64 * 1024 * 1024);
+        {
+            let runtime =
+                crate::RedDBRuntime::with_options(options.clone()).expect("legacy reopen");
+            assert!(runtime.db().is_paged());
+            assert_eq!(
+                runtime.db().options().storage_profile.deploy_profile,
+                crate::storage::DeployProfile::Embedded
+            );
+            // Exercise both distinct names and recreation after a removal proof.
+            for cycle in 0..6 {
+                let table = format!("discarded_source_{}", cycle % 4);
+                runtime
+                    .execute_query(&format!("CREATE TABLE {table} (value INTEGER)"))
+                    .expect("temporary table");
+                runtime.checkpoint().expect("publish derived descriptors");
+                let before = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(before
+                    .indexes
+                    .iter()
+                    .any(|index| index.collection.as_deref() == Some(table.as_str())));
+                runtime
+                    .execute_query(&format!("DROP TABLE {table}"))
+                    .expect("drop temporary table");
+                for _ in 0..2 {
+                    runtime.checkpoint().expect("checkpoint after drop");
+                    let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                    assert!(
+                        !metadata.indexes.iter().any(|index| index
+                            .collection
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("discarded_source_"))),
+                        "a dropped collection's derived descriptors were resurrected"
+                    );
+                    let native = runtime
+                        .db()
+                        .native_registry_summary()
+                        .expect("native registry");
+                    assert!(!native.indexes.iter().any(|index| index
+                        .collection
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("discarded_source_"))));
+                }
+                if cycle == 0 {
+                    // Model the consistent sidecar/native pair left by an older
+                    // writer. Its final Remove event is a durable removal proof.
+                    let ghost = before
+                        .indexes
+                        .iter()
+                        .find(|index| index.collection.as_deref() == Some(table.as_str()))
+                        .expect("old derived descriptor")
+                        .clone();
+                    runtime
+                        .db()
+                        .update_physical_metadata(|metadata| {
+                            assert!(metadata.manifest_events.iter().any(|event| {
+                                event.collection == table
+                                    && matches!(
+                                        &event.kind,
+                                        crate::physical::ManifestEventKind::Remove
+                                    )
+                            }));
+                            metadata.indexes.push(ghost.clone());
+                            let mut orphan = ghost.clone();
+                            orphan.name = "audited_legacy_orphan".into();
+                            orphan.collection = Some("audited_missing_source".into());
+                            orphan.artifact_root_page = None;
+                            orphan.artifact_checksum = None;
+                            metadata.indexes.push(orphan.clone());
+                            orphan.name = "global_descriptor".into();
+                            orphan.collection = None;
+                            metadata.indexes.push(orphan);
+                        })
+                        .expect("simulate old metadata without deleting any rows");
+                    runtime
+                        .checkpoint()
+                        .expect("repair a confirmed old removal");
+                }
+                let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "audited_legacy_orphan"));
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "global_descriptor"));
+            }
+        }
+        let runtime = crate::RedDBRuntime::with_options(options).expect("second legacy reopen");
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("retained_source")
+                .expect("retained source")
+                .count(),
+            1
+        );
+        let metadata = runtime.db().physical_metadata().expect("physical metadata");
+        assert!(!metadata.indexes.iter().any(|index| index
+            .collection
+            .as_deref()
+            .is_some_and(|name| name.starts_with("discarded_source_"))));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.collection.as_deref() == Some("retained_source")));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "audited_legacy_orphan"));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "global_descriptor"));
+    }
+
+    #[test]
+    fn index_reconciliation_reads_one_native_observation() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let runtime = crate::RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+                .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+                .expect("paged profile")
+                .with_capability(Capability::FullText),
+        )
+        .expect("runtime");
+        for number in 0..4 {
+            runtime
+                .execute_query(&format!("CREATE TABLE source_{number} (payload TEXT)"))
+                .expect("table");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO source_{number} (payload) VALUES ('searchable payload')"
+                ))
+                .expect("row");
+        }
+        runtime.checkpoint().expect("published artifacts");
+        let db = runtime.db();
+        let pager = db.store.pager().expect("paged store");
+        let reads = || {
+            let stats = pager.cache_stats();
+            stats.hits + stats.misses
+        };
+        let before = reads();
+        let native = db.native_physical_state().expect("native state");
+        let observation_reads = reads() - before;
+        let artifacts = native.registry.expect("registry").vector_artifacts;
+        let pages = native.vector_artifact_pages.expect("artifact pages");
+        let indexes: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_kind == "text.fulltext")
+            .map(|artifact| PhysicalIndexState {
+                name: format!("{}::fulltext", artifact.collection),
+                kind: IndexKind::FullText,
+                collection: Some(artifact.collection.clone()),
+                enabled: true,
+                entries: 0,
+                estimated_memory_bytes: 0,
+                last_refresh_ms: None,
+                backend: "catalog-derived".into(),
+                artifact_kind: None,
+                artifact_root_page: None,
+                artifact_checksum: None,
+                build_state: "catalog-derived".into(),
+            })
+            .collect();
+        assert!(indexes.len() >= 4, "fixture must publish all four indexes");
+        let declarations = indexes.clone();
+        let before = reads();
+        let indexes = db.reconcile_index_states_with_native_artifacts(indexes);
+        let reconciliation_reads = reads() - before;
+        for index in indexes {
+            let artifact = artifacts
+                .iter()
+                .find(|artifact| {
+                    Some(&artifact.collection) == index.collection.as_ref()
+                        && artifact.artifact_kind == "text.fulltext"
+                })
+                .expect("published artifact");
+            let page = pages
+                .iter()
+                .find(|page| {
+                    page.collection == artifact.collection
+                        && page.artifact_kind == artifact.artifact_kind
+                })
+                .expect("artifact root");
+            assert_eq!(index.artifact_root_page, Some(page.root_page));
+            assert_eq!(index.artifact_checksum, Some(artifact.checksum));
+            assert_eq!(index.entries, artifact.vector_count as usize);
+            assert_eq!(index.build_state, "artifact-published");
+        }
+        assert_eq!(
+            reconciliation_reads, observation_reads,
+            "catalog reconciliation must not reread artifact pages per index"
+        );
+
+        // An undecodable artifact directory must retain the existing fallback,
+        // not reuse the successful observation from the preceding call.
+        let page_id = native.header.vector_artifact_page;
+        let mut page = pager.read_page(page_id).expect("artifact directory");
+        page.as_bytes_mut()[crate::storage::engine::HEADER_SIZE..].fill(0);
+        pager
+            .write_page(page_id, page)
+            .expect("corrupt artifact directory");
+        assert!(db.native_vector_artifact_pages().is_none());
+        let indexes = db.reconcile_index_states_with_native_artifacts(declarations);
+        for index in indexes {
+            assert_eq!(index.artifact_root_page, None);
+            assert!(
+                index.artifact_checksum.is_some(),
+                "registry remains available"
+            );
+            assert_eq!(index.build_state, "artifact-published");
+        }
+    }
 }

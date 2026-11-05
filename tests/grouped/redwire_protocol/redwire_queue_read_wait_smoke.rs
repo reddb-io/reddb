@@ -6,7 +6,7 @@
 //! `RedDBRuntime::execute_query` level). This file re-verifies the
 //! four canonical cases when the WAIT is dispatched over RedWire,
 //! i.e. with the engine listener bound on an ephemeral port and
-//! the request shipped as a `Query` frame through the published
+//! the request shipped through the published
 //! `RedWireClient`.
 //!
 //! Cases pinned here:
@@ -32,17 +32,10 @@
 //!      not through `Timeout`, even when the request originated on
 //!      a RedWire `Query` frame.
 //!
-//! Telemetry, not record count, is the assertion of record in #2
-//! and #4: the JSON `Query` envelope today carries `affected` /
-//! `statement` only, so a parked WAIT that wakes still appears to
-//! the client as a `Result` frame with zero rows. The behaviour
-//! the brief calls out — *wake* vs *timeout* vs *cancel* — lives
-//! in the runtime's `wait_*` counters, which `queue_telemetry_snapshot`
-//! exposes process-locally per (scope, queue). We assert there to
-//! avoid coupling the smoke to envelope shape that lives in the
-//! presentation layer.
-
-#![cfg(all(feature = "redwire", feature = "embedded"))]
+//! These run on a single Tokio thread so a synchronous WAIT in the
+//! session task cannot hide behind additional I/O workers. Both the
+//! legacy summary frame and the full result envelope must wake and
+//! surface cancellation without starving the producer or cancellation task.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -50,34 +43,36 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reddb::api::RedDBOptions;
-use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
+use reddb::health::HealthProvider;
+use reddb::wire::redwire::start_redwire_listener_on;
 use reddb::RedDBRuntime;
 use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
 use reddb_client::ErrorCode;
-use tokio::net::TcpListener;
+use reddb_wire::redwire::{
+    encode_execute_prepared_payload, encode_frame, encode_prepare_payload, read_frame_async, Frame,
+    MessageKind, REDWIRE_MAGIC,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 /// Bind the listener on :0, hand the chosen `addr` back so tests
 /// can connect, and return the runtime handle so the test can poke
 /// runtime-internal state (registry, telemetry) the wire path does
 /// not surface yet.
 async fn start_server() -> (SocketAddr, Arc<RedDBRuntime>, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
+    let addr = listener.local_addr().expect("ephemeral address");
 
-    let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
-    let cfg = RedWireConfig {
-        bind_addr: addr.to_string(),
-        auth_store: None,
-        oauth: None,
-    };
+    let runtime =
+        Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"));
     let rt_for_listener = runtime.clone();
     let handle = tokio::spawn(async move {
-        let _ = start_redwire_listener(cfg, rt_for_listener).await;
+        start_redwire_listener_on(listener, rt_for_listener)
+            .await
+            .expect("RedWire listener");
     });
-    // Give the listener time to bind. 50 ms matches the rest of the
-    // RedWire smoke suite.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, runtime, handle)
 }
 
@@ -134,7 +129,7 @@ async fn wait_for_started(
     started >= target
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn wait_returns_empty_after_budget_over_redwire() {
     let (addr, runtime, _server) = start_server().await;
     let mut client = connect(addr).await;
@@ -180,8 +175,17 @@ async fn wait_returns_empty_after_budget_over_redwire() {
     client.close().await.ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn enqueue_from_second_client_wakes_waiter_over_redwire() {
+    assert_enqueue_wakes_waiter(false).await;
+}
+
+#[tokio::test]
+async fn enqueue_wakes_legacy_query_waiter_over_redwire() {
+    assert_enqueue_wakes_waiter(true).await;
+}
+
+async fn assert_enqueue_wakes_waiter(legacy_query: bool) {
     let (addr, runtime, _server) = start_server().await;
 
     // Setup over a throwaway client so the waiter's connection
@@ -216,18 +220,16 @@ async fn enqueue_from_second_client_wakes_waiter_over_redwire() {
     });
 
     let started = Instant::now();
-    let _result = waiter
-        .query("QUEUE READ qrw_wake GROUP workers CONSUMER c1 COUNT 1 WAIT 5s")
-        .await
-        .expect("WAIT should return through the wire once the producer commits");
+    let sql = "QUEUE READ qrw_wake GROUP workers CONSUMER c1 COUNT 1 WAIT 5s";
+    if legacy_query {
+        waiter.query_raw(sql).await.expect("legacy WAIT wakes");
+    } else {
+        let result = waiter.query(sql).await.expect("WAIT wakes with records");
+        assert_eq!(result.rows.len(), 1, "the committed item must be delivered");
+    }
     let elapsed = started.elapsed();
     producer_task.await.expect("producer task joined");
 
-    // The wire envelope strips records (the JSON `Query` reply
-    // carries `affected` only — see notes at the top of the file).
-    // The signal that matters is *when* the waiter unblocked: the
-    // wake fired well before the 5s budget, and the runtime
-    // accounted it under `wait_woken`, not `wait_timed_out`.
     assert!(
         elapsed < Duration::from_secs(4),
         "commit on a second client must wake the waiter before the budget, elapsed={elapsed:?}"
@@ -299,8 +301,17 @@ async fn wait_above_server_cap_is_rejected_over_redwire() {
     client.close().await.ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn server_cancellation_surfaces_explicit_outcome_over_redwire() {
+    assert_server_cancellation(false).await;
+}
+
+#[tokio::test]
+async fn server_cancellation_reaches_legacy_query_waiter_over_redwire() {
+    assert_server_cancellation(true).await;
+}
+
+async fn assert_server_cancellation(legacy_query: bool) {
     let (addr, runtime, _server) = start_server().await;
 
     let mut setup = connect(addr).await;
@@ -333,15 +344,20 @@ async fn server_cancellation_surfaces_explicit_outcome_over_redwire() {
     });
 
     let started = Instant::now();
-    // Either the client sees an explicit engine Error frame (the
-    // usual happy path — runtime returns Err, run_query maps to an
-    // Error frame), or an empty Result frame if the cancellation
-    // races with the wire response. Either way the *runtime* must
-    // have terminated the parked WAIT through the Cancelled branch,
-    // which is what the telemetry assertion below pins.
-    let _ = waiter
-        .query("QUEUE READ qrw_cancel GROUP workers CONSUMER c1 COUNT 1 WAIT 5s")
-        .await;
+    let sql = "QUEUE READ qrw_cancel GROUP workers CONSUMER c1 COUNT 1 WAIT 5s";
+    let error = if legacy_query {
+        waiter
+            .query_raw(sql)
+            .await
+            .expect_err("legacy WAIT cancelled")
+    } else {
+        waiter.query(sql).await.expect_err("WAIT cancelled")
+    };
+    assert_eq!(error.code, ErrorCode::Engine);
+    assert!(
+        error.message.contains("QUEUE READ WAIT cancelled"),
+        "{error}"
+    );
     let elapsed = started.elapsed();
     cancel_task.await.expect("cancel task joined");
 
@@ -367,4 +383,168 @@ async fn server_cancellation_surfaces_explicit_outcome_over_redwire() {
     // map and telemetry are already isolated; only the flag is
     // process-visible.
     runtime.queue_wait_registry().reset_cancelled();
+}
+
+async fn connect_raw(addr: SocketAddr) -> TcpStream {
+    let mut socket = TcpStream::connect(addr).await.expect("raw connection");
+    socket
+        .write_all(&[REDWIRE_MAGIC, 1])
+        .await
+        .expect("startup");
+    let hello = Frame::new(
+        MessageKind::Hello,
+        1,
+        br#"{"versions":[1],"auth_methods":["anonymous"],"features":0,"client_name":"wait-regression"}"#.to_vec(),
+    );
+    socket
+        .write_all(&encode_frame(&hello))
+        .await
+        .expect("hello");
+    assert_eq!(
+        read_frame_async(&mut socket).await.expect("hello ack").kind,
+        MessageKind::HelloAck
+    );
+    let auth = Frame::new(MessageKind::AuthResponse, 2, b"{}".to_vec());
+    socket
+        .write_all(&encode_frame(&auth))
+        .await
+        .expect("anonymous auth");
+    assert_eq!(
+        read_frame_async(&mut socket).await.expect("auth ack").kind,
+        MessageKind::AuthOk
+    );
+    socket
+}
+
+#[tokio::test]
+async fn enqueue_wakes_binary_query_waiter_over_redwire() {
+    assert_binary_enqueue_wakes_waiter(false).await;
+}
+
+#[tokio::test]
+async fn enqueue_wakes_prepared_query_waiter_over_redwire() {
+    assert_binary_enqueue_wakes_waiter(true).await;
+}
+
+async fn assert_binary_enqueue_wakes_waiter(prepared: bool) {
+    let (addr, runtime, _server) = start_server().await;
+    let mut producer = connect(addr).await;
+    producer
+        .query("CREATE QUEUE qrw_binary")
+        .await
+        .expect("queue");
+    producer
+        .query("QUEUE GROUP CREATE qrw_binary workers")
+        .await
+        .expect("group");
+    let mut waiter = connect_raw(addr).await;
+    let sql = "QUEUE READ qrw_binary GROUP workers CONSUMER c1 COUNT 1 WAIT 5s";
+    let frame = if prepared {
+        let prepare = Frame::new(
+            MessageKind::Prepare,
+            3,
+            encode_prepare_payload(41, sql).expect("prepare payload"),
+        );
+        waiter
+            .write_all(&encode_frame(&prepare))
+            .await
+            .expect("prepare");
+        let reply = read_frame_async(&mut waiter).await.expect("prepared ack");
+        assert_eq!(reply.kind, MessageKind::PreparedOk, "{reply:?}");
+        assert_eq!(u16::from_le_bytes([reply.payload[4], reply.payload[5]]), 0);
+        // Run an intervening query through the worker before executing the
+        // prepared ID: its connection-owned registry must survive the handoff.
+        let query = Frame::new(MessageKind::Query, 4, b"SELECT 1".to_vec());
+        waiter
+            .write_all(&encode_frame(&query))
+            .await
+            .expect("intervening query");
+        assert_eq!(
+            read_frame_async(&mut waiter)
+                .await
+                .expect("query reply")
+                .kind,
+            MessageKind::Result
+        );
+        Frame::new(
+            MessageKind::ExecutePrepared,
+            5,
+            encode_execute_prepared_payload(41, &[]).expect("execute payload"),
+        )
+    } else {
+        Frame::new(MessageKind::QueryBinary, 5, sql.as_bytes().to_vec())
+    };
+    let rt_for_producer = Arc::clone(&runtime);
+    let producer_task = tokio::spawn(async move {
+        assert!(wait_for_started(&rt_for_producer, "qrw_binary", 1, Duration::from_secs(3)).await);
+        producer
+            .query("QUEUE PUSH qrw_binary 'live'")
+            .await
+            .expect("push");
+        producer.close().await.expect("producer close");
+    });
+    let started = Instant::now();
+    waiter
+        .write_all(&encode_frame(&frame))
+        .await
+        .expect("wait query");
+    let reply = read_frame_async(&mut waiter).await.expect("wait result");
+    assert_eq!(reply.kind, MessageKind::Result, "{reply:?}");
+    assert_eq!(reply.correlation_id, 5);
+    assert!(started.elapsed() < Duration::from_secs(4));
+    producer_task.await.expect("producer joined");
+    assert_eq!(wait_counts(&runtime, "qrw_binary"), (1, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn cancelled_session_retains_lease_until_blocking_query_finishes() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let runtime = Arc::new(RedDBRuntime::in_memory().expect("runtime"));
+        runtime
+            .execute_query("CREATE QUEUE qrw_lease")
+            .expect("queue");
+        runtime
+            .execute_query("QUEUE GROUP CREATE qrw_lease workers")
+            .expect("group");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("address");
+        let rt_for_session = Arc::clone(&runtime);
+        let session = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            assert_eq!(socket.read_u8().await.expect("magic"), REDWIRE_MAGIC);
+            reddb::wire::redwire::session::handle_session(socket, rt_for_session, None, None)
+                .await
+                .expect("session");
+        });
+        let mut socket = connect_raw(addr).await;
+        let frame = Frame::new(
+            MessageKind::Query,
+            3,
+            b"QUEUE READ qrw_lease GROUP workers CONSUMER c1 COUNT 1 WAIT 5s".to_vec(),
+        );
+        socket.write_all(&encode_frame(&frame)).await.expect("WAIT");
+        assert!(wait_for_started(&runtime, "qrw_lease", 1, Duration::from_secs(3)).await);
+        session.abort();
+        assert!(session.await.expect_err("session aborted").is_cancelled());
+        assert_eq!(
+            runtime
+                .health()
+                .diagnostics
+                .get("runtime.active_connections"),
+            Some(&"1".to_string()),
+            "the running query must still own its lease"
+        );
+        runtime.queue_wait_registry().cancel_all();
+        while runtime
+            .health()
+            .diagnostics
+            .get("runtime.active_connections")
+            != Some(&"0".to_string())
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(wait_counts(&runtime, "qrw_lease"), (1, 0, 0, 1));
+    })
+    .await
+    .expect("query releases lease after cancellation");
 }

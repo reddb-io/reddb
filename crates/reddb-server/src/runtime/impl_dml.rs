@@ -54,7 +54,7 @@ use super::impl_dml_update_target::*;
 // `impl_dml_support`'s `use super::impl_dml::{...}` keep resolving unchanged.
 pub(super) use super::impl_dml_ttl::{canonicalize_sql_ttl_metadata, resolve_sql_ttl_metadata_key};
 
-const UPDATE_APPLY_CHUNK_SIZE: usize = 2048;
+pub(super) const UPDATE_APPLY_CHUNK_SIZE: usize = 2048;
 pub(super) const TREE_CHILD_EDGE_LABEL: &str = "TREE_CHILD";
 pub(super) const TREE_METADATA_PREFIX: &str = "red.tree.";
 
@@ -74,6 +74,8 @@ pub(super) struct CompiledUpdatePlan {
     row_contract_plan: Option<RowUpdateContractPlan>,
     row_modified_columns: Vec<String>,
     row_touches_unique_columns: bool,
+    /// The SET list names a column of a standalone UNIQUE index.
+    touches_unique_index: bool,
 }
 
 #[derive(Default)]
@@ -476,11 +478,10 @@ impl RedDBRuntime {
         // Phase 2.5.4 table-scoped tenancy: if the target table is
         // tenant-scoped and the user didn't name the tenant column,
         // auto-inject it with the thread-local `CURRENT_TENANT()`
-        // value. When the column is named explicitly we trust the
-        // caller (useful for admin tooling that writes on behalf of
-        // specific tenants). An unbound tenant on an implicit-fill
-        // path errors up front rather than producing a row the RLS
-        // policy would silently hide.
+        // value. Explicit values must match the active transport/session
+        // tenant; an unbound platform caller may still write on behalf of a
+        // tenant. An unbound tenant on an implicit-fill path errors up front
+        // rather than producing a row the RLS policy would silently hide.
         let augmented_owned;
         let query = match self.maybe_inject_tenant_column(query)? {
             Some(new_q) => {
@@ -504,7 +505,7 @@ impl RedDBRuntime {
             ));
         }
         self.check_insert_column_policy(query)?;
-        if let Some(ref embed_config) = query.auto_embed {
+        let resolved_auto_embed = if let Some(ref embed_config) = query.auto_embed {
             // Empty provider → resolve via the embeddings task pointer
             // (ADR-0068 §5); an explicit `USING` overrides it. A modality-
             // incapable provider fails didactically here.
@@ -536,7 +537,22 @@ impl RedDBRuntime {
                     model_name,
                 )?;
             }
-        }
+            let connection = if matches!(provider, crate::ai::AiProvider::Local) {
+                None
+            } else {
+                Some(crate::ai::resolve_connection_from_runtime(
+                    &provider, None, self,
+                )?)
+            };
+            let model = crate::ai::resolve_embeddings_model_from_runtime(
+                self,
+                &provider,
+                embed_config.model.as_deref(),
+            );
+            Some((provider, model, connection, &embed_config.fields))
+        } else {
+            None
+        };
 
         let mut inserted_count: u64 = 0;
         let effective_rows =
@@ -556,10 +572,20 @@ impl RedDBRuntime {
         // Ensure the collection exists (auto-create on first insert).
         let store = self.inner.db.store();
         let _ = store.get_or_create_collection(&query.table);
-        let declared_model = self
-            .db()
-            .collection_contract_arc(&query.table)
-            .map(|contract| contract.declared_model);
+        let contract = self.db().collection_contract_arc(&query.table);
+        let declared_model = contract.as_ref().map(|contract| contract.declared_model);
+        let secret_columns: Vec<bool> = query
+            .columns
+            .iter()
+            .map(|column| {
+                contract.as_ref().is_some_and(|contract| {
+                    contract.declared_columns.iter().any(|declared| {
+                        declared.name == *column
+                            && declared.data_type.eq_ignore_ascii_case("secret")
+                    })
+                })
+            })
+            .collect();
         if query.on_conflict.is_some()
             && matches!(
                 declared_model,
@@ -608,8 +634,8 @@ impl RedDBRuntime {
             // concurrent submitters can't both bind to the same prev_hash —
             // the loser observes the advanced tip and gets 409 with the new
             // tip so it can retry.
-            let chain_mode = crate::runtime::blockchain_kind::is_chain(&store, &query.table);
-            let _chain_lock_arc: Option<Arc<parking_lot::Mutex<()>>> = if chain_mode {
+            let chain_mode = crate::runtime::blockchain_kind::try_is_chain(&store, &query.table)?;
+            let _chain_lock_arc: Option<Arc<super::RmwRowLock>> = if chain_mode {
                 Some(self.inner.rmw_locks.lock_for(&query.table, "__chain__"))
             } else {
                 None
@@ -618,7 +644,7 @@ impl RedDBRuntime {
 
             // Issue #525 — refuse new blocks if the chain has been marked
             // `integrity = broken` until an admin clears the flag.
-            if chain_mode && self.is_chain_integrity_broken(&query.table) {
+            if chain_mode && self.is_chain_integrity_broken(&query.table)? {
                 return Err(RedDBError::InvalidOperation(format!(
                     "ChainIntegrityBroken: collection '{}' is locked until \
                      POST /collections/{}/clear-integrity-flag is called by an admin",
@@ -635,7 +661,7 @@ impl RedDBRuntime {
                     if let Some(existing) = cache.get(&query.table) {
                         Some(existing.clone())
                     } else if let Some(scanned) =
-                        crate::runtime::blockchain_kind::chain_tip_full(&store, &query.table)
+                        crate::runtime::blockchain_kind::try_chain_tip_full(&store, &query.table)?
                     {
                         cache.insert(query.table.clone(), scanned.clone());
                         Some(scanned)
@@ -657,7 +683,7 @@ impl RedDBRuntime {
                     )));
                 }
                 let (mut fields, mut metadata) =
-                    split_insert_metadata(self, &query.columns, row_values)?;
+                    split_insert_metadata(self, &secret_columns, &query.columns, row_values)?;
                 if query
                     .on_conflict
                     .as_ref()
@@ -936,11 +962,12 @@ impl RedDBRuntime {
                 // composition is owned by issue #526; we keep #522 to the
                 // non-chain path and let chain_mode collections punt to that
                 // slice rather than half-wire it here.
-                if crate::runtime::signed_writes_kind::is_signed(&store, &query.table) {
+                if crate::runtime::signed_writes_kind::try_is_signed(&store, &query.table)? {
                     let (pk_col, sig_col, residual) =
                         crate::runtime::signed_writes_kind::split_signature_fields(fields);
                     let payload = crate::runtime::blockchain_kind::canonical_payload(&residual);
-                    let reg = crate::runtime::signed_writes_kind::registry(&store, &query.table);
+                    let reg =
+                        crate::runtime::signed_writes_kind::try_registry(&store, &query.table)?;
                     crate::runtime::signed_writes_kind::verify_row(
                         &reg,
                         pk_col.as_ref().map(|c| c.bytes.as_slice()),
@@ -1091,8 +1118,12 @@ impl RedDBRuntime {
 
                     match query.entity_type {
                         InsertEntityType::Node => {
-                            let (node_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (node_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             if let Some(clause) = &query.on_conflict {
                                 if let Some(conflict_id) = self
                                     .on_conflict_unique_index_conflict_id(
@@ -1172,8 +1203,12 @@ impl RedDBRuntime {
                             });
                         }
                         InsertEntityType::Edge => {
-                            let (edge_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (edge_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             if let Some(clause) = &query.on_conflict {
                                 if let Some(conflict_id) = self
                                     .on_conflict_unique_index_conflict_id(
@@ -1362,8 +1397,12 @@ impl RedDBRuntime {
                                     .to_string(),
                             ));
                             }
-                            let (fields, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (fields, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -1376,8 +1415,12 @@ impl RedDBRuntime {
                             unreachable!("NODE and EDGE are handled by the prepared graph path")
                         }
                         InsertEntityType::Vector => {
-                            let (vector_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (vector_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -1407,8 +1450,12 @@ impl RedDBRuntime {
                             entity_outputs.push(self.create_vector(input)?);
                         }
                         InsertEntityType::Document => {
-                            let (document_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (document_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             let (columns, values) = pairwise_columns_values(&document_values);
                             let body = find_document_body_json(&columns, &values)?;
                             let conflict_fields =
@@ -1467,8 +1514,12 @@ impl RedDBRuntime {
                             entity_outputs.push(output);
                         }
                         InsertEntityType::Kv => {
-                            let (kv_values, mut metadata) =
-                                split_insert_metadata(self, &query.columns, row_values)?;
+                            let (kv_values, mut metadata) = split_insert_metadata(
+                                self,
+                                &secret_columns,
+                                &query.columns,
+                                row_values,
+                            )?;
                             merge_with_clauses(
                                 &mut metadata,
                                 query.ttl_ms,
@@ -1510,27 +1561,13 @@ impl RedDBRuntime {
         }
 
         // Auto-embed pipeline: batch-embed fields across all inserted rows via AiBatchClient.
-        if let Some(ref embed_config) = query.auto_embed {
+        if let Some((provider, model, connection, fields)) = resolved_auto_embed.as_ref() {
             let store = self.inner.db.store();
-            let provider =
-                crate::ai::resolve_embeddings_provider_from_runtime(self, &embed_config.provider)?;
             let is_local_provider = matches!(provider, crate::ai::AiProvider::Local);
-            // Local provider runs in-process — no API key path applies.
-            // The pre-flight above already required `MODEL '<name>'`
-            // for the local case, so the unwrap_or default below only
-            // ever fires for OpenAI-compatible providers.
-            let api_key = if is_local_provider {
-                String::new()
-            } else {
-                crate::ai::resolve_api_key_from_runtime(&provider, None, self)?
-            };
-            // Explicit `MODEL '<name>'` wins; otherwise resolve via the
-            // provider models block then the built-in default (ADR-0068 §5).
-            let model = crate::ai::resolve_embeddings_model_from_runtime(
-                self,
-                &provider,
-                embed_config.model.as_deref(),
-            );
+            let (api_key, api_base) = connection
+                .as_ref()
+                .map(|connection| (connection.api_key.as_str(), connection.api_base.as_str()))
+                .unwrap_or(("", ""));
 
             // Read only this INSERT's returned IDs. A pre-write statement
             // snapshot correctly excludes newly committed rows; a fresh/global
@@ -1546,8 +1583,7 @@ impl RedDBRuntime {
                 .enumerate()
                 .filter_map(|(i, entity)| {
                     if let EntityData::Row(ref row) = entity.data {
-                        let texts: Vec<String> = embed_config
-                            .fields
+                        let texts: Vec<String> = fields
                             .iter()
                             .filter_map(|field| match row.get_field(field) {
                                 Some(Value::Text(t)) if !t.is_empty() => Some(t.to_string()),
@@ -1579,7 +1615,7 @@ impl RedDBRuntime {
                 let embeddings = if is_local_provider {
                     let response = crate::runtime::ai::local_embedding::embed_local_with_db(
                         &self.inner.db,
-                        &model,
+                        model,
                         batch_texts,
                     )?;
                     response.embeddings
@@ -1589,10 +1625,11 @@ impl RedDBRuntime {
 
                     match tokio::runtime::Handle::try_current() {
                         Ok(handle) => tokio::task::block_in_place(|| {
-                            handle.block_on(batch_client.embed_batch(
-                                &provider,
-                                &model,
-                                &api_key,
+                            handle.block_on(batch_client.embed_batch_at(
+                                provider,
+                                model,
+                                api_key,
+                                api_base,
                                 batch_texts,
                             ))
                         }),
@@ -1692,9 +1729,11 @@ impl RedDBRuntime {
     pub(crate) fn insert_timeseries_point(
         &self,
         collection: &str,
-        fields: Vec<(String, Value)>,
+        mut fields: Vec<(String, Value)>,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<EntityId> {
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, collection)?;
+        crate::runtime::mutation::enforce_tenant_fields(self, collection, &mut fields)?;
         apply_collection_default_ttl_metadata(self, collection, &mut metadata);
 
         let (columns, values) = pairwise_columns_values(&fields);
@@ -1827,6 +1866,16 @@ impl RedDBRuntime {
                 fields: fields.into_iter().collect(),
             }),
         );
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            collection,
+            reddb_rql::ast::PolicyAction::Insert,
+            &entity,
+        ) {
+            return Err(RedDBError::Query(format!(
+                "insert into collection '{collection}' denied by row-level security"
+            )));
+        }
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
         // or an autocommit xid (allocated and committed up-front so
         // future snapshots see the row as soon as it lands).
@@ -1888,7 +1937,10 @@ impl RedDBRuntime {
         // Issue #523 — blockchain collections are immutable. Reject before
         // RLS / RETURNING work so the operator sees a clean 409-mapped
         // error instead of a partially-applied mutation surface.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: UPDATE not allowed on '{}'",
                 query.table
@@ -2007,7 +2059,7 @@ impl RedDBRuntime {
                 graph_update_returning_snapshots(self, &effective_query.table, &touched_ids)
             } else {
                 super::dml_target_scan::DmlTargetScan::new(self, &effective_query.table, None, None)
-                    .row_snapshots(&touched_ids)
+                    .row_snapshots(&touched_ids)?
             };
             if matches!(effective_query.target, UpdateTarget::Kv) {
                 restore_kv_returning_keys(
@@ -2072,7 +2124,13 @@ impl RedDBRuntime {
             .collection_topology_lock(&query.table);
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
-        let needs_rmw_lock = update_needs_rmw_lock(query);
+        // Autocommit table-row UPDATE replaces an MVCC version even when its
+        // assignments are constants. Resolve the current pre-image under the
+        // RMW lock. Explicit transactions keep their statement snapshot and
+        // first-committer-wins conflict detection.
+        let autocommit_table_update =
+            matches!(query.target, UpdateTarget::Rows) && self.current_xid().is_none();
+        let needs_rmw_lock = autocommit_table_update || update_needs_rmw_lock(query);
         let claim_model = update_model_name(update_target_model(query.target));
         if query.claim_limit.is_some() {
             self.inner
@@ -2141,11 +2199,36 @@ impl RedDBRuntime {
             scan_limit,
             query.target,
         );
-        if needs_rmw_lock {
+        if needs_rmw_lock && !autocommit_table_update {
             target_scan = target_scan.with_live_table_rows();
         }
         let ids_to_update = {
             let _topology_guard = topology_lock.read();
+            // The statement snapshot predates the table lock. Refresh it
+            // after acquiring that lock so earlier autocommits are visible,
+            // but never select an uncommitted physical tip. Historical
+            // versions can be absent from current indexes while a writer is
+            // active, so retain the snapshot-aware index fallback then.
+            let _fresh_snapshot = if autocommit_table_update {
+                let mut ctx =
+                    crate::runtime::impl_core::capture_current_snapshot().unwrap_or_else(|| {
+                        let manager = self.snapshot_manager();
+                        crate::runtime::impl_core::SnapshotContext {
+                            snapshot: manager.fresh_read_snapshot(),
+                            manager,
+                            own_xids: std::collections::HashSet::new(),
+                            requires_index_fallback: false,
+                            serializable_reader: None,
+                        }
+                    });
+                ctx.snapshot = ctx.manager.fresh_read_snapshot();
+                ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
+                Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
+                    ctx,
+                ))
+            } else {
+                None
+            };
             target_scan.find_target_ids()?
         };
         let order_limit = if query.claim_limit.is_some() {
@@ -2156,10 +2239,10 @@ impl RedDBRuntime {
         let ids_to_update = if query.order_by.is_empty() {
             ids_to_update
         } else {
-            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)
+            ordered_update_target_ids(&manager, &ids_to_update, &query.order_by, order_limit)?
         };
-        let mut ids_to_update = if query.claim_limit.is_some() {
-            self.filter_claim_locked_target_ids(&query.table, ids_to_update)
+        let mut ids_to_update = if query.claim_limit.is_some() || autocommit_table_update {
+            self.filter_claim_locked_target_ids(&query.table, ids_to_update)?
         } else {
             ids_to_update
         };
@@ -2206,7 +2289,16 @@ impl RedDBRuntime {
         let mut prepared = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            for entity in manager.get_many(chunk).into_iter().flatten() {
+            for id in chunk {
+                #[cfg(test)]
+                self.index_store_ref().mutation_test_hook(
+                    &query.table,
+                    super::index_store::MutationTestPhase::DmlPostImageCandidate,
+                );
+                super::query_budget::charge(1)?;
+                let Some(entity) = manager.try_get(*id, usize::MAX)? else {
+                    continue;
+                };
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
                 let applied = self.apply_materialized_update_for_entity(
@@ -2222,7 +2314,16 @@ impl RedDBRuntime {
         }
         let affected = prepared.len() as u64;
         let mut published = 0;
+        let mut _durable_publication = None;
         let persistence = (|| -> RedDBResult<()> {
+            super::query_budget::charge(0)?;
+            // Standalone UNIQUE keys are admitted for the whole statement
+            // before any chunk is published.
+            self.enforce_unique_update_post_images(&query.table, &compiled_plan, &prepared)?;
+            // This is the cancellation boundary. Once durable publication
+            // starts, finish the prepared statement rather than exposing a
+            // timeout with only a prefix of its chunks committed.
+            _durable_publication = Some(super::query_budget::begin_durable_publication()?);
             for chunk in prepared.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                 if compiled_plan.row_touches_unique_columns
                     || compiled_plan
@@ -2280,20 +2381,27 @@ impl RedDBRuntime {
         ))
     }
 
-    fn filter_claim_locked_target_ids(&self, table: &str, ids: Vec<EntityId>) -> Vec<EntityId> {
+    fn filter_claim_locked_target_ids(
+        &self,
+        table: &str,
+        ids: Vec<EntityId>,
+    ) -> RedDBResult<Vec<EntityId>> {
         let conn_id = current_connection_id();
         let locks = self.inner.pending_claim_locks.read();
-        ids.into_iter()
-            .filter(|id| {
-                let Some(entity) = self.inner.db.store().get(table, *id) else {
-                    return false;
-                };
+        if locks.is_empty() {
+            return Ok(ids);
+        }
+        let mut admitted = Vec::with_capacity(ids.len());
+        for id in ids {
+            super::query_budget::charge(1)?;
+            if let Some(entity) = self.inner.db.store().try_get(table, id, usize::MAX)? {
                 let key = (table.to_string(), entity.logical_id());
-                locks
-                    .get(&key)
-                    .is_none_or(|owner_conn_id| *owner_conn_id == conn_id)
-            })
-            .collect()
+                if locks.get(&key).is_none_or(|owner| *owner == conn_id) {
+                    admitted.push(id);
+                }
+            }
+        }
+        Ok(admitted)
     }
 
     fn record_pending_claim_locks_for_touched_ids(&self, table: &str, ids: &[EntityId]) {
@@ -2331,11 +2439,12 @@ impl RedDBRuntime {
         let mut lock_entries = Vec::new();
 
         for id in ids_to_update {
-            let Some(candidate) = store.get(&query.table, *id) else {
+            super::query_budget::charge(1)?;
+            let Some(candidate) = store.try_get(&query.table, *id, usize::MAX)? else {
                 continue;
             };
             let logical_id = candidate.logical_id();
-            let lock_key = format!("row:{}", logical_id.raw());
+            let lock_key = super::RmwLockTable::row_key(logical_id);
             let rmw_lock = self.inner.rmw_locks.lock_for(&query.table, &lock_key);
             lock_entries.push((lock_key, logical_id, rmw_lock));
         }
@@ -2347,18 +2456,25 @@ impl RedDBRuntime {
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
-            let Some(entity) = resolve_update_entity_by_logical_id(self, &query.table, *logical_id)
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &query.table,
+                super::index_store::MutationTestPhase::DmlPostImageCandidate,
+            );
+            super::query_budget::charge(1)?;
+            let Some(entity) =
+                try_resolve_update_entity_by_logical_id(self, &query.table, *logical_id)?
             else {
                 continue;
             };
             if let Some(filter) = effective_filter {
-                if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                if !crate::runtime::query_exec::evaluate_entity_filter_result_with_db(
                     Some(self.inner.db.as_ref()),
                     &entity,
                     filter,
                     &query.table,
                     &query.table,
-                ) {
+                )? {
                     continue;
                 }
             }
@@ -2377,13 +2493,44 @@ impl RedDBRuntime {
         }
 
         let affected = applied_chunk.len() as u64;
-        if !applied_chunk.is_empty() {
-            self.persist_update_chunk(&applied_chunk)?;
-            let lsns = self.flush_update_chunk(&applied_chunk, topology_guard)?;
-            if !query.suppress_events {
-                self.emit_update_events_for_collection(&query.table, &applied_chunk, &lsns)?;
+        let mut published = 0;
+        let mut _durable_publication = None;
+        let persistence = (|| -> RedDBResult<()> {
+            super::query_budget::charge(0)?;
+            self.enforce_unique_update_post_images(&query.table, compiled_plan, &applied_chunk)?;
+            // Final cooperative checkpoint before the first durable chunk.
+            // Cancellation after this point cannot safely abort a prefix.
+            _durable_publication = Some(super::query_budget::begin_durable_publication()?);
+            for chunk in applied_chunk.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                if compiled_plan.row_touches_unique_columns
+                    || compiled_plan
+                        .row_contract_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.has_expressions)
+                {
+                    let db = self.db();
+                    let contract = crate::application::collection_contract_enforcer::CollectionContractWriteEnforcer::new(self, &db, &query.table);
+                    for item in chunk {
+                        let fields =
+                            crate::application::ports::entity_row_fields_snapshot(&item.entity);
+                        let previous_id =
+                            item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
+                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                    }
+                }
+                self.persist_update_chunk(chunk)?;
+                published += chunk.len();
             }
+            Ok(())
+        })();
+        // Earlier chunks may have been published when a later constraint
+        // check fails. Finish their indexes and events before returning it.
+        let published_mutations = &applied_chunk[..published];
+        let lsns = self.flush_update_chunk(published_mutations, topology_guard)?;
+        if !query.suppress_events {
+            self.emit_update_events_for_collection(&query.table, published_mutations, &lsns)?;
         }
+        persistence?;
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2398,6 +2545,27 @@ impl RedDBRuntime {
             ),
             touched_ids,
         ))
+    }
+
+    fn enforce_unique_update_post_images(
+        &self,
+        collection: &str,
+        compiled_plan: &CompiledUpdatePlan,
+        applied: &[AppliedEntityMutation],
+    ) -> RedDBResult<()> {
+        if !compiled_plan.touches_unique_index {
+            return Ok(());
+        }
+        let post_images: Vec<_> = applied
+            .iter()
+            .map(|item| {
+                (
+                    item.replaced_entity.as_ref().map_or(item.id, |old| old.id),
+                    crate::application::ports::entity_row_fields_snapshot(&item.entity),
+                )
+            })
+            .collect();
+        self.enforce_unique_updates(collection, &post_images)
     }
 
     fn compile_update_plan(&self, query: &UpdateQuery) -> RedDBResult<CompiledUpdatePlan> {
@@ -2417,26 +2585,43 @@ impl RedDBRuntime {
             }
             if compound_op.is_none() {
                 if let Ok(value) = fold_expr_to_value(expr.clone()) {
-                    if let Some(metadata_key) = metadata_key {
-                        let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
-                        let (canonical_key, canonical_value) =
-                            canonicalize_sql_ttl_metadata(metadata_key, raw_value);
-                        static_metadata_assignments
-                            .push((canonical_key.to_string(), canonical_value));
-                    } else {
-                        let value = self.resolve_crypto_sentinel(value)?;
-                        static_field_assignments.push((
-                            column.clone(),
-                            normalize_row_update_assignment_with_plan(
-                                &query.table,
-                                column,
-                                value,
-                                row_contract_plan.as_ref(),
-                            )?,
-                        ));
-                        row_modified_columns.push(column.clone());
+                    // Without a declared type, a text constant may overwrite an
+                    // existing Secret. Resolve it per row to preserve encryption.
+                    let unknown_text_target = metadata_key.is_none()
+                        && matches!(value, Value::Text(_))
+                        && row_contract_plan
+                            .as_ref()
+                            .and_then(|plan| plan.declared_rules.get(column))
+                            .is_none();
+                    if !unknown_text_target {
+                        if let Some(metadata_key) = metadata_key {
+                            let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
+                            let (canonical_key, canonical_value) =
+                                canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+                            static_metadata_assignments
+                                .push((canonical_key.to_string(), canonical_value));
+                        } else {
+                            let is_secret_column = row_contract_plan
+                                .as_ref()
+                                .and_then(|plan| plan.declared_rules.get(column))
+                                .is_some_and(|rule| {
+                                    rule.data_type == reddb_types::DataType::Secret
+                                });
+                            let value =
+                                self.resolve_secret_column_value(value, is_secret_column)?;
+                            static_field_assignments.push((
+                                column.clone(),
+                                normalize_row_update_assignment_with_plan(
+                                    &query.table,
+                                    column,
+                                    value,
+                                    row_contract_plan.as_ref(),
+                                )?,
+                            ));
+                            row_modified_columns.push(column.clone());
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
 
@@ -2486,6 +2671,10 @@ impl RedDBRuntime {
             })
         });
 
+        let touches_unique_index = self
+            .index_store_ref()
+            .touches_unique_index(&query.table, &row_modified_columns);
+
         if let Some(ttl_ms) = query.ttl_ms {
             static_metadata_assignments
                 .push(("_ttl_ms".to_string(), metadata_u64_to_value(ttl_ms)));
@@ -2507,6 +2696,7 @@ impl RedDBRuntime {
             row_contract_plan,
             row_modified_columns,
             row_touches_unique_columns,
+            touches_unique_index,
         })
     }
 
@@ -2541,13 +2731,13 @@ impl RedDBRuntime {
                     query.table
                 )));
             };
-            let rhs = super::expr_eval::evaluate_runtime_expr_with_db(
+            let rhs = super::expr_eval::try_evaluate_runtime_expr_with_db(
                 Some(self.inner.db.as_ref()),
                 &assignment.expr,
                 record,
                 Some(query.table.as_str()),
                 Some(query.table.as_str()),
-            )
+            )?
             .ok_or_else(|| {
                 RedDBError::Query(format!(
                     "failed to evaluate UPDATE expression for column '{}'",
@@ -2560,6 +2750,24 @@ impl RedDBRuntime {
                 rhs
             };
 
+            let sensitive = super::join_filter::expression_uses_secret(
+                &assignment.expr,
+                record,
+                Some(&query.table),
+                Some(&query.table),
+            );
+            let secret_target = assignment
+                .row_rule
+                .as_ref()
+                .is_some_and(|rule| rule.data_type == reddb_types::DataType::Secret)
+                || record
+                    .get(&assignment.column)
+                    .is_some_and(|value| matches!(value, Value::Secret(_)));
+            if sensitive && !secret_target {
+                return Err(RedDBError::Query(
+                    "secret-derived UPDATE values require a SECRET target column".into(),
+                ));
+            }
             if let Some(metadata_key) = assignment.metadata_key {
                 let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
                 let (canonical_key, canonical_value) =
@@ -2572,7 +2780,14 @@ impl RedDBRuntime {
                     assignment.column.clone(),
                     normalize_row_update_value_for_rule(
                         &query.table,
-                        self.resolve_crypto_sentinel(value)?,
+                        self.resolve_secret_column_value(
+                            value,
+                            assignment.row_rule.as_ref().is_some_and(|rule| {
+                                rule.data_type == reddb_types::DataType::Secret
+                            }) || record
+                                .get(&assignment.column)
+                                .is_some_and(|value| matches!(value, Value::Secret(_))),
+                        )?,
                         assignment.row_rule.as_ref(),
                     )?,
                 ));
@@ -2650,7 +2865,10 @@ impl RedDBRuntime {
         let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
         // Issue #523 — blockchain collections are immutable; see
         // execute_update for the same gate.
-        if crate::runtime::blockchain_kind::is_chain(self.inner.db.store().as_ref(), &query.table) {
+        if crate::runtime::blockchain_kind::try_is_chain(
+            self.inner.db.store().as_ref(),
+            &query.table,
+        )? {
             return Err(RedDBError::InvalidOperation(format!(
                 "BlockchainCollectionImmutable: DELETE not allowed on '{}'",
                 query.table
@@ -2760,43 +2978,49 @@ impl RedDBRuntime {
         );
         let ids_to_delete = {
             let _topology_guard = topology_lock.read();
-            scan.find_target_ids()?
+            let ids = scan.find_target_ids()?;
+            if ids.len() > UPDATE_APPLY_CHUNK_SIZE
+                && self.current_xid().is_none()
+                && UnifiedStore::deferred_store_wal_capture_active()
+            {
+                super::delete_publication::order_target_ids(self, &query.table, ids)?
+            } else {
+                ids
+            }
         };
 
-        // For event-enabled collections, snapshot the pre-delete state
-        // before rows are physically removed.
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
-        let mut pre_images: HashMap<u64, crate::json::Value> = if needs_delete_events {
-            scan.row_json_pre_images(&ids_to_delete)
-        } else {
-            HashMap::new()
-        };
-
         let mut affected: u64 = 0;
+        // Final cooperative checkpoint before DELETE begins publishing its
+        // prepared target set. A later timeout must not strand a partial
+        // statement merely to stop sooner.
+        let _durable_publication = super::query_budget::begin_durable_publication()?;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-            let (count, lsns) =
-                self.delete_entities_batch(&query.table, chunk, topology_lock.read())?;
+            let deleted = self.delete_entities_batch(
+                &query.table,
+                chunk,
+                topology_lock.read(),
+                effective_filter.as_ref(),
+                needs_delete_events,
+            )?;
             #[cfg(test)]
             self.index_store_ref().mutation_test_hook(
                 &query.table,
                 super::index_store::MutationTestPhase::BeforeEvents,
             );
-            affected += count;
-            if needs_delete_events && !lsns.is_empty() {
-                // lsns.len() == actually-deleted entities; align with chunk ids.
-                // `delete_batch` may skip missing entities, so we correlate by
-                // the number returned (they're emitted in chunk order).
-                let deleted_chunk = &chunk[..lsns.len().min(chunk.len())];
+            affected += deleted.affected;
+            if needs_delete_events && !deleted.changes.is_empty() {
+                let ids: Vec<_> = deleted.changes.iter().map(|(id, _)| *id).collect();
+                let lsns: Vec<_> = deleted.changes.iter().map(|(_, lsn)| *lsn).collect();
                 self.emit_delete_events_for_collection(
                     &query.table,
-                    deleted_chunk,
+                    &ids,
                     &lsns,
-                    &pre_images,
+                    &deleted.pre_images,
                 )?;
             }
         }
-        pre_images.clear();
 
         if affected > 0 {
             self.note_table_write(&query.table);
@@ -2818,6 +3042,425 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::path::Path;
+
+    #[test]
+    fn captured_bulk_delete_keeps_global_row_lock_order_across_chunks() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let runtime = Arc::new(
+            RedDBRuntime::with_options(
+                RedDBOptions::in_memory().with_memory_budget(128 * 1024 * 1024),
+            )
+            .expect("bulk lock fixture"),
+        );
+        runtime
+            .execute_query("CREATE TABLE bulk_lock_order (id INTEGER)")
+            .expect("table");
+        let count = super::UPDATE_APPLY_CHUNK_SIZE + 16;
+        for batch in (0..count).collect::<Vec<_>>().chunks(512) {
+            let values = batch
+                .iter()
+                .map(|id| format!("({id})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!("INSERT INTO bulk_lock_order (id) VALUES {values}"))
+                .expect("seed chunk boundary");
+        }
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("bulk_lock_order")
+            .expect("rows");
+        // Imported/versioned rows can have logical identities independent
+        // of their physical positions. Cross decimal-width boundaries too;
+        // fresh time-based physical IDs alone keep the same string order.
+        let mut rows = manager.query_all(|_| true);
+        rows.sort_unstable_by_key(|entity| entity.id);
+        for (position, mut entity) in rows.into_iter().enumerate() {
+            entity.set_logical_id(crate::storage::EntityId::new(
+                u64::try_from(position + 1).expect("small identity"),
+            ));
+            manager
+                .update(entity)
+                .expect("independent logical identity");
+        }
+        let mut expected: Vec<_> = manager
+            .query_all(|_| true)
+            .iter()
+            .map(|entity| format!("row:{}", entity.logical_id().raw()))
+            .collect();
+        expected.sort_unstable();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let weak_runtime = Arc::downgrade(&runtime);
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "bulk_lock_order"
+                    && phase == super::super::index_store::MutationTestPhase::BeforeEvents
+                {
+                    let runtime = weak_runtime.upgrade().expect("writer still alive");
+                    let held =
+                        super::super::delete_publication::pending_lock_keys(&runtime, collection);
+                    assert!(!held.is_empty());
+                    assert!(held.len() <= expected.len());
+                    let mismatch = held
+                        .iter()
+                        .zip(&expected)
+                        .position(|(actual, expected)| actual != expected);
+                    assert!(
+                        mismatch.is_none(),
+                        "captured DELETE violated global lock order at position {mismatch:?}"
+                    );
+                    hook_calls.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        let result = runtime
+            .with_deferred_store_wal_for_dml(true, || {
+                runtime.execute_query("DELETE FROM bulk_lock_order")
+            })
+            .expect("captured bulk delete");
+        assert_eq!(
+            result.affected_rows,
+            u64::try_from(count).expect("small fixture")
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "fixture must cross an apply chunk"
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM bulk_lock_order")
+            .expect("deleted rows")
+            .result
+            .records
+            .is_empty());
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    }
+
+    #[test]
+    fn locked_update_recheck_read_failure_preserves_preimages_and_retry() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::PagedCollection;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().expect("locked update fixture");
+        let options = RedDBOptions::persistent(directory.path().join("locked-update.rdb"))
+            .with_memory_budget(128 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("locked update profile");
+        let runtime = RedDBRuntime::with_options(options).expect("locked update runtime");
+        for sql in [
+            "CREATE TABLE recheck_probe (id INTEGER)",
+            "INSERT INTO recheck_probe (id) VALUES (1), (2)",
+            "SET CONFIG fixture.flag = 'ready'",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let sql = "UPDATE recheck_probe SET id = id + 10 WHERE id = 1 OR CONFIG('fixture.flag') = 'ready'";
+        let reddb_rql::ast::QueryExpr::Update(query) =
+            reddb_rql::parse(sql).expect("parse update").query
+        else {
+            panic!("expected UPDATE");
+        };
+        let compiled = runtime.compile_update_plan(&query).expect("compile update");
+        let filter = reddb_rql::sql_lowering::effective_update_filter(&query);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &runtime,
+            "recheck_probe",
+            filter.as_ref(),
+            None,
+        )
+        .find_target_ids()
+        .expect("discover targets before failure");
+        assert_eq!(ids.len(), 2);
+        let store = runtime.db().store();
+        store.persist().expect("publish recheck configuration");
+        let root = store
+            .collection_root_page("red_config")
+            .expect("configuration root");
+        let manager = store
+            .get_collection("red_config")
+            .expect("configuration collection");
+        let install = |limit| {
+            let tree = BTree::with_root(Arc::clone(store.pager().expect("pager")), root);
+            manager.install_backing(
+                Arc::new(PagedCollection::new(Arc::new(tree))),
+                root,
+                store.format_version(),
+                limit,
+                manager.count() as u64,
+            );
+        };
+        let assert_ids = |expected: [i64; 2]| {
+            runtime.invalidate_result_cache();
+            let rows = runtime
+                .execute_query("SELECT id FROM recheck_probe ORDER BY id")
+                .expect("read preimages");
+            let actual: Vec<_> = rows
+                .result
+                .records
+                .iter()
+                .map(|row| row.get("id").cloned().expect("row value"))
+                .collect();
+            assert_eq!(actual, expected.map(Value::Integer));
+        };
+        // Candidate discovery has succeeded. Fail only the locked recheck,
+        // after the first row's postimage can already have been prepared.
+        install(1);
+        let error = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .err()
+            .expect("locked recheck must propagate its read failure");
+        assert!(error.to_string().contains("read memory limit"), "{error}");
+        install(4096);
+        assert_ids([1, 2]);
+        let retried = runtime
+            .execute_update_inner_tracked_locked(sql, &query, &compiled, &ids, filter.as_ref())
+            .expect("retry locked recheck");
+        assert_eq!(retried.0.affected_rows, 2);
+        assert_ids([11, 12]);
+    }
+
+    #[test]
+    fn concurrent_constant_updates_leave_one_visible_row_per_logical_id() {
+        use std::sync::{Arc, Barrier};
+
+        const WRITERS: usize = 3;
+        const ROUNDS: usize = 8;
+        let rt = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let rt = Arc::clone(&rt);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    for round in 0..ROUNDS {
+                        barrier.wait();
+                        rt.execute_query(&format!(
+                            "UPDATE capabilities SET observed_at = '{writer}-{round}' WHERE id = 'A'"
+                        ))
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let selected = rt
+            .execute_query("SELECT id, observed_at FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(
+            selected.result.records.len(),
+            1,
+            "concurrent updates published multiple visible versions"
+        );
+    }
+
+    #[test]
+    fn locked_constant_updates_preserve_unique_constraints() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE accounts (id INT PRIMARY KEY, email TEXT UNIQUE)")
+            .unwrap();
+        rt.execute_query("INSERT INTO accounts (id, email) VALUES (1, 'a'), (2, 'b')")
+            .unwrap();
+        assert!(rt
+            .execute_query("UPDATE accounts SET email = 'b' WHERE id = 1")
+            .is_err());
+        let selected = rt
+            .execute_query("SELECT id FROM accounts WHERE email = 'a'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_transactions_do_not_both_commit_the_same_row_update() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        for connection in [41, 42] {
+            set_current_connection_id(connection);
+            rt.execute_query("BEGIN").unwrap();
+        }
+        set_current_connection_id(41);
+        rt.execute_query("UPDATE capabilities SET observed_at = 'first' WHERE id = 'A'")
+            .unwrap();
+        set_current_connection_id(42);
+        let competing =
+            rt.execute_query("UPDATE capabilities SET observed_at = 'second' WHERE id = 'A'");
+        set_current_connection_id(41);
+        rt.execute_query("COMMIT").unwrap();
+        set_current_connection_id(42);
+        if competing.is_ok() {
+            assert!(
+                rt.execute_query("COMMIT").is_err(),
+                "both writers committed"
+            );
+        } else {
+            rt.execute_query("ROLLBACK").unwrap();
+        }
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT id FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn transaction_and_autocommit_update_do_not_publish_two_live_versions() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'initial')")
+            .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("UPDATE capabilities SET observed_at = 'transaction' WHERE id = 'A'")
+            .unwrap();
+        clear_current_connection_id();
+        let autocommit =
+            rt.execute_query("UPDATE capabilities SET observed_at = 'auto' WHERE id = 'A'");
+        set_current_connection_id(41);
+        let commit = rt.execute_query("COMMIT");
+        clear_current_connection_id();
+        assert!(
+            autocommit.is_err() || commit.is_err(),
+            "conflicting writers both committed"
+        );
+        let selected = rt
+            .execute_query("SELECT id FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+    }
+
+    #[test]
+    fn transaction_update_does_not_target_rows_created_after_snapshot() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, observed_at TEXT)")
+            .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("SELECT id FROM capabilities").unwrap();
+        clear_current_connection_id();
+        rt.execute_query("INSERT INTO capabilities (id, observed_at) VALUES ('A', 'after')")
+            .unwrap();
+        set_current_connection_id(41);
+        let updated = rt
+            .execute_query("UPDATE capabilities SET observed_at = 'changed' WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(
+            updated.affected_rows, 0,
+            "updated a row outside the transaction snapshot"
+        );
+        rt.execute_query("COMMIT").unwrap();
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT observed_at FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("observed_at"),
+            Some(&Value::text("after"))
+        );
+    }
+
+    #[test]
+    fn autocommit_update_does_not_filter_on_uncommitted_row_image() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id TEXT, status TEXT, payload TEXT)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, status, payload) VALUES ('A', 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        rt.execute_query("UPDATE capabilities SET status = 'busy' WHERE id = 'A'")
+            .unwrap();
+        clear_current_connection_id();
+        let autocommit =
+            rt.execute_query("UPDATE capabilities SET payload = 'new' WHERE status = 'ready'");
+        if let Ok(result) = &autocommit {
+            assert_eq!(
+                result.affected_rows, 1,
+                "uncommitted status hid the committed target"
+            );
+        }
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let selected = rt
+            .execute_query("SELECT status, payload FROM capabilities WHERE id = 'A'")
+            .unwrap();
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        if autocommit.is_ok() {
+            assert_eq!(
+                selected.result.records[0].get("payload"),
+                Some(&Value::text("new"))
+            );
+        }
+    }
+
+    #[test]
+    fn autocommit_update_skips_row_claimed_by_another_transaction() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE capabilities (id INT, rank INT, status TEXT, note TEXT)")
+            .unwrap();
+        rt.execute_query("CREATE INDEX capabilities_rank ON capabilities (rank)")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO capabilities (id, rank, status, note) VALUES (1, 10, 'ready', 'old')",
+        )
+        .unwrap();
+        set_current_connection_id(41);
+        rt.execute_query("BEGIN").unwrap();
+        let claim = rt.execute_query("UPDATE capabilities SET status = 'claimed' WHERE status = 'ready' CLAIM LIMIT 1 ORDER BY rank ASC").unwrap();
+        assert_eq!(claim.affected_rows, 1);
+        set_current_connection_id(42);
+        let other = rt
+            .execute_query("UPDATE capabilities SET note = 'new' WHERE id = 1")
+            .unwrap();
+        assert_eq!(other.affected_rows, 0);
+        set_current_connection_id(41);
+        rt.execute_query("ROLLBACK").unwrap();
+        clear_current_connection_id();
+        let rows = rt
+            .execute_query("SELECT status, note FROM capabilities WHERE id = 1")
+            .unwrap();
+        assert_eq!(rows.result.records.len(), 1);
+        assert_eq!(
+            rows.result.records[0].get("status"),
+            Some(&Value::text("ready"))
+        );
+        assert_eq!(
+            rows.result.records[0].get("note"),
+            Some(&Value::text("old"))
+        );
+    }
 
     fn persistent_operational_options(path: &Path) -> RedDBOptions {
         RedDBOptions::persistent(path)

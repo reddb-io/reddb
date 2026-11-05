@@ -776,9 +776,13 @@ impl<'a> VaultClient<'a> {
     }
 
     pub async fn unseal(&self, key: &str) -> Result<QueryResult> {
+        self.reveal(key).await
+    }
+
+    pub async fn reveal(&self, key: &str) -> Result<QueryResult> {
         self.db
             .query(&format!(
-                "UNSEAL VAULT {}.{}",
+                "VAULT REVEAL {}.{}",
                 kv_collection_identifier(self.collection)?,
                 kv_path_segment(key)
             ))

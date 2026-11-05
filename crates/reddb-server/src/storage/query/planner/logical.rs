@@ -12,7 +12,7 @@ use reddb_rql::ast::{
 use reddb_rql::sql_lowering::{
     effective_graph_filter, effective_graph_projections, effective_join_filter,
     effective_join_projections, effective_path_filter, effective_path_projections,
-    effective_table_filter, effective_table_projections, effective_vector_filter,
+    effective_vector_filter,
 };
 use reddb_types::Value;
 
@@ -22,165 +22,10 @@ use logical_helpers::*;
 pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> CanonicalLogicalNode {
     match expr {
         QueryExpr::Explain(explain) => logical_plan_node_with_catalog(db, &explain.inner),
-        QueryExpr::Table(query) => {
-            let mut details = BTreeMap::new();
-            let effective_projection_count = effective_table_projections(query).len();
-            let effective_filter = effective_table_filter(query);
-            let is_any = is_universal_entity_source(query.table.as_str());
-            let access = if is_any {
-                AccessPathDecision {
-                    path: "entity_scan",
-                    index_hint: None,
-                    reason: "universal entity space requested".to_string(),
-                    warning: None,
-                }
-            } else {
-                table_access_path_hint(db, query)
-            };
-            let scan_estimate = if is_any {
-                universal_entity_cardinality(db)
-            } else if access.path == "document_path_index_seek" {
-                document_index_cardinality(db, query.table.as_str())
-            } else {
-                base_collection_cardinality(db, query.table.as_str())
-            };
-            details.insert("access_path".to_string(), access.path.to_string());
-            details.insert("access_path_reason".to_string(), access.reason);
-            if let Some(warning) = access.warning {
-                details.insert("lifecycle_warning".to_string(), warning);
-            }
-            if let Some(index_hint) = access.index_hint {
-                details.insert("index_hint".to_string(), index_hint);
-            }
-            details.insert("universal".to_string(), is_any.to_string());
-            details.insert("filter".to_string(), effective_filter.is_some().to_string());
-            details.insert("order_by".to_string(), query.order_by.len().to_string());
-            details.insert(
-                "limit".to_string(),
-                query
-                    .limit
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-            );
-            details.insert(
-                "offset".to_string(),
-                query
-                    .offset
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-            );
-            details.insert(
-                "projection_count".to_string(),
-                effective_projection_count.to_string(),
-            );
-            let mut node = CanonicalLogicalNode {
-                operator: access.path.to_string(),
-                source: Some(query.table.clone()),
-                details,
-                estimated_rows: scan_estimate.rows,
-                estimated_selectivity: scan_estimate.selectivity,
-                estimated_confidence: scan_estimate.confidence,
-                operator_cost: operator_cost_estimate(access.path, scan_estimate.rows),
-                children: Vec::new(),
-            };
-            if let Some(filter) = &effective_filter {
-                let document_path_filter = uses_document_path_filter(db, query);
-                let filter_estimate = if document_path_filter {
-                    document_filtered_cardinality(db, query)
-                } else {
-                    table_filtered_cardinality(db, query)
-                };
-                node = wrap_unary_plan(
-                    if document_path_filter {
-                        "document_path_filter"
-                    } else if is_any {
-                        "entity_filter"
-                    } else {
-                        "filter"
-                    },
-                    btree_details([("predicate", filter_summary(filter))]),
-                    Some(filter_estimate),
-                    node,
-                );
-            }
-            if !query.order_by.is_empty() || requires_implicit_entity_sort(query) {
-                node = wrap_unary_plan(
-                    if uses_document_path_sort(query) {
-                        "document_sort"
-                    } else if is_any {
-                        "entity_sort"
-                    } else {
-                        "sort"
-                    },
-                    btree_details([(
-                        "keys",
-                        if query.order_by.is_empty() && is_any {
-                            "_score desc, _entity_id asc".to_string()
-                        } else {
-                            order_by_summary(&query.order_by)
-                        },
-                    )]),
-                    None,
-                    node,
-                );
-            }
-            if query.offset.is_some() {
-                let offset_estimate = offset_cardinality(
-                    node.estimated_rows,
-                    node.estimated_selectivity,
-                    node.estimated_confidence,
-                    query.offset,
-                );
-                node = wrap_unary_plan(
-                    if is_any { "entity_offset" } else { "offset" },
-                    btree_details([(
-                        "offset",
-                        query
-                            .offset
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                    )]),
-                    Some(offset_estimate),
-                    node,
-                );
-            }
-            if query.limit.is_some() {
-                let limit_estimate = limit_cardinality(
-                    node.estimated_rows,
-                    node.estimated_selectivity,
-                    node.estimated_confidence,
-                    query.limit,
-                );
-                node = wrap_unary_plan(
-                    if is_any { "entity_limit" } else { "limit" },
-                    btree_details([(
-                        "limit",
-                        query
-                            .limit
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                    )]),
-                    Some(limit_estimate),
-                    node,
-                );
-            }
-            if table_has_explicit_projection(query) {
-                let document_projection = is_document_projection(db, query);
-                node = wrap_unary_plan(
-                    if document_projection {
-                        "document_projection"
-                    } else if is_any {
-                        "entity_projection"
-                    } else {
-                        "projection"
-                    },
-                    btree_details([("columns", table_projection_summary(query))]),
-                    None,
-                    node,
-                );
-            }
-            node
-        }
+        QueryExpr::Table(query) => reddb_engine::query::planning::build_table_plan_with_host(
+            &NativeTablePlanningHost(db),
+            query,
+        ),
         QueryExpr::Graph(query) => {
             let mut details = BTreeMap::new();
             let access = graph_access_path_hint(db);
@@ -710,5 +555,38 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 children: Vec::new(),
             }
         }
+    }
+}
+
+struct NativeTablePlanningHost<'a>(&'a RedDB);
+impl reddb_engine::query::planning::TablePlanningHost for NativeTablePlanningHost<'_> {
+    fn access_path(&self, query: &TableQuery) -> AccessPathDecision {
+        table_access_path_hint(self.0, query)
+    }
+    fn scan_cardinality(
+        &self,
+        query: &TableQuery,
+        access: &AccessPathDecision,
+    ) -> CardinalityEstimate {
+        if is_universal_entity_source(query.table.as_str()) {
+            universal_entity_cardinality(self.0)
+        } else if access.path == "document_path_index_seek" {
+            document_index_cardinality(self.0, query.table.as_str())
+        } else {
+            base_collection_cardinality(self.0, query.table.as_str())
+        }
+    }
+    fn uses_document_path_filter(&self, query: &TableQuery) -> bool {
+        uses_document_path_filter(self.0, query)
+    }
+    fn filter_cardinality(&self, query: &TableQuery, document_path: bool) -> CardinalityEstimate {
+        if document_path {
+            document_filtered_cardinality(self.0, query)
+        } else {
+            table_filtered_cardinality(self.0, query)
+        }
+    }
+    fn is_document_projection(&self, query: &TableQuery) -> bool {
+        is_document_projection(self.0, query)
     }
 }

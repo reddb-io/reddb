@@ -1,6 +1,7 @@
 # `storage/engine/btree` — Page-based on-disk B+tree
 
-This is the **on-disk** B+tree used by the durable storage engine. Pages live
+This native module aliases the **on-disk** B+tree in
+`crates/reddb-engine/src/storage/btree.rs`, shared with the browser WASM target. Pages live
 in the SIEVE buffer pool (`src/storage/engine/page_cache.rs`), are flushed by
 the pager (`src/storage/engine/pager/`), and recovered from the WAL on startup.
 

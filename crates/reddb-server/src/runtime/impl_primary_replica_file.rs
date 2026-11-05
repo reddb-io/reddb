@@ -183,7 +183,8 @@ impl RedDBRuntime {
         let intent_log = crate::telemetry::admin_intent_log::AdminIntentLog::open(intent_log_path)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         let replica_id = self.resolve_replica_id();
-        let bootstrapper = crate::replication::replica::ReplicaBootstrapper::new(replica_id);
+        let bootstrapper =
+            crate::replication::replica::ReplicaBootstrapper::new(replica_id.clone());
         let source_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
         let _ = std::fs::remove_file(&pending_path);
 
@@ -209,6 +210,12 @@ impl RedDBRuntime {
 
         loop {
             let mut request = tonic::Request::new(crate::grpc::proto::Empty {});
+            request.metadata_mut().insert(
+                "x-reddb-replica-id",
+                replica_id
+                    .parse()
+                    .map_err(|err| RedDBError::Internal(format!("replica id metadata: {err}")))?,
+            );
             request.metadata_mut().insert(
                 "x-reddb-snapshot-max-bytes",
                 chunk_bytes
@@ -569,10 +576,10 @@ impl RedDBRuntime {
         Ok(promoted)
     }
 
-    pub fn record_replica_relay_batch(
+    pub fn record_replica_relay_batch<T: AsRef<[u8]>>(
         &self,
         replica_id: &str,
-        records: &[(u64, Vec<u8>)],
+        records: &[(u64, T)],
         applied_lsn: u64,
     ) -> RedDBResult<()> {
         let Some(plan) = self.primary_replica_file_plan_result()? else {
@@ -625,7 +632,9 @@ impl RedDBRuntime {
             let new_records = records
                 .iter()
                 .filter(|(lsn, _)| *lsn > manifest.flushed_lsn)
-                .map(|(lsn, payload)| reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.clone()))
+                .map(|(lsn, payload)| {
+                    reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.as_ref().to_vec())
+                })
                 .collect::<Vec<_>>();
             let segment = reddb_file::ReplicaRelayLogSegment::from_records(
                 reddb_file::TimelineId::initial(),

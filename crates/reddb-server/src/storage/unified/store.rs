@@ -22,25 +22,23 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 
 use super::context_index::ContextIndex;
 use super::entity::{
-    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
-    GraphNodeKind, NodeData, RefType, RowData, TimeSeriesPointKind, UnifiedEntity, VectorData,
+    CrossRef, EmbeddingSlot, EntityData, EntityId, EntityKind, RefType, RowData,
+    TimeSeriesPointKind, UnifiedEntity,
 };
-use super::entity_cache::EntityCache;
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
-use super::segment::SegmentError;
 use crate::api::{DurabilityMode, GroupCommitOptions};
 use crate::physical::{ManifestEvent, ManifestEventKind};
 use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
-use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
+use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
 
 pub use reddb_file::{
@@ -130,6 +128,9 @@ pub struct UnifiedStoreConfig {
     /// supplies a count derived from the page-cache budget share, so the
     /// default is reached only by direct library callers.
     pub page_cache_slots: Option<usize>,
+    /// Shared resident arena allowance for disk-backed collections. The host
+    /// supplies the segment share of its process memory budget.
+    pub resident_memory_bytes_max: Option<u64>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -147,6 +148,7 @@ impl Default for UnifiedStoreConfig {
             data_dir: None,
             embedded_wal_path: None,
             page_cache_slots: None,
+            resident_memory_bytes_max: None,
         }
     }
 }
@@ -196,58 +198,7 @@ impl UnifiedStoreConfig {
 // Error Types
 // ============================================================================
 
-/// Errors from UnifiedStore operations
-#[derive(Debug)]
-pub enum StoreError {
-    /// Collection already exists
-    CollectionExists(String),
-    /// Collection not found
-    CollectionNotFound(String),
-    /// Entity not found
-    EntityNotFound(EntityId),
-    /// Too many cross-references
-    TooManyRefs(EntityId),
-    /// Segment error
-    Segment(SegmentError),
-    /// I/O error
-    Io(std::io::Error),
-    /// Checksummed storage bytes failed validation.
-    StorageIntegrity(crate::api::StorageIntegrityError),
-    /// Serialization error
-    Serialization(String),
-    /// Internal error (lock poisoning, invariant violation)
-    Internal(String),
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CollectionExists(name) => write!(f, "Collection already exists: {}", name),
-            Self::CollectionNotFound(name) => write!(f, "Collection not found: {}", name),
-            Self::EntityNotFound(id) => write!(f, "Entity not found: {}", id),
-            Self::TooManyRefs(id) => write!(f, "Too many cross-references for entity: {}", id),
-            Self::Segment(e) => write!(f, "Segment error: {:?}", e),
-            Self::Io(e) => write!(f, "I/O error: {}", e),
-            Self::StorageIntegrity(e) => write!(f, "{e}"),
-            Self::Serialization(msg) => write!(f, "Serialization error: {}", msg),
-            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-impl From<SegmentError> for StoreError {
-    fn from(e: SegmentError) -> Self {
-        Self::Segment(e)
-    }
-}
-
-impl From<std::io::Error> for StoreError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
+pub use reddb_engine::storage::error::StoreError;
 
 // ============================================================================
 // Statistics
@@ -288,6 +239,36 @@ impl StoreStats {
 // UnifiedStore - The Main API
 // ============================================================================
 
+struct CheckpointVersion {
+    manager: std::sync::Weak<SegmentManager>,
+    segments: Vec<(u64, u64)>,
+    visibility_revision: u64,
+    untracked_visibility_revision: u64,
+    excluded_xids: Arc<std::collections::HashSet<u64>>,
+    pending_vault: Arc<std::collections::HashSet<EntityId>>,
+    format_version: u32,
+    /// Raw rows omitted or normalized in the durable image. None retains the
+    /// full validation path when more than 1,024 such rows are outstanding.
+    /// Also carries bounded unprojected IDs across completed inline GC batches.
+    deferred_rows: Option<Arc<Vec<EntityId>>>,
+    /// The resident image includes rows omitted or normalized in the checkpoint.
+    has_unprojected_rows: bool,
+}
+
+impl CheckpointVersion {
+    fn remember_deferred_row(&mut self, id: EntityId) {
+        self.has_unprojected_rows = true;
+        let Some(rows) = self.deferred_rows.as_mut() else {
+            return;
+        };
+        if rows.len() == 1024 {
+            self.deferred_rows = None;
+        } else {
+            Arc::make_mut(rows).push(id);
+        }
+    }
+}
+
 /// Unified storage for tables, graphs, and vectors
 ///
 /// UnifiedStore provides a single coherent interface for all data types:
@@ -321,18 +302,12 @@ impl StoreStats {
 /// let found = store.get("hosts", id);
 /// ```
 pub struct UnifiedStore {
+    /// Canonical resident state; native fields below retain durability policy.
+    resident: reddb_engine::storage::resident_store::ResidentStore,
     /// Store configuration
     config: UnifiedStoreConfig,
     /// File format version for serialization
     format_version: AtomicU32,
-    /// Global entity ID counter
-    next_entity_id: AtomicU64,
-    /// Collections by name
-    collections: RwLock<HashMap<String, Arc<SegmentManager>>>,
-    /// Forward cross-references: source_id → [(target_id, ref_type, target_collection)]
-    cross_refs: RwLock<HashMap<EntityId, Vec<(EntityId, RefType, String)>>>,
-    /// Reverse cross-references: target_id → [(source_id, ref_type, source_collection)]
-    reverse_refs: RwLock<HashMap<EntityId, Vec<(EntityId, RefType, String)>>>,
     /// Optional page-based storage via Pager
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
@@ -344,24 +319,22 @@ pub struct UnifiedStore {
     /// btree mutation, serialising every concurrent insert across every
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
-    /// Cross-structure context index for unified search
-    context_index: ContextIndex,
-    /// Hot entity cache — sharded bounded LRU for `get_any` lookups.
-    /// See `entity_cache.rs` for the rationale; this replaced a single
-    /// `RwLock<HashMap>` that serialised every `delete_batch` invalidation.
-    entity_cache: EntityCache,
-    /// Graph node label index: (collection, label) → Vec<EntityId>.
-    /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
-    graph_label_index: RwLock<HashMap<(String, String), Vec<EntityId>>>,
-    /// Whether the paged registry on page 1 must be rewritten before the next flush.
-    paged_registry_dirty: AtomicBool,
+    key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
+    secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
+    /// Reuse only a successfully published generation with the same live rows.
+    checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
+    checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
+    /// The immediately previous published trees and any older reader-pinned
+    /// trees. Root identities are persisted with the paged catalog.
+    retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
+    /// Epoch in the durable catalog and the epoch being published, if any.
+    ownership_catalog_epoch: AtomicU64,
+    ownership_active_epoch: AtomicU64,
+    /// Detached artifact pages stay unavailable until native metadata is durable.
+    detached_native_blob_pages: parking_lot::Mutex<std::collections::BTreeSet<u32>>,
     /// Logical store WAL / grouped durability coordinator for paged mode.
     commit: Option<Arc<StoreCommitCoordinator>>,
-    /// Counts how often `unindex_cross_refs_batch` took the read-only fast
-    /// path (no inbound refs, no outbound refs for any deleted id) and so
-    /// avoided acquiring the `cross_refs` / `reverse_refs` write locks.
-    /// Used by tests to pin the early-exit; cheap relaxed counter otherwise.
-    unindex_cross_refs_fast_path: AtomicU64,
     /// WAL-replayed `VectorInsert` records, captured at open time and
     /// drained per-collection on first `vector.turbo` access (issue
     /// #694). Boot-time recovery: the in-memory TurboQuant index is
@@ -374,19 +347,41 @@ pub struct UnifiedStore {
     /// probabilistic snapshot from store state.
     pub(crate) replayed_probabilistic_deltas:
         parking_lot::Mutex<Vec<(u8, u8, String, Vec<Vec<u8>>)>>,
-    /// Opaque store-level auxiliary metadata persisted inside the binary dump
-    /// (store format V10+). RedDB uses this to carry collection contracts
-    /// through the single-file artifact so a collection's `declared_model`
-    /// (e.g. `kv`) survives a restart instead of being re-inferred as a table.
-    /// The store treats the bytes as opaque; only RedDB interprets them.
-    pub(crate) aux_metadata: RwLock<Vec<u8>>,
+    /// Serialize vault publication with snapshot capture and WAL truncation.
+    /// Physical metadata and native header publication take it too (#2376).
+    /// Reentrant because embedded checkpoint calls the snapshot encoder while
+    /// holding the barrier, and storage maintenance may nest those calls.
+    pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
+    /// Live-only vault rows excluded from a reentrant WAL-full compaction.
+    pub(crate) pending_vault_versions: RwLock<std::collections::HashSet<EntityId>>,
     /// Retain transaction outcomes through embedded snapshot-on-drop. Without
     /// this, aborted physical versions are reopened as committed rows.
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
+    embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
+    #[cfg(test)]
+    pub(crate) test_fail_deferred_wal_append: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) test_require_deferred_publication_fence: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct PublishedKeyIndex {
+    indexed: bool,
+    source: std::sync::Weak<BTree>,
+    tree: Arc<BTree>,
+    secondary: BTreeMap<String, secondary_index::PublishedSecondaryIndex>,
+}
+
+struct RetiredBTree {
+    tree: Arc<BTree>,
+    published: bool,
 }
 
 mod builder;
+mod checkpoint_cold_append;
+mod checkpoint_delta;
+mod checkpoint_wal;
 mod commit;
 mod impl_entities;
 mod impl_file;
@@ -394,9 +389,61 @@ mod impl_native_a;
 mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
+mod impl_vault_import;
+mod key_index;
+mod keyed_write;
+mod mvcc_reclaim;
+pub(crate) use mvcc_reclaim::MvccReclaimCursor;
+pub(crate) mod count_index;
 mod native_helpers;
+mod recovery_xid;
+pub mod secondary_index;
 
-pub use self::builder::EntityBuilder;
 pub(crate) use self::commit::DeferredStoreWalActions;
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
+
+#[cfg(test)]
+mod shared_state_tests {
+    use super::*;
+
+    #[test]
+    fn native_mutations_and_shared_reads_use_one_resident_state() {
+        let store = UnifiedStore::new();
+        let resident: &reddb_engine::storage::resident_store::ResidentStore = &store.resident;
+        store.create_collection("nodes").expect("collection");
+        let native = store.get_collection("nodes").expect("native manager");
+        let shared = resident.get_collection("nodes").expect("shared manager");
+        assert!(
+            Arc::ptr_eq(&native, &shared),
+            "one canonical collection owner"
+        );
+        let id = store
+            .insert_auto(
+                "nodes",
+                UnifiedEntity::graph_node(EntityId::new(0), "Person", "person", HashMap::new()),
+            )
+            .expect("native mutation");
+        assert_eq!(id.raw(), 1);
+        assert_eq!(
+            resident.get_any(id).expect("shared read").1.kind,
+            store.get("nodes", id).expect("native read").kind
+        );
+        assert_eq!(
+            resident.lookup_graph_nodes_by_label_in("nodes", "Person"),
+            [id]
+        );
+        assert_eq!(resident.entity_cache_stats().entries, 1);
+        assert!(store.delete("nodes", id).expect("native delete"));
+        assert!(resident.get_any(id).is_none());
+        assert!(resident.lookup_graph_nodes_by_label("Person").is_empty());
+        assert_eq!(resident.entity_cache_stats().entries, 0);
+        store.set_aux_metadata(b"catalog".to_vec());
+        assert_eq!(resident.aux_metadata(), b"catalog");
+        assert_eq!(
+            store.next_entity_id().raw(),
+            2,
+            "native allocator is the shared allocator"
+        );
+    }
+}

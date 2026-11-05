@@ -3,7 +3,7 @@
 //! Provides the [`AuthResult`] type and [`check_permission`] function used by
 //! the gRPC and HTTP layers to decide whether an incoming request is allowed.
 
-use super::{CertIdentity, OAuthIdentity, Role};
+use super::{CertIdentity, OAuthIdentity, Role, UserId};
 
 // ---------------------------------------------------------------------------
 // AuthResult
@@ -25,7 +25,7 @@ pub enum AuthSource {
 pub enum AuthResult {
     /// Fully authenticated with RBAC.
     Authenticated {
-        username: String,
+        principal: UserId,
         role: Role,
         /// Which auth path produced this identity. Defaults to
         /// `Password` for callers that haven't been updated to set it
@@ -43,7 +43,15 @@ impl AuthResult {
     /// the `AuthSource` field can keep passing `(user, role)`.
     pub fn password(username: impl Into<String>, role: Role) -> Self {
         Self::Authenticated {
-            username: username.into(),
+            principal: UserId::platform(username),
+            role,
+            source: AuthSource::Password,
+        }
+    }
+
+    pub fn password_principal(principal: UserId, role: Role) -> Self {
+        Self::Authenticated {
+            principal,
             role,
             source: AuthSource::Password,
         }
@@ -52,7 +60,7 @@ impl AuthResult {
     /// Build an `AuthResult` from a validated client certificate.
     pub fn from_cert(id: CertIdentity) -> Self {
         Self::Authenticated {
-            username: id.username,
+            principal: UserId::platform(id.username),
             role: id.role,
             source: AuthSource::ClientCert,
         }
@@ -61,7 +69,7 @@ impl AuthResult {
     /// Build an `AuthResult` from a validated OAuth/OIDC token.
     pub fn from_oauth(id: OAuthIdentity) -> Self {
         Self::Authenticated {
-            username: id.username,
+            principal: UserId::from_parts(id.tenant.as_deref(), &id.username),
             role: id.role,
             source: AuthSource::Oauth,
         }
@@ -71,7 +79,7 @@ impl AuthResult {
     pub fn summary(&self) -> String {
         match self {
             Self::Authenticated {
-                username,
+                principal,
                 role,
                 source,
             } => {
@@ -80,7 +88,7 @@ impl AuthResult {
                     AuthSource::ClientCert => "cert",
                     AuthSource::Oauth => "oauth",
                 };
-                format!("user={username} role={role} via={src}")
+                format!("user={principal} role={role} via={src}")
             }
             Self::Anonymous => "anonymous".to_string(),
             Self::Denied(reason) => format!("denied: {reason}"),
@@ -139,7 +147,7 @@ mod tests {
     #[test]
     fn test_admin_can_do_everything() {
         let auth = AuthResult::Authenticated {
-            username: "root".into(),
+            principal: UserId::platform("root"),
             role: Role::Admin,
             source: AuthSource::Password,
         };
@@ -152,7 +160,7 @@ mod tests {
     #[test]
     fn test_write_role_cannot_admin() {
         let auth = AuthResult::Authenticated {
-            username: "writer".into(),
+            principal: UserId::platform("writer"),
             role: Role::Write,
             source: AuthSource::Password,
         };
@@ -164,7 +172,7 @@ mod tests {
     #[test]
     fn test_read_role_cannot_write() {
         let auth = AuthResult::Authenticated {
-            username: "reader".into(),
+            principal: UserId::platform("reader"),
             role: Role::Read,
             source: AuthSource::Password,
         };
@@ -192,7 +200,7 @@ mod tests {
     #[test]
     fn test_auth_result_summary() {
         let auth = AuthResult::Authenticated {
-            username: "alice".into(),
+            principal: UserId::platform("alice"),
             role: Role::Admin,
             source: AuthSource::Password,
         };
@@ -202,5 +210,21 @@ mod tests {
         let anon = AuthResult::Anonymous;
         assert_eq!(anon.summary(), "anonymous");
         assert!(!anon.is_authenticated());
+    }
+
+    #[test]
+    fn oauth_result_preserves_tenant_principal() {
+        let auth = AuthResult::from_oauth(OAuthIdentity {
+            username: "alice".to_string(),
+            tenant: Some("acme".to_string()),
+            role: Role::Read,
+            issuer: "https://issuer.example".to_string(),
+            subject: None,
+            expires_at_unix_secs: None,
+        });
+        let AuthResult::Authenticated { principal, .. } = auth else {
+            panic!("expected authenticated result");
+        };
+        assert_eq!(principal, UserId::scoped("acme", "alice"));
     }
 }

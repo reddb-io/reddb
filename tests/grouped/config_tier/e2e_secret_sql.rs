@@ -141,15 +141,18 @@ fn set_secret_persists_to_vault_and_show_masks_value() {
         .expect("SET SECRET should succeed");
     assert_eq!(set.statement, "set_secret");
 
+    assert!(auth.vault_kv_get("mycompany.stripe.key").is_none());
     assert_eq!(
-        auth.vault_kv_get("mycompany.stripe.key").as_deref(),
-        Some("sk_live"),
-        "vault keys after SET SECRET: {:?}",
-        auth.vault_kv_keys()
+        rt.execute_query("VAULT REVEAL red.vault.mycompany.stripe.key")
+            .expect("canonical vault entry")
+            .result
+            .records[0]
+            .get("value"),
+        Some(&Value::text("sk_live"))
     );
     auth.vault_kv_try_set(
-        "red.secret.aes_key".to_string(),
-        "vault-aes-key".to_string(),
+        "red.secret.synthetic".to_string(),
+        "vault-internal-value".to_string(),
     )
     .expect("seed internal red.secret key");
     auth.vault_kv_try_set(
@@ -176,9 +179,9 @@ fn set_secret_persists_to_vault_and_show_masks_value() {
 
 #[test]
 fn vault_kv_logical_export_is_encrypted_and_roundtrips() {
-    let (_path, rt, auth) = open_runtime_with_vault("secret_sql_logical_export");
-    rt.execute_query("SET SECRET mycompany.stripe.key = 'sk_live_export'")
-        .expect("SET SECRET should succeed");
+    let (_path, _rt, auth) = open_runtime_with_vault("secret_sql_logical_export");
+    auth.vault_kv_try_set("mycompany.stripe.key".into(), "sk_live_export".into())
+        .expect("legacy root KV export fixture");
 
     let blob = auth
         .vault_kv_export_encrypted()
@@ -258,9 +261,14 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
             "source runtime should reopen",
         );
         let auth = attach_vault(&rt, CLI_CERTIFICATE);
+        assert!(auth.vault_kv_get("mycompany.payments.key").is_none());
         assert_eq!(
-            auth.vault_kv_get("mycompany.payments.key").as_deref(),
-            Some("sk_cli_secret")
+            rt.execute_query("VAULT REVEAL red.vault.mycompany.payments.key")
+                .expect("reopened vault entry")
+                .result
+                .records[0]
+                .get("value"),
+            Some(&Value::text("sk_cli_secret"))
         );
     }
 
@@ -313,9 +321,14 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
         "dest runtime should open",
     );
     let auth = attach_vault(&rt, CLI_CERTIFICATE);
+    assert!(auth.vault_kv_get("mycompany.payments.key").is_none());
     assert_eq!(
-        auth.vault_kv_get("mycompany.payments.key").as_deref(),
-        Some("sk_cli_secret")
+        rt.execute_query("VAULT REVEAL red.vault.mycompany.payments.key")
+            .expect("restored vault entry")
+            .result
+            .records[0]
+            .get("value"),
+        Some(&Value::text("sk_cli_secret"))
     );
     let config = rt
         .execute_query("SELECT $red.config.demo.enabled")
@@ -341,10 +354,10 @@ fn dollar_secret_reference_masks_projection_and_resolves_in_filter() {
     let projected = rt
         .execute_query("SELECT $secret.mycompany.tokens.active AS secret_value FROM tokens LIMIT 1")
         .expect("project secret");
-    assert_eq!(
+    assert!(matches!(
         projected.result.records[0].get("secret_value"),
-        Some(&Value::Text("***".into()))
-    );
+        Some(Value::Secret(_))
+    ));
 
     let filtered = rt
         .execute_query("SELECT id FROM tokens WHERE token = $secret.mycompany.tokens.active")
@@ -407,7 +420,7 @@ fn secret_writes_require_secret_write_policy_in_policy_only_mode() {
         rt.execute_query("SET SECRET acme.key = 'val'")
     })
     .expect_err("SET SECRET should require secret:write");
-    assert!(denied_set.to_string().contains("secret:write"));
+    assert!(denied_set.to_string().contains("vault:write"));
     assert!(auth.vault_kv_get("acme.key").is_none());
 
     attach_secret_policy(
@@ -420,13 +433,14 @@ fn secret_writes_require_secret_write_policy_in_policy_only_mode() {
         rt.execute_query("SET SECRET acme.key = 'val'")
     })
     .expect("secret:write should allow SET SECRET");
-    assert_eq!(auth.vault_kv_get("acme.key").as_deref(), Some("val"));
+    assert!(auth.vault_kv_get("acme.key").is_none());
+    assert!(rt.db().store().get_collection("red.vault").expect("default vault").query_all(|_| true).iter().any(|entity| matches!(&entity.data, reddb::storage::EntityData::Row(row) if matches!(row.get_field("value"), Some(Value::Secret(_))))));
 
     let denied_delete = as_user("bob", Role::Write, || {
         rt.execute_query("DELETE SECRET acme.key")
     })
     .expect_err("DELETE SECRET should require secret:write");
-    assert!(denied_delete.to_string().contains("secret:write"));
+    assert!(denied_delete.to_string().contains("vault:write"));
 
     as_user("alice", Role::Write, || {
         rt.execute_query("DELETE SECRET acme.key")
@@ -456,10 +470,10 @@ fn legacy_rbac_admin_can_read_and_write_user_managed_secrets_without_policy() {
     })
     .expect("legacy admin should read user-managed secrets");
     assert_eq!(read.result.records.len(), 1);
-    assert_eq!(
+    assert!(matches!(
         read.result.records[0].get("s"),
-        Some(&Value::Text("***".into()))
-    );
+        Some(Value::Secret(_))
+    ));
 
     as_user("admin", Role::Admin, || {
         rt.execute_query("DELETE SECRET acme.key")
@@ -479,8 +493,8 @@ fn dollar_secret_reference_does_not_resolve_reserved_red_secret_namespace() {
     rt.execute_query("SET SECRET acme.key = 'user-match'")
         .expect("set user secret");
     auth.vault_kv_try_set(
-        "red.secret.aes_key".to_string(),
-        "vault-aes-key".to_string(),
+        "red.secret.synthetic".to_string(),
+        "vault-internal-value".to_string(),
     )
     .expect("seed internal AES key");
     auth.vault_kv_try_set(

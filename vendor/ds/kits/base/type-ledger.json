@@ -1,0 +1,4 @@
+{
+  "$comment": "Type debt this Kit carried when kit-lint's type rule arrived (ADR 0025), deferred to the type-role migration (wave 3). Each entry is a file, a class as written and its occurrences. The lint fails on any type violation beyond these entries and on any entry larger than what the source still holds, so this ledger only shrinks: remove a line when its debt is migrated. Base paid its debt in full in wave 3a (ADR 0025): the ledger stays, empty, so any new type violation fails.",
+  "debts": {}
+}

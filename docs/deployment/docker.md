@@ -11,7 +11,7 @@ The container image defaults to the standard container listener contract:
 - gRPC on `0.0.0.0:55055`
 - HTTP/Web/health on `0.0.0.0:5000`
 - optional TLS/extra listener on `0.0.0.0:55555` when enabled
-- data file at `/data/data.rdb`
+- data file at `/data/red/database.rdb`
 
 The convention is intentional: product-facing/local development ports use the
 `50xx` range, while infrastructure/control-plane listeners and local infra
@@ -31,6 +31,10 @@ docker run --rm -it \
   -p 55055:55055 \
   -p 5000:5000 \
   -v $(pwd)/data:/data \
+  -v $(pwd)/secrets:/run/secrets:ro \
+  -e REDDB_USERNAME_FILE=/run/secrets/reddb_username \
+  -e REDDB_PASSWORD_FILE=/run/secrets/reddb_password \
+  -e REDDB_VAULT_PASSPHRASE_FILE=/run/secrets/reddb_vault_passphrase \
   --name reddb \
   reddb
 ```
@@ -41,10 +45,39 @@ The image `CMD` is intentionally just:
 CMD ["server"]
 ```
 
-The image env supplies `REDDB_DATA_PATH=/data/data.rdb`,
+The image env supplies `REDDB_DATA_PATH=/data/red/database.rdb`,
 `REDDB_WIRE_BIND_ADDR=0.0.0.0:5050`,
 `REDDB_GRPC_BIND_ADDR=0.0.0.0:55055`,
-`REDDB_HTTP_BIND_ADDR=0.0.0.0:5000`, and `REDDB_VAULT=false`.
+`REDDB_HTTP_BIND_ADDR=0.0.0.0:5000`, `REDDB_VAULT=true`, and
+`REDDB_BOOTSTRAP_PRESET=production`. First boot therefore requires the
+username, password, and vault passphrase secret files shown above. Reuse the
+same vault passphrase when restarting the persisted `/data` volume.
+
+## Persistent data path and upgrades
+
+Mount the persistent volume at `/data`. New containers use
+`/data/red/database.rdb`; when an adjacent external unified WAL is used, its
+path is `/data/red/database.rdb-uwal`. Layout-specific WAL, metadata and auxiliary files
+also belong on this volume. The image creates `/data/red` for its non-root
+user. A bind mount hides the image directory, so prepare a writable `red`
+subdirectory for the runtime UID before starting with a host directory.
+
+An explicit `--path` or `REDDB_DATA_PATH` still selects a different database.
+Before upgrading an existing volume from the previous `/data/data.rdb`
+default, pin `REDDB_DATA_PATH=/data/data.rdb` to keep opening its current data.
+The new default does not discover or migrate an existing database: an absent
+target can initialize a new database.
+
+To adopt the new path, first verify a complete native backup and record data,
+indexes and authentication checks. Stop every writer, inventory the complete
+native file family (including WAL, metadata and support directories), then
+relocate it on the same volume using the engine's filename/layout contract.
+A renamed main file requires matching companion names. Do not move only the
+`.rdb` or infer completeness from a logical export. Keep certificates and
+runtime credentials unchanged. Validate hashes before reopening, then repeat
+write, checkpoint, restart, indexed-read and authentication checks. Resume
+consumers only after acceptance. A rollback after new writes must preserve
+those writes; never replace them with an older backup.
 
 ## Container Topology Contract
 
@@ -152,7 +185,7 @@ docker run --rm -it \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
-  -e REDDB_DATA_PATH=/data/reddb.rdb \
+  -e REDDB_DATA_PATH=/data/red/database.rdb \
   -e REDDB_WIRE_BIND_ADDR=0.0.0.0:5050 \
   -e REDDB_GRPC_BIND_ADDR=0.0.0.0:55055 \
   -e REDDB_HTTP_BIND_ADDR=0.0.0.0:5000 \
@@ -169,13 +202,17 @@ docker run --rm -it \
   -p 5000:5000 \
   -v $(pwd)/data:/data \
   reddb server \
-    --path /data/reddb.rdb \
+    --path /data/red/database.rdb \
     --wire-bind 0.0.0.0:5050 \
     --grpc-bind 0.0.0.0:55055 \
     --http-bind 0.0.0.0:5000
 ```
 
 ## Docker Compose
+
+The topology snippets below inherit the fail-closed image defaults. Add the
+bootstrap and vault secret-file mounts from **With Auth Vault** before starting
+them; the service intentionally will not initialize anonymously.
 
 ### Single Server
 
@@ -197,7 +234,7 @@ services:
       REDDB_STORAGE_PROFILE: embedded
       REDDB_STORAGE_PACKAGING: single-file
       REDDB_REPLICA_COUNT: "0"
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
@@ -228,7 +265,7 @@ services:
       REDDB_STORAGE_PROFILE: primary-replica
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "1"
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
@@ -255,7 +292,7 @@ services:
       REDDB_STORAGE_PACKAGING: operational-directory
       REDDB_REPLICA_COUNT: "1"
       REDDB_PRIMARY_ADDR: http://primary:55055
-      REDDB_VAULT: "false"
+      REDDB_VAULT: "true"
     healthcheck:
       test: ["CMD", "red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 10s
@@ -361,7 +398,7 @@ You can still pass flags via the Docker `command` for ad hoc overrides:
 ```bash
 docker run -d \
   reddb server \
-    --path /data/reddb.rdb \
+    --path /data/red/database.rdb \
     --vault \
     --wire-bind 0.0.0.0:5050 \
     --grpc-bind 0.0.0.0:55055 \

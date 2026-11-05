@@ -18,48 +18,6 @@ use super::refs::{NodeRef, TableRef, VectorRef};
 // MetadataValue Conversions
 // ============================================================================
 
-impl From<&str> for MetadataValue {
-    fn from(s: &str) -> Self {
-        MetadataValue::String(s.to_string())
-    }
-}
-
-impl From<String> for MetadataValue {
-    fn from(s: String) -> Self {
-        MetadataValue::String(s)
-    }
-}
-
-impl From<i64> for MetadataValue {
-    fn from(n: i64) -> Self {
-        MetadataValue::Int(n)
-    }
-}
-
-impl From<f64> for MetadataValue {
-    fn from(n: f64) -> Self {
-        MetadataValue::Float(n)
-    }
-}
-
-impl From<bool> for MetadataValue {
-    fn from(b: bool) -> Self {
-        MetadataValue::Bool(b)
-    }
-}
-
-impl From<RefTarget> for MetadataValue {
-    fn from(r: RefTarget) -> Self {
-        MetadataValue::Reference(r)
-    }
-}
-
-impl From<Vec<RefTarget>> for MetadataValue {
-    fn from(refs: Vec<RefTarget>) -> Self {
-        MetadataValue::References(refs)
-    }
-}
-
 impl From<TableRef> for MetadataValue {
     fn from(r: TableRef) -> Self {
         MetadataValue::Reference(RefTarget::table(r.table, r.row_id))

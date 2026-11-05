@@ -100,7 +100,7 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
     let impl_access =
         read(root.join("crates/reddb-server/src/storage/unified/devx/reddb/impl_access.rs"));
     let table = read(root.join("crates/reddb-types/src/table.rs"));
-    let physical = read(root.join("crates/reddb-server/src/physical/json_codec.rs"));
+    let catalog = read(root.join("crates/reddb-engine/src/catalog/codec.rs"));
 
     let hnsw_src = non_test_source(&hnsw);
     let ivf_src = non_test_source(&ivf);
@@ -173,8 +173,8 @@ fn server_does_not_redeclare_native_artifact_payload_formats() {
         "the retired storage/schema/table.rs shim must not come back"
     );
     assert!(
-        physical.contains("reddb_file::encode_table_def")
-            && physical.contains("reddb_file::decode_table_def"),
-        "physical JSON persistence must call the reddb-file RTBL codec"
+        catalog.contains("reddb_file::encode_table_def")
+            && catalog.contains("reddb_file::decode_table_def"),
+        "shared catalog persistence must call the reddb-file RTBL codec"
     );
 }

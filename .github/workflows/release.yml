@@ -155,17 +155,15 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The Node addon is a second engine compile on the legs that build it.
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 / armv7: native compile on a Blacksmith 8-vCPU
-          # x86_64 runner. The armv7 target still needs the cross-gcc
-          # toolchain, but the underlying CPU is 2x faster than ubuntu-latest.
+          # Linux x86_64: native compile on a Blacksmith 8-vCPU runner.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
           # Linux aarch64: build natively on a Blacksmith ARM runner instead
           # of cross-compiling from x86_64. Removes the gcc-aarch64-linux-gnu
           # cross toolchain install + linker env vars + the QEMU smoke test
@@ -180,13 +178,10 @@ jobs:
           # version, unlike the glibc-linked `linux-x86_64`. Same Docker musl-
           # cross path as aarch64.
           - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-musl, asset_name: linux-x86_64-static, cross: true }
-          # Build Intel macOS on the ARM macOS pool. The macos-13 Intel pool
-          # frequently queues long enough to block publishing; cross-building
-          # from macos-14 still produces the x86_64-apple-darwin asset, but we
-          # cannot rely on Rosetta being available for a local smoke test.
-          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: true,  smoke: false, optional: true }
-          - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
+          # Build Apple Silicon on the Blacksmith ARM pool already used by the
+          # full CI workflow.
+          - { os: blacksmith-6vcpu-macos-15,       target: aarch64-apple-darwin,      asset_name: macos-aarch64, cross: false, optional: true }
+          - { os: blacksmith-8vcpu-windows-2025,   target: x86_64-pc-windows-msvc,   asset_name: windows-x86_64, cross: false, optional: true }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -216,18 +211,9 @@ jobs:
         with:
           shared-key: release-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: "true"
-
-      - name: Add cross-compile target
-        if: matrix.cross
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Cross-compile tools
-        # Only `armv7` and the musl-via-docker target need apt-installed
-        # cross toolchains now. aarch64 builds natively on blacksmith-arm64.
-        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          workspaces: |
+            . -> target
+            drivers/node -> target
 
       - name: Build
         if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'x86_64-unknown-linux-musl'
@@ -235,15 +221,6 @@ jobs:
         env:
           SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
           RUSTC_WRAPPER: ${{ !matrix.cross && 'sccache' || '' }}
-          # Cross-compile linker/CC overrides only apply when matrix.cross
-          # is true. aarch64-unknown-linux-gnu now builds natively on
-          # blacksmith-arm64, so the host gcc is the right answer for
-          # that target — setting `aarch64-linux-gnu-gcc` here would point
-          # cargo at a binary that isn't installed on the arm64 runner.
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CC_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CXX_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-g++' || '' }}
-          AR_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-ar' || '' }}
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
@@ -266,6 +243,50 @@ jobs:
               cargo build --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
             '
           sudo chown -R "$(id -u):$(id -g)" target/${{ matrix.target }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: "!matrix.cross"
+        with:
+          node-version: '22'
+
+      - name: Build + smoke-test Node addon (in-process embedded engine)
+        # `@reddb-io/sdk` loads this as `reddb.node` instead of spawning `red`.
+        # Only legs that run on their own architecture build it, because an
+        # addon is only shipped once it has been LOADED and answered a request
+        # on the runner: a cross-compiled or musl `.node` that was never loaded
+        # must not reach users. Legs without one ship the plain package and the
+        # SDK keeps using the `red` subprocess there. Best effort: a failure
+        # here never blocks the release, it only leaves the asset out.
+        # `drivers/node` is outside the workspace (own lockfile/target).
+        if: "!matrix.cross"
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          case "${{ matrix.target }}" in
+            *windows*) LIB=reddb_node.dll ;;
+            *apple*)   LIB=libreddb_node.dylib ;;
+            *)         LIB=libreddb_node.so ;;
+          esac
+          OUT="reddb-node-${{ matrix.asset_name }}.node"
+          if ! (cd drivers/node && cargo build --locked --release --target ${{ matrix.target }}); then
+            echo "::warning::Node addon failed to build for ${{ matrix.asset_name }}; shipping without it"
+            exit 0
+          fi
+          cp "drivers/node/target/${{ matrix.target }}/release/${LIB}" "${OUT}"
+          if node -e '
+            const { Engine } = require(require("path").resolve(process.argv[1]))
+            const e = Engine.open()
+            const r = JSON.parse(e.callSync(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "version", params: {} })))
+            e.close()
+            if (!r.result) { console.error(JSON.stringify(r)); process.exit(1) }
+          ' "${OUT}"; then
+            shasum -a 256 "${OUT}" > "${OUT}.sha256" 2>/dev/null || certutil -hashfile "${OUT}" SHA256 > "${OUT}.sha256"
+            echo "Node addon ${OUT} loaded and answered a request"
+          else
+            echo "::warning::Node addon ${OUT} built but failed to load/answer; NOT shipping it"
+            rm -f "${OUT}"
+          fi
 
       - name: Strip (Linux native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -321,6 +342,7 @@ jobs:
           path: |
             red-${{ matrix.asset_name }}*
             red_client-${{ matrix.asset_name }}*
+            reddb-node-${{ matrix.asset_name }}*
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -416,7 +438,7 @@ jobs:
           set -euo pipefail
           (
             cd release
-            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' \) ! -name '*.sha256' -print0 \
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' -o -name 'reddb-node-*' \) ! -name '*.sha256' -print0 \
               | sort -z \
               | xargs -0 sha256sum \
               | sed 's#  \./#  #'
@@ -498,7 +520,7 @@ jobs:
           ## Compatibility
 
           - Server, CLI, client packages, crates, and container images are published from the same tag: \`${TAG}\`.
-          - Official JavaScript packages are published only after the GitHub Release carries every postinstall-required binary asset and checksum manifest.
+          - Official JavaScript packages are published only after the GitHub Release carries every binary asset (packaged into the `@reddb-io/red-*` platform packages) and checksum manifest.
           - Client/transport compatibility details live in [SDK & Client Compatibility](https://github.com/${REPO}/blob/${TAG}/docs/clients/sdk-compatibility.md).
 
           ## Installation
@@ -518,8 +540,6 @@ jobs:
           | Linux x86_64 (static musl) | \`red-linux-x86_64-static\` | \`red_client-linux-x86_64-static\` |
           | Linux aarch64 (glibc) | \`red-linux-aarch64\` | \`red_client-linux-aarch64\` |
           | Linux aarch64 (static musl) | \`red-linux-aarch64-static\` | \`red_client-linux-aarch64-static\` |
-          | Linux armv7 | \`red-linux-armv7\` | \`red_client-linux-armv7\` |
-          | macOS Intel | \`red-macos-x86_64\` | \`red_client-macos-x86_64\` |
           | macOS Apple Silicon | \`red-macos-aarch64\` | \`red_client-macos-aarch64\` |
           | Windows x86_64 | \`red-windows-x86_64.exe\` | \`red_client-windows-x86_64.exe\` |
 
@@ -607,9 +627,9 @@ jobs:
 
   verify-release-assets:
     # Gate every npm publish on the GitHub Release carrying the binary
-    # assets the SDK postinstall expects. Closes #418 — 1.0.5 shipped to
-    # npm without `red-linux-x86_64`, which broke every Linux x86_64
-    # postinstall with a 404 until users discovered `REDDB_BIN`. The
+    # assets the npm platform packages are built from. Closes #418 — 1.0.5
+    # shipped to npm without `red-linux-x86_64`, which broke every Linux
+    # x86_64 install with a 404 until users discovered `REDDB_BIN`. The
     # `needs: [build]` chain on `publish-github` was supposed to make
     # this impossible (matrix failure blocks the release), but defense
     # in depth: explicitly check the assets are listed on the Release
@@ -622,15 +642,69 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Assert every postinstall-required asset is published
+      - name: Assert every npm-package-required asset is published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         run: bash scripts/verify-release-assets.sh "$RELEASE_TAG"
 
+  publish-npm-platforms:
+    # ADR 0007 (amendment, alternative D): the `red` binary ships to npm as
+    # per-platform packages (@reddb-io/red-<os>-<cpu>[-musl]) that
+    # @reddb-io/cli and @reddb-io/sdk list as optionalDependencies, so
+    # installing needs no postinstall download. Built from the GitHub Release
+    # assets (verified against SHA256SUMS) and published BEFORE the packages
+    # that depend on them.
+    name: Publish @reddb-io/red-* platform packages (npm)
+    needs: [plan, publish-github, verify-release-assets]
+    runs-on: ubuntu-latest
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Build platform packages from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          VERSION: ${{ needs.plan.outputs.package_version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/assets" --pattern 'red-*' --pattern SHA256SUMS
+          node scripts/npm-platform-packages.mjs build \
+            --version "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/platform-packages" \
+            | tee "$RUNNER_TEMP/platform-dirs.txt"
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.package_version }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
+            exit 0
+          fi
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          while read -r dir; do
+            name="$(node -p "require('${dir}/package.json').name")"
+            # Re-runs must not fail on the packages a previous attempt already published.
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "==> ${name}@${VERSION} already published — skipping"
+              continue
+            fi
+            echo "==> publishing ${name}@${VERSION}"
+            pnpm publish "${dir}" --tag "${TAG}" --access public --no-git-checks
+          done < "$RUNNER_TEMP/platform-dirs.txt"
+
   publish-npm:
     name: Publish CLI npm package
-    needs: [plan, publish-github, verify-release-assets]
+    needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -649,6 +723,8 @@ jobs:
           node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+      - name: Add platform packages as optionalDependencies
+        run: node scripts/npm-platform-packages.mjs inject --version "${{ needs.plan.outputs.package_version }}" package.json
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -720,7 +796,10 @@ jobs:
           publish_one reddb-io-crypto
           publish_one reddb-io-file
           publish_one reddb-io-rql
+          publish_one reddb-io-engine
           publish_one reddb-io-wire
+          publish_one reddb-io-tonic
+          publish_one reddb-io-tonic-prost
           publish_one reddb-io-grpc-proto
           publish_one reddb-io-client-connector
           publish_one reddb-io-server
@@ -729,7 +808,7 @@ jobs:
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)
-    needs: [plan, publish-github, verify-release-assets]
+    needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |
       needs.plan.outputs.should_skip != 'true' &&
@@ -748,6 +827,8 @@ jobs:
           node -e "const fs=require('fs');const p=require('./package.json');p.version='${VERSION}';fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
           node scripts/sync-version.js
           bash scripts/check-versions.sh
+      - name: Add platform packages as optionalDependencies
+        run: node scripts/npm-platform-packages.mjs inject --version "${{ needs.plan.outputs.package_version }}" drivers/js/package.json
       - name: Verify pack
         working-directory: drivers/js
         run: pnpm pack --pack-destination "$RUNNER_TEMP"
@@ -1085,7 +1166,6 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  manylinux: '2014' }
           - { os: ubuntu-latest, target: blacksmith-4vcpu-ubuntu-2404-arm, manylinux: '2014' }
           - { os: macos-14,      target: aarch64-apple-darwin,      manylinux: 'auto' }
-          - { os: macos-13,      target: x86_64-apple-darwin,       manylinux: 'auto' }
           - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
     runs-on: ${{ matrix.os }}
     steps:

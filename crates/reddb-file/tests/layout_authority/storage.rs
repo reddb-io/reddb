@@ -96,9 +96,10 @@ fn server_uses_reddb_file_for_pager_shadow_sidecar_groups() {
 #[test]
 fn server_does_not_own_unified_store_wal_action_frame() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/storage/unified/store/commit.rs"));
+    let native = read(root.join("crates/reddb-server/src/storage/unified/store/commit.rs"));
+    let shared = read(root.join("crates/reddb-engine/src/storage/store_wal.rs"));
 
-    for forbidden in [
+    let forbidden = [
         "const STORE_WAL_VERSION",
         "store wal action too short",
         "unsupported store wal version",
@@ -109,11 +110,14 @@ fn server_does_not_own_unified_store_wal_action_frame() {
         "fn write_bytes(",
         "fn read_string(",
         "fn read_bytes(",
-    ] {
-        assert!(
-            !text.contains(forbidden),
-            "UnifiedStore WAL action frame belongs in reddb-file, found {forbidden:?}"
-        );
+    ];
+    for (host, text) in [("native", &native), ("shared", &shared)] {
+        for forbidden in forbidden {
+            assert!(
+                !text.contains(forbidden),
+                "{host} WAL action frame belongs in reddb-file, found {forbidden:?}"
+            );
+        }
     }
 
     for required in [
@@ -122,10 +126,15 @@ fn server_does_not_own_unified_store_wal_action_frame() {
         "reddb_file::StoreWalActionFrame",
     ] {
         assert!(
-            text.contains(required),
+            shared.contains(required),
             "UnifiedStore WAL action frame should route through {required}"
         );
     }
+    assert!(
+        native.contains("pub(crate) use reddb_engine::storage::store_wal::StoreWalAction;")
+            && native.contains("reddb_engine::storage::store_wal::apply_replayed_action("),
+        "native store must use the canonical typed actions and replay dispatcher"
+    );
 }
 
 #[test]
@@ -346,44 +355,14 @@ fn server_wal_tests_use_reddb_file_temp_wal_names() {
 #[test]
 fn server_does_not_own_transaction_wal_record_envelope() {
     let root = repo_root();
-    let text = read(root.join("crates/reddb-server/src/storage/transaction/log.rs"));
-    let non_test = text
-        .split("#[cfg(test)]")
-        .next()
-        .expect("transaction/log.rs has non-test source");
+    assert!(
+        !root
+            .join("crates/reddb-server/src/storage/transaction/log.rs")
+            .exists(),
+        "retired server transaction WAL implementation must stay removed"
+    );
     let file = read(root.join("crates/reddb-file/src/transaction_wal.rs"));
     let layout = read(root.join("crates/reddb-file/src/layout.rs"));
-
-    for forbidden in [
-        "PathBuf::from(\"wal.log\")",
-        "buf.extend(&self.lsn.to_le_bytes())",
-        "buf.extend(&self.txn_id.to_le_bytes())",
-        "buf.extend(&self.prev_lsn.unwrap_or(0).to_le_bytes())",
-        "buf.extend(&self.timestamp.to_le_bytes())",
-        "buf.extend(&(type_bytes.len() as u32).to_le_bytes())",
-        "buf.push(0)",
-        "buf.push(1)",
-        "buf.push(2)",
-        "buf.push(3)",
-        "buf.push(4)",
-        "buf.push(5)",
-        "buf.push(6)",
-        "buf.push(7)",
-        "buf.push(8)",
-        "buf.push(9)",
-        "buf.push(10)",
-        "read_u32(data, &mut offset",
-        "read_u64(data, &mut offset",
-        "let computed: u8 = data[..offset].iter().fold(0",
-        "Checksum mismatch",
-        "Missing WAL entry checksum",
-        "Missing WAL entry LSN",
-    ] {
-        assert!(
-            !non_test.contains(forbidden),
-            "transaction WAL record envelope belongs in reddb-file, found {forbidden:?}"
-        );
-    }
 
     for required in [
         "pub const TRANSACTION_WAL_FILE_NAME",
@@ -407,22 +386,6 @@ fn server_does_not_own_transaction_wal_record_envelope() {
         assert!(
             file.contains(required),
             "reddb-file should own transaction WAL contract {required}"
-        );
-    }
-
-    for required in [
-        "reddb_file::TransactionWalRecordFrame",
-        "reddb_file::layout::default_transaction_wal_path",
-        "reddb_file::encode_transaction_wal_record_frame",
-        "reddb_file::decode_transaction_wal_record_frame",
-        "reddb_file::transaction_wal_record_encoded_len",
-        "reddb_file::TransactionWalEntryPayload",
-        "reddb_file::encode_transaction_wal_entry_payload",
-        "reddb_file::decode_transaction_wal_entry_payload",
-    ] {
-        assert!(
-            non_test.contains(required),
-            "transaction WAL runtime should route persisted contract through {required}"
         );
     }
 }
@@ -950,23 +913,47 @@ fn server_does_not_redeclare_native_store_file_contracts() {
     }
 
     let impl_file = read(root.join("crates/reddb-server/src/storage/unified/store/impl_file.rs"));
+    let snapshot_writer = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
     for required in [
-        "reddb_file::decode_native_store_header",
-        "reddb_file::verify_native_store_crc32_footer",
         "reddb_file::encode_native_store_header",
         "reddb_file::append_native_store_crc32_footer",
         "reddb_file::encode_native_dump_count",
-        "reddb_file::decode_native_dump_count",
         "reddb_file::encode_native_dump_collection_header",
-        "reddb_file::decode_native_dump_collection_header",
         "reddb_file::encode_native_dump_entity_record",
-        "reddb_file::decode_native_dump_entity_record",
         "reddb_file::encode_native_dump_cross_ref",
+    ] {
+        assert!(
+            snapshot_writer.contains(required),
+            "UnifiedStore dump header/footer should route through {required}"
+        );
+    }
+
+    let native_compact: String = impl_file.split_whitespace().collect();
+    assert!(
+        impl_file.contains("reddb_engine::storage::resident_store::ResidentStore::from_snapshot")
+            && native_compact.contains("self.resident.snapshot_bytes("),
+        "native store must use the shared resident snapshot reader and writer"
+    );
+
+    let recovery = read(root.join("crates/reddb-engine/src/storage/resident_snapshot.rs"));
+    assert!(
+        recovery.contains("use super::snapshot::{visit_snapshot, SnapshotVisitor}")
+            && recovery.contains("let version = visit_snapshot("),
+        "shared resident reconstruction must use canonical snapshot decoding"
+    );
+
+    let snapshot = read(root.join("crates/reddb-engine/src/storage/snapshot.rs"));
+    for required in [
+        "reddb_file::decode_native_store_header",
+        "reddb_file::native_store_payload",
+        "reddb_file::decode_native_dump_count",
+        "reddb_file::decode_native_dump_collection_header",
+        "reddb_file::decode_native_dump_entity_record",
         "reddb_file::decode_native_dump_cross_ref",
     ] {
         assert!(
-            impl_file.contains(required),
-            "UnifiedStore dump header/footer should route through {required}"
+            snapshot.contains(required),
+            "shared snapshot recovery should route through {required}"
         );
     }
 
@@ -995,18 +982,14 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 
     let impl_pages = read(root.join("crates/reddb-server/src/storage/unified/store/impl_pages.rs"));
     for required in [
-        "reddb_file::encode_native_entity_record_frame",
-        "reddb_file::decode_native_entity_record_frame",
+        "reddb_engine::storage::metadata_codec::serialize_entity_record",
+        "reddb_engine::storage::metadata_codec::deserialize_entity_record",
         "reddb_file::encode_native_metadata_overflow_header",
         "reddb_file::decode_native_metadata_overflow_header",
         "reddb_file::encode_native_metadata_overflow_continuation_header",
         "reddb_file::decode_native_metadata_overflow_continuation_header",
         "reddb_file::encode_native_paged_metadata_header",
         "reddb_file::decode_native_paged_metadata_header",
-        "reddb_file::encode_native_len_prefixed_bytes",
-        "reddb_file::encode_native_len_prefixed_str",
-        "reddb_file::decode_native_len_prefixed_bytes",
-        "reddb_file::decode_native_len_prefixed_string",
         "reddb_file::encode_native_paged_collection_root",
         "reddb_file::decode_native_paged_collection_root",
         "reddb_file::encode_native_paged_cross_ref",
@@ -1015,6 +998,21 @@ fn server_does_not_redeclare_native_store_file_contracts() {
         assert!(
             impl_pages.contains(required),
             "UnifiedStore entity record framing should route through {required}"
+        );
+    }
+
+    let metadata_codec = read(root.join("crates/reddb-engine/src/storage/metadata_codec.rs"));
+    for required in [
+        "reddb_file::encode_native_entity_record_frame",
+        "reddb_file::decode_native_entity_record_frame",
+        "reddb_file::encode_native_len_prefixed_bytes",
+        "reddb_file::encode_native_len_prefixed_str",
+        "reddb_file::decode_native_len_prefixed_bytes",
+        "reddb_file::decode_native_len_prefixed_string",
+    ] {
+        assert!(
+            metadata_codec.contains(required),
+            "shared entity record framing should route through {required}"
         );
     }
 
@@ -1037,12 +1035,14 @@ fn server_does_not_redeclare_native_store_file_contracts() {
 }
 
 #[test]
-fn server_does_not_redeclare_core_file_format_constants() {
+fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     let root = repo_root();
-    let page = read(root.join("crates/reddb-server/src/storage/engine/page.rs"));
-    let page_impl = read(root.join("crates/reddb-server/src/storage/engine/page/impl.rs"));
+    let page = read(root.join("crates/reddb-engine/src/storage/page.rs"));
+    let page_impl = read(root.join("crates/reddb-engine/src/storage/page/impl.rs"));
     let pager = read(root.join("crates/reddb-server/src/storage/engine/pager.rs"));
     let pager_impl = read(root.join("crates/reddb-server/src/storage/engine/pager/impl.rs"));
+    let pager_io = read(root.join("crates/reddb-engine/src/storage/pager_io.rs"));
+    let shared_pager = read(root.join("crates/reddb-engine/src/storage/pager.rs"));
     let column_block = read(root.join("crates/reddb-server/src/storage/unified/column_block.rs"));
     let bloom_segment = read(root.join("crates/reddb-server/src/storage/index/bloom_segment.rs"));
     let vector_btree =
@@ -1050,7 +1050,7 @@ fn server_does_not_redeclare_core_file_format_constants() {
     let vector_value_codec =
         read(root.join("crates/reddb-server/src/storage/engine/vector_btree/value_codec.rs"));
     let btree_value_layout =
-        read(root.join("crates/reddb-server/src/storage/engine/btree/value_layout.rs"));
+        read(root.join("crates/reddb-engine/src/storage/btree/value_layout.rs"));
     let graph_store = read(root.join("crates/reddb-server/src/storage/engine/graph_store.rs"));
     let graph_store_impl =
         read(root.join("crates/reddb-server/src/storage/engine/graph_store/impl.rs"));
@@ -1095,8 +1095,10 @@ fn server_does_not_redeclare_core_file_format_constants() {
         .expect("graph_table_index.rs has non-test source");
 
     for (label, text) in [
-        ("storage/engine/page.rs", page.as_str()),
-        ("storage/engine/page/impl.rs", page_impl.as_str()),
+        ("reddb-engine/storage/page.rs", page.as_str()),
+        ("reddb-engine/storage/page/impl.rs", page_impl.as_str()),
+        ("reddb-engine/storage/pager_io.rs", pager_io.as_str()),
+        ("reddb-engine/storage/pager.rs", shared_pager.as_str()),
         ("storage/engine/pager.rs", pager.as_str()),
         ("storage/engine/pager/impl.rs", pager_impl.as_str()),
         ("storage/unified/column_block.rs", column_block.as_str()),
@@ -1110,7 +1112,7 @@ fn server_does_not_redeclare_core_file_format_constants() {
             vector_value_codec.as_str(),
         ),
         (
-            "storage/engine/btree/value_layout.rs",
+            "reddb-engine/storage/btree/value_layout.rs",
             btree_value_layout.as_str(),
         ),
         ("physical.rs", physical.as_str()),
@@ -1527,12 +1529,18 @@ fn server_does_not_redeclare_core_file_format_constants() {
             && page_impl.contains("reddb_file::write_paged_cell")
             && page_impl.contains("reddb_file::init_database_header_page")
             && page_impl.contains("reddb_file::database_header_page_count")
-            && pager.contains("pub use reddb_file::{DatabaseHeader, PhysicalFileHeader}")
+            && shared_pager.contains("pub use reddb_file::{DatabaseHeader, PhysicalFileHeader}")
+            && pager.contains("pub use reddb_engine::storage::pager::")
+            && pager_impl.contains("SharedPager::open_owned")
             && pager.contains("reddb_file::encode_paged_dwb_frame")
-            && pager_impl.contains("reddb_file::encode_paged_dwb_frame")
-            && pager_impl.contains("reddb_file::decode_paged_dwb_frame")
-            && pager_impl.contains("reddb_file::decode_database_header")
-            && pager_impl.contains("reddb_file::encode_database_header")
+            && shared_pager.contains("pager_io::write_pages")
+            && shared_pager.contains("pager_io::recover_from_dwb")
+            && shared_pager.contains("pager_io::write_superblock_slot")
+            && pager_io.contains("reddb_file::encode_paged_dwb_frame")
+            && pager_io.contains("reddb_file::decode_paged_dwb_frame")
+            && pager_io.contains("reddb_file::seal_paged_superblock_slot")
+            && shared_pager.contains("reddb_file::decode_database_header")
+            && shared_pager.contains("reddb_file::encode_database_header")
             && pager_impl.contains("reddb_file::paged_encryption_marker_present")
             && pager_impl.contains("reddb_file::write_paged_encryption_marker_and_header")
             && column_block
@@ -1627,11 +1635,12 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
         );
     }
 
-    // Server consumes the codecs and no longer defines the byte formats.
+    // Runtime adapters consume the codecs and never define their byte formats.
     let server = root.join("crates/reddb-server/src");
     let hnsw = read(server.join("storage/engine/hnsw.rs"));
     let ivf = read(server.join("storage/engine/ivf.rs"));
-    let physical = read(server.join("physical/json_codec.rs"));
+    let engine = root.join("crates/reddb-engine/src");
+    let catalog = read(engine.join("catalog/codec.rs"));
     let access = read(server.join("storage/unified/devx/reddb/impl_access.rs"));
 
     for (label, text, calls) in [
@@ -1652,8 +1661,8 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
             ][..],
         ),
         (
-            "physical/json_codec.rs",
-            &physical,
+            "shared catalog/codec.rs",
+            &catalog,
             &[
                 "reddb_file::encode_table_def",
                 "reddb_file::decode_table_def",
@@ -1673,12 +1682,15 @@ fn native_artifact_payload_codecs_live_only_in_reddb_file() {
         ),
     ] {
         for call in calls {
-            assert!(text.contains(call), "server {label} must consume {call:?}");
+            assert!(text.contains(call), "runtime {label} must consume {call:?}");
         }
     }
 
-    // No server file may re-declare a relocated payload magic in shipped code.
-    for path in rust_files_under(&server) {
+    // Neither runtime may redeclare a relocated payload magic in shipped code.
+    for path in rust_files_under(&server)
+        .into_iter()
+        .chain(rust_files_under(&engine))
+    {
         let text = read(&path);
         let shipped = non_test_source(&text);
         for magic in [

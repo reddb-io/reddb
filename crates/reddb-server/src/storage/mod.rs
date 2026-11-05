@@ -87,7 +87,7 @@ pub mod memory_budget;
 pub mod memory_pools;
 
 #[cfg(test)]
-mod no_malloc_hot_paths;
+pub(crate) mod no_malloc_hot_paths;
 
 // Embedded single-file `.rdb` artifact skeleton.
 pub mod embedded;
@@ -243,3 +243,6 @@ pub use unified::{
     // Query DSL - Entry point for all queries
     Q as Query,
 };
+
+/// Offline native file rewrite.
+pub mod compact;

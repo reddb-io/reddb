@@ -1,0 +1,247 @@
+[
+  {
+    "sql": "SELECT 1 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 2 + 3 * 4 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          14
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 7 / 2 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          3.5
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT UPPER('red') AS upper_name, LOWER('DB') AS lower_name",
+    "expected": {
+      "columns": [
+        "upper_name",
+        "lower_name"
+      ],
+      "rows": [
+        [
+          "RED",
+          "db"
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT LENGTH('ação') AS chars, OCTET_LENGTH('ação') AS bytes",
+    "expected": {
+      "columns": [
+        "chars",
+        "bytes"
+      ],
+      "rows": [
+        [
+          4,
+          6
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT CASE WHEN 3 > 2 THEN 'yes' ELSE 'no' END AS choice",
+    "expected": {
+      "columns": [
+        "choice"
+      ],
+      "rows": [
+        [
+          "yes"
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT COALESCE(NULL, 42) AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          42
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT NULL + 1 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT NULL IS NULL AS is_null",
+    "expected": {
+      "columns": [
+        "is_null"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 3 BETWEEN 1 AND 4 AS included",
+    "expected": {
+      "columns": [
+        "included"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 3 IN (1, 3, 5) AS included",
+    "expected": {
+      "columns": [
+        "included"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT CAST(42 AS TEXT) AS label",
+    "expected": {
+      "columns": [
+        "label"
+      ],
+      "rows": [
+        [
+          "42"
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 9007199254740993 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          {
+            "$int": "9007199254740993"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 1 AS n LIMIT 0",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": []
+    }
+  },
+  {
+    "sql": "SELECT 1 AS n OFFSET 1",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": []
+    }
+  },
+  {
+    "sql": "SELECT DISTINCT 1 AS n",
+    "expected": {
+      "columns": [
+        "n"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT JSON_EXTRACT_TEXT(JSON_PARSE('{\"user\":{\"name\":\"Ada\"}}'), '$.user.name') AS name",
+    "expected": {
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Ada"
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT 1 + 2",
+    "expected": {
+      "columns": [
+        "1 + 2"
+      ],
+      "rows": [
+        [
+          3
+        ]
+      ]
+    }
+  },
+  {
+    "sql": "SELECT UPPER('red')",
+    "expected": {
+      "columns": [
+        "UPPER('red')"
+      ],
+      "rows": [
+        [
+          "RED"
+        ]
+      ]
+    }
+  }
+]

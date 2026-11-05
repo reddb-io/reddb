@@ -46,15 +46,10 @@ pub mod analyze_cmd;
 pub mod batch;
 pub mod binary;
 pub mod engine;
-pub mod evaluator;
-pub mod executor;
 pub mod executors;
-pub mod filter;
-pub mod filter_compiled;
 pub mod planner;
 pub mod rag;
 pub mod similarity;
-pub mod sort;
 pub mod step;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -63,6 +58,9 @@ pub mod user_params;
 pub(crate) mod value_compare;
 
 // Re-export common types
+// Native public paths alias the same portable modules and types (ADR 0077).
+pub use reddb_engine::query::{evaluator, executor, filter, filter_compiled, sort};
+
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,
     OpFilter, OpGroup, OpJoin, OpLeftJoin, OpMinus, OpNull, OpOrder, OpProject, OpReduced,
@@ -105,12 +103,4 @@ pub use unified::{
 
 /// Returns true when the table source should be interpreted as the universal entity
 /// space (table, document, graph, vector mixed mode).
-pub fn is_universal_entity_source(table: &str) -> bool {
-    table.eq_ignore_ascii_case("any")
-        || table.eq_ignore_ascii_case("_any")
-        || table.eq_ignore_ascii_case("all")
-        || table.eq_ignore_ascii_case("entity")
-        || table.eq_ignore_ascii_case("universal")
-        || table.eq_ignore_ascii_case("mixed")
-        || table == "*"
-}
+pub use reddb_engine::query::runtime::is_universal_entity_source;

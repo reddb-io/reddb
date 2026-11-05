@@ -11,8 +11,8 @@ use super::*;
 pub(super) fn indices_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         INDEX_COLUMNS
             .iter()
@@ -57,14 +57,14 @@ pub(super) fn indices_snapshot(
         }
     }
 
-    rows
+    Ok(rows)
 }
 
 pub(super) fn show_indexes_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         SHOW_INDEX_COLUMNS
             .iter()
@@ -93,13 +93,15 @@ pub(super) fn show_indexes_snapshot(
                     ),
                     Value::text(render_index_method_for_ddl(index.method)),
                     Value::Boolean(index.unique),
-                    Value::UnsignedInteger(entries_indexed),
+                    entries_indexed
+                        .map(Value::UnsignedInteger)
+                        .unwrap_or(Value::Null),
                 ],
             ));
         }
     }
 
-    rows
+    Ok(rows)
 }
 
 fn index_status_record(
@@ -153,8 +155,8 @@ pub(super) fn describe_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = describe_target_collection(query)?;
     let db = runtime.db();
-    let exists = db
-        .catalog_model_snapshot()
+    let exists = runtime
+        .try_catalog()?
         .collections
         .into_iter()
         .any(|entry| entry.name == collection);
@@ -234,8 +236,8 @@ pub(super) fn show_create_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = show_create_target_collection(query)?;
     let db = runtime.db();
-    let catalog_entry = db
-        .catalog_model_snapshot()
+    let catalog_entry = runtime
+        .try_catalog()?
         .collections
         .into_iter()
         .find(|entry| entry.name == collection);
@@ -443,8 +445,8 @@ pub(super) fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         COLLECTION_COLUMNS
             .iter()
@@ -454,7 +456,7 @@ pub(super) fn collections_snapshot(
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|collection| {
@@ -522,7 +524,7 @@ pub(super) fn collections_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 
 /// Number of most-common values surfaced per column in `red.stats`.
@@ -557,19 +559,26 @@ pub(super) fn stats_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
     query: &TableQuery,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let schema = Arc::new(
         STATS_COLUMNS
             .iter()
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let store = runtime.db().store();
     // `SHOW STATS <name>` desugars to a `collection = '<name>'` filter;
     // scope the profiling scan to that one collection so an unfiltered
     // `SELECT * FROM red.stats` is the only path that scans everything.
     let target = stats_target_collection(query);
+    // Process memory counters need no catalog, snapshot validation or WAL scan.
+    // In particular, reporting RAM must not materialize pending WAL payloads.
+    if target.as_deref() == Some(MEMORY_BUDGET_COLLECTION) {
+        let mut rows = Vec::new();
+        append_memory_budget_stats(&mut rows, &schema, runtime, target.as_deref());
+        return Ok(rows);
+    }
+    let snapshot = runtime.try_catalog()?;
+    let store = runtime.db().store();
 
     let checkpoint_stats = runtime
         .inner
@@ -672,7 +681,7 @@ pub(super) fn stats_snapshot(
             _ => {}
         }
     }
-    rows
+    Ok(rows)
 }
 
 fn append_scrub_stats(
@@ -994,30 +1003,57 @@ fn append_table_stats(
     }
 }
 
+/// Legacy positional records get names from the collection schema without
+/// cloning their payloads. Explicit per-row names remain authoritative.
+fn stats_row_field<'a>(
+    row: &'a crate::storage::unified::entity::RowData,
+    columns: Option<&[String]>,
+    name: &str,
+) -> Option<&'a Value> {
+    row.get_field(name).or_else(|| {
+        if row.named.is_none() && row.schema.is_none() {
+            columns?
+                .iter()
+                .position(|column| column == name)
+                .and_then(|index| row.columns.get(index))
+        } else {
+            None
+        }
+    })
+}
+
 fn append_document_stats(
     rows: &mut Vec<UnifiedRecord>,
     schema: &Arc<Vec<Arc<str>>>,
     store: &UnifiedStore,
     collection: &str,
 ) {
-    let mut entities = Vec::new();
+    let mut row_count = 0usize;
+    let mut field_names = std::collections::BTreeSet::new();
     let mut key_counts = BTreeMap::<String, u64>::new();
     let mut type_counts = BTreeMap::<String, BTreeMap<&'static str, u64>>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    let column_schema = manager.column_schema();
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
 
-        let mut fields: Vec<(String, Value)> = row
-            .iter_fields()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect();
-        let body_fields = row
-            .get_field("body")
+        row_count += 1;
+        for (name, _) in row.iter_fields() {
+            if !field_names.contains(name) {
+                field_names.insert(name.to_string());
+            }
+        }
+        if row.named.is_none() && row.schema.is_none() {
+            if let Some(columns) = &column_schema {
+                field_names.extend(columns.iter().take(row.columns.len()).cloned());
+            }
+        }
+        let body_fields = stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "body")
             .and_then(document_body_top_level_fields)
             .unwrap_or_default();
 
@@ -1029,26 +1065,52 @@ fn append_document_stats(
                 .entry(document_value_type_name(value))
                 .or_default() += 1;
         }
-        for (name, value) in body_fields {
-            if fields.iter().all(|(existing, _)| existing != &name) {
-                fields.push((name, value));
-            }
-        }
-
-        entities.push((entity.id, fields));
-    }
-
-    let analyzed =
-        crate::storage::query::planner::stats_catalog::analyze_entity_fields(collection, &entities);
+        field_names.extend(body_fields.into_iter().map(|(name, _)| name));
+        true
+    });
 
     rows.push(stats_row(
         schema,
         collection,
         Value::Null,
         "row_count",
-        Value::UnsignedInteger(analyzed.row_count),
+        Value::UnsignedInteger(row_count as u64),
     ));
-    for column in &analyzed.columns {
+    for name in field_names {
+        // Revisit borrowed rows for one column at a time. The analyzer bounds
+        // its samples; decoded document fields live for just one row, never
+        // alongside a materialized copy of every document in the collection.
+        let column = crate::storage::query::planner::stats_catalog::analyze_column_scan(
+            &name,
+            row_count,
+            |visit| {
+                manager.for_each_entity(|entity| {
+                    let EntityData::Row(row) = &entity.data else {
+                        return true;
+                    };
+                    if let Some(value) =
+                        stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), &name)
+                    {
+                        visit(Some(value));
+                    } else {
+                        let body_fields = stats_row_field(
+                            row,
+                            column_schema.as_deref().map(Vec::as_slice),
+                            "body",
+                        )
+                        .and_then(document_body_top_level_fields)
+                        .unwrap_or_default();
+                        visit(
+                            body_fields
+                                .iter()
+                                .find(|(field, _)| field == &name)
+                                .map(|(_, value)| value),
+                        );
+                    }
+                    true
+                });
+            },
+        );
         rows.push(stats_row(
             schema,
             collection,
@@ -1073,10 +1135,10 @@ fn append_document_stats(
     }
 
     for (name, count) in key_counts {
-        let coverage = if analyzed.row_count == 0 {
+        let coverage = if row_count == 0 {
             0.0
         } else {
-            count as f64 / analyzed.row_count as f64
+            count as f64 / row_count as f64
         };
         rows.push(stats_row(
             schema,
@@ -1110,22 +1172,28 @@ fn append_kv_stats(
     let mut total_value_bytes = 0u64;
     let mut type_counts = BTreeMap::<&'static str, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    let column_schema = manager.column_schema();
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         entry_count += 1;
-        if let Some(Value::Text(key)) = row.get_field("key") {
+        if let Some(Value::Text(key)) =
+            stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "key")
+        {
             total_key_bytes += key.len() as u64;
         }
-        if let Some(value) = row.get_field("value") {
+        if let Some(value) =
+            stats_row_field(row, column_schema.as_deref().map(Vec::as_slice), "value")
+        {
             total_value_bytes += value_estimated_bytes(value);
             *type_counts.entry(value_type_name(value)).or_default() += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1171,10 +1239,10 @@ fn append_graph_stats(
     let mut node_labels = BTreeMap::<String, u64>::new();
     let mut edge_labels = BTreeMap::<String, u64>::new();
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
         match &entity.kind {
             crate::storage::unified::EntityKind::GraphNode(node) => {
                 node_count += 1;
@@ -1189,7 +1257,8 @@ fn append_graph_stats(
             }
             _ => {}
         }
-    }
+        true
+    });
 
     let max_degree = degree.values().copied().max().unwrap_or(0);
     let avg_degree = degree
@@ -1258,19 +1327,20 @@ fn append_vector_stats(
     let mut observed_dimension = None;
     let mut hybrid_count = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::Vector(vector) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Vector(vector) = &entity.data else {
+            return true;
         };
         vector_count += 1;
         observed_dimension.get_or_insert_with(|| vector.dimension());
         if vector.is_hybrid() {
             hybrid_count += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1316,12 +1386,12 @@ fn append_queue_stats(
     let mut acked_count = 0u64;
     let mut max_attempts_seen = 0u64;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::QueueMessage(message) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::QueueMessage(message) = &entity.data else {
+            return true;
         };
         message_count += 1;
         max_attempts_seen = max_attempts_seen.max(message.attempts as u64);
@@ -1332,7 +1402,8 @@ fn append_queue_stats(
         } else {
             delivered_count += 1;
         }
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1383,12 +1454,12 @@ fn append_timeseries_stats(
     let mut oldest = None::<u64>;
     let mut newest = None::<u64>;
 
-    for (name, entity) in store.query_all(|_| true) {
-        if name != collection {
-            continue;
-        }
-        let EntityData::TimeSeries(point) = entity.data else {
-            continue;
+    let Some(manager) = store.get_collection(collection) else {
+        return;
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::TimeSeries(point) = &entity.data else {
+            return true;
         };
         point_count += 1;
         series_keys.insert(timeseries_series_key(&point.metric, &point.tags));
@@ -1399,7 +1470,8 @@ fn append_timeseries_stats(
         newest = Some(newest.map_or(point.timestamp_ns, |current| {
             current.max(point.timestamp_ns)
         }));
-    }
+        true
+    });
 
     rows.push(stats_row(
         schema,
@@ -1538,7 +1610,7 @@ fn timeseries_series_key(metric: &str, tags: &std::collections::HashMap<String, 
 /// equality filter (as produced by `SHOW STATS <name>`). Returns `None`
 /// for any other shape so the caller profiles every visible row table.
 fn stats_target_collection(query: &TableQuery) -> Option<String> {
-    match query.filter.as_ref() {
+    match effective_table_filter(query).as_ref() {
         Some(Filter::Compare {
             field: FieldRef::TableColumn { column, .. },
             op: CompareOp::Eq,
@@ -1569,7 +1641,7 @@ fn most_common_values(
 pub(super) fn columns_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let db = runtime.db();
     let mut records = Vec::new();
     let schema = Arc::new(
@@ -1578,7 +1650,7 @@ pub(super) fn columns_snapshot(
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let snapshot = db.catalog_model_snapshot();
+    let snapshot = runtime.try_catalog()?;
     let contracts = db.collection_contracts();
     let contracts_by_name: HashMap<_, _> = contracts
         .iter()
@@ -1621,7 +1693,7 @@ pub(super) fn columns_snapshot(
         }
     }
 
-    records
+    Ok(records)
 }
 
 fn column_record(
@@ -1663,19 +1735,18 @@ fn infer_document_columns(
     let mut fields: BTreeMap<String, InferredColumn> = BTreeMap::new();
     let mut document_count = 0usize;
 
-    for (_, entity) in runtime
-        .db()
-        .store()
-        .query_all(|entity| entity.kind.collection() == collection)
-    {
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = runtime.db().store().get_collection(collection) else {
+        return Vec::new();
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         if !row
             .iter_fields()
             .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
         {
-            continue;
+            return true;
         }
 
         document_count += 1;
@@ -1686,18 +1757,8 @@ fn infer_document_columns(
         // container and no longer promote top-level columns onto the row, so
         // schema inference must offset-read the body's top-level fields —
         // mirroring the GET presentation derive in `named_fields_json`.
-        let mut recorded: Vec<(String, Value)> = row
-            .iter_fields()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect();
-        if let Some(Value::Json(bytes)) = row.get_field("body") {
-            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
-                recorded.extend(body_fields);
-            }
-        }
-
-        for (name, value) in recorded {
-            let entry = fields.entry(name).or_insert(InferredColumn {
+        let mut record = |name: &str, value: &Value| {
+            let entry = fields.entry(name.to_string()).or_insert(InferredColumn {
                 data_type: None,
                 seen: 0,
                 saw_null: false,
@@ -1705,7 +1766,7 @@ fn infer_document_columns(
             entry.seen += 1;
             if value.is_null() {
                 entry.saw_null = true;
-                continue;
+                return;
             }
             let value_type = value.data_type();
             entry.data_type = match entry.data_type {
@@ -1713,8 +1774,19 @@ fn infer_document_columns(
                 Some(existing) if existing == value_type => Some(existing),
                 Some(_) => Some(DataType::Unknown),
             };
+        };
+        for (name, value) in row.iter_fields() {
+            record(name, value);
         }
-    }
+        if let Some(Value::Json(bytes)) = row.get_field("body") {
+            if let Some(body_fields) = crate::document_body::body_fields(bytes) {
+                for (name, value) in &body_fields {
+                    record(name, value);
+                }
+            }
+        }
+        true
+    });
 
     if document_count == 0 {
         return Vec::new();
@@ -1741,4 +1813,182 @@ fn infer_document_columns(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scoped_stats_memory_tests {
+    use super::*;
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+    #[test]
+    fn memory_budget_stats_do_not_materialize_unrelated_wal_payloads() {
+        let directory = tempfile::tempdir().expect("stats fixture");
+        let runtime = RedDBRuntime::with_options(
+            crate::RedDBOptions::persistent(directory.path().join("stats.rdb"))
+                .with_memory_budget(128 * 1024 * 1024),
+        )
+        .expect("persistent runtime");
+        runtime
+            .execute_query("CREATE TABLE stats_payload (payload TEXT)")
+            .expect("table");
+        runtime.checkpoint().expect("initial checkpoint");
+        let observe = || {
+            runtime
+                .execute_query(
+                    "SELECT entity, metric, value FROM red.stats WHERE collection = 'red.memory_budget'",
+                )
+                .expect("memory counters")
+        };
+        observe();
+        let (before, baseline) = measure_allocations(observe);
+        // Repeated bytes compress away in the native WAL. Keep this fixture
+        // deterministic while forcing a genuinely large encoded payload.
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let payload: String = (0..2 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(b'!' + u8::try_from(state >> 58).expect("six random bits"))
+            })
+            .collect();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO stats_payload (payload) VALUES ($1)",
+                &[Value::text(payload)],
+            )
+            .expect("large pending WAL record");
+        assert!(
+            runtime
+                .db()
+                .embedded_pending_wal_records()
+                .expect("native WAL")
+                > 0
+        );
+        let (after, measured) = measure_allocations(observe);
+        assert_eq!(before.result.records.len(), after.result.records.len());
+        eprintln!(
+            "memory budget stats allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(
+            measured.allocated_bytes <= baseline.allocated_bytes + 256 * 1024,
+            "memory counters must not materialize unrelated WAL payloads: {baseline:?} -> {measured:?}"
+        );
+    }
+
+    #[test]
+    fn collection_stats_do_not_clone_unrelated_database_rows() {
+        let store = UnifiedStore::new();
+        store.create_collection("target").expect("target");
+        store.create_collection("unrelated").expect("unrelated");
+        let schema = Arc::new(
+            STATS_COLUMNS
+                .iter()
+                .map(|name| Arc::<str>::from(*name))
+                .collect(),
+        );
+        let observe = || {
+            let mut rows = Vec::new();
+            append_document_stats(&mut rows, &schema, &store, "target");
+            append_kv_stats(&mut rows, &schema, &store, "target");
+            append_graph_stats(&mut rows, &schema, &store, "target");
+            append_vector_stats(&mut rows, &schema, &store, "target", None, None);
+            append_queue_stats(&mut rows, &schema, &store, "target");
+            append_timeseries_stats(&mut rows, &schema, &store, "target");
+            rows
+        };
+        let (before, baseline) = measure_allocations(observe);
+        let manager = store.get_collection("unrelated").expect("manager");
+        for id in 1..=2048 {
+            manager
+                .insert(crate::storage::UnifiedEntity::table_row(
+                    crate::storage::EntityId::new(id),
+                    "unrelated",
+                    id,
+                    (0..16).map(reddb_types::Value::Integer).collect(),
+                ))
+                .expect("unrelated row");
+        }
+        let (after, measured) = measure_allocations(observe);
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
+        eprintln!(
+            "stats allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
+            "profiling one collection must not allocate copies of every other collection: {baseline:?} -> {measured:?}");
+    }
+
+    #[test]
+    fn document_observation_does_not_clone_payloads_to_infer_types() {
+        let observe = |payload_bytes| {
+            let runtime =
+                RedDBRuntime::with_options(crate::RedDBOptions::in_memory()).expect("runtime");
+            runtime
+                .execute_query("CREATE DOCUMENT target")
+                .expect("document");
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection("target")
+                .expect("manager");
+            for id in 1..=128 {
+                let mut entity = crate::storage::UnifiedEntity::table_row(
+                    crate::storage::EntityId::new(id),
+                    "target",
+                    id,
+                    vec![],
+                );
+                entity.data =
+                    EntityData::Row(crate::storage::unified::entity::RowData::with_names(
+                        vec![
+                            Value::Json(br#"{"retained":7}"#.to_vec()),
+                            Value::Blob(vec![7; payload_bytes]),
+                        ],
+                        vec!["body".into(), "attachment".into()],
+                    ));
+                manager.insert(entity).expect("document row");
+            }
+            let visible = HashSet::from(["target".to_string()]);
+            measure_allocations(|| {
+                let mut stats = Vec::new();
+                let schema = Arc::new(
+                    STATS_COLUMNS
+                        .iter()
+                        .map(|name| Arc::<str>::from(*name))
+                        .collect(),
+                );
+                append_document_stats(&mut stats, &schema, runtime.db().store().as_ref(), "target");
+                let documents = crate::runtime::red_schema::model_views::documents_snapshot(
+                    &runtime,
+                    None,
+                    Some(&visible),
+                )
+                .expect("document catalog");
+                assert_eq!(documents.len(), 1);
+                assert_eq!(
+                    documents[0].get("document_count"),
+                    Some(&Value::UnsignedInteger(128))
+                );
+                assert_eq!(
+                    documents[0].get("inferred_field_count"),
+                    Some(&Value::UnsignedInteger(2))
+                );
+                (
+                    columns_snapshot(&runtime, Some(&visible)).expect("column catalog"),
+                    stats,
+                )
+            })
+        };
+        let (before, baseline) = observe(0);
+        let (after, measured) = observe(64 * 1024);
+        assert_eq!(format!("{before:?}"), format!("{after:?}"));
+        eprintln!(
+            "document catalog allocation bytes: {} -> {}",
+            baseline.allocated_bytes, measured.allocated_bytes
+        );
+        assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
+            "document catalog observation must not copy stored payloads: {baseline:?} -> {measured:?}");
+    }
 }

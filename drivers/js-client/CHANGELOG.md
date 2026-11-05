@@ -1,5 +1,160 @@
 # @reddb-io/client
 
+## 1.28.10
+
+## 1.28.9
+
+## 1.28.8
+
+## 1.28.7
+
+## 1.28.6
+
+## 1.28.5
+
+## 1.28.4
+
+## 1.28.3
+
+## 1.28.2
+
+## 1.28.1
+
+## 1.28.0
+
+## 1.27.13
+
+## 1.27.12
+
+## 1.27.11
+
+## 1.27.10
+
+## 1.27.9
+
+## 1.27.8
+
+## 1.27.7
+
+## 1.27.6
+
+## 1.27.5
+
+## 1.27.4
+
+## 1.27.3
+
+## 1.27.2
+
+## 1.27.1
+
+## 1.27.0
+
+## 1.26.8
+
+## 1.26.7
+
+## 1.26.6
+
+## 1.26.5
+
+### Patch Changes
+
+- [#2476](https://github.com/reddb-io/reddb/pull/2476) [`8fff87a`](https://github.com/reddb-io/reddb/commit/8fff87aeea7c313773e67178b1c4c877c3e697b6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Accumulate fragmented RedWire frames without repeatedly copying incomplete payloads,
+  release consumed receive buffers, and reject pending reads when a connection ends
+  mid-frame or framing fails. Wire bytes and public APIs remain unchanged.
+
+## 1.26.4
+
+### Patch Changes
+
+- [#2475](https://github.com/reddb-io/reddb/pull/2475) [`fced2ab`](https://github.com/reddb-io/reddb/commit/fced2ab5149ed8e7a97ee67e1142530479bfee52) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve typed vectors and byte buffers through RedWire query normalization to avoid redundant array and base64 conversions. Fill canonical Rust vector payloads in one pre-sized region. Keep JSON transports and wire bytes unchanged, and compare the complete encoding path with canonical Rust/WASM codecs.
+
+## 1.26.3
+
+## 1.26.2
+
+## 1.26.1
+
+## 1.26.0
+
+## 1.25.7
+
+## 1.25.6
+
+## 1.25.5
+
+## 1.25.4
+
+## 1.25.3
+
+### Patch Changes
+
+- [#2445](https://github.com/reddb-io/reddb/pull/2445) [`ac5f61d`](https://github.com/reddb-io/reddb/commit/ac5f61d90d596ff5a3bed0b442475660c7e01135) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound collection-scan payload allocation to the requested page. Traverse physical
+  entities in stable ID order without cloning the whole collection, preserve owned
+  row schemas, and pass HTTP offsets directly as runtime cursors instead of
+  materializing the skipped prefix. Retain total counts, next cursors and empty
+  beyond-end pages, including maximum-size offsets. Add allocation regressions over
+  the runtime and real HTTP transport.
+
+## 1.25.2
+
+### Patch Changes
+
+- [#2443](https://github.com/reddb-io/reddb/pull/2443) [`c9a92f4`](https://github.com/reddb-io/reddb/commit/c9a92f4db670e4eeddaaf2165a6fc5ac63c97f18) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Defer reuse of physically removed B-tree and overflow pages until their removal
+  from the collection catalog is durable. Preserve pending reclamation across
+  reopen with an optional paged-metadata ledger, and publish physical delete
+  batches without serializing unchanged survivors. Add crash/reuse, tree-shrink
+  and repeated-reopen storage regressions. Older readers can ignore the new
+  ledger; older writers do not preserve its reclamation state, so writer
+  downgrades require a separately qualified recovery procedure.
+
+## 1.25.1
+
+## 1.25.0
+
+## 1.24.15
+
+## 1.24.14
+
+## 1.24.13
+
+## 1.24.12
+
+## 1.24.11
+
+## 1.24.10
+
+## 1.24.9
+
+## 1.24.8
+
+## 1.24.7
+
+## 1.24.6
+
+## 1.24.5
+
+## 1.24.4
+
+## 1.24.3
+
+## 1.24.2
+
+## 1.24.1
+
+## 1.24.0
+
+### Minor Changes
+
+- [#2357](https://github.com/reddb-io/reddb/pull/2357) [`46b9e15`](https://github.com/reddb-io/reddb/commit/46b9e15078c324422b4fae3dc0f0c670601decfc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Drop the `postinstall` script from `@reddb-io/client`. The package is pure JavaScript and never needed the `red_client` binary it downloaded, so installs no longer touch the network, no longer depend on the platform/architecture, and work with `--ignore-scripts`. The `REDDB_CLIENT_BIN`, `REDDB_SKIP_POSTINSTALL`, `REDDB_POSTINSTALL_VERSION` and `REDDB_POSTINSTALL_REPO` overrides are gone; install `@reddb-io/cli` if you want the `red_client` CLI.
+
+- [#2391](https://github.com/reddb-io/reddb/pull/2391) [`a88cab4`](https://github.com/reddb-io/reddb/commit/a88cab431df12fc720ca9cff377fdc3cfb53dae2) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Expose the native Blob Cache over authenticated HTTP with tenant-scoped namespaces, hard TTL, binary values, existence probes and key/prefix/tag/namespace invalidation. The remote JavaScript client now uses application-authorized endpoints for tag invalidation and namespace flush, without requiring an operator credential. Align cache policy types with the implemented HTTP contract.
+
+### Patch Changes
+
+- [#2372](https://github.com/reddb-io/reddb/pull/2372) [`bf1a41c`](https://github.com/reddb-io/reddb/commit/bf1a41cb234c2641e74441a61793fd1b726a228a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `query()` now returns the documented `{ statement, affected, columns, rows }` over every transport. Over HTTP it returned the server envelope's bare `result` (`{ columns, records, stats }`, no `rows`, and `affected`/`statement` dropped); over RedWire a parameterized query returned the raw envelope. `rows` are plain objects keyed by column, so `kv`, `documents` and the quickstart now work. RedWire sends every query as `QueryWithParams` (with an empty list when nothing is bound): the legacy `Query` frame returned only a summary and `QueryBinary` returned all-NULL columns for a one-row table on 1.23.4. HTTP `insert()` now sends the row under `fields`, as the server requires. `bookmark` and `stats` are passed through when the server sends them.
+
 ## 1.23.4
 
 ## 1.23.3

@@ -56,6 +56,7 @@ pub(crate) struct MutationEngine<'rt> {
     runtime: &'rt crate::RedDBRuntime,
     store: Arc<UnifiedStore>,
     suppress_events: bool,
+    keyed_previous: Option<Option<EntityId>>,
     #[cfg(test)]
     after_admission: Option<&'rt (dyn Fn() + Sync)>,
 }
@@ -81,6 +82,7 @@ impl<'rt> MutationEngine<'rt> {
             runtime,
             store,
             suppress_events: false,
+            keyed_previous: None,
             #[cfg(test)]
             after_admission: None,
         }
@@ -89,6 +91,16 @@ impl<'rt> MutationEngine<'rt> {
     pub(crate) fn with_suppress_events(mut self) -> Self {
         self.suppress_events = true;
         self
+    }
+
+    pub(crate) fn for_keyed_write(mut self, previous: Option<EntityId>) -> RedDBResult<Self> {
+        if self.store.pager().is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "atomic keyed replacement requires single-file storage".into(),
+            ));
+        }
+        self.keyed_previous = Some(previous);
+        Ok(self)
     }
 
     /// Dispatch to the right kernel by batch size.
@@ -106,6 +118,10 @@ impl<'rt> MutationEngine<'rt> {
         // method, so legitimate replica catch-up is unaffected.
         self.runtime
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.runtime
+            .check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &collection)?;
+        self.enforce_tenant_scope(&collection, &mut rows)?;
+        self.enforce_insert_rls(&collection, &rows)?;
 
         // Synchronous content-moderation gate (#1274, ADR 0057). For a
         // collection that declares a `MODERATE (... sync = true)` policy,
@@ -146,10 +162,7 @@ impl<'rt> MutationEngine<'rt> {
                 RowIndexTopologyGuard::Read(read_guard)
             };
             if constraint_lock.is_none()
-                && self
-                    .runtime
-                    .index_store_ref()
-                    .has_unique_hash_index(&collection)
+                && self.runtime.index_store_ref().has_unique_index(&collection)
             {
                 // UNIQUE may have appeared while we waited for topology.
                 // Retry in constraint -> topology order before validating keys.
@@ -160,13 +173,62 @@ impl<'rt> MutationEngine<'rt> {
         }
     }
 
+    fn enforce_tenant_scope(&self, collection: &str, rows: &mut [MutationRow]) -> RedDBResult<()> {
+        for row in rows {
+            enforce_tenant_fields(self.runtime, collection, &mut row.fields)?;
+        }
+        Ok(())
+    }
+
+    fn enforce_insert_rls(&self, collection: &str, rows: &[MutationRow]) -> RedDBResult<()> {
+        if crate::runtime::execution_context::current_auth_identity().is_none()
+            || !crate::runtime::rls_injection::rls_is_enabled(self.runtime, collection)
+        {
+            return Ok(());
+        }
+        let table: Arc<str> = Arc::from(collection);
+        for row in rows {
+            let mut data = RowData::new(Vec::new());
+            data.named = Some(row.fields.iter().cloned().collect());
+            let entity = UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TableRow {
+                    table: Arc::clone(&table),
+                    row_id: 0,
+                },
+                EntityData::Row(data),
+            );
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self.runtime,
+                collection,
+                reddb_rql::ast::PolicyAction::Insert,
+                &entity,
+            ) {
+                return Err(RedDBError::Query(format!(
+                    "insert into collection '{collection}' denied by row-level security"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_with_topology(
         &self,
         collection: String,
         mut rows: Vec<MutationRow>,
         topology_guard: RowIndexTopologyGuard<'_>,
     ) -> RedDBResult<MutationResult> {
-        self.runtime.enforce_unique_hash_rows(&collection, &rows)?;
+        if let Some(previous) = self.keyed_previous {
+            assert_eq!(rows.len(), 1, "a keyed write replaces one row");
+            if let Some(previous) = previous {
+                self.runtime
+                    .enforce_unique_updates(&collection, &[(previous, rows[0].fields.clone())])?;
+            } else {
+                self.runtime.enforce_unique_rows(&collection, &rows)?;
+            }
+        } else {
+            self.runtime.enforce_unique_rows(&collection, &rows)?;
+        }
 
         let growth_bytes = rows
             .iter()
@@ -211,8 +273,6 @@ impl<'rt> MutationEngine<'rt> {
         row: MutationRow,
         topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<MutationResult> {
-        let db = self.runtime.db();
-
         // Build entity — same logic as BatchBuilder::add_row
         let mut entity = build_table_entity(
             self.store.as_ref(),
@@ -243,13 +303,36 @@ impl<'rt> MutationEngine<'rt> {
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
-        let id = self
-            .store
-            .insert_auto(&collection, entity)
-            .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
+        let previous_fields = self
+            .keyed_previous
+            .flatten()
+            .filter(|_| {
+                !self
+                    .runtime
+                    .index_store_ref()
+                    .list_indices(&collection)
+                    .is_empty()
+            })
+            .and_then(|previous| {
+                self.store.get(&collection, previous).map(|entity| {
+                    (
+                        previous,
+                        super::impl_lifecycle::table_row_index_fields(&entity),
+                    )
+                })
+            });
+        let id = if let Some(previous) = self.keyed_previous {
+            let metadata = (!row.metadata.is_empty())
+                .then(|| Metadata::with_fields(row.metadata.iter().cloned().collect()));
+            self.store
+                .write_keyed_row(&collection, entity, metadata, previous)
+        } else {
+            self.store.insert_auto(&collection, entity)
+        }
+        .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
 
-        // Metadata
-        if !row.metadata.is_empty() {
+        // Keyed writes include metadata in their durable batch.
+        if self.keyed_previous.is_none() && !row.metadata.is_empty() {
             let _ = self.store.set_metadata(
                 &collection,
                 id,
@@ -258,6 +341,12 @@ impl<'rt> MutationEngine<'rt> {
         }
 
         // Secondary indexes (not handled by insert_auto)
+        if let Some((previous, fields)) = previous_fields {
+            self.runtime
+                .index_store_ref()
+                .index_entity_delete(&collection, previous, &fields)
+                .map_err(RedDBError::Internal)?;
+        }
         self.runtime
             .index_store_ref()
             .index_entity_insert(&collection, id, &row.fields)
@@ -537,18 +626,120 @@ impl<'rt> MutationEngine<'rt> {
             );
             return;
         }
-        index_store.register(super::index_store::RegisteredIndex {
+        let descriptor = super::index_store::RegisteredIndex {
             name: "idx_id".to_string(),
             collection: collection.to_string(),
             columns,
             method: super::index_store::IndexMethodKind::Hash,
             unique: false,
-        });
+        };
+        // Use the same durable registry as explicit CREATE INDEX. Without it
+        // the implicit index disappears after reopen or physical restore.
+        if let Err(err) = self
+            .runtime
+            .persist_runtime_index_descriptor(descriptor.clone())
+        {
+            index_store.drop_index("idx_id", collection);
+            tracing::debug!(
+                target: "reddb::runtime::auto_index_id",
+                collection = %collection,
+                error = %err,
+                "auto_index_id: failed to persist implicit hash index on `id`"
+            );
+            return;
+        }
+        index_store.register(descriptor);
         // Plan-cache invalidation so subsequent SELECT/UPDATE/DELETE
         // pickers see the new index when planning. Mirrors the explicit
         // `CREATE INDEX` path in `impl_ddl::execute_create_index`.
         self.runtime.invalidate_plan_cache();
     }
+}
+
+pub(crate) fn enforce_tenant_fields(
+    runtime: &crate::RedDBRuntime,
+    collection: &str,
+    fields: &mut Vec<(String, Value)>,
+) -> RedDBResult<()> {
+    let Some(tenant_column) = runtime.tenant_column(collection) else {
+        return Ok(());
+    };
+    let active_tenant = crate::runtime::execution_context::current_tenant();
+    if let Some((root, tail)) = tenant_column.split_once('.') {
+        let existing = fields
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case(root));
+        match existing {
+            Some((_, value))
+                if crate::runtime::impl_dml_support::dotted_tail_already_set(value, tail) =>
+            {
+                if let Some(active) = active_tenant.as_deref() {
+                    let explicit =
+                        crate::runtime::impl_dml_support::dotted_tenant_text(value, tail)?;
+                    if explicit.as_deref() != Some(active) {
+                        return Err(RedDBError::Query(format!(
+                            "tenant discriminator '{tenant_column}' must match active tenant '{active}'"
+                        )));
+                    }
+                }
+            }
+            Some((_, value)) => {
+                let Some(active) = active_tenant.as_deref() else {
+                    return Err(RedDBError::Query(format!(
+                        "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                    )));
+                };
+                *value = crate::runtime::impl_dml_support::merge_dotted_tenant(
+                    value.clone(),
+                    tail,
+                    active,
+                )?;
+            }
+            None => {
+                let Some(active) = active_tenant.as_deref() else {
+                    return Err(RedDBError::Query(format!(
+                        "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                    )));
+                };
+                fields.push((
+                    root.to_string(),
+                    crate::runtime::impl_dml_support::merge_dotted_tenant(
+                        Value::Null,
+                        tail,
+                        active,
+                    )?,
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    match fields
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(&tenant_column))
+    {
+        Some(index) => {
+            if let Some(active) = active_tenant.as_deref() {
+                match &fields[index].1 {
+                    Value::Text(value) if value.as_ref() == active => {}
+                    _ => {
+                        return Err(RedDBError::Query(format!(
+                            "tenant discriminator '{tenant_column}' must match active tenant '{active}'"
+                        )))
+                    }
+                }
+            }
+        }
+        None => {
+            let Some(active) = active_tenant.as_deref() else {
+                return Err(RedDBError::Query(format!(
+                    "insert into tenant-scoped collection '{collection}' requires tenant discriminator '{tenant_column}'"
+                )));
+            };
+            fields.push((tenant_column, Value::text(active)));
+        }
+    }
+    Ok(())
 }
 
 impl crate::RedDBRuntime {

@@ -55,9 +55,14 @@ lock_version() {
 }
 
 # Lock-step with engine: publishable workspace member crates, drivers, npm package
+check "crates/reddb-tonic"       "$(grep -m1 '^version' crates/reddb-tonic/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "crates/reddb-tonic-prost" "$(grep -m1 '^version' crates/reddb-tonic-prost/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "Cargo.lock reddb-io-tonic" "$(lock_version Cargo.lock reddb-io-tonic)"
+check "Cargo.lock reddb-io-tonic-prost" "$(lock_version Cargo.lock reddb-io-tonic-prost)"
 check "crates/reddb-types"       "$(grep -m1 '^version' crates/reddb-types/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-crypto"      "$(grep -m1 '^version' crates/reddb-crypto/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-file"        "$(grep -m1 '^version' crates/reddb-file/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "crates/reddb-engine"      "$(grep -m1 '^version' crates/reddb-engine/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-rql"         "$(grep -m1 '^version' crates/reddb-rql/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-wire"        "$(grep -m1 '^version' crates/reddb-wire/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "crates/reddb-grpc-proto"  "$(grep -m1 '^version' crates/reddb-grpc-proto/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -68,18 +73,29 @@ check "Cargo.lock reddb-io"         "$(lock_version Cargo.lock reddb-io)"
 check "Cargo.lock reddb-io-types"   "$(lock_version Cargo.lock reddb-io-types)"
 check "Cargo.lock reddb-io-crypto"  "$(lock_version Cargo.lock reddb-io-crypto)"
 check "Cargo.lock reddb-io-file"    "$(lock_version Cargo.lock reddb-io-file)"
+check "Cargo.lock reddb-io-engine" "$(lock_version Cargo.lock reddb-io-engine)"
 check "Cargo.lock reddb-io-rql"     "$(lock_version Cargo.lock reddb-io-rql)"
 check "Cargo.lock reddb-io-wire"    "$(lock_version Cargo.lock reddb-io-wire)"
 check "Cargo.lock reddb-io-grpc-proto" "$(lock_version Cargo.lock reddb-io-grpc-proto)"
 check "Cargo.lock reddb-io-server"  "$(lock_version Cargo.lock reddb-io-server)"
 check "Cargo.lock reddb-io-client"  "$(lock_version Cargo.lock reddb-io-client)"
 check "Cargo.lock reddb-io-client-connector" "$(lock_version Cargo.lock reddb-io-client-connector)"
+check "drivers/node"        "$(grep -m1 '^version'  drivers/node/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "drivers/node/Cargo.lock reddb-io-tonic" "$(lock_version drivers/node/Cargo.lock reddb-io-tonic)"
+check "drivers/node/Cargo.lock reddb-io-tonic-prost" "$(lock_version drivers/node/Cargo.lock reddb-io-tonic-prost)"
+check "drivers/node/Cargo.lock reddb-io" "$(lock_version drivers/node/Cargo.lock reddb-io)"
+check "drivers/node/Cargo.lock reddb-io-types" "$(lock_version drivers/node/Cargo.lock reddb-io-types)"
+check "drivers/node/Cargo.lock reddb-io-engine" "$(lock_version drivers/node/Cargo.lock reddb-io-engine)"
+check "drivers/node/Cargo.lock reddb-io-server" "$(lock_version drivers/node/Cargo.lock reddb-io-server)"
 check "drivers/python"      "$(grep -m1 '^version'  drivers/python/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 check "drivers/python (py)" "$(grep -m1 '^version' drivers/python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+check "drivers/python/Cargo.lock reddb-io-tonic" "$(lock_version drivers/python/Cargo.lock reddb-io-tonic)"
+check "drivers/python/Cargo.lock reddb-io-tonic-prost" "$(lock_version drivers/python/Cargo.lock reddb-io-tonic-prost)"
 check "drivers/python/Cargo.lock reddb-io" "$(lock_version drivers/python/Cargo.lock reddb-io)"
 check "drivers/python/Cargo.lock reddb-io-types" "$(lock_version drivers/python/Cargo.lock reddb-io-types)"
 check "drivers/python/Cargo.lock reddb-io-crypto" "$(lock_version drivers/python/Cargo.lock reddb-io-crypto)"
 check "drivers/python/Cargo.lock reddb-io-file" "$(lock_version drivers/python/Cargo.lock reddb-io-file)"
+check "drivers/python/Cargo.lock reddb-io-engine" "$(lock_version drivers/python/Cargo.lock reddb-io-engine)"
 check "drivers/python/Cargo.lock reddb-io-rql" "$(lock_version drivers/python/Cargo.lock reddb-io-rql)"
 check "drivers/python/Cargo.lock reddb-io-wire" "$(lock_version drivers/python/Cargo.lock reddb-io-wire)"
 check "drivers/python/Cargo.lock reddb-io-grpc-proto" "$(lock_version drivers/python/Cargo.lock reddb-io-grpc-proto)"
@@ -91,7 +107,6 @@ check "drivers/js (@reddb-io/sdk)"  "$(grep -m1 '"version"' drivers/js/package.j
 check "drivers/bun (@reddb-io/client-bun)"  "$(grep -m1 '"version"' drivers/bun/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-asset-fetcher" "$(grep -m1 '"version"' packages/internal-asset-fetcher/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/internal-bin-resolver"  "$(grep -m1 '"version"' packages/internal-bin-resolver/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
-check "packages/internal-version-compare" "$(grep -m1 '"version"' packages/internal-version-compare/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 check "packages/mcp (@reddb-io/mcp)" "$(grep -m1 '"version"' packages/mcp/package.json | sed -E 's/.*"([0-9][^"]+)".*/\1/')"
 # drivers/js-client is being introduced by Lane T (#136) in parallel.
 # Skip gracefully if the manifest isn't on this branch yet — the line
@@ -105,6 +120,7 @@ check "@reddb-io/cli"               "$(grep -m1 '"version"' package.json | sed -
 
 node scripts/check-registry-names.mjs
 node scripts/check-contract-authorities.mjs
+node scripts/check-changeset-workspace.mjs
 
 # Drift guard: the committed version must never be BEHIND the latest published
 # stable tag. Catches the failure mode where a release was cut without the

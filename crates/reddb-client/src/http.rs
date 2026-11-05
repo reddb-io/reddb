@@ -449,15 +449,59 @@ async fn decode_text(response: reqwest::Response) -> Result<String> {
 }
 
 fn http_err(status: StatusCode, body: Option<Value>) -> ClientError {
-    let msg = body
+    let server_code = body.as_ref().and_then(|v| v.as_object()).and_then(|o| {
+        o.get("error_code")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                o.get("error")
+                    .and_then(|value| value.as_object())
+                    .and_then(|error| error.get("code"))
+                    .and_then(|value| value.as_str())
+            })
+    });
+    let mut msg = body
         .as_ref()
         .and_then(|v| v.as_object())
-        .and_then(|o| o.get("error"))
-        .and_then(|x| x.as_str())
+        .and_then(|o| {
+            o.get("detail")
+                .and_then(|value| value.as_str())
+                .or_else(|| o.get("error").and_then(|value| value.as_str()))
+                .or_else(|| {
+                    o.get("error")
+                        .and_then(|value| value.as_object())
+                        .and_then(|error| error.get("message"))
+                        .and_then(|value| value.as_str())
+                })
+        })
         .map(String::from)
         .or_else(|| body.as_ref().and_then(|v| v.as_str()).map(String::from))
         .unwrap_or_else(|| format!("request failed with status {status}"));
+    let overloaded = server_code.is_some_and(|code| {
+        matches!(
+            code,
+            "global_inflight_exhausted"
+                | "health_reserve_exhausted"
+                | "execution_queue_full"
+                | "execution_queue_timeout"
+                | "handler_deadline_exceeded"
+                | "principal_inflight_exhausted"
+        )
+    });
+    if overloaded {
+        if let Some(code) = server_code {
+            msg = format!("{code}: {msg}");
+        }
+        if let Some(retry_after_secs) = body
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|object| object.get("retry_after_secs"))
+            .and_then(|value| value.as_u64())
+        {
+            msg.push_str(&format!("; retry after {retry_after_secs}s"));
+        }
+    }
     let code = match status.as_u16() {
+        _ if overloaded => ErrorCode::Overloaded,
         401 | 403 => ErrorCode::AuthRefused,
         404 => ErrorCode::NotFound,
         _ if status.is_server_error() => ErrorCode::Engine,
@@ -526,4 +570,35 @@ fn json_id_to_string(value: &Value) -> Option<String> {
         .as_str()
         .map(String::from)
         .or_else(|| value.as_u64().map(|n| n.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_capacity_response_maps_to_overloaded() {
+        let body = serde_json::json!({
+            "error": "server at capacity",
+            "error_code": "execution_queue_full",
+            "detail": "engine execution queue is full",
+            "retry_after_secs": 5
+        });
+        let error = http_err(StatusCode::SERVICE_UNAVAILABLE, Some(body));
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        assert!(error.message.contains("execution_queue_full"));
+        assert!(error.message.contains("retry after 5s"));
+    }
+
+    #[test]
+    fn principal_capacity_response_maps_to_overloaded() {
+        let body = serde_json::json!({
+            "error": {
+                "code": "principal_inflight_exhausted",
+                "message": "per-principal in-flight request cap exceeded"
+            }
+        });
+        let error = http_err(StatusCode::TOO_MANY_REQUESTS, Some(body));
+        assert_eq!(error.code, ErrorCode::Overloaded);
+    }
 }

@@ -22,6 +22,7 @@ use crate::storage::signed_writes::{
     SIGNATURE_LEN, SIGNER_PUBKEY_LEN,
 };
 use crate::storage::unified::UnifiedStore;
+use crate::RedDBResult;
 use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -125,90 +126,78 @@ fn entry_from_json(v: &crate::serde_json::Value) -> Option<SignerHistoryEntry> {
 /// (or `ALTER COLLECTION ... ADD SIGNER` has been used to enable the
 /// registry) and there is at least a marker in `red_config`.
 pub fn is_signed(store: &UnifiedStore, collection: &str) -> bool {
-    matches!(
-        store.get_config(&key(collection, ENABLED_SUFFIX)),
-        Some(Value::Boolean(true)) | Some(Value::Text(_))
-    )
+    // Compatibility probe: failed policy reads require verification. Runtime
+    // decisions use the fallible API and report the actual storage failure.
+    try_is_signed(store, collection).unwrap_or(true)
 }
 
-/// Persist the registry-bearing marker plus the initial allowed-signer
-/// list. Idempotent: re-calling with the same list is a no-op if a
-/// registry is already installed.
+pub fn try_is_signed(store: &UnifiedStore, collection: &str) -> RedDBResult<bool> {
+    Ok(matches!(
+        store.try_get_config(&key(collection, ENABLED_SUFFIX))?,
+        Some(Value::Boolean(true)) | Some(Value::Text(_))
+    ))
+}
+
+/// Compatibility wrapper. Authoritative DDL uses `try_install` so failed
+/// persistence is returned to the caller.
 pub fn install(
     store: &UnifiedStore,
     collection: &str,
     initial: &[[u8; SIGNER_PUBKEY_LEN]],
     actor: &str,
 ) {
-    if is_signed(store, collection) {
-        return;
+    if let Err(error) = try_install(store, collection, initial, actor) {
+        tracing::error!(collection, %error, "failed to install signer registry");
+    }
+}
+
+/// Persist allowed signers and history before publishing their enable marker.
+pub fn try_install(
+    store: &UnifiedStore,
+    collection: &str,
+    initial: &[[u8; SIGNER_PUBKEY_LEN]],
+    actor: &str,
+) -> RedDBResult<()> {
+    let _publication = store.vault_publication_lock.lock();
+    if try_is_signed(store, collection)? {
+        return Ok(());
     }
     let reg = SignerRegistry::from_initial(initial, actor.to_string(), now_ms());
-    write_registry(store, collection, &reg);
-    // Mark enabled last so a partial install never leaves the marker
-    // without payload.
-    store.set_config_tree(
+    write_registry(store, collection, &reg)?;
+    store.try_set_config_tree(
         &key(collection, ENABLED_SUFFIX),
         &crate::serde_json::Value::Bool(true),
-    );
+    )?;
+    Ok(())
 }
 
 /// Serialise registry state into the config tree. Overwrites any prior
 /// value at the same key — the store treats `red_config` as
 /// insert-only, but the read path returns the most recent matching row.
-fn write_registry(store: &UnifiedStore, collection: &str, reg: &SignerRegistry) {
+fn write_registry(store: &UnifiedStore, collection: &str, reg: &SignerRegistry) -> RedDBResult<()> {
     let allowed: Vec<crate::serde_json::Value> = reg
         .allowed()
         .map(|pk| crate::serde_json::Value::String(hex_encode(pk)))
         .collect();
     let history: Vec<crate::serde_json::Value> = reg.history().iter().map(entry_to_json).collect();
-    store.set_config_tree(
+    store.try_set_config_tree(
         &key(collection, ALLOWED_SUFFIX),
         &crate::serde_json::Value::String(crate::serde_json::Value::Array(allowed).to_string()),
-    );
-    store.set_config_tree(
+    )?;
+    store.try_set_config_tree(
         &key(collection, HISTORY_SUFFIX),
         &crate::serde_json::Value::String(crate::serde_json::Value::Array(history).to_string()),
-    );
+    )?;
+    Ok(())
 }
 
-/// Read the *latest* value stored under a `red_config` key.
-///
-/// `UnifiedStore::get_config` returns the *first* matching row, which
-/// for append-only configs means the oldest write wins. Registry
-/// mutations need the newest write, so we scan and keep the last
-/// match.
-fn read_latest_config(store: &UnifiedStore, full_key: &str) -> Option<Value> {
-    let manager = store.get_collection("red_config")?;
-    // `red_config` is append-only: every set rewrites by appending a new
-    // row. The growing-segment iterator backs entities with a HashMap so
-    // iteration order is non-deterministic — sort by the engine-assigned
-    // monotonic `EntityId` descending and take the first match to get
-    // the most recent write.
-    let mut all = manager.query_all(|_| true);
-    all.sort_by_key(|b| std::cmp::Reverse(b.id.raw()));
-    for entity in all {
-        let crate::storage::unified::EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        let matches = matches!(
-            named.get("key"),
-            Some(Value::Text(s)) if s.as_ref() == full_key
-        );
-        if matches {
-            return named.get("value").cloned();
-        }
-    }
-    None
-}
-
-fn read_registry(store: &UnifiedStore, collection: &str) -> SignerRegistry {
-    let allowed_json = match read_latest_config(store, &key(collection, ALLOWED_SUFFIX)) {
+fn read_registry(store: &UnifiedStore, collection: &str) -> RedDBResult<SignerRegistry> {
+    let _publication = store.vault_publication_lock.lock();
+    let allowed_json = match store.try_get_config(&key(collection, ALLOWED_SUFFIX))? {
         Some(Value::Text(s)) => s.to_string(),
         _ => "[]".to_string(),
     };
-    let history_json = match read_latest_config(store, &key(collection, HISTORY_SUFFIX)) {
+    let history_json = match store.try_get_config(&key(collection, HISTORY_SUFFIX))? {
         Some(Value::Text(s)) => s.to_string(),
         _ => "[]".to_string(),
     };
@@ -233,46 +222,78 @@ fn read_registry(store: &UnifiedStore, collection: &str) -> SignerRegistry {
             },
             Err(_) => Vec::new(),
         };
-    SignerRegistry::from_persisted_parts(parsed_allowed, parsed_history)
+    Ok(SignerRegistry::from_persisted_parts(
+        parsed_allowed,
+        parsed_history,
+    ))
 }
 
 /// Load the current registry. Cheap enough for the INSERT hot path:
 /// two `red_config` reads + two JSON parses, no scan of the parent
 /// collection.
 pub fn registry(store: &UnifiedStore, collection: &str) -> SignerRegistry {
+    // An empty compatibility result denies every signer; it never authorizes
+    // an unsigned write. Runtime verification propagates failures via try_registry.
+    try_registry(store, collection)
+        .unwrap_or_else(|_| SignerRegistry::from_persisted_parts(Vec::new(), Vec::new()))
+}
+
+pub fn try_registry(store: &UnifiedStore, collection: &str) -> RedDBResult<SignerRegistry> {
     read_registry(store, collection)
 }
 
-/// Apply `ALTER COLLECTION ... ADD SIGNER 'hex'` on a signed-writes
-/// collection. Returns `true` if the registry actually changed.
 pub fn add_signer(
     store: &UnifiedStore,
     collection: &str,
     pubkey: [u8; SIGNER_PUBKEY_LEN],
     actor: &str,
 ) -> bool {
-    let mut reg = read_registry(store, collection);
-    let changed = reg.add_signer(pubkey, actor.to_string(), now_ms());
-    if changed {
-        write_registry(store, collection, &reg);
-    }
-    changed
+    try_add_signer(store, collection, pubkey, actor).unwrap_or_else(|error| {
+        tracing::error!(collection, %error, "failed to add signer");
+        false
+    })
 }
 
-/// Apply `ALTER COLLECTION ... REVOKE SIGNER 'hex'` on a signed-writes
-/// collection. Returns `true` if the key was previously allowed.
+pub fn try_add_signer(
+    store: &UnifiedStore,
+    collection: &str,
+    pubkey: [u8; SIGNER_PUBKEY_LEN],
+    actor: &str,
+) -> RedDBResult<bool> {
+    let _publication = store.vault_publication_lock.lock();
+    let mut reg = read_registry(store, collection)?;
+    let changed = reg.add_signer(pubkey, actor.to_string(), now_ms());
+    if changed {
+        write_registry(store, collection, &reg)?;
+    }
+    Ok(changed)
+}
+
 pub fn revoke_signer(
     store: &UnifiedStore,
     collection: &str,
     pubkey: &[u8; SIGNER_PUBKEY_LEN],
     actor: &str,
 ) -> bool {
-    let mut reg = read_registry(store, collection);
+    try_revoke_signer(store, collection, pubkey, actor).unwrap_or_else(|error| {
+        tracing::error!(collection, %error, "failed to revoke signer");
+        false
+    })
+}
+
+pub fn try_revoke_signer(
+    store: &UnifiedStore,
+    collection: &str,
+    pubkey: &[u8; SIGNER_PUBKEY_LEN],
+    actor: &str,
+) -> RedDBResult<bool> {
+    let _publication = store.vault_publication_lock.lock();
+    let mut reg = read_registry(store, collection)?;
     let changed = reg.revoke_signer(pubkey, actor.to_string(), now_ms());
     if changed {
-        write_registry(store, collection, &reg);
+        write_registry(store, collection, &reg)?;
     }
-    changed
+    Ok(changed)
 }
 
 /// Reserved column set automatically present on every signed-writes

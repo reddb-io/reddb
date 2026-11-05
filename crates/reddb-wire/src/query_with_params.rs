@@ -203,8 +203,17 @@ pub fn encode_value(value: &ParamValue, out: &mut Vec<u8>) -> Result<(), ParamCo
                 return Err(ParamCodecError::LengthOverflow("vector"));
             }
             out.extend_from_slice(&(values.len() as u32).to_le_bytes());
-            for value in values {
-                out.extend_from_slice(&value.to_le_bytes());
+            let bytes_len = values
+                .len()
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(ParamCodecError::LengthOverflow("vector"))?;
+            let start = out.len();
+            let end = start
+                .checked_add(bytes_len)
+                .ok_or(ParamCodecError::LengthOverflow("vector"))?;
+            out.resize(end, 0);
+            for (bytes, value) in out[start..].chunks_exact_mut(4).zip(values) {
+                bytes.copy_from_slice(&value.to_le_bytes());
             }
         }
         ParamValue::Json(value) => {

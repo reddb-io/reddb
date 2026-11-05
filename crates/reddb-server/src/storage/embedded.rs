@@ -18,7 +18,43 @@ pub use reddb_file::{
 
 pub struct EmbeddedRdbArtifact;
 
+pub(crate) struct EmbeddedCommitSession(reddb_file::embedded::EmbeddedGroupCommitSession);
+
+impl EmbeddedCommitSession {
+    pub(crate) fn fence_interrupted_write(&self) {
+        self.0.fence_interrupted_write();
+    }
+    pub(crate) fn check(&self) -> RedDBResult<()> {
+        map_result(self.0.check())
+    }
+    pub(crate) fn append(
+        &self,
+        payloads: &[Vec<u8>],
+        options: reddb_file::embedded::EmbeddedGroupCommitOptions,
+    ) -> RedDBResult<EmbeddedRdbOpen> {
+        map_result(self.0.append(payloads, options))
+    }
+    pub(crate) fn enqueue(
+        &self,
+        payloads: &[Vec<u8>],
+        options: reddb_file::embedded::EmbeddedGroupCommitOptions,
+    ) -> RedDBResult<PendingEmbeddedAppend> {
+        map_result(self.0.enqueue(payloads, options)).map(PendingEmbeddedAppend)
+    }
+}
+
+pub(crate) struct PendingEmbeddedAppend(reddb_file::embedded::PendingEmbeddedAppend);
+
+impl PendingEmbeddedAppend {
+    pub(crate) fn wait(&self) -> RedDBResult<EmbeddedRdbOpen> {
+        map_result(self.0.wait())
+    }
+}
+
 impl EmbeddedRdbArtifact {
+    pub(crate) fn group_commit_session(path: impl AsRef<Path>) -> EmbeddedCommitSession {
+        EmbeddedCommitSession(reddb_file::EmbeddedRdbArtifact::group_commit_session(path))
+    }
     pub fn create(path: impl AsRef<Path>) -> RedDBResult<EmbeddedRdbOpen> {
         map_result(reddb_file::EmbeddedRdbArtifact::create(path))
     }
@@ -94,7 +130,8 @@ fn map_error(err: reddb_file::RdbFileError) -> RedDBError {
         reddb_file::RdbFileError::Io(err) => RedDBError::Io(err),
         // The zone message names the zone and points at scrub/salvage
         // (ADR 0074 §2/§4); keep it verbatim rather than flattening it.
-        err @ reddb_file::RdbFileError::ZoneUnrecoverable { .. } => {
+        err @ (reddb_file::RdbFileError::ZoneUnrecoverable { .. }
+        | reddb_file::RdbFileError::ReadLimitExceeded { .. }) => {
             RedDBError::InvalidOperation(err.to_string())
         }
     }

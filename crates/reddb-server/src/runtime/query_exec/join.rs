@@ -101,7 +101,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
         "projection" => {
             let records = execute_runtime_canonical_join_child(runtime, node, query)?;
             let effective_projections = effective_join_projections(query);
-            Ok(records
+            records
                 .iter()
                 .map(|record| {
                     project_runtime_join_record_with_db(
@@ -114,7 +114,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
                         right_table_alias,
                     )
                 })
-                .collect())
+                .collect()
         }
         "join" => execute_runtime_canonical_join_base(
             runtime,
@@ -415,6 +415,7 @@ pub(crate) fn project_runtime_join_record(
         right_table_name,
         right_table_alias,
     )
+    .unwrap_or_else(|_| UnifiedRecord::new())
 }
 
 pub(crate) fn project_runtime_join_record_with_db(
@@ -425,7 +426,7 @@ pub(crate) fn project_runtime_join_record_with_db(
     left_table_alias: Option<&str>,
     right_table_name: Option<&str>,
     right_table_alias: Option<&str>,
-) -> UnifiedRecord {
+) -> RedDBResult<UnifiedRecord> {
     let select_all = projections.is_empty()
         || projections
             .iter()
@@ -451,7 +452,22 @@ pub(crate) fn project_runtime_join_record_with_db(
         }
 
         let label = projection_name(projection);
+        let sensitive =
+            super::super::join_filter::projection_uses_secret(projection, source, None, None);
         let value = match projection {
+            Projection::Function(_, _) | Projection::Expression(_, _) if sensitive => {
+                super::super::join_filter::project_runtime_record_with_db(
+                    db,
+                    source,
+                    std::slice::from_ref(projection),
+                    None,
+                    None,
+                    false,
+                    false,
+                )?
+                .get(&label)
+                .cloned()
+            }
             Projection::Column(column) | Projection::Alias(column, _) => source
                 .get(column.as_str())
                 .cloned()
@@ -482,10 +498,16 @@ pub(crate) fn project_runtime_join_record_with_db(
             Projection::Window { .. } => None,
         };
 
-        record.set_arc(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
+        let value = value.unwrap_or(Value::Null);
+        let value = if sensitive {
+            super::super::execution_context::secret_query_output(value)?
+        } else {
+            value
+        };
+        record.set_arc(std::sync::Arc::from(label), value);
     }
 
-    record
+    Ok(record)
 }
 
 pub(crate) fn evaluate_runtime_join_filter(

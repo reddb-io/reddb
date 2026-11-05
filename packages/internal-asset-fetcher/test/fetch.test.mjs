@@ -161,9 +161,6 @@ await test('composeAssetName covers every shipped platform/arch', () => {
   const cases = [
     [{ platform: 'linux', arch: 'x64', binName: 'red' }, 'red-linux-x86_64'],
     [{ platform: 'linux', arch: 'arm64', binName: 'red' }, 'red-linux-aarch64'],
-    [{ platform: 'linux', arch: 'arm', binName: 'red' }, 'red-linux-armv7'],
-    [{ platform: 'linux', arch: 'armv7l', binName: 'red' }, 'red-linux-armv7'],
-    [{ platform: 'darwin', arch: 'x64', binName: 'red' }, 'red-macos-x86_64'],
     [{ platform: 'darwin', arch: 'arm64', binName: 'red' }, 'red-macos-aarch64'],
     [{ platform: 'win32', arch: 'x64', binName: 'red' }, 'red-windows-x86_64.exe'],
   ]
@@ -199,6 +196,16 @@ await test('composeAssetName throws UnsupportedPlatformError on unknown combo', 
     () => composeAssetName({ platform: 'win32', arch: 'arm64', binName: 'red' }),
     (err) => err.code === 'UNSUPPORTED_PLATFORM',
     'win32/arm64 rejected (no asset shipped today)',
+  )
+  assertThrows(
+    () => composeAssetName({ platform: 'darwin', arch: 'x64', binName: 'red' }),
+    (err) => err.code === 'UNSUPPORTED_PLATFORM',
+    'darwin/x64 rejected (no prebuilt asset)',
+  )
+  assertThrows(
+    () => composeAssetName({ platform: 'linux', arch: 'arm', binName: 'red' }),
+    (err) => err.code === 'UNSUPPORTED_PLATFORM',
+    'linux/arm rejected (no prebuilt asset)',
   )
 })
 

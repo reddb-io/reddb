@@ -2199,7 +2199,7 @@ fn test_password_hash_and_verify() {
 }
 
 #[test]
-fn test_secret_encrypt_and_decrypt() {
+fn test_secret_encrypt_and_compute_without_implicit_reveal() {
     use std::sync::Arc;
 
     let rt = rt();
@@ -2221,7 +2221,7 @@ fn test_secret_encrypt_and_decrypt() {
 
     let query = &rt;
 
-    // Happy path: INSERT encrypts, SELECT decrypts (auto_decrypt=true default).
+    // INSERT encrypts and ordinary SELECT keeps the secret masked.
     query
         .execute(ExecuteQueryInput {
             query: "INSERT INTO creds (name, token) VALUES ('stripe', SECRET('sk_live_abc'))"
@@ -2236,10 +2236,9 @@ fn test_secret_encrypt_and_decrypt() {
         .expect("SELECT should succeed");
     let row = decrypted.result.records.first().expect("at least one row");
     let tok_val = row.get("token").expect("token column present");
-    assert_eq!(
-        tok_val,
-        &Value::text("sk_live_abc".to_string()),
-        "auto_decrypt=true should surface plaintext, got {tok_val:?}"
+    assert!(
+        matches!(tok_val, Value::Secret(_)),
+        "SELECT keeps secrets masked: {tok_val:?}"
     );
 
     // Flip auto_decrypt off: SELECT should return the raw Value::Secret
@@ -2284,10 +2283,20 @@ fn test_secret_encrypt_and_decrypt() {
             query: "SELECT name, token FROM creds".into(),
         })
         .expect("SELECT updated secret should succeed");
-    assert_eq!(
+    assert!(matches!(
         updated_decrypted.result.records[0].get("token"),
-        Some(&Value::text("sk_live_updated".to_string())),
-        "updated secret should decrypt to the new plaintext"
+        Some(Value::Secret(_))
+    ));
+    assert_eq!(
+        query
+            .execute(ExecuteQueryInput {
+                query: "SELECT name FROM creds WHERE token = 'sk_live_updated'".into()
+            })
+            .expect("queries compute with real secret values")
+            .result
+            .records
+            .len(),
+        1
     );
 
     query

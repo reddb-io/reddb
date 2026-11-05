@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-client"
-version = "1.23.4"
+version = "1.28.10"
 edition.workspace = true
 authors.workspace = true
 description = "Official Rust client for RedDB — embedded engine, gRPC, HTTP, and RedWire transports behind one connection-string API. Also hosts the workspace-internal connector + REPL used by the `red` and `red_client` binaries."
@@ -27,7 +27,7 @@ embedded = ["dep:reddb-server"]
 grpc = []
 # RedWire native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
-redwire = ["dep:zstd"]
+redwire = []
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:reqwest"]
@@ -48,10 +48,11 @@ redwire-tls = [
 reddb-grpc-proto = { workspace = true }
 reddb-wire = { workspace = true }
 reddb-types = { workspace = true }
+tonic = { workspace = true, features = ["channel", "tls-ring", "tls-webpki-roots"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { version = "1.53.3", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
 # RedWire handshake payloads + HTTP request/response shapes are
 # JSON-encoded.
 serde_json = "1"
@@ -71,10 +72,6 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 # directly.
 reddb-server = { workspace = true, optional = true }
 
-# Per-frame compression (Flags::COMPRESSED). Pulled in only by
-# the `redwire` feature so embedded-only callers don't pay it.
-zstd = { version = "0.13", default-features = false, optional = true }
-
 # The RedWire adapter supplies a CSPRNG nonce to reddb-wire's sans-I/O
 # SCRAM client driver.
 getrandom = "0.4"
@@ -89,22 +86,22 @@ webpki-roots = { version = "1", optional = true }
 # HTTP / HTTPS transport for the published `Reddb::Http` variant.
 # Pulled in only by the `http` feature. `default-features = false`
 # skips OpenSSL; we use rustls.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync"] }
 # OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
 # RS256 tokens against an in-process JWKS server. Pulled only when
-# building tests. v10 requires opting into a crypto backend;
-# `rust_crypto` keeps the tests pure-Rust (no system C deps).
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# building tests. Match the server's AWS-LC backend without re-enabling
+# RustCrypto's affected crypto-bigint dependency (RUSTSEC-2026-0387).
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 serde_json = "1"
 # Slow-mock RedDb gRPC server used by `tests/grpc_pool_concurrency.rs`
 # needs server-side tonic transport. The published crate keeps the
 # slim client-only feature set (`channel`, `codegen`); cargo unions
 # features across [dependencies] and [dev-dependencies], so this
 # only widens tonic during tests.
-tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "server", "router"] }
+tonic = { workspace = true, features = ["channel", "codegen", "server", "router"] }
 reddb-grpc-proto = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 # Proptest exercises HealthAwareRouter (issue #171): random RTT

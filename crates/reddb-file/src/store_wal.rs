@@ -32,6 +32,9 @@ pub enum StoreWalActionFrame {
         collection: String,
         records: Vec<Vec<u8>>,
     },
+    SetAuxMetadata {
+        bytes: Vec<u8>,
+    },
 }
 
 pub fn encode_store_wal_action_frame(frame: &StoreWalActionFrame) -> io::Result<Vec<u8>> {
@@ -75,8 +78,70 @@ pub fn encode_store_wal_action_frame(frame: &StoreWalActionFrame) -> io::Result<
             write_string(&mut out, collection)?;
             write_record_list(&mut out, records)?;
         }
+        StoreWalActionFrame::SetAuxMetadata { bytes } => {
+            out.push(7);
+            write_bytes(&mut out, bytes)?;
+        }
     }
     Ok(out)
+}
+
+/// Visit borrowed entity records and their byte offsets within an upsert action.
+/// Other action kinds carry no retained row proof. No record payload is cloned.
+pub fn visit_store_wal_entity_records(
+    bytes: &[u8],
+    mut visit: impl FnMut(&str, usize, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    if bytes.len() < 2 || bytes[0] != STORE_WAL_ACTION_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid store WAL action header",
+        ));
+    }
+    if !matches!(bytes[1], 3 | 5) {
+        return Ok(());
+    }
+    fn field<'a>(bytes: &'a [u8], position: &mut usize) -> io::Result<(usize, &'a [u8])> {
+        let length = read_u32(bytes, position)? as usize;
+        let start = *position;
+        let end = start.checked_add(length).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "store WAL field length overflow",
+            )
+        })?;
+        let value = bytes.get(start..end).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated store WAL field")
+        })?;
+        *position = end;
+        Ok((start, value))
+    }
+    let mut position = 2;
+    let (_, collection) = field(bytes, &mut position)?;
+    let collection = std::str::from_utf8(collection)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let count = if bytes[1] == 3 {
+        1
+    } else {
+        read_u32(bytes, &mut position)? as usize
+    };
+    if count > bytes.len().saturating_sub(position) / std::mem::size_of::<u32>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "implausible store WAL record count",
+        ));
+    }
+    for _ in 0..count {
+        let (offset, record) = field(bytes, &mut position)?;
+        visit(collection, offset, record)?;
+    }
+    if position != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing store WAL action bytes",
+        ));
+    }
+    Ok(())
 }
 
 pub fn decode_store_wal_action_frame(bytes: &[u8]) -> io::Result<StoreWalActionFrame> {
@@ -129,6 +194,16 @@ pub fn decode_store_wal_action_frame(bytes: &[u8]) -> io::Result<StoreWalActionF
                 records,
             })
         }
+        7 => {
+            let value = read_bytes(bytes, &mut pos)?;
+            if pos != bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trailing auxiliary metadata WAL bytes",
+                ));
+            }
+            Ok(StoreWalActionFrame::SetAuxMetadata { bytes: value })
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported store wal action tag: {other}"),
@@ -158,6 +233,14 @@ fn read_record_list(data: &[u8], pos: &mut usize, label: &'static str) -> io::Re
         ));
     }
     let count = read_u32(data, pos)? as usize;
+    // Every record needs at least its u32 byte-length prefix. Reject an
+    // impossible count before reserving a potentially enormous record vector.
+    if count > data.len().saturating_sub(*pos) / std::mem::size_of::<u32>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label}: implausible record count"),
+        ));
+    }
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         records.push(read_bytes(data, pos)?);
@@ -266,6 +349,30 @@ mod tests {
             assert_eq!(encoded[0], STORE_WAL_ACTION_VERSION);
             assert_eq!(decode_store_wal_action_frame(&encoded).unwrap(), frame);
         }
+    }
+
+    #[test]
+    fn record_lists_reject_impossible_counts_before_allocation() {
+        for tag in [5, 6] {
+            let mut bytes = vec![STORE_WAL_ACTION_VERSION, tag];
+            write_string(&mut bytes, "data").expect("collection");
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+            assert_eq!(
+                decode_store_wal_action_frame(&bytes)
+                    .expect_err("impossible count")
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let valid = StoreWalActionFrame::BulkUpsertEntityRecords {
+            collection: "data".into(),
+            records: vec![Vec::new(); 64],
+        };
+        let encoded = encode_store_wal_action_frame(&valid).expect("empty opaque records");
+        assert_eq!(
+            decode_store_wal_action_frame(&encoded).expect("exact count bound"),
+            valid
+        );
     }
 
     #[test]

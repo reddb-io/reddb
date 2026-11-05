@@ -61,6 +61,7 @@ pub fn scrub_embedded_store(
 ) -> RdbFileResult<StorageScrubReport> {
     let started = Instant::now();
     let mut file = File::open(path)?;
+    reject_paged_store(&mut file, "embedded SCRUB")?;
     let file_len = file.metadata()?.len();
     let mut report = StorageScrubReport {
         total_objects: 5,
@@ -95,6 +96,35 @@ pub fn scrub_embedded_store(
     report.complete = report.next_cursor >= 5;
     report.duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(report)
+}
+
+/// Embedded and paged stores have different authorities and payload layouts.
+/// Check both slots before scanning or carving: a damaged primary must not
+/// turn a surviving paged authority into an embedded recovery candidate.
+pub(crate) fn reject_paged_store(file: &mut File, operation: &str) -> RdbFileResult<()> {
+    let mut prefix = [0; crate::PAGED_SUPERBLOCK_ZONE_SIZE];
+    let mut read = 0;
+    while read < prefix.len() {
+        let count = file.read(&mut prefix[read..])?;
+        if count == 0 {
+            break;
+        }
+        read += count;
+    }
+    for (copy, slot) in prefix[..read]
+        .chunks(crate::PAGED_SUPERBLOCK_SLOT_SIZE)
+        .enumerate()
+    {
+        if crate::database_header_magic_matches(slot)
+            || crate::paged_superblock_slot_generation(slot, copy).is_some()
+        {
+            return Err(RdbFileError::InvalidOperation(format!(
+                "{operation} does not support the paged RDDB format; \
+                 preserve the source and use a paged-format verifier or recovery tool"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read and parse a superblock copy for use as zone authority, reporting

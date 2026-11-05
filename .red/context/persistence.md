@@ -25,6 +25,252 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **Paced maintenance** — per [ADR 0038](../adr/0038-embedded-single-file-zoned-rdb.md) §3, the rule that all storage maintenance (consolidation, scrub, append-only compaction, archival) runs as incremental tick-paced work with bounded per-tick cost. Bursty background maintenance threads (the Cassandra compaction model) are prohibited in every profile.
 - **Scale contract** — the per-profile promise about dataset size vs memory: embedded contracts working set ≤ memory budget; the server profile carries the disk-residency roadmap (dataset > RAM, ADR 0038 phase 4); serverless contracts strict boundedness. Documented in ADR 0038 §1.
 
+Buffered HTTP SELECT envelopes reserve serialized capacity against the same
+memory budget as storage growth, including both allocations during resizing.
+Clones and transport bodies share the allocation and retain its charge until
+the last owner drops. The request executor also returns immutable shared owners
+for completed materialized reads, charging retained row/model/metadata capacities
+through the last result clone. PostgreSQL portals retain these owners too.
+RedWire post-handshake replies also admit the encoded allocation and existing
+payload capacity before the encoding copy. Shared byte owners retain that charge
+through queued responses, blocked sends, clones and socket writes. A refused
+response terminates the connection and releases its pending output, including
+when the socket is blocked. Clean Bye/half-close drains accepted replies.
+RedWire output streams retain the request executor's shared materialized-read
+owner until completion or worker cancellation and render JSON one row at a time.
+A row that cannot fit a stream frame emits StreamError before StreamEnd instead
+of silently disappearing from an apparently successful response.
+The legacy binary result encoder writes into its final frame and frees its
+working allocation with the response instead of retaining the largest scratch
+buffer on each worker thread. This removes retained scratch and full-payload
+copies. Materialized binary reads reserve resolver metadata and exact encoded
+capacity first. Direct scans reserve incremental output growth outside storage
+sampling, sharing the mutation ledger, and retain response owners through RedWire
+conversion. Ordered direct scans also reserve candidate/slot vectors and encoded
+row owners; admission failure discards any accepted prefix. Resident HASH point
+candidates and owned IN unions reserve the complete posting allocation before
+copying, keeping the charge through their consuming iterator.
+Sampling runs outside index locks; empty lookups allocate and sample nothing.
+Resident sorted range/IN/composite candidate vectors, intersection hash sets and
+64-bit Roaring bitmaps also reserve before allocation, retaining input and output
+owners while they coexist. Admission denial propagates instead of falling back.
+Parser, predicate/canonical-key metadata, legacy H3/graph raw candidates and
+backing-read workspaces remain separate admission gaps.
+Executor workspaces, legacy raw runtime results, presentation trees, streaming
+execution workspaces, command payload construction, handshake buffers and other
+non-HTTP outputs still require their own owned admission; this accounting alone
+does not establish a process-wide memory ceiling.
+
+Single-column push-down GROUP BY folds inputs during the physical scan instead
+of retaining an input-row vector. Its materialized-group ceiling is captured
+once per query and rejects the first excess group before allocating that group's
+accumulator. Scan failures discard partial aggregates. Group keys, aggregate
+values and final result buffers still require shared byte-budget admission;
+a group-count ceiling alone is not a process-wide RAM guarantee.
+The ceiling lookup reads both published config pages and the resident overlay,
+selects the newest config row, and propagates physical read failures instead of
+silently substituting the default ceiling.
+
+On GNU/Linux, paced maintenance checks cgroup v2 resident pressure at most once
+every five seconds. At 75% of a finite controller limit it asks the allocator to
+return already free pages to the OS. This complements logical pool reclamation;
+it does not free live rows, change admission budgets or replace their limits.
+
+Physical collection scans retain global entity-ID order while cloning only the
+requested page and restoring its owned row schemas. The ordering metadata still
+scales with entity count; payload memory does not scale with the skipped prefix.
+HTTP offsets pass directly to the runtime cursor. Total counts, next offsets and
+empty beyond-end pages describe the same physical scan, including historical
+versions; this does not introduce logical MVCC filtering or a transaction snapshot.
+
+Cursors over immutable published collection generations retain at most one 16 KiB
+leaf, avoiding a page-cache read and page copy for each peek and record read.
+Hosts retain their existing root publication and retirement fences. Mutable-tree
+cursors still re-read pages; value decoding, read limits, retry positions and
+strictly advancing leaf-range validation remain in force. With 2,000 inline rows
+in five tree pages, the deterministic regression reduces 4,004 page reads to four;
+this does not establish runtime boot, RSS or query latency improvements.
+
+Native B-tree writes keep the 1-KiB compression trigger and pack the selected
+raw/compressed representation inline up to one quarter of the 16-KiB native
+page. Larger representations retain the existing overflow-chain path. This is
+an allocation policy over unchanged cell framing; existing cells keep their
+layout until rebuilt. See ADR 0023's page-size amendment for density and
+compatibility qualification.
+
+## Checkpoint reuse
+
+Double-write page batches synchronize each frame's staging image before its
+home writes and synchronize those homes before replacing the staging image.
+The recovery zone is cleared and synchronized once after the final frame.
+An interrupted replacement may replay the already durable preceding frame or
+discard incomplete staging; it cannot lose the preceding durable home pages.
+
+Checkpoints exclude row creators whose transactions are active or aborted and
+clear their delete stamps on committed preimages. Live transaction state stays
+unchanged. Transaction visibility revisions invalidate reuse after begin, commit
+or rollback; equivalent exclusion sets can retain the existing proof. Commit
+WAL publication and visibility changes share the checkpoint publication fence.
+While store WAL actions are captured for a transaction, row inserts and
+upserts stay in the live segment and deferred WAL, leaving published B-tree
+pages unchanged. Incidental pager flushes cannot publish unfinished inserts
+or delete stamps; a successful commit makes the captured WAL batch durable.
+Bulk inserts hold the checkpoint publication fence before installing their
+segment rows through WAL capture or append, including transactions that begin
+after checkpoint visibility has already been frozen.
+
+Owned row reads restore missing positional column names from the collection's
+shared schema before mutation or index backfill. Explicit row schemas and named
+fields remain authoritative. This changes neither the stored record format nor
+the raw segment revisions used by checkpoint reuse.
+
+Runtime secondary-index restoration reads the physical descriptor registry and
+reduces append-only history by durable entity ID, including DROP/recreate.
+Backfill projects one row at a time, admits its estimated resident growth against
+the shared budget and publishes a complete replacement under the collection
+index-topology fence. Read failures and budget denial preserve the prior indexes
+and permit retry. In the opt-in disk-residency qualifier, HASH and
+BTREE restoration retain generation-bound native root descriptors instead of
+rebuilding resident posting maps. Initial projection preparation scans the source;
+compatible prepared restoration does not. BTREE projections use prefix-free,
+type-ordered bytes; integral and text ranges, including equality prefixes over
+fixed-arity composite keys, merge physical candidates with live changes, retain
+their memory reservation through result assembly and
+recheck visibility and predicates. Unsupported query shapes, coercions, mixed
+families and oversized keys retain the authoritative scan. An overflow marker
+prevents a partial index from reporting complete results; unreadable pages fail.
+UNIQUE keeps a paged equality pocket and the existing snapshot-aware admission.
+Bitmap and H3 providers, and explicit CREATE INDEX construction, still retain
+resident state. Range planning checks each bound component's family within its
+prefix and prefers the most constrained applicable index. Unsupported composite
+predicates still scan; paging does not make those queries constant-cost. Managed
+activation remains disabled; these changes
+do not establish whole-server RAM bounds or qualify historical startup latency.
+
+Paged checkpoints reuse unchanged collection trees using volatile segment mutation
+revisions and manager identity. Active and aborted transaction visibility, pending vault
+versions and record format also participate in reuse admission.
+Visibility changes outside a collection are checked against borrowed row headers
+without serializing its payloads. Each checkpoint shares one frozen excluded-XID
+set across collections for both reuse admission and row normalization.
+WAL replay and every entity or metadata mutation invalidate the corresponding
+generation. Exclusive startup recovery reuses unchanged loaded trees and can
+project sparse committed table-row changes from bounded exact WAL images under
+the same ownership epoch and undo protocol as checkpoints. Missing proof,
+tracking exhaustion, replaced managers and older formats keep full validation. New mutation paths must advance the segment revision before exposing mutable data.
+Segment checkpoint journals retain the latest revision of each of at most 8,192
+distinct physical IDs. Repeated updates and GC do not spend the bound on duplicate
+entries; removed versions remain tracked. Evicting an ID invalidates older
+baselines. Sparse projection still requires the existing exact durable WAL proof
+and transaction visibility checks. The journal and its revision floor are volatile
+and do not change the stored file format.
+When embedded options open an existing paged file, collection definitions remain
+in physical metadata. The binary dump's auxiliary contract blob is only used for
+an actual embedded artifact; paged checkpoints do not serialize that blob.
+Actual paged mode also retains native metadata and index-artifact publication
+when the selected options still carry the default embedded single-file profile.
+Catalog model snapshots reuse one physical metadata observation for their
+declared and operational resource lists; index reconciliation retains its native
+artifact checks and fallback when persisted index declarations are empty.
+Aggregate readiness derives all flags from one health observation. Catalog HTTP
+responses share that same health observation with their readiness fields and
+reuse their catalog snapshot for health diagnostics. Connection-pool counters
+are observed without holding the pool lock through storage inspection.
+Cached generations are accepted only after durable catalog publication; current
+format roots loaded from disk are seeded before WAL replay. Physical metadata
+fingerprints additionally retain their existing statistics seed. The caches do
+not change persistent formats or release the checkpoint writer fence. A first
+metadata fingerprint or a changed collection still requires work proportional
+to that collection; unchanged history is not serialized on every checkpoint.
+Fingerprint scans sort compact entity ID/source references and borrow one row at
+a time. They preserve the existing hash order and values without materializing
+a second collection of payloads; source segments remain pinned for the scan.
+
+Paged loading and WAL replay preserve stored sequence identities. Automatic
+inserts encode the segment-assigned identity and fence the complete inline
+mutation plus WAL append against checkpoint publication. A completed inline
+insert may advance its existing tree-reuse proof only when the before/after
+segment revisions show exactly that one mutation. Sparse checkpoint journals
+follow segment identities across growing-to-sealed transitions; a new growing
+segment must account for all mutations from revision zero. Missing old segment
+identities, incomplete journals, untracked edits, visibility changes and
+versioned rows retain conservative validation. Durable
+replay reconciliation seeds the current raw tree generation before runtime
+visibility normalization is attached.
+
+Bulk inserts record each installed entity in the same bounded mutation journal
+without clearing earlier changes. Their paged and WAL records encode the
+installed segment image after sequence assignment. Empty or rejected batches
+do not change the journal; tracking exhaustion keeps conservative validation.
+
+Updating an existing row may relocate it from a sealed segment to the growing
+segment. This physical move adopts its existing sequence identity and advances
+the destination allocator, while rebuilding indexes and tracking the mutation.
+A pending transaction must not change the identity of its durable preimage:
+checkpoint normalization clears its provisional delete stamp without inventing
+a committed WAL proof for an otherwise unchanged row.
+
+Completed WAL-backed physical delete batches may advance that proof when every
+tree removal succeeds and the segment revision delta accounts for exactly the
+deleted rows. Earlier untracked edits, changed segment topology, pending vault
+versions and format changes retain full checkpoint validation.
+
+Store-managed physical frees remain quarantined outside the allocator until
+their removal from the durable collection catalog has been published. Dirty
+empty or forwarding nodes remain flushable while an older catalog can still
+name them. A trailing optional `RDF1` ledger, owned by `reddb-file`, preserves
+detached page IDs across reopen. A later publication forgets eligible IDs
+before returning them to the free list; outstanding tree readers defer that
+release. Physical delete batches publish this metadata without re-encoding
+unchanged survivors, keeping background reclamation paced under grouped WAL.
+Legacy files without the extension remain readable. Older readers ignore the
+extension, while older writers cannot preserve its pending-reclamation state;
+writer downgrades require a separately qualified recovery procedure.
+
+Changed checkpoints encode ordered borrowed rows in batches capped at 1 MiB or
+512 records (a single larger value keeps the existing value-size contract).
+Comparison with a published tree is streamed; a replacement copies the already
+verified prefix only after the first difference. WAL reconciliation uses the
+same bounded builder, without cloning a whole collection of payloads.
+
+Replaced and dropped trees enter an optional `RDR1` retirement-root extension
+after the paged catalog's cross references, owned by `reddb-file`. The immediately
+preceding published generation and older reader-pinned generations remain in
+that ledger. A later durable publication removes eligible roots before their
+structural and overflow pages enter the free list. Tree handles and cursors pin
+retirement independently; reopening restores retirement roots from the ledger.
+This recycles physical checkpoint copies, not historical MVCC row versions.
+Legacy catalogs without the extension remain readable; older writers ignore it
+and therefore cannot preserve automatic retirement across a downgrade. Failed
+unpublished allocations remain conservative recovery garbage; this mechanism
+does not claim a general orphan-page vacuum of pre-upgrade files.
+
+Native index blob replacement terminates the chain at the new payload boundary.
+Shrunk tails, empty blobs and removed artifacts remain outside the allocator
+until the native summary and physical header have been synced. They then enter
+the existing `RDF1` quarantine and become reusable after a later durable catalog
+publication. Native blob reads share the publication fence with replacement.
+A crash before quarantine admission can leave conservative garbage; this is
+not a general reclaim of previously unreachable native artifact pages.
+
+Free-list trunks consume already-free pages instead of extending the file.
+Before a consumed trunk can be overwritten, its old allocator role is removed
+durably from both superblock copies. A sync that makes reclaimed pages live
+also mirrors allocator ownership, so sibling-superblock recovery cannot hand
+out a live page again.
+If the consumed-trunk fence fails, its pending state survives in memory and
+every allocation retry must complete both durable writes before using the
+loaded free pages.
+
+Exact WAL images retained for sparse checkpoint projection have a per-collection
+row limit and one shared byte budget. Pressure first evicts images from the
+collection responsible, preserving earlier proofs for other collections when
+the shared budget permits. Half of the same allowance retains compact references
+to successful appends in the existing WAL. A reference includes its truncation
+generation, byte offset, length and checksum; projection compares the exact WAL
+bytes with the current canonical row before modifying the tree. Missing images
+can use those proofs, while missing or stale proofs retain full validation.
+
 ## Fault model & integrity tooling
 
 - **Storage fault model** — per [ADR 0074](../adr/0074-storage-fault-model.md), the explicit list of modeled physical faults: torn writes, misdirected writes, bit rot, lost writes, and crash-at-any-point. Each zone (superblock, manifest, WAL region, pages/blocks) has a written detection contract; out-of-model faults are documented as such.
@@ -53,6 +299,11 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 
 ## Backup, restore & WAL
 
+Main-file-only remote backups require an actual self-contained embedded file.
+An existing paged file opened with embedded options still requires its physical
+metadata sidecars and must use a complete, fenced physical-directory backup.
+The runtime rejects incomplete remote snapshots before advertising success.
+
 - **Operational backup boundary** — initial backup contract for operational layouts: create a consistent checkpoint, copy manifest/data/index/segment files covered by that checkpoint, and retain/copy WAL from the checkpoint boundary forward. The first contract targets local and primary-replica stores; coordinated cluster-wide backup is a separate distributed protocol.
 - **Operational restore boundary** — initial restore contract for operational layouts: restore a consistent checkpoint, validate manifest and file checksums, then replay retained WAL up to the requested target LSN before opening the store.
 - **Operational WAL retention floor** — WAL pruning boundary for operational primary-replica stores. It is the maximum safety requirement across backup/PITR retention and the slowest replica's durable restart LSN, so pruning cannot break point-in-time recovery or force unnecessary replica rebootstrap.
@@ -60,3 +311,44 @@ Part of the [glossary map](../CONTEXT-MAP.md). The storage engine shared by **ev
 - **LSN-pinned analytical scan** — read protocol for the columnar analytics projection. An analytical read is an ordinary MVCC read: it pins the current snapshot/LSN, scans columnar segments up to the last materialized LSN, and concatenates the un-materialized tail (rows past the last checkpoint boundary) through the normal row read path. There is a single consistency class — analytical reads are never a separate stale tier — and `AS OF` time-travel composes on top by pinning a historical LSN instead of the current one.
 - **Store fork** — metadata-level fork of an entire store: a new operational manifest generation pinned to a fork LSN, sharing the parent's immutable artifacts and writing its own private WAL from that point forward. Creation is an O(metadata) operation, never a physical copy of the dataset. Deliberately distinct from the VCS data model's *branch* (#1567 vocabulary): a store fork is storage/deploy mechanics for experiment-and-discard workflows (e.g. testing a risky migration or letting an agent run against production-shaped data), not version-control semantics over collection contents. Mechanically, a fork is a lazy in-place restore-to-LSN riding the operational backup/restore boundary (ADR 0043): immutable artifacts (append-only segments, checkpoint artifacts, columnar projection segments) are shared by manifest reference; mutable collection files are hydrated lazily (replay/CoW) the first time the fork touches them, so creation stays O(metadata) and cost is deferred to what the fork actually writes. Lifecycle is diverge-and-discard: a fork ends by being discarded, kept as an independent store, or promoted to new primary (the recovery/PITR path) — there is no merge-back of divergent stores at the storage layer; merge semantics belong to the VCS data model, which has vocabulary for conflicts.
 - **WAL spool** — versioned (v2) write-ahead log records used for replication streaming. Includes magic, version byte, lsn, timestamp, payload-len, payload, crc32. `sync_all` after every append. (The replica-side consumer is the **logical change applier** — see [Primary-replica](primary-replica.md) / [Clustering](clustering.md).)
+
+Row mutation batches and tombstone batches take the publication fence before
+changing live segments and retain it through WAL capture or append. Fencing only
+COMMIT is insufficient: a transaction may begin after checkpoint visibility was
+frozen, and an autocommit's recovery records must not be truncated before its
+mutations belong to the published generation.
+
+Sparse paged checkpoints may project a bounded set of changed table rows into
+an unpinned live tree after the existing WAL sync fence. A contiguous volatile
+segment mutation journal accounts for every changed ID, and each different
+row must exactly match a retained successful WAL append. Up to 8,192 deferred
+row IDs per collection remember which raw MVCC rows were omitted or normalized
+in the published image. Later commits and rollbacks revisit those IDs alongside
+new mutations instead of scanning unchanged payloads. A different projected
+image still requires an exact retained canonical WAL record. Low-level rollback
+of a non-active xid invalidates this reuse proof. Pinned readers, unknown edits,
+segment replacement and tracking exhaustion retain the conservative
+replacement-tree path. Mutation tracking is bounded by 8,192
+mutations per segment, 8,192 changed IDs and at most 8 MiB shared by retained
+records and WAL references
+(a smaller page-cache-derived allowance applies to smaller budgets); its bytes
+participate in store memory observations, as do the deferred-ID vectors. A successful publication resets the
+retained-record allowance. Exhaustion evicts retained images without disabling
+later retention. WAL references are invalidated on truncation, even when an
+offset is reused. All sources are validated before tree mutation, then read in
+projection batches capped at 1 MiB except for a single oversized row. Normalized
+MVCC images have a separate 8 MiB temporary allowance; exhaustion keeps the
+conservative path.
+The ordinary inline KV path retains no records.
+The catalog publication and WAL truncation fences remain in their existing
+order. Versioned table updates encode the canonical segment-assigned sequence
+image in their WAL, rather than a pre-insertion caller clone.
+
+Completed physical GC batches already update the paged tree. Their validated
+revision deltas may advance while carrying earlier unprojected IDs in the
+existing bounded deferred-row vector, so already-applied deletes cannot exhaust
+the mutation journal for a small pending update. Whole-tree reuse waits until
+those carried IDs have been checked by sparse projection; differing rows still
+require exact durable WAL proof. An already-absent aborted row is a completed
+physical removal, while tree errors and unknown mutations keep conservative
+validation.

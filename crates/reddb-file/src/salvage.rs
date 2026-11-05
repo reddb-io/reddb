@@ -82,6 +82,8 @@ pub fn salvage_embedded_store(
         )));
     }
 
+    crate::scrub::reject_paged_store(&mut fs::File::open(source)?, "embedded salvage")?;
+
     let open = match EmbeddedRdbArtifact::open_strict_manifest(source) {
         Ok(open) => open,
         Err(_) => return salvage_by_carving(source, destination),

@@ -104,7 +104,7 @@ fn build_oauth_validator() -> Arc<OAuthValidator> {
         jwks_url: String::new(),
         identity_mode: OAuthIdentityMode::SubClaim,
         role_claim: Some("role".into()),
-        tenant_claim: None,
+        tenant_claim: Some("tenant".into()),
         default_role: Role::Read,
         map_to_existing_users: false,
         accept_bearer: true,
@@ -121,6 +121,17 @@ fn build_oauth_validator() -> Arc<OAuthValidator> {
 
 fn spawn_http(rt: RedDBRuntime, auth_store: Arc<AuthStore>) -> String {
     let server = RedDBServer::new(rt).with_auth(auth_store);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    thread::sleep(Duration::from_millis(80));
+    addr.to_string()
+}
+
+fn spawn_http_oauth_only(rt: RedDBRuntime) -> String {
+    let server = RedDBServer::new(rt);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -171,6 +182,47 @@ fn valid_jwt_is_accepted_via_oauth_validator() {
     assert_eq!(status, 200, "expected 200, got body:\n{body}");
     assert!(body.contains("\"username\":\"alice\""), "body = {body}");
     assert!(body.contains("\"method\":\"oauth_jwt\""), "body = {body}");
+}
+
+#[test]
+fn oauth_only_server_fails_closed_and_preserves_tenant_identity() {
+    let validator = build_oauth_validator();
+    let (_db, rt) = support::persistent_runtime("http-oauth-only");
+    rt.set_oauth_validator(Some(validator));
+    let addr = spawn_http_oauth_only(rt);
+
+    let (missing_status, _) = http_get(&addr, "/collections", None);
+    assert_eq!(
+        missing_status, 401,
+        "OAuth-only mode must require a bearer token"
+    );
+    let (invalid_status, _) = http_get(&addr, "/collections", Some("invalid-token"));
+    assert_eq!(
+        invalid_status, 401,
+        "OAuth-only mode must reject invalid tokens"
+    );
+
+    let now = now_secs();
+    let header = r#"{"alg":"RS256","kid":"k1","typ":"JWT"}"#;
+    let payload = format!(
+        r#"{{"iss":"https://id.example.com","sub":"alice","aud":"reddb","exp":{exp},"role":"write","tenant":"acme"}}"#,
+        exp = now + 3600,
+    );
+    let token = make_jwt(header, &payload);
+
+    let (collections_status, body) = http_get(&addr, "/collections", Some(&token));
+    assert_eq!(
+        collections_status, 200,
+        "valid OAuth identity must pass; body={body}"
+    );
+
+    let (whoami_status, body) = http_get(&addr, "/auth/whoami", Some(&token));
+    assert_eq!(
+        whoami_status, 200,
+        "OAuth-only whoami must work; body={body}"
+    );
+    assert!(body.contains("\"username\":\"alice\""), "body = {body}");
+    assert!(body.contains("\"tenant_id\":\"acme\""), "body = {body}");
 }
 
 #[test]

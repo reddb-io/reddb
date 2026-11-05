@@ -214,6 +214,7 @@ impl Database {
 
         // Create pager config
         let pager_config = PagerConfig {
+            disk_residency: false,
             cache_size: config.cache_size,
             read_only: config.read_only,
             create: config.create,
@@ -653,7 +654,7 @@ mod tests {
         // Create database first
         {
             let db = Database::open(&path).unwrap();
-            let page = db.allocate_page(PageType::BTreeLeaf).unwrap();
+            db.allocate_page(PageType::BTreeLeaf).unwrap();
             db.close().unwrap();
         }
 

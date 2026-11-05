@@ -129,6 +129,15 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: migrate_pager_zone_flags(),
     },
     CommandDef {
+      name: "compact",
+      summary: "Rewrite a closed checkpointed native paged database into a fresh directory",
+      usage: "red compact --source data.rdb --destination-dir compacted [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -408,6 +417,9 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_description("Declare WAL retention for storage profile validation"),
         FlagSchema::new("primary-addr").with_description("Primary gRPC address for replica mode"),
         FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
+        FlagSchema::boolean("bounded-disk-residency").with_description(
+            "Opt into bounded disk residency for standalone single-file databases; upgrades the writer format",
+        ),
         FlagSchema::boolean("no-create-if-missing")
             .with_description("Fail instead of creating the database file"),
         FlagSchema::boolean("auth").with_description("Enable authentication for this boot"),
@@ -455,9 +467,9 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_description("File containing cloud customer admin password"),
         FlagSchema::new("bootstrap-cert-out").with_description(
             "Write the first-boot unseal certificate to this file (e.g. /run/reddb/cert.pem) \
-             in addition to stderr, so a distroless init can read it back for the next boot's \
-             REDDB_CERTIFICATE_FILE unseal. Written only on the bootstrap-creating boot; a \
-             re-boot against the existing vault does not rewrite it.",
+             without emitting it to logs, so a distroless init can read it back for the next \
+             boot's REDDB_CERTIFICATE_FILE unseal. Written only on the bootstrap-creating boot; \
+             a re-boot against the existing vault does not rewrite it.",
         ),
         FlagSchema::boolean("ui")
             .with_description("Serve the pinned red-ui bundle as static assets"),
@@ -483,8 +495,14 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("no-log-file")
             .with_description("Disable rotating file logs (stderr only)"),
         FlagSchema::new("http-max-handlers").with_description(
-            "Max concurrent HTTP handler threads (env: REDDB_HTTP_MAX_HANDLERS; \
+            "Max admitted in-flight HTTP requests, including queued execution \
+             (env: REDDB_HTTP_MAX_HANDLERS; \
              red_config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
+        ),
+        FlagSchema::new("http-execution-workers").with_description(
+            "Max buffered non-health HTTP engine calls executed concurrently; excess admitted \
+             requests wait FIFO (env: REDDB_HTTP_EXECUTION_WORKERS; \
+             red_config: red.http.execution_workers; default: num_cpus)",
         ),
         FlagSchema::new("http-handler-timeout-ms")
             .with_description(
@@ -501,7 +519,8 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::new("http-max-inflight-per-principal").with_description(
             "Max concurrent in-flight HTTP requests per principal; over-cap requests \
              get a structured 429 (env: REDDB_HTTP_MAX_INFLIGHT_PER_PRINCIPAL; \
-             red_config: red.http.max_inflight_per_principal; 0 disables; default: 64)",
+             red_config: red.http.max_inflight_per_principal; 0 disables; default: \
+             min(64, max_handlers - 1))",
         ),
     ]
 }
@@ -988,6 +1007,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("inspect".to_string(), vec![]),
         ("migrate-from-redis".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
+        ("compact".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),
@@ -1046,8 +1066,9 @@ mod tests {
         let flag_names: Vec<&str> = server.flags.iter().map(|f| f.long.as_str()).collect();
         assert!(flag_names.contains(&"path"));
         assert!(flag_names.contains(&"bind"));
-        // Slice 5 of issue #574 — HTTP handler-pool knobs.
+        // HTTP admission and execution knobs.
         assert!(flag_names.contains(&"http-max-handlers"));
+        assert!(flag_names.contains(&"http-execution-workers"));
         assert!(flag_names.contains(&"http-handler-timeout-ms"));
         assert!(flag_names.contains(&"http-retry-after-secs"));
     }
@@ -1056,9 +1077,11 @@ mod tests {
     fn test_server_help_text_lists_http_limit_flags() {
         let help = command_help_text("server").unwrap();
         assert!(help.contains("--http-max-handlers"));
+        assert!(help.contains("--http-execution-workers"));
         assert!(help.contains("--http-handler-timeout-ms"));
         assert!(help.contains("--http-retry-after-secs"));
         assert!(help.contains("REDDB_HTTP_MAX_HANDLERS"));
+        assert!(help.contains("REDDB_HTTP_EXECUTION_WORKERS"));
     }
 
     #[test]

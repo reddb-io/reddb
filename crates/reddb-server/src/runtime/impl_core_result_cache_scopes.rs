@@ -234,7 +234,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
                 KvCommand::Put { collection, .. }
                 | KvCommand::InvalidateTags { collection, .. }
                 | KvCommand::Get { collection, .. }
-                | KvCommand::Unseal { collection, .. }
+                | KvCommand::Reveal { collection, .. }
                 | KvCommand::Rotate { collection, .. }
                 | KvCommand::History { collection, .. }
                 | KvCommand::List { collection, .. }

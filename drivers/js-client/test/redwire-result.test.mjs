@@ -125,6 +125,39 @@ test(
       ])
 
       await db.close()
+
+      // The same results, with the same shape, over RedWire and HTTP (the
+      // router port serves both). Each case below was broken before: a
+      // parameterized SELECT came back without `rows`, a DML statement lost
+      // `affected`, HTTP never returned `rows`, and a one-row table could come
+      // back as all NULLs through the binary frame.
+      for (const scheme of ['red', 'http']) {
+        const conn = await connect(`${scheme}://127.0.0.1:${port}`)
+        const table = `js_shape_${scheme}`
+        try {
+          await conn.query(`CREATE TABLE ${table} (id INT, name TEXT)`)
+          const inserted = await conn.query(`INSERT INTO ${table} (id, name) VALUES (1, 'Ada')`)
+          assert.equal(inserted.affected, 1, `${scheme}: INSERT affected`)
+
+          const single = await conn.query(`SELECT id, name FROM ${table} WHERE id = 1`)
+          assert.deepEqual(single.rows, [{ id: 1, name: 'Ada' }], `${scheme}: one-row table`)
+
+          await conn.query(`INSERT INTO ${table} (id, name) VALUES ($1, $2)`, 2, 'Grace')
+          const bound = await conn.query(`SELECT id, name FROM ${table} WHERE name = $1`, 'Grace')
+          assert.deepEqual(bound.columns, ['id', 'name'], `${scheme}: parameterized columns`)
+          assert.deepEqual(bound.rows, [{ id: 2, name: 'Grace' }], `${scheme}: parameterized rows`)
+
+          const updated = await conn.query(`UPDATE ${table} SET name = 'Hopper' WHERE id = 2`)
+          assert.equal(updated.affected, 1, `${scheme}: UPDATE affected`)
+          const none = await conn.query(`SELECT id FROM ${table} WHERE id = 99`)
+          assert.deepEqual(none.rows, [], `${scheme}: no match`)
+
+          const created = await conn.insert(`${table}_rows`, { id: 7, name: 'Linus' })
+          assert.ok(created.rid != null && created.id === created.rid, `${scheme}: insert() returns rid`)
+        } finally {
+          await conn.close()
+        }
+      }
     } finally {
       server.kill()
       await once(server, 'close').catch(() => {})

@@ -86,6 +86,11 @@ impl UnifiedStore {
             return Ok((0, 0, 0));
         };
         if payload.is_empty() {
+            if let Some(root) = existing_root {
+                self.detached_native_blob_pages
+                    .lock()
+                    .extend(self.read_native_blob_chain_page_ids(root)?);
+            }
             return Ok((0, 0, 0));
         }
 
@@ -109,7 +114,11 @@ impl UnifiedStore {
 
         for (index, chunk) in payload.chunks(chunk_capacity).enumerate() {
             let page_id = page_ids[index];
-            let next_page = page_ids.get(index + 1).copied().unwrap_or(0);
+            let next_page = if index + 1 < page_count as usize {
+                page_ids[index + 1]
+            } else {
+                0
+            };
             let data = reddb_file::encode_native_blob_page(next_page, chunk);
 
             let mut page = crate::storage::engine::Page::new(
@@ -125,14 +134,24 @@ impl UnifiedStore {
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
         }
 
+        let root_page = page_ids[0];
+        let mut detached = self.detached_native_blob_pages.lock();
+        // A retry after an unsuccessful summary publication may retain a root
+        // previously staged for removal. Its current pages are live again.
+        for page in &page_ids[..page_count as usize] {
+            detached.remove(page);
+        }
+        detached.extend(page_ids.into_iter().skip(page_count as usize));
+
         Ok((
-            page_ids[0],
+            root_page,
             page_count,
             crate::storage::engine::crc32(payload) as u64,
         ))
     }
 
     pub fn read_native_blob_chain(&self, root_page: u32) -> Result<Vec<u8>, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Err(StoreError::Serialization(
                 "native blob chain requires paged mode".to_string(),
@@ -162,6 +181,7 @@ impl UnifiedStore {
         artifacts: &[(String, String, Vec<u8>)],
         existing_page: Option<u32>,
     ) -> Result<(u32, u64, Vec<NativeVectorArtifactPageSummary>), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Ok((0, 0, Vec::new()));
         };
@@ -196,6 +216,16 @@ impl UnifiedStore {
                 byte_len: bytes.len() as u64,
                 checksum,
             });
+        }
+
+        for previous in &existing {
+            if !artifacts.iter().any(|(collection, kind, _)| {
+                previous.collection == *collection && previous.artifact_kind == *kind
+            }) {
+                self.detached_native_blob_pages
+                    .lock()
+                    .extend(self.read_native_blob_chain_page_ids(previous.root_page)?);
+            }
         }
 
         let data = reddb_file::encode_native_vector_artifact_store_page(&summaries);
@@ -241,6 +271,7 @@ impl UnifiedStore {
         collection: &str,
         artifact_kind: Option<&str>,
     ) -> Result<Option<(NativeVectorArtifactPageSummary, Vec<u8>)>, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let artifact_kind = artifact_kind.unwrap_or("hnsw");
         let summaries = self.read_native_vector_artifact_store(page_id)?;
         let Some(summary) = summaries.into_iter().find(|summary| {
@@ -250,5 +281,213 @@ impl UnifiedStore {
         };
         let bytes = self.read_native_blob_chain(summary.root_page)?;
         Ok(Some((summary, bytes)))
+    }
+
+    /// Call only after the native summary and physical header have been synced.
+    /// A failed publication retains these pages; a crash before ledger admission
+    /// can leave conservative garbage, but never returns a live page for reuse.
+    pub(crate) fn publish_detached_native_blob_pages(&self) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        let mut detached = self.detached_native_blob_pages.lock();
+        if detached.is_empty() {
+            return Ok(());
+        }
+        while let Some(&page) = detached.first() {
+            pager
+                .free_page(page)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            detached.remove(&page);
+        }
+        drop(detached);
+        // Use the existing RDF1 publication fence. Pages cannot enter the
+        // allocator until a later durable catalog forgets this quarantine.
+        self.flush_paged_registry()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shrinking_native_blob_does_not_read_the_previous_tail() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("blob.rdb")).expect("paged store");
+        let capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
+        let original = vec![7; capacity * 3];
+        let (root, count, _) = store
+            .write_native_blob_chain(&original, None)
+            .expect("original blob");
+        assert_eq!(count, 3);
+        store.persist().expect("publish original blob");
+
+        let replacement = vec![9; capacity / 2];
+        let (root, count, checksum) = store
+            .write_native_blob_chain(&replacement, Some(root))
+            .expect("smaller replacement");
+        assert_eq!(count, 1);
+        let actual = store
+            .read_native_blob_chain(root)
+            .expect("read replacement");
+        assert_eq!(
+            actual.len(),
+            replacement.len(),
+            "old artifact tail survived shrink"
+        );
+        assert_eq!(actual, replacement);
+        assert_eq!(checksum, crate::storage::engine::crc32(&actual) as u64);
+    }
+
+    fn publish_artifacts(store: &UnifiedStore, artifacts: &[(String, String, Vec<u8>)]) -> u32 {
+        let mut header = store.physical_file_header().expect("physical header");
+        let previous = (header.vector_artifact_page != 0).then_some(header.vector_artifact_page);
+        let (page, checksum, _) = store
+            .write_native_vector_artifact_store(artifacts, previous)
+            .expect("write artifact summary");
+        header.vector_artifact_page = page;
+        header.vector_artifact_checksum = checksum;
+        store
+            .update_physical_file_header(header)
+            .expect("new header");
+        store.persist().expect("durable native publication");
+        store
+            .publish_detached_native_blob_pages()
+            .expect("quarantine detached pages");
+        page
+    }
+
+    #[test]
+    fn native_blob_retirement_survives_reopen_and_reuses_pages() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("retired-blob.rdb");
+        let store = UnifiedStore::open(&path).expect("paged store");
+        let capacity = reddb_file::native_blob_chunk_capacity(
+            crate::storage::engine::PAGE_SIZE,
+            crate::storage::engine::HEADER_SIZE,
+        );
+        let large = ("rows".into(), "text.fulltext".into(), vec![7; capacity * 4]);
+        let small = ("rows".into(), "text.fulltext".into(), vec![9; capacity / 2]);
+        publish_artifacts(&store, std::slice::from_ref(&large));
+        let size = std::fs::metadata(&path).expect("allocated file").len();
+        let page = publish_artifacts(&store, std::slice::from_ref(&small));
+        let (pending, published) = store
+            .pager()
+            .expect("pager")
+            .deferred_reclamation_pages()
+            .expect("quarantine");
+        assert_eq!(pending.len(), 3, "shrunk tail must remain quarantined");
+        assert_eq!(published.len(), 3);
+        drop(store);
+
+        let store = UnifiedStore::open(&path).expect("reopen published quarantine");
+        let (summary, bytes) = store
+            .read_native_vector_artifact_blob(page, "rows", Some("text.fulltext"))
+            .expect("read artifact")
+            .expect("artifact survives");
+        assert_eq!(summary.page_count, 1);
+        assert_eq!(summary.byte_len as usize, bytes.len());
+        assert_eq!(bytes, small.2);
+        store
+            .flush_paged_registry()
+            .expect("release published tail");
+        assert!(
+            store
+                .pager()
+                .expect("pager")
+                .free_page_count()
+                .expect("free pages")
+                >= 2,
+            "one reclaimed page hosts the allocator trunk"
+        );
+        // One three-page tail may still be quarantined when the next large
+        // artifact is allocated. After that warmup, equal churn must plateau.
+        let maximum_size = size + 3 * crate::storage::engine::PAGE_SIZE as u64;
+        let mut plateau = None;
+        for cycle in 0..8 {
+            publish_artifacts(&store, std::slice::from_ref(&large));
+            publish_artifacts(&store, std::slice::from_ref(&small));
+            let current_size = std::fs::metadata(&path).expect("reused allocation").len();
+            assert!(current_size <= maximum_size);
+            let free = store
+                .pager()
+                .expect("pager")
+                .free_page_count()
+                .expect("free pages");
+            if cycle >= 2 {
+                assert_eq!(
+                    Some((current_size, free)),
+                    plateau,
+                    "equal churn must preserve allocation and free-page accounting"
+                );
+            }
+            plateau = Some((current_size, free));
+        }
+        publish_artifacts(&store, &[]);
+        store
+            .flush_paged_registry()
+            .expect("release dropped artifact");
+        assert!(store
+            .read_native_vector_artifact_store(page)
+            .expect("empty summary")
+            .is_empty());
+        assert!(store
+            .pager()
+            .expect("pager")
+            .deferred_reclamation_pages()
+            .expect("released quarantine")
+            .0
+            .is_empty());
+        // Trunk pages are also reclaimed on allocation; check actual reuse
+        // rather than counting only the free IDs stored inside those trunks.
+        publish_artifacts(&store, std::slice::from_ref(&large));
+        assert!(std::fs::metadata(&path).expect("reuse after drop").len() <= maximum_size);
+        assert_eq!(
+            store
+                .read_native_vector_artifact_blob(page, "rows", Some("text.fulltext"))
+                .expect("recreated artifact")
+                .expect("artifact exists")
+                .1,
+            large.2
+        );
+    }
+
+    #[test]
+    fn retained_blob_retry_cancels_its_unpublished_retirement() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store =
+            UnifiedStore::open(&directory.path().join("retry-blob.rdb")).expect("paged store");
+        let bytes = vec![42; 1024];
+        let (root, _, _) = store
+            .write_native_blob_chain(&bytes, None)
+            .expect("original blob");
+        store
+            .write_native_blob_chain(&[], Some(root))
+            .expect("stage removal");
+        store
+            .write_native_blob_chain(&bytes, Some(root))
+            .expect("retain on retry");
+        store.persist().expect("retry publication");
+        store
+            .publish_detached_native_blob_pages()
+            .expect("no live retirement");
+        store.flush_paged_registry().expect("later publication");
+        assert_eq!(
+            store.read_native_blob_chain(root).expect("retained page"),
+            bytes
+        );
+        assert_eq!(
+            store
+                .pager()
+                .expect("pager")
+                .free_page_count()
+                .expect("no live free"),
+            0
+        );
     }
 }

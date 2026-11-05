@@ -1,6 +1,16 @@
 use super::*;
 use crate::api::DurabilityMode;
 
+#[cfg(test)]
+fn flush_local_only_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_native name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 fn write_optional_snapshot_sidecar(
     json: &crate::json::Value,
     field: &str,
@@ -34,6 +44,14 @@ fn store_config_from_options(
         .with_group_commit(options.group_commit)
         .with_page_cache_slots(shares.page_cache_slots());
     config.auto_index_id = options.auto_index_id;
+    // The explicit server/library option and scoped legacy test fixtures select
+    // the same factory. Defaults remain resident until deployment qualification.
+    if options.bounded_disk_residency
+        || (cfg!(test) && QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.get()))
+    {
+        config.resident_memory_bytes_max =
+            Some(shares.share_bytes(crate::storage::memory_pools::MemoryPool::SegmentArena));
+    }
 
     if let Ok(value) = std::env::var("REDDB_DURABILITY") {
         if let Some(mode) = DurabilityMode::from_str(&value) {
@@ -311,6 +329,16 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        if options.bounded_disk_residency
+            && (!embedded_single_file_selected(options)
+                || options.replication.role != crate::replication::ReplicationRole::Standalone
+                || options.remote_backend.is_some()
+                || options.remote_backend_atomic.is_some())
+        {
+            return Err(
+                "bounded disk residency requires standalone single-file local storage".into(),
+            );
+        }
         // Tier wiring: flip the six tier-flag global toggles from the
         // resolved StorageLayout, then materialise the support
         // directories the layout demands (logs/wal/snapshots/etc).
@@ -450,7 +478,26 @@ impl RedDB {
         } else {
             None
         };
-        let embedded_open = if embedded_single_file_selected(options) {
+        let embedded_open = if options.bounded_disk_residency {
+            // The snapshot-backed embedded factory has no durable page ownership
+            // coordinator. Explicit residency must create/open the native pager,
+            // including on the very first boot, before registering disk indexes.
+            if !path_buf.exists() && !options.create_if_missing {
+                return Err(format!(
+                    "database path does not exist and create_if_missing is false: {}",
+                    path_buf.display()
+                )
+                .into());
+            }
+            if path_buf.exists()
+                && (Self::is_binary_dump(&path_buf)?
+                    || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+            {
+                return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
+            }
+            let store = UnifiedStore::open_with_config(&path_buf, store_config.clone())?;
+            Some((store, Some(path_buf.clone()), true))
+        } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
                     Ok(artifact) => {
@@ -584,7 +631,7 @@ impl RedDB {
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
-            collection_contract_cache: RwLock::new(None),
+            collection_contract_cache: super::contract_cache::CollectionContractCache::default(),
             remote_backend: options.remote_backend.clone(),
             remote_backend_atomic: options.remote_backend_atomic.clone(),
             remote_key,
@@ -623,7 +670,14 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
+        let _vault_guard = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "publication-lock");
         let _ = self.ec_consolidate_all();
+        #[cfg(test)]
+        flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
@@ -633,8 +687,14 @@ impl RedDB {
             } else {
                 self.store.save_to_file(path)?;
             }
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "store-persist");
             self.publish_append_only_segments(path)?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "append-only-publication");
             self.persist_metadata()?;
+            #[cfg(test)]
+            flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
             // the WAL checkpoint cycle. Each turbo collection with a
             // resolved snapshot path spawns at most one in-flight
@@ -657,17 +717,21 @@ impl RedDB {
             let Some(manager) = self.store.get_collection(&contract.name) else {
                 continue;
             };
-            let mut entities = manager.query_all(|_| true);
-            entities.sort_by_key(|entity| entity.id.raw());
             let published_rows = manifest.append_only_published_rows(&contract.name)?;
-            if published_rows >= entities.len() as u64 {
+            // The caller fences mutations. Retain the same physical ID order,
+            // but materialize only the unpublished tail, not its old payloads.
+            let entity_count = manager.count();
+            if published_rows >= entity_count as u64 {
+                continue;
+            }
+            let offset = usize::try_from(published_rows)
+                .expect("invariant: published prefix is below the entity count");
+            let (_, entities) = manager.page_in_id_order(offset, entity_count - offset);
+            if entities.is_empty() {
                 continue;
             }
             let next_segment_id = manifest.next_append_only_segment_id(&contract.name)?;
-            let segment_entities = entities
-                .iter()
-                .skip(published_rows as usize)
-                .collect::<Vec<_>>();
+            let segment_entities = entities.iter().collect::<Vec<_>>();
             let (retention_min_ms, retention_max_ms) =
                 append_only_retention_bounds(&contract, &segment_entities);
             let rows = segment_entities
@@ -705,7 +769,7 @@ impl RedDB {
     }
 
     pub fn embedded_pending_wal_records(&self) -> Option<u64> {
-        if !embedded_single_file_selected(&self.options) {
+        if self.paged_mode || !embedded_single_file_selected(&self.options) {
             return None;
         }
         let path = self.path.as_ref()?;
@@ -1155,7 +1219,7 @@ impl RedDB {
             };
         };
 
-        let sidecar = PhysicalMetadataFile::load_for_data_path_with_source(path).ok();
+        let sidecar = PhysicalMetadataFile::inspect_for_data_path_with_source(path).ok();
         PhysicalAuthorityStatus {
             preference: self
                 .physical_metadata_preference()
@@ -1254,11 +1318,11 @@ impl RedDB {
         for name in self.store.list_collections() {
             if let Some(manager) = self.store.get_collection(&name) {
                 let manager_stats = manager.stats();
-                let cross_refs = manager
-                    .query_all(|_| true)
-                    .iter()
-                    .map(|entity| entity.cross_refs().len())
-                    .sum();
+                let mut cross_refs = 0;
+                manager.for_each_entity(|entity| {
+                    cross_refs += entity.cross_refs().len();
+                    true
+                });
                 stats_by_collection.insert(
                     name,
                     CollectionStats {
@@ -1291,12 +1355,13 @@ impl RedDB {
         let declarations = self
             .physical_metadata()
             .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
                 declared_indexes: metadata.indexes,
-                declared_graph_projections: metadata.graph_projections,
-                declared_analytics_jobs: metadata.analytics_jobs,
-                operational_indexes: self.physical_indexes(),
-                operational_graph_projections: self.graph_projections(),
-                operational_analytics_jobs: self.analytics_jobs(),
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
             });
         snapshot_store_with_declarations(
             "reddb",
@@ -1304,6 +1369,34 @@ impl RedDB {
             Some(&catalog),
             declarations.as_ref(),
             Some(contracts.as_slice()),
+        )
+    }
+
+    /// Read complete catalog observations without hydrating persistent collections.
+    pub fn try_catalog_model_snapshot(
+        &self,
+        read_bytes_max: usize,
+    ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+        let catalog = self.runtime_index_catalog();
+        let contracts = self.collection_contracts();
+        let declarations = self
+            .physical_metadata()
+            .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
+                declared_indexes: metadata.indexes,
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
+            });
+        crate::catalog::try_snapshot_store_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            declarations.as_ref(),
+            Some(contracts.as_slice()),
+            read_bytes_max,
         )
     }
 
@@ -1375,8 +1468,13 @@ impl RedDB {
             return (query_allowed, write_allowed, repair_allowed);
         }
 
-        let authority = self.physical_authority_status();
-        let native_bootstrap_ready = authority.native_bootstrap_ready;
+        // Readiness needs only native completeness. Full authority diagnostics
+        // also reconcile physical metadata, unnecessarily waiting behind
+        // checkpoint publication for each query/write/repair flag.
+        let native_bootstrap_ready = self
+            .native_physical_state()
+            .as_ref()
+            .is_some_and(Self::native_state_is_bootstrap_complete);
         let query_allowed = native_bootstrap_ready && matches!(report.state, HealthState::Healthy);
         let write_allowed = !self.options.read_only
             && native_bootstrap_ready
@@ -1442,6 +1540,145 @@ fn value_as_retention_ms(value: &Value) -> Option<i64> {
     }
 }
 
+thread_local! {
+    static QUALIFICATION_DISK_RESIDENCY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+mod append_only_publication_tests {
+    use super::*;
+    use crate::storage::RowData;
+
+    #[test]
+    fn already_published_append_only_checkpoint_does_not_clone_payloads() {
+        let directory = tempfile::tempdir().expect("checkpoint fixture");
+        let path = directory.path().join("append-only-memory.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE checkpoint_events (id INTEGER, payload BLOB) APPEND ONLY")
+            .expect("append-only table");
+        let store = runtime.db().store();
+        let manager = store.get_collection("checkpoint_events").expect("source");
+        let schema = Arc::new(vec!["id".into(), "payload".into()]);
+        for id in 1..=16 {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(1000 + id),
+                "checkpoint_events",
+                id,
+                Vec::new(),
+            );
+            entity.data = EntityData::Row(RowData {
+                columns: vec![
+                    Value::Integer(id as i64),
+                    Value::Blob(vec![id as u8; 128 * 1024]),
+                ],
+                named: None,
+                schema: Some(Arc::clone(&schema)),
+            });
+            manager.insert(entity).expect("source row");
+        }
+        runtime.flush().expect("initial durable segment");
+        let manifest = reddb_file::OperationalManifest::for_db_path(&path);
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("published count"),
+            16
+        );
+
+        let _publication = store.vault_publication_lock.lock();
+        let (result, unchanged_allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.db().publish_append_only_segments(&path)
+            });
+        result.expect("unchanged publication succeeds");
+        assert!(
+            unchanged_allocations.allocated_bytes < 256 * 1024,
+            "already published payloads must stay borrowed: {unchanged_allocations:?}"
+        );
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("same published count"),
+            16
+        );
+        assert_eq!(manager.count(), 16);
+
+        let mut tail =
+            UnifiedEntity::table_row(EntityId::new(1017), "checkpoint_events", 17, Vec::new());
+        tail.data = EntityData::Row(RowData {
+            columns: vec![Value::Integer(17), Value::Blob(vec![17; 32])],
+            named: None,
+            schema: Some(Arc::clone(&schema)),
+        });
+        manager.insert(tail).expect("new unpublished row");
+        let (result, allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.db().publish_append_only_segments(&path)
+            });
+        result.expect("tail publication succeeds");
+        assert!(
+            allocations.allocated_bytes < 256 * 1024,
+            "tail publication must not clone previously published payloads: {allocations:?}"
+        );
+        assert_eq!(
+            manifest
+                .append_only_published_rows("checkpoint_events")
+                .expect("tail included"),
+            17
+        );
+        eprintln!(
+            "append-only publication allocation bytes: unchanged={} tail={}",
+            unchanged_allocations.allocated_bytes, allocations.allocated_bytes
+        );
+    }
+}
+
+#[cfg(test)]
+mod serverless_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn native_readiness_does_not_wait_for_metadata_publication() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let options = RedDBOptions::persistent(directory.path().join("ready.rdb"))
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("serverless profile");
+        let runtime = Arc::new(crate::RedDBRuntime::with_options(options).expect("runtime"));
+        runtime
+            .execute_query("CREATE TABLE readiness_probe (value INT)")
+            .expect("collection");
+        runtime.checkpoint().expect("published native state");
+        let expected = runtime
+            .db()
+            .readiness_flags_from_health_serverless(&HealthReport::healthy());
+
+        let store = runtime.db().store();
+        let publication = store.vault_publication_lock.lock();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let reader = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            let flags = reader
+                .db()
+                .readiness_flags_from_health_serverless(&HealthReport::healthy());
+            send.send(flags).expect("readiness receiver");
+        });
+        let flags = receive.recv_timeout(std::time::Duration::from_secs(2));
+        // Release before asserting so a regression cannot leave a blocked
+        // worker behind. The old authority-diagnostic path waits on this lock.
+        drop(publication);
+        worker.join().expect("readiness worker");
+        assert_eq!(
+            flags.expect("native readiness must not wait for metadata publication"),
+            expected
+        );
+    }
+}
+
 #[cfg(test)]
 mod ephemeral_cleanup_tests {
     use super::*;
@@ -1466,5 +1703,50 @@ mod ephemeral_cleanup_tests {
         let options = RedDBOptions::persistent(&path);
 
         assert!(!should_cleanup_ephemeral_data_path(&options, &path));
+    }
+}
+
+#[cfg(test)]
+impl RedDB {
+    pub(crate) fn with_disk_residency_for_qualification<T>(operation: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.set(self.0));
+            }
+        }
+        let previous = QUALIFICATION_DISK_RESIDENCY.with(|enabled| enabled.replace(true));
+        let _restore = Restore(previous);
+        operation()
+    }
+}
+
+#[cfg(test)]
+mod qualification_scope_tests {
+    use super::*;
+
+    #[test]
+    fn qualification_factory_selection_is_nested_thread_local_and_unwind_safe() {
+        let options = RedDBOptions::in_memory().with_memory_budget(64 * 1024 * 1024);
+        let selected = || {
+            store_config_from_options(&options)
+                .expect("config")
+                .resident_memory_bytes_max
+        };
+        assert_eq!(selected(), None);
+        RedDB::with_disk_residency_for_qualification(|| {
+            assert!(selected().is_some());
+            RedDB::with_disk_residency_for_qualification(|| assert!(selected().is_some()));
+            assert!(selected().is_some());
+            std::thread::scope(|threads| {
+                threads.spawn(|| assert_eq!(selected(), None));
+            });
+        });
+        assert_eq!(selected(), None);
+        let result = std::panic::catch_unwind(|| {
+            RedDB::with_disk_residency_for_qualification(|| panic!("qualification fixture"));
+        });
+        assert!(result.is_err());
+        assert_eq!(selected(), None);
     }
 }

@@ -6,9 +6,9 @@
 #![deny(clippy::disallowed_methods)]
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::crypto::os_random;
 use crate::crypto::sha256::sha256;
@@ -124,6 +124,7 @@ pub struct AuthStore {
     /// key so `alice@acme` and `alice@globex` are distinct identities.
     users: RwLock<HashMap<UserId, User>>,
     sessions: RwLock<HashMap<String, Session>>,
+    counted_session_tokens: RwLock<HashSet<String>>,
     /// key-string -> (owner UserId, role)
     api_key_index: RwLock<HashMap<String, (UserId, Role)>>,
     /// Once true, bootstrap() is permanently sealed.
@@ -133,12 +134,15 @@ pub struct AuthStore {
     vault: RwLock<Option<Vault>>,
     /// Reference to the pager for vault page I/O.
     pager: Option<Arc<Pager>>,
+    /// Existing operator credential; bootstrap must preserve this seal.
+    provided_certificate: Option<String>,
     /// Certificate-based keypair for token signing and vault seal.
     /// Populated after bootstrap or after restoring from a sealed vault.
     keypair: RwLock<Option<KeyPair>>,
     /// Encrypted key-value store for arbitrary secrets.
     /// Persisted to vault alongside users/api_keys.
     vault_kv: RwLock<HashMap<String, String>>,
+    secret_key_init: std::sync::Mutex<()>,
     /// Plain (non-encrypted) user key-value store for `$kv.*` / `SET KV`
     /// (#1602). Deliberately isolated from `vault_kv` (encrypted secrets)
     /// and from the runtime config store — three independent flat-maps,
@@ -207,6 +211,19 @@ pub struct AuthStore {
     /// POLICY/DROP COLLECTION.
     visible_collections_cache: super::scope_cache::AuthCache,
     control_events: RwLock<Option<AuthStoreControlEvents>>,
+}
+
+/// RAII reservation for a long-lived wire connection. Dropping the lease
+/// releases exactly one CONNECTION LIMIT slot.
+pub struct ConnectionLease {
+    store: Arc<AuthStore>,
+    principal: UserId,
+}
+
+impl Drop for ConnectionLease {
+    fn drop(&mut self) {
+        self.store.decrement_session_count(&self.principal);
+    }
 }
 
 // Use fast-but-safe Argon2id params for auth hashing (smaller than the
@@ -410,13 +427,16 @@ impl AuthStore {
         Self {
             users: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
+            counted_session_tokens: RwLock::new(HashSet::new()),
             api_key_index: RwLock::new(HashMap::new()),
             bootstrapped: AtomicBool::new(false),
             config,
             vault: RwLock::new(None),
             pager: None,
+            provided_certificate: None,
             keypair: RwLock::new(None),
             vault_kv: RwLock::new(HashMap::new()),
+            secret_key_init: std::sync::Mutex::new(()),
             plain_kv: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
             public_grants: RwLock::new(Vec::new()),
@@ -463,7 +483,16 @@ impl AuthStore {
     /// automatically persisted to the vault pages via the pager.
     pub fn with_vault(config: AuthConfig, pager: Arc<Pager>) -> Result<Self, AuthError> {
         let certificate = crate::utils::env_with_file_fallback("REDDB_CERTIFICATE");
-        Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
+        let passphrase = crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE");
+        match (certificate, passphrase) {
+            (Some(_), Some(_)) => Err(AuthError::Internal(
+                "set either REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE, not both".into(),
+            )),
+            (None, Some(passphrase)) => Self::with_vault_passphrase(config, pager, &passphrase),
+            (certificate, None) => {
+                Self::with_vault_optional_certificate(config, pager, certificate.as_deref())
+            }
+        }
     }
 
     pub fn with_vault_certificate(
@@ -472,6 +501,21 @@ impl AuthStore {
         certificate_hex: &str,
     ) -> Result<Self, AuthError> {
         Self::with_vault_optional_certificate(config, pager, Some(certificate_hex))
+    }
+
+    pub fn with_vault_passphrase(
+        config: AuthConfig,
+        pager: Arc<Pager>,
+        passphrase: &str,
+    ) -> Result<Self, AuthError> {
+        let mut store = Self::new(config);
+        let vault = Vault::with_passphrase(&pager, passphrase)?;
+        if let Some(state) = vault.load(&pager)? {
+            store.restore_from_vault(state);
+        }
+        *store.vault.write().map_err(lock_err)? = Some(vault);
+        store.pager = Some(pager);
+        Ok(store)
     }
 
     fn with_vault_optional_certificate(
@@ -499,6 +543,8 @@ impl AuthStore {
         }
 
         store.pager = Some(pager);
+        store.provided_certificate =
+            certificate_hex.map(|certificate| certificate.trim().to_ascii_lowercase());
         Ok(store)
     }
 
@@ -550,6 +596,33 @@ impl AuthStore {
         }
     }
 
+    /// Bootstrap while durably delivering a newly generated vault
+    /// certificate before the sealed vault is installed or persisted.
+    pub fn bootstrap_with_certificate_delivery(
+        &self,
+        username: &str,
+        password: &str,
+        mut deliver: impl FnMut(&str) -> Result<(), AuthError>,
+    ) -> Result<BootstrapResult, AuthError> {
+        let delivery: &mut dyn FnMut(&str) -> Result<(), AuthError> = &mut deliver;
+        if let Some(configured) = self.configured_control_events() {
+            let ctx = bootstrap_user_lifecycle_ctx();
+            let control = UserLifecycleControl {
+                ctx: &ctx,
+                ledger: configured.ledger.as_ref(),
+                config: configured.config,
+            };
+            self.bootstrap_with_control_events_inner_and_delivery(
+                username,
+                password,
+                &control,
+                Some(delivery),
+            )
+        } else {
+            self.bootstrap_unaudited_with_delivery(username, password, Some(delivery))
+        }
+    }
+
     pub fn bootstrap_with_control_events(
         &self,
         username: &str,
@@ -589,6 +662,15 @@ impl AuthStore {
         username: &str,
         password: &str,
     ) -> Result<BootstrapResult, AuthError> {
+        self.bootstrap_unaudited_with_delivery(username, password, None)
+    }
+
+    fn bootstrap_unaudited_with_delivery(
+        &self,
+        username: &str,
+        password: &str,
+        mut certificate_delivery: Option<&mut dyn FnMut(&str) -> Result<(), AuthError>>,
+    ) -> Result<BootstrapResult, AuthError> {
         // Atomic seal: only the first caller wins.
         if self
             .bootstrapped
@@ -619,40 +701,47 @@ impl AuthStore {
             None,
         )?;
 
-        // Generate a certificate-based keypair and re-seal the vault.
-        let certificate = if let Some(ref pager) = self.pager {
-            let kp = KeyPair::generate();
-            let cert_hex = kp.certificate_hex();
-
-            // Re-create the vault using the certificate-derived key.
-            let new_vault = Vault::with_certificate_bytes(pager, &kp.certificate)
-                .map_err(|e| AuthError::Internal(format!("vault re-seal failed: {e}")))?;
-
-            // Store the keypair so token signing works immediately.
-            if let Ok(mut kp_guard) = self.keypair.write() {
-                *kp_guard = Some(kp);
+        // Token signing gets a fresh master secret. Preserve an existing
+        // certificate/passphrase seal instead of replacing the operator's key.
+        let credential_result = (|| -> Result<Option<String>, AuthError> {
+            let certificate = if let Some(ref pager) = self.pager {
+                let keypair = KeyPair::generate();
+                let mut vault = self.vault.write().map_err(lock_err)?;
+                let certificate = if vault.is_none() {
+                    let certificate = keypair.certificate_hex();
+                    if let Some(deliver) = certificate_delivery.as_mut() {
+                        deliver(&certificate)?;
+                    }
+                    *vault = Some(Vault::with_certificate_bytes(pager, &keypair.certificate)?);
+                    Some(certificate)
+                } else {
+                    self.provided_certificate.clone()
+                };
+                *self.keypair.write().map_err(lock_err)? = Some(keypair);
+                drop(vault);
+                self.ensure_vault_secret_key_result()?;
+                certificate
+            } else {
+                None
+            };
+            *self.enforcement_mode.write().map_err(lock_err)? =
+                PolicyEnforcementMode::default_fresh_bootstrap();
+            self.vault_kv.write().map_err(lock_err)?.insert(
+                "red.config.policy.enforcement_mode".into(),
+                PolicyEnforcementMode::default_fresh_bootstrap()
+                    .as_str()
+                    .into(),
+            );
+            self.persist_to_vault_result()?;
+            Ok(certificate)
+        })();
+        let certificate = match credential_result {
+            Ok(certificate) => certificate,
+            Err(err) => {
+                self.rollback_bootstrap(&UserId::from_parts(None, username));
+                return Err(err);
             }
-
-            // Replace the vault and persist with the master secret included.
-            if let Ok(mut vault_guard) = self.vault.write() {
-                *vault_guard = Some(new_vault);
-            }
-            // Generate the AES-256 secret key for Value::Secret encryption.
-            self.ensure_vault_secret_key();
-            self.persist_to_vault();
-
-            Some(cert_hex)
-        } else {
-            None
         };
-
-        // #712 / S5A: fresh bootstraps land in the strict posture.
-        // Persist explicitly to vault_kv so subsequent boots
-        // (rehydrate_iam) pick up `policy_only` instead of the
-        // existing-install default. Existing installs upgrading past
-        // this commit never traverse this branch — `bootstrap()` is
-        // sealed once and never re-runs.
-        self.set_enforcement_mode(PolicyEnforcementMode::default_fresh_bootstrap());
 
         Ok(BootstrapResult {
             user,
@@ -667,8 +756,18 @@ impl AuthStore {
         password: &str,
         control: &UserLifecycleControl<'_>,
     ) -> Result<BootstrapResult, AuthError> {
+        self.bootstrap_with_control_events_inner_and_delivery(username, password, control, None)
+    }
+
+    fn bootstrap_with_control_events_inner_and_delivery(
+        &self,
+        username: &str,
+        password: &str,
+        control: &UserLifecycleControl<'_>,
+        certificate_delivery: Option<&mut dyn FnMut(&str) -> Result<(), AuthError>>,
+    ) -> Result<BootstrapResult, AuthError> {
         let id = UserId::from_parts(None, username);
-        match self.bootstrap_unaudited(username, password) {
+        match self.bootstrap_unaudited_with_delivery(username, password, certificate_delivery) {
             Ok(result) => {
                 let event_result = self.emit_user_lifecycle_allowed(
                     control,
@@ -720,8 +819,61 @@ impl AuthStore {
         if username.is_empty() || password.is_empty() {
             return None;
         }
+        let mut certificate_output = if self.bootstrap_requires_certificate_delivery() {
+            let Some(path) = crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_CERT_OUT")
+            else {
+                tracing::error!(
+                    target: "reddb::security",
+                    "env bootstrap requires REDDB_BOOTSTRAP_CERT_OUT when the vault is enabled; refusing to emit the certificate to logs"
+                );
+                return None;
+            };
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = match options.open(&path) {
+                Ok(file) => file,
+                Err(error) => {
+                    tracing::error!(
+                        target: "reddb::security",
+                        path = %path,
+                        error = %error,
+                        "env bootstrap certificate output is not writable"
+                    );
+                    return None;
+                }
+            };
+            Some((path, file))
+        } else {
+            None
+        };
 
-        match self.bootstrap(&username, &password) {
+        let mut certificate_staged = false;
+        let bootstrap_result = match certificate_output.as_mut() {
+            Some((path, file)) => {
+                self.bootstrap_with_certificate_delivery(&username, &password, |certificate| {
+                    use std::io::Write;
+                    writeln!(file, "{certificate}").map_err(|error| {
+                        AuthError::Internal(format!(
+                            "write bootstrap certificate {}: {error}",
+                            path
+                        ))
+                    })?;
+                    file.sync_all().map_err(|error| {
+                        AuthError::Internal(format!("sync bootstrap certificate {}: {error}", path))
+                    })?;
+                    certificate_staged = true;
+                    Ok(())
+                })
+            }
+            None => self.bootstrap(&username, &password),
+        };
+
+        match bootstrap_result {
             Ok(result) => {
                 // F-04: `username` is REDDB_USERNAME — operator-supplied
                 // (env), but still routed through the LogField escaper
@@ -732,12 +884,38 @@ impl AuthStore {
                     username = %reddb_wire::audit_safe_log_field(&username),
                     "bootstrapped admin user from REDDB_USERNAME/REDDB_PASSWORD"
                 );
-                if let Some(ref cert) = result.certificate {
-                    deliver_bootstrap_certificate(cert);
+                if !certificate_staged {
+                    if let (Some(cert), Some((path, file))) =
+                        (result.certificate.as_deref(), certificate_output.as_mut())
+                    {
+                        use std::io::Write;
+                        if let Err(error) = writeln!(file, "{cert}").and_then(|()| file.sync_all())
+                        {
+                            tracing::error!(
+                                target: "reddb::security",
+                                path = %path,
+                                error = %error,
+                                "could not write the vault certificate"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                if let Some((path, _)) = certificate_output {
+                    tracing::warn!(
+                        target: "reddb::security",
+                        path = %path,
+                        "vault certificate written — save it: the ONLY way to unseal after a restart"
+                    );
                 }
                 Some(result)
             }
             Err(e) => {
+                let output_path = certificate_output.as_ref().map(|(path, _)| path.clone());
+                drop(certificate_output);
+                if let Some(path) = output_path {
+                    let _ = std::fs::remove_file(path);
+                }
                 tracing::error!(err = %e, "env bootstrap failed");
                 None
             }
@@ -749,7 +927,7 @@ impl AuthStore {
     // -----------------------------------------------------------------
 
     /// Persist the current auth state to the vault pages (if configured).
-    fn persist_to_vault_result(&self) -> Result<(), AuthError> {
+    pub(crate) fn persist_to_vault_result(&self) -> Result<(), AuthError> {
         let vault_guard = self.vault.read().unwrap_or_else(|e| e.into_inner());
         if let (Some(ref vault), Some(ref pager)) = (&*vault_guard, &self.pager) {
             let state = self.snapshot();
@@ -787,6 +965,18 @@ impl AuthStore {
                 .read()
                 .map(|guard| guard.is_some())
                 .unwrap_or(false)
+    }
+
+    /// Whether first-admin bootstrap must mint and deliver a new certificate
+    /// before the vault can be activated. Passphrase-backed and already
+    /// credentialed vaults preserve their existing seal and need no output.
+    pub fn bootstrap_requires_certificate_delivery(&self) -> bool {
+        self.pager.is_some()
+            && self
+                .vault
+                .read()
+                .map(|vault| vault.is_none())
+                .unwrap_or(true)
     }
 
     // -----------------------------------------------------------------
@@ -1042,9 +1232,30 @@ impl AuthStore {
 
     /// Generate and store the AES-256 secret key on first boot if not present.
     pub fn ensure_vault_secret_key(&self) {
-        if self.vault_kv_get("red.secret.aes_key").is_none() {
-            let key = random_bytes(32);
-            self.vault_kv_set("red.secret.aes_key".to_string(), hex::encode(key));
+        if let Err(err) = self.ensure_vault_secret_key_result() {
+            tracing::error!(error = %err, "vault secret key initialization failed");
+        }
+    }
+
+    pub(crate) fn ensure_vault_secret_key_result(&self) -> Result<(), AuthError> {
+        let _guard = self.secret_key_init.lock().map_err(lock_err)?;
+        if self.vault_secret_key().is_some() {
+            return Ok(());
+        }
+        if self.vault_kv_get("red.secret.aes_key").is_some() {
+            return Err(AuthError::Internal(
+                "stored vault secret key is invalid".into(),
+            ));
+        }
+        let value = hex::encode(random_bytes(32));
+        if self.is_vault_backed() {
+            self.vault_kv_try_set("red.secret.aes_key".into(), value)
+        } else {
+            self.vault_kv
+                .write()
+                .map_err(lock_err)?
+                .insert("red.secret.aes_key".into(), value);
+            Ok(())
         }
     }
 
@@ -1417,7 +1628,14 @@ impl AuthStore {
     ) -> bool {
         let resource = Self::user_lifecycle_resource(target);
         let ctx = self.eval_context_for_principal(actor, actor_role, target.tenant.clone());
-        self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
+        if actor.tenant.is_some() && actor.tenant != target.tenant {
+            return false;
+        }
+        if self.has_explicit_user_lifecycle_deny(actor, actor_role, action, target) {
+            return false;
+        }
+        actor_role.can_admin()
+            || self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
     }
 
     /// Returns `true` only when an IAM policy explicitly denies the
@@ -1522,12 +1740,7 @@ impl AuthStore {
             }
         }
 
-        // Remove sessions belonging to this user (match on tenant+username
-        // so we don't tear down a same-named user in another tenant).
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions
-                .retain(|_, s| !(s.username == username && s.tenant_id.as_deref() == tenant_id));
-        }
+        self.purge_sessions_for(&id);
 
         self.persist_to_vault();
         Ok(())
@@ -2042,24 +2255,31 @@ impl AuthStore {
         username: &str,
         password: &str,
     ) -> Result<Session, AuthError> {
+        // Initialize once on the first login, regardless of whether the
+        // principal exists. Subsequent missing/disabled-account attempts use
+        // this verifier instead of returning before production-cost Argon2.
+        let dummy_hash = dummy_password_hash();
         // The synthetic platform-owner principal exists only as a
         // policy-graph anchor (see `crate::auth::self_lock_guard`); it
         // must never authenticate via any transport.
         if crate::auth::self_lock_guard::is_synthetic_principal(username) {
+            let _ = verify_password(password, dummy_hash);
             return Err(AuthError::InvalidCredentials);
         }
         let id = UserId::from_parts(tenant_id, username);
         let users = self.users.read().map_err(lock_err)?;
-        let user = users.get(&id).ok_or(AuthError::InvalidCredentials)?;
-
-        if !user.enabled {
+        let (stored_hash, account_enabled) = match users.get(&id) {
+            Some(user) => (user.password_hash.clone(), user.enabled),
+            None => (dummy_hash.to_string(), false),
+        };
+        let password_matches = verify_password(password, &stored_hash);
+        if !account_enabled || !password_matches {
             return Err(AuthError::InvalidCredentials);
         }
 
-        let stored_hash = user.password_hash.clone();
-        if !verify_password(password, &stored_hash) {
-            return Err(AuthError::InvalidCredentials);
-        }
+        let user = users
+            .get(&id)
+            .expect("an enabled account came from the user map");
 
         // Generate token: signed if keypair is available, random otherwise.
         let token = match self.keypair.read().ok().and_then(|g| {
@@ -2394,6 +2614,15 @@ impl AuthStore {
         }
     }
 
+    /// Resolve the tenant-aware owner of an API key without exposing its record.
+    pub fn api_key_owner(&self, key: &str) -> Option<UserId> {
+        let key_id = api_key_credential_id(key);
+        self.api_key_index
+            .read()
+            .ok()
+            .and_then(|index| index.get(&key_id).map(|(id, _)| id.clone()))
+    }
+
     /// Revoke (delete) an API key.
     pub fn revoke_api_key(&self, key: &str) -> Result<(), AuthError> {
         if let Some(configured) = self.configured_control_events() {
@@ -2518,18 +2747,43 @@ impl AuthStore {
 
     /// Revoke a session token.
     pub fn revoke_session(&self, token: &str) {
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.remove(token);
+        if let Some(session) = self.remove_session_without_count(token) {
+            if self.take_counted_session(token) {
+                let uid = UserId::from_parts(session.tenant_id.as_deref(), &session.username);
+                self.decrement_session_count(&uid);
+            }
         }
+    }
+
+    fn remove_session_without_count(&self, token: &str) -> Option<Session> {
+        self.sessions.write().ok()?.remove(token)
+    }
+
+    fn take_counted_session(&self, token: &str) -> bool {
+        self.counted_session_tokens
+            .write()
+            .map(|mut tokens| tokens.remove(token))
+            .unwrap_or(false)
     }
 
     /// Purge expired sessions (housekeeping).
     pub fn purge_expired_sessions(&self) -> usize {
         let now = now_ms();
         if let Ok(mut sessions) = self.sessions.write() {
-            let before = sessions.len();
-            sessions.retain(|_, s| s.expires_at > now);
-            return before - sessions.len();
+            let expired: Vec<Session> = sessions
+                .values()
+                .filter(|session| session.expires_at <= now)
+                .cloned()
+                .collect();
+            sessions.retain(|_, session| session.expires_at > now);
+            drop(sessions);
+            for session in &expired {
+                if self.take_counted_session(&session.token) {
+                    let uid = UserId::from_parts(session.tenant_id.as_deref(), &session.username);
+                    self.decrement_session_count(&uid);
+                }
+            }
+            return expired.len();
         }
         0
     }
@@ -2969,7 +3223,22 @@ impl AuthStore {
     /// so a same-named user in another tenant is untouched).
     fn purge_sessions_for(&self, uid: &UserId) {
         if let Ok(mut sessions) = self.sessions.write() {
-            sessions.retain(|_, s| !(s.username == uid.username && s.tenant_id == uid.tenant));
+            let tokens: Vec<String> = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.username == uid.username && session.tenant_id == uid.tenant
+                })
+                .map(|(token, _)| token.clone())
+                .collect();
+            for token in &tokens {
+                sessions.remove(token);
+            }
+            drop(sessions);
+            for token in tokens {
+                if self.take_counted_session(&token) {
+                    self.decrement_session_count(uid);
+                }
+            }
         }
     }
 
@@ -3278,38 +3547,104 @@ impl AuthStore {
         password: &str,
     ) -> Result<Session, AuthError> {
         let uid = UserId::from_parts(tenant_id, username);
-        let attrs = self.user_attributes(&uid);
+        let session = self.authenticate_active(tenant_id, username, password)?;
+        if let Err(error) = self.reserve_connection_slot(&uid) {
+            self.remove_session_without_count(&session.token);
+            return Err(error);
+        }
+        let mut tokens = self.counted_session_tokens.write().map_err(|_| {
+            self.remove_session_without_count(&session.token);
+            self.decrement_session_count(&uid);
+            AuthError::Internal("session admission lock poisoned".to_string())
+        })?;
+        tokens.insert(session.token.clone());
+        Ok(session)
+    }
 
+    /// Authenticate a stateless/token login while enforcing account expiry.
+    /// CONNECTION LIMIT is reserved for live wire leases, not for merely
+    /// issuing a reusable bearer token.
+    pub fn authenticate_active(
+        &self,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+    ) -> Result<Session, AuthError> {
+        let uid = UserId::from_parts(tenant_id, username);
+        if let Some(deadline) = self.user_attributes(&uid).valid_until {
+            if now_ms() >= deadline {
+                return Err(AuthError::Forbidden(format!(
+                    "account `{uid}` expired (VALID UNTIL exceeded)"
+                )));
+            }
+        }
+        self.authenticate_in_tenant(tenant_id, username, password)
+    }
+
+    /// Authenticate a wire connection and hold its admission slot until the
+    /// returned lease is dropped at EOF/Bye/error.
+    pub fn authenticate_connection(
+        self: &Arc<Self>,
+        tenant_id: Option<&str>,
+        username: &str,
+        password: &str,
+    ) -> Result<(Session, ConnectionLease), AuthError> {
+        let session = self.authenticate_active(tenant_id, username, password)?;
+        let principal = UserId::from_parts(tenant_id, username);
+        if let Err(error) = self.reserve_connection_slot(&principal) {
+            self.remove_session_without_count(&session.token);
+            return Err(error);
+        }
+        // PG password authentication needs the verified identity but does not
+        // expose a bearer token. Remove the transient login session so its TTL
+        // and revocation lifecycle cannot release the socket-owned lease.
+        self.remove_session_without_count(&session.token);
+        let lease = ConnectionLease {
+            store: Arc::clone(self),
+            principal,
+        };
+        Ok((session, lease))
+    }
+
+    /// Reserve a slot after a non-password proof (SCRAM, API key, session,
+    /// or a locally mapped OAuth principal) has already been validated.
+    pub fn acquire_connection_lease(
+        self: &Arc<Self>,
+        principal: &UserId,
+    ) -> Result<ConnectionLease, AuthError> {
+        if !self.principal_is_active(principal) {
+            return Err(AuthError::InvalidCredentials);
+        }
+        self.reserve_connection_slot(principal)?;
+        Ok(ConnectionLease {
+            store: Arc::clone(self),
+            principal: principal.clone(),
+        })
+    }
+
+    fn reserve_connection_slot(&self, uid: &UserId) -> Result<(), AuthError> {
+        let attrs = self.user_attributes(uid);
         if let Some(deadline) = attrs.valid_until {
             if now_ms() >= deadline {
                 return Err(AuthError::Forbidden(format!(
-                    "account `{}` expired (VALID UNTIL exceeded)",
-                    uid
+                    "account `{uid}` expired (VALID UNTIL exceeded)"
                 )));
             }
         }
-
+        let mut counts = self
+            .session_count_by_user
+            .write()
+            .map_err(|_| AuthError::Internal("connection admission lock poisoned".to_string()))?;
+        let current = counts.get(uid).copied().unwrap_or(0);
         if let Some(limit) = attrs.connection_limit {
-            let current = self
-                .session_count_by_user
-                .read()
-                .ok()
-                .and_then(|m| m.get(&uid).copied())
-                .unwrap_or(0);
             if current >= limit {
                 return Err(AuthError::Forbidden(format!(
-                    "account `{}` exceeded CONNECTION LIMIT ({})",
-                    uid, limit
+                    "account `{uid}` exceeded CONNECTION LIMIT ({limit})"
                 )));
             }
         }
-
-        let session = self.authenticate_in_tenant(tenant_id, username, password)?;
-
-        if let Ok(mut counts) = self.session_count_by_user.write() {
-            *counts.entry(uid).or_insert(0) += 1;
-        }
-        Ok(session)
+        counts.insert(uid.clone(), current.saturating_add(1));
+        Ok(())
     }
 
     /// Decrement the live-session count for `uid`. Call from session
@@ -4957,6 +5292,14 @@ const PASSWORD_T_COST: u32 = 2;
 const PASSWORD_P_COST: u32 = 1;
 const PASSWORD_TAG_LEN: usize = 32;
 
+static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
+
+fn dummy_password_hash() -> &'static str {
+    DUMMY_PASSWORD_HASH
+        .get_or_init(|| hash_password("reddb-invalid-login-dummy"))
+        .as_str()
+}
+
 fn password_hasher() -> argon2::Argon2<'static> {
     let params = argon2::Params::new(
         PASSWORD_M_COST_KIB,
@@ -5271,6 +5614,24 @@ mod tests {
     }
 
     #[test]
+    fn unknown_disabled_and_wrong_password_logins_share_the_public_error() {
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "secret", Role::Read).unwrap();
+        store.create_user("disabled", "secret", Role::Read).unwrap();
+        store
+            .set_user_enabled(&UserId::platform("disabled"), false)
+            .unwrap();
+
+        for result in [
+            store.authenticate("unknown", "secret"),
+            store.authenticate("alice", "wrong"),
+            store.authenticate("disabled", "secret"),
+        ] {
+            assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        }
+    }
+
+    #[test]
     fn test_api_key_lifecycle() {
         let store = AuthStore::new(test_config());
         store.create_user("alice", "pass", Role::Admin).unwrap();
@@ -5454,6 +5815,21 @@ mod tests {
     }
 
     #[test]
+    fn admin_user_lifecycle_keeps_role_baseline_in_policy_only_mode() {
+        let store = AuthStore::new(test_config());
+        store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+        store.create_user("admin", "pass", Role::Admin).unwrap();
+        store.create_user("alice", "pass", Role::Read).unwrap();
+
+        assert!(store.check_user_lifecycle_authz(
+            &UserId::platform("admin"),
+            Role::Admin,
+            "user:update",
+            &UserId::platform("alice"),
+        ));
+    }
+
+    #[test]
     fn test_regular_user_mutations_still_work() {
         let store = AuthStore::new(test_config());
         store.create_user("alice", "old", Role::Admin).unwrap();
@@ -5606,6 +5982,43 @@ mod tests {
         // Only 1 user exists (the first one)
         assert_eq!(store.list_users().len(), 1);
         assert_eq!(store.list_users()[0].username, "admin");
+    }
+
+    #[test]
+    fn certificate_delivery_failure_precedes_vault_activation() {
+        use crate::storage::engine::pager::PagerConfig;
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "reddb-auth-delivery-failure-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let pager = Arc::new(
+            Pager::open(directory.join("test.rdb"), PagerConfig::default()).expect("pager"),
+        );
+        let mut config = test_config();
+        config.vault_enabled = true;
+        let store = AuthStore::with_vault_optional_certificate(config, Arc::clone(&pager), None)
+            .expect("fresh vault store");
+
+        let error = store
+            .bootstrap_with_certificate_delivery("admin", "secret", |_| {
+                Err(AuthError::Internal(
+                    "simulated delivery failure".to_string(),
+                ))
+            })
+            .expect_err("delivery failure must abort bootstrap");
+        assert!(error.to_string().contains("simulated delivery failure"));
+        assert!(store.needs_bootstrap());
+        assert!(store.list_users().is_empty());
+        assert!(!Vault::has_saved_state(&pager));
+
+        drop(store);
+        drop(pager);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -6020,41 +6433,4 @@ mod tests {
             "a password rotation must revoke live sessions"
         );
     }
-}
-
-/// Hand the operator the vault certificate minted by an env bootstrap.
-///
-/// It used to be printed to stderr unconditionally, which in a container
-/// means the log aggregator now holds the one secret that unseals the
-/// vault. With `REDDB_BOOTSTRAP_CERT_OUT` set it is written there
-/// (owner-only, thanks to the boot umask) and only the path is logged;
-/// without it, stderr remains the delivery channel, with a warning that
-/// says so.
-fn deliver_bootstrap_certificate(cert: &str) {
-    if let Some(path) = crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_CERT_OUT") {
-        match std::fs::write(&path, format!("{cert}\n")) {
-            Ok(()) => {
-                tracing::warn!(
-                    target: "reddb::security",
-                    path = %path,
-                    "vault certificate written — save it: the ONLY way to unseal after a restart"
-                );
-                return;
-            }
-            Err(err) => {
-                tracing::error!(
-                    target: "reddb::security",
-                    path = %path,
-                    error = %err,
-                    "could not write the vault certificate; falling back to stderr"
-                );
-            }
-        }
-    }
-    eprintln!("[reddb] CERTIFICATE: {cert}");
-    tracing::warn!(
-        target: "reddb::security",
-        "vault certificate issued on stderr — save it (ONLY way to unseal after restart); \
-         set REDDB_BOOTSTRAP_CERT_OUT to receive it as a file instead of a log line"
-    );
 }

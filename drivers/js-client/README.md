@@ -30,12 +30,10 @@ pnpm add @reddb-io/client
 npm install @reddb-io/client
 ```
 
-The `postinstall` script downloads the matching `red_client` binary
-from GitHub Releases into `node_modules/@reddb-io/client/bin/`. If your
-environment blocks postinstall scripts or has no network, set
-`REDDB_CLIENT_BIN=/path/to/red_client` to point at a copy you've placed
-manually. The driver itself does **not** need the binary for `connect()`
-— it speaks the wire protocols directly from JS.
+This package is pure JavaScript: it has no install scripts and downloads no
+binary, so it installs the same way on every platform and works with
+`--ignore-scripts`. It speaks the wire protocols directly from JS. For the
+`red` / `red_client` CLI, install `@reddb-io/cli`.
 
 ## Quickstart
 
@@ -76,6 +74,14 @@ is still accepted.
 For `http://` and `https://` connections, `connect()` verifies readiness with
 a lightweight `SELECT 1` round-trip. `/health` states such as `degraded` are
 transient during boot and are not fatal as long as queries succeed.
+
+RedWire query parameters retain `Float32Array`, `Float64Array`, `Uint8Array`
+and `Buffer` views through normalization, avoiding intermediate number arrays
+and base64 strings. The request owns its encoded bytes before `query()` yields;
+later mutations of caller-owned views do not change the sent request. The
+transport drops input-view references before waiting for the network. HTTP/gRPC
+keep the same JSON-compatible parameter envelopes. See the measured
+[encoding results](../../docs/perf/client-codecs-2026-10-23.md).
 
 ## Transactions
 
@@ -185,15 +191,6 @@ await connect('red://host:5050?token=sk-abc')
 // Username + password (driver calls /auth/login first):
 await connect('red://user:pass@host:5050')
 ```
-
-## Environment overrides
-
-| Variable                     | Effect                                                |
-| ---------------------------- | ----------------------------------------------------- |
-| `REDDB_CLIENT_BIN`           | Override path to `red_client` for spawn-style helpers |
-| `REDDB_SKIP_POSTINSTALL=1`   | Don't download the binary on install                  |
-| `REDDB_POSTINSTALL_VERSION`  | Pull a specific release tag                           |
-| `REDDB_POSTINSTALL_REPO`     | Pull from a fork (default `reddb-io/reddb`)           |
 
 ## License
 

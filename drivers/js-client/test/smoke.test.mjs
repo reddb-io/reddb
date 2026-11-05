@@ -260,12 +260,14 @@ test('domain clients expose explicit kv config and vault surfaces', async () => 
     await db.config('app').resolve('api_key')
     await db.vault('secrets').get('api_key')
     await db.vault('secrets').unseal('api_key')
+    await db.vault('secrets').reveal('api_key')
 
     assert.equal(seen[0], "KV PUT sessions.token = 'abc'")
     assert.equal(seen[1], 'PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)')
     assert.equal(seen[2], 'RESOLVE CONFIG app api_key')
     assert.equal(seen[3], 'VAULT GET secrets.api_key')
-    assert.equal(seen[4], 'UNSEAL VAULT secrets.api_key')
+    assert.equal(seen[4], 'VAULT REVEAL secrets.api_key')
+    assert.equal(seen[5], 'VAULT REVEAL secrets.api_key')
     await db.close()
   } finally {
     await stub.close()

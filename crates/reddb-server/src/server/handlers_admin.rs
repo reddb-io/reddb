@@ -974,7 +974,7 @@ impl RedDBServer {
             return HttpResponse {
                 status: 200,
                 content_type: "application/x-ndjson",
-                body: body.into_bytes(),
+                body: body.into_bytes().into(),
                 extra_headers: Vec::new(),
             };
         }
@@ -1062,15 +1062,28 @@ impl RedDBServer {
             );
         }
 
-        if phase.accepts_queries() {
+        let execution_ready = self.execution_watchdog.is_ready();
+        if phase.accepts_queries() && execution_ready {
             object.insert("status".to_string(), JsonValue::String("ready".to_string()));
             json_response(200, JsonValue::Object(object))
         } else {
             object.insert(
                 "status".to_string(),
-                JsonValue::String(phase.as_str().to_string()),
+                JsonValue::String(
+                    if execution_ready {
+                        phase.as_str()
+                    } else {
+                        "unready"
+                    }
+                    .to_string(),
+                ),
             );
-            if let Some(reason) = lifecycle.not_ready_reason() {
+            if !execution_ready {
+                object.insert(
+                    "reason".to_string(),
+                    JsonValue::String("handler_deadline_exceeded".to_string()),
+                );
+            } else if let Some(reason) = lifecycle.not_ready_reason() {
                 object.insert("reason".to_string(), JsonValue::String(reason));
             } else {
                 object.insert(
@@ -1109,7 +1122,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_metrics();
-        let body = String::from_utf8(response.body).expect("utf8 metrics");
+        let body = String::from_utf8(response.body.to_vec()).expect("utf8 metrics");
 
         for needle in [
             "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l1\"}",
@@ -1146,7 +1159,7 @@ mod tests {
 
         let server = RedDBServer::new(runtime);
         let response = server.handle_metrics();
-        let body = String::from_utf8(response.body).expect("utf8 metrics");
+        let body = String::from_utf8(response.body.to_vec()).expect("utf8 metrics");
 
         for needle in [
             "# TYPE reddb_replication_full_resync_total counter",

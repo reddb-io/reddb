@@ -1,0 +1,10 @@
+   Compiling reddb-io-types v1.24.15 (/work/src/crates/reddb-types)
+   Compiling reddb-io-grpc-proto v1.24.15 (/work/src/crates/reddb-grpc-proto)
+   Compiling reddb-io-server v1.24.15 (/work/src/crates/reddb-server)
+   Compiling reddb-io-crypto v1.24.15 (/work/src/crates/reddb-crypto)
+   Compiling reddb-io-wire v1.24.15 (/work/src/crates/reddb-wire)
+   Compiling reddb-io-rql v1.24.15 (/work/src/crates/reddb-rql)
+   Compiling reddb-io-file v1.24.15 (/work/src/crates/reddb-file)
+   Compiling reddb-io-client v1.24.15 (/work/src/crates/reddb-client)
+   Compiling reddb-io v1.24.15 (/work/src)
+    Finished `release` profile [optimized] target(s) in 2m 54s

@@ -1,6 +1,7 @@
 use super::*;
 use crate::auth::column_policy_gate::ColumnAccessRequest;
 use crate::auth::UserId;
+use crate::catalog::CollectionModel;
 use crate::replication::cdc::ChangeRecord;
 use reddb_rql::ast::TableSource;
 // Authorization surface moved to `super::authz` (issue #1622). Re-export the
@@ -44,7 +45,7 @@ pub(crate) use super::impl_audit_control::{
 // Config/secret free helpers still called unqualified from the dispatch here.
 pub(crate) use super::impl_config_secret::{
     insert_config_json_path, secret_sql_value_to_string, seed_storage_deploy_config,
-    show_config_json_result, show_secrets_allows_key,
+    show_config_json_result,
 };
 pub(super) use super::impl_core_outer_scope::{
     first_column_values, query_references_outer_scope, relation_scopes_for_query,
@@ -65,9 +66,9 @@ pub use super::execution_context::{
     capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
     clear_current_snapshot, clear_current_tenant, current_auth_identity_for_audit,
     current_connection_id, current_tenant, entity_visible_under_current_snapshot,
-    entity_visible_with_context, set_current_auth_identity, set_current_connection_id,
-    set_current_snapshot, set_current_tenant, snapshot_bundle, with_snapshot_bundle,
-    SnapshotBundle, SnapshotContext,
+    entity_visible_with_context, set_current_auth_identity, set_current_auth_principal,
+    set_current_connection_id, set_current_snapshot, set_current_tenant, snapshot_bundle,
+    with_snapshot_bundle, SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
     config_read_permitted, current_auth_identity, current_config_value, current_kv_value,
@@ -142,6 +143,7 @@ pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
         // query referencing them as volatile (never result-cache it).
         "$config",
         "$secret",
+        "$red.secret",
         "$kv",
         // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
         // omitted for now — they ARE volatile but today's tests rely
@@ -291,6 +293,7 @@ impl RedDBRuntime {
         if scope.is_empty() {
             return self.execute_query(query);
         }
+        self.check_scope_override_privilege(&scope)?;
         let _scope_guard = ScopeOverrideGuard::install(scope);
         self.execute_query(query)
     }
@@ -362,11 +365,13 @@ impl RedDBRuntime {
         // results before they reach any consumer. Fast no-op (one relaxed
         // atomic load) unless an input-stream digest mismatch has tombstoned
         // a RID range on this store.
-        if let Ok(ref mut query_result) = result {
-            if query_result.statement_type == "select" {
-                self.filter_integrity_tombstoned(&mut query_result.result);
+        result = result.and_then(|mut value| {
+            if value.statement_type == "select" {
+                self.filter_integrity_tombstoned(&mut value.result)?;
             }
-        }
+            super::query_budget::check_result(self.resource_limits(), &value)?;
+            Ok(value)
+        });
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build
@@ -385,14 +390,10 @@ impl RedDBRuntime {
             "delete" => crate::telemetry::slow_query_logger::QueryKind::Delete,
             _ => crate::telemetry::slow_query_logger::QueryKind::Internal,
         };
-        // SQL redaction: pass the raw query through. The slow-query
-        // logger writes structured JSON so embedded literals stay
-        // escape-safe at the JSON boundary (proven by
-        // `adversarial_sql_is_escape_safe` in slow_query_logger.rs).
-        // PII redaction (e.g. literal masking) is a follow-up.
+        let logged_query = redact_sql_for_slow_log(query);
         self.inner
             .slow_query_logger
-            .record(kind, elapsed_ms, query.to_string(), &scope);
+            .record(kind, elapsed_ms, logged_query, &scope);
 
         // Issue #1241 — record latency into the bounded per-`kind`
         // histogram substrate (always, not only above the slow-query
@@ -503,11 +504,7 @@ impl RedDBRuntime {
             }
         };
 
-        let mut result = self.dispatch_expr(expr, query, mode)?;
-        if result.statement_type == "select" {
-            self.apply_secret_decryption(&mut result);
-        }
-        Ok(result)
+        self.dispatch_expr(expr, query, mode)
     }
 
     pub fn causal_session(&self) -> crate::runtime::CausalSession {
@@ -585,6 +582,7 @@ impl RedDBRuntime {
         // requests and an early `?` return still pops cleanly.
         match crate::runtime::within_clause::try_strip_within_prefix(query) {
             Ok(Some((scope, inner))) => {
+                self.check_scope_override_privilege(&scope)?;
                 let _scope_guard = ScopeOverrideGuard::install(scope);
                 // Re-enter the inner path, NOT `execute_query`, so the
                 // slow-query lifecycle hook records exactly one row per
@@ -618,6 +616,7 @@ impl RedDBRuntime {
         // an error (matches PG semantics: SET LOCAL only takes effect
         // within an active transaction).
         if let Some(value) = parse_set_local_tenant(query)? {
+            self.check_scope_tenant_privilege(value.as_deref())?;
             let conn_id = current_connection_id();
             if !self.inner.transaction_state.in_transaction(conn_id) {
                 return Err(RedDBError::Query(
@@ -716,6 +715,12 @@ impl RedDBRuntime {
         let mode = prepared.mode;
         let expr = prepared.expr;
 
+        let _query_budget = if super::query_budget::is_materialized_read(&expr) {
+            Some(self.query_budget_scope()?)
+        } else {
+            None
+        };
+
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
         let control_event_specs = query_control_event_specs(&expr);
@@ -738,7 +743,6 @@ impl RedDBRuntime {
                 return Err(err);
             }
         };
-        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
         let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {
@@ -1160,28 +1164,28 @@ impl RedDBRuntime {
                     ));
                 }
                 reject_engine_internal_vault_key(key)?;
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query("SET SECRET requires an enabled, unsealed vault".to_string())
-                })?;
-                self.check_secret_write_privilege(&auth_store, key)?;
-                if matches!(value, Value::Null) {
-                    auth_store
-                        .vault_kv_try_delete(key)
-                        .map_err(|err| RedDBError::Query(err.to_string()))?;
-                    update_current_secret_value(key, None);
-                    self.invalidate_result_cache();
+                if key.starts_with("red.secret.") {
+                    self.set_internal_provider_secret(
+                        key,
+                        if value.is_null() {
+                            None
+                        } else {
+                            Some(secret_sql_value_to_string(value)?)
+                        },
+                    )?;
                     return Ok(RuntimeQueryResult::ok_message(
                         query.to_string(),
-                        &format!("secret deleted: {key}"),
-                        "delete_secret",
+                        &format!("secret set: {key}"),
+                        "set_secret",
                     ));
                 }
-                let value = secret_sql_value_to_string(value)?;
-                auth_store
-                    .vault_kv_try_set(key.clone(), value.clone())
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                update_current_secret_value(key, Some(value));
-                self.invalidate_result_cache();
+                let value = if value.is_null() {
+                    None
+                } else {
+                    Some(secret_sql_value_to_string(value)?)
+                };
+                self.set_user_secret(key, value.clone())?;
+                update_current_secret_value(key, value);
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("secret set: {key}"),
@@ -1191,27 +1195,20 @@ impl RedDBRuntime {
             // DELETE SECRET key
             QueryExpr::DeleteSecret { ref key } => {
                 reject_engine_internal_vault_key(key)?;
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query(
-                        "DELETE SECRET requires an enabled, unsealed vault".to_string(),
-                    )
-                })?;
-                self.check_secret_write_privilege(&auth_store, key)?;
-                let deleted = auth_store
-                    .vault_kv_try_delete(key)
-                    .map_err(|err| RedDBError::Query(err.to_string()))?;
-                if deleted {
-                    update_current_secret_value(key, None);
+                if key.starts_with("red.secret.") {
+                    self.set_internal_provider_secret(key, None)?;
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("secret deleted: {key}"),
+                        "delete_secret",
+                    ));
                 }
-                self.invalidate_result_cache();
+                self.set_user_secret(key, None)?;
+                update_current_secret_value(key, None);
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("secret deleted: {key}"),
-                    if deleted {
-                        "delete_secret"
-                    } else {
-                        "delete_secret_not_found"
-                    },
+                    "delete_secret",
                 ))
             }
             // SET KV key = value — plain (non-encrypted) user KV entry (#1602)
@@ -1267,36 +1264,7 @@ impl RedDBRuntime {
             }
             // SHOW SECRET[S] [prefix]
             QueryExpr::ShowSecrets { ref prefix } => {
-                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
-                    RedDBError::Query("SHOW SECRET requires an enabled, unsealed vault".to_string())
-                })?;
-                if !auth_store.is_vault_backed() {
-                    return Err(RedDBError::Query(
-                        "SHOW SECRET requires an enabled, unsealed vault".to_string(),
-                    ));
-                }
-                let mut keys = auth_store.vault_kv_keys();
-                keys.sort();
-                let mut result = UnifiedResult::with_columns(vec![
-                    "key".into(),
-                    "value".into(),
-                    "status".into(),
-                ]);
-                for key in keys {
-                    if !show_secrets_allows_key(&key) {
-                        continue;
-                    }
-                    if let Some(ref pfx) = prefix {
-                        if !key.starts_with(pfx) {
-                            continue;
-                        }
-                    }
-                    let mut record = UnifiedRecord::new();
-                    record.set("key", Value::text(key));
-                    record.set("value", Value::text("***"));
-                    record.set("status", Value::text("active"));
-                    result.push(record);
-                }
+                let result = self.show_user_secrets(prefix.as_deref())?;
                 Ok(RuntimeQueryResult {
                     query: query.to_string(),
                     mode,
@@ -1468,6 +1436,9 @@ impl RedDBRuntime {
 
                 let (kind, msg) = match ctl {
                     TxnControl::Begin(requested_isolation) => {
+                        if self.inner.transaction_state.in_transaction(conn_id) {
+                            return Err(RedDBError::Query("transaction already active".into()));
+                        }
                         let isolation = requested_isolation
                             .map(IsolationLevel::from)
                             .unwrap_or(IsolationLevel::SnapshotIsolation);
@@ -1475,6 +1446,15 @@ impl RedDBRuntime {
                         ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
                     }
                     TxnControl::Commit => {
+                        let has_vault_writes = self
+                            .inner
+                            .pending_vault_writes
+                            .read()
+                            .get(&conn_id)
+                            .is_some_and(|writes| !writes.is_empty());
+                        let store = self.inner.db.store();
+                        let _vault_guard =
+                            has_vault_writes.then(|| store.vault_publication_lock.lock());
                         let context = self.inner.transaction_state.commit(conn_id, |ctx| {
                             let mut own_xids = std::collections::HashSet::new();
                             own_xids.insert(ctx.xid);
@@ -1514,8 +1494,25 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
+                            if let Err(err) = self.prepare_pending_vault_writes(conn_id, ctx) {
+                                let undo = self.revive_pending_versioned_updates(conn_id);
+                                self.revive_pending_tombstones(conn_id);
+                                self.discard_pending_queue_dedup(conn_id);
+                                self.discard_pending_kv_watch_events(conn_id);
+                                self.discard_pending_queue_wakes(conn_id);
+                                self.discard_pending_store_wal_actions(conn_id);
+                                self.release_pending_claim_locks(conn_id);
+                                undo?;
+                                return Err(err);
+                            }
+                            // Validate before taking the publication fence:
+                            // conflict rollback can acquire index topology.
+                            // Retain the fence through WAL and visibility so a
+                            // checkpoint cannot discard a durable commit's WAL.
+                            let publication = store.vault_publication_lock.lock();
                             self.restore_pending_write_stamps(conn_id);
                             if let Err(err) = self.flush_pending_store_wal_actions(conn_id) {
+                                drop(publication);
                                 let undo = self.revive_pending_versioned_updates(conn_id);
                                 self.revive_pending_tombstones(conn_id);
                                 self.discard_pending_queue_dedup(conn_id);
@@ -1525,10 +1522,15 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
-                            Ok(())
-                        })?;
+                            Ok(publication)
+                        });
+                        if context.is_err() {
+                            self.discard_pending_vault_writes(conn_id)?;
+                        }
+                        let context = context?;
                         match context {
                             Some(ctx) => {
+                                self.finalize_pending_vault_writes(conn_id);
                                 self.finalize_pending_versioned_updates(conn_id);
                                 self.finalize_pending_tombstones(conn_id);
                                 self.finalize_pending_queue_dedup(conn_id);
@@ -1543,28 +1545,13 @@ impl RedDBRuntime {
                             ),
                         }
                     }
-                    TxnControl::Rollback => {
-                        match self.inner.transaction_state.rollback(conn_id) {
-                            Some(ctx) => {
-                                // Phase 2.3.2b: tuples that the txn had
-                                // xmax-stamped become live again — wipe xmax
-                                // back to 0 so later snapshots see them.
-                                let undo = self.revive_pending_versioned_updates(conn_id);
-                                self.revive_pending_tombstones(conn_id);
-                                self.discard_pending_queue_dedup(conn_id);
-                                self.discard_pending_kv_watch_events(conn_id);
-                                self.discard_pending_queue_wakes(conn_id);
-                                self.discard_pending_store_wal_actions(conn_id);
-                                self.release_pending_claim_locks(conn_id);
-                                undo?;
-                                ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
-                            }
-                            None => (
-                                "rollback",
-                                "ROLLBACK outside transaction — no-op (autocommit)".to_string(),
-                            ),
-                        }
-                    }
+                    TxnControl::Rollback => match self.rollback_connection(conn_id)? {
+                        Some(ctx) => ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid)),
+                        None => (
+                            "rollback",
+                            "ROLLBACK outside transaction — no-op (autocommit)".to_string(),
+                        ),
+                    },
                     // Phase 2.3.2e: savepoints map onto sub-xids. Each
                     // SAVEPOINT allocates a fresh xid and pushes it
                     // onto the per-txn stack so subsequent writes can
@@ -1600,16 +1587,18 @@ impl RedDBRuntime {
                         match self
                             .inner
                             .transaction_state
-                            .rollback_to_savepoint(conn_id, name)?
-                        {
-                            Some(rollback) => {
+                            .rollback_to_savepoint_with(conn_id, name, |rollback| {
+                                self.rollback_vault_savepoint(conn_id, rollback.savepoint_xid);
                                 let reverted_updates = self.revive_versioned_updates_since(
                                     conn_id,
                                     rollback.savepoint_xid,
                                 );
                                 let revived =
                                     self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
-                                let reverted_updates = reverted_updates?;
+                                reverted_updates.map(|updates| (updates, revived))
+                            })?
+                        {
+                            Some((rollback, (reverted_updates, revived))) => {
                                 (
                                     "rollback_to_savepoint",
                                     format!(
@@ -2261,10 +2250,9 @@ impl RedDBRuntime {
                             }
                             vacuum_stats.add(&stats);
                         }
-                        self.inner
-                            .transaction_state
-                            .snapshot_manager()
-                            .prune_aborted(cutoff_xid);
+                        // The cutoff protects snapshots, not physical references.
+                        // Aborted inserts can remain in this or another collection;
+                        // forgetting their outcome would make them visible again.
                         // Stats refresh covers every target (same as ANALYZE).
                         for t in &targets {
                             self.refresh_table_planner_stats(t);
@@ -2362,6 +2350,9 @@ impl RedDBRuntime {
             )),
         };
 
+        if _query_budget.is_some() {
+            super::query_budget::charge(0)?;
+        }
         if !control_event_specs.is_empty() {
             let (outcome, reason) = match &query_result {
                 Ok(_) => (crate::runtime::control_events::Outcome::Allowed, None),
@@ -2386,16 +2377,6 @@ impl RedDBRuntime {
                 query_audit_started.elapsed().as_millis() as u64,
                 result,
             );
-        }
-
-        // Decrypt Value::Secret columns in-place before caching, so
-        // cached results match the post-decrypt shape and repeat
-        // queries skip the per-row AES-GCM pass.
-        let mut query_result = query_result;
-        if let Ok(ref mut result) = query_result {
-            if result.statement_type == "select" {
-                self.apply_secret_decryption(result);
-            }
         }
 
         // Cache SELECT results for 30s.
@@ -2429,7 +2410,7 @@ impl RedDBRuntime {
     /// statement's snapshot rather than minting a new one, and the frame opts
     /// out of the result cache because there is no stable text key.
     ///
-    /// Applies secret decryption on SELECT results, identical to `execute_query`.
+    /// Keeps secret SELECT results masked, identical to `execute_query`.
     pub fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let frame = super::statement_frame::StatementExecutionFrame::build(
             self,
@@ -2449,22 +2430,19 @@ impl RedDBRuntime {
             return Err(RedDBError::Query(format!("permission denied: {err}")));
         }
 
+        frame.release_snapshot_for_maintenance(&expr);
         let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;
 
-        let result = self.dispatch_expr(expr, query_str, mode)?;
-        let mut r = result;
-        if r.statement_type == "select" {
-            self.apply_secret_decryption(&mut r);
-        }
-        Ok(r)
+        self.dispatch_expr(expr, query_str, mode)
     }
 
     pub(super) fn validate_model_operations_before_auth(
         &self,
         expr: &QueryExpr,
     ) -> RedDBResult<()> {
+        self.validate_vault_table_access(expr)?;
         use crate::catalog::CollectionModel;
         use crate::runtime::ddl::polymorphic_resolver;
         use reddb_rql::ast::KvCommand;
@@ -2522,7 +2500,7 @@ impl RedDBRuntime {
                     KvCommand::Watch {
                         collection, model, ..
                     } => (collection.as_str(), *model),
-                    KvCommand::Unseal { collection, .. } => {
+                    KvCommand::Reveal { collection, .. } => {
                         (collection.as_str(), CollectionModel::Vault)
                     }
                 };
@@ -2538,6 +2516,18 @@ impl RedDBRuntime {
         let Some((name, expected_model)) = expected else {
             return Ok(());
         };
+        // Declared models are authoritative in the catalog snapshot. Resolve
+        // just this contract instead of observing every row in every collection
+        // for a point command. Keep the snapshot fallback for undeclared legacy
+        // collections and orphaned contracts, preserving their inference rules.
+        if let Some(contract) = self.inner.db.collection_contract_arc(name) {
+            if self.inner.db.store().get_collection(name).is_some() {
+                return polymorphic_resolver::ensure_model_match(
+                    expected_model,
+                    contract.declared_model,
+                );
+            }
+        }
         let snapshot = self.inner.db.catalog_model_snapshot();
         let Some(actual_model) = snapshot
             .collections
@@ -2771,6 +2761,30 @@ impl RedDBRuntime {
                     .collect::<RedDBResult<Vec<_>>>()?;
                 Ok(Expr::FunctionCall { name, args, span })
             }
+            Expr::WindowFunctionCall {
+                name,
+                args,
+                mut window,
+                span,
+            } => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.resolve_expr_subqueries(arg, outer_scopes, frame))
+                    .collect::<RedDBResult<Vec<_>>>()?;
+                for expr in &mut window.partition_by {
+                    *expr = self.resolve_expr_subqueries(expr.clone(), outer_scopes, frame)?;
+                }
+                for clause in &mut window.order_by {
+                    clause.expr =
+                        self.resolve_expr_subqueries(clause.expr.clone(), outer_scopes, frame)?;
+                }
+                Ok(Expr::WindowFunctionCall {
+                    name,
+                    args,
+                    window,
+                    span,
+                })
+            }
             Expr::Case {
                 branches,
                 else_,
@@ -2917,6 +2931,35 @@ impl RedDBRuntime {
     }
 
     fn dispatch_expr(
+        &self,
+        expr: QueryExpr,
+        query_str: &str,
+        mode: QueryMode,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Typed read plans only: mutation/transaction cleanup must never fail
+        // because a read result or cooperative deadline budget was exhausted.
+        let is_read = super::query_budget::is_materialized_read(&expr);
+        let _budget = if is_read {
+            Some(super::query_budget::Scope::enter(
+                self.resource_limits(),
+                &self.inner.query_budget_slots,
+            )?)
+        } else {
+            None
+        };
+        let result = self.dispatch_expr_inner(expr, query_str, mode);
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        let result = result?;
+        super::query_budget::check_result(self.resource_limits(), &result)?;
+        if is_read {
+            super::query_budget::charge(0)?;
+        }
+        Ok(result)
+    }
+
+    fn dispatch_expr_inner(
         &self,
         expr: QueryExpr,
         query_str: &str,
@@ -3199,6 +3242,11 @@ impl RedDBRuntime {
         for candidate in candidates {
             let (collection, old_id, new_id, xid, previous_xmax) = &candidate;
             let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                super::index_store::MutationTestPhase::BeforeUndoTopology,
+            );
             let topology_guard = topology_lock.read();
             let mut guard = self.inner.pending_versioned_updates.write();
             let Some(pending) = guard.get_mut(&conn_id) else {
@@ -3472,16 +3520,46 @@ impl RedDBRuntime {
     }
 }
 
+fn redact_sql_for_slow_log(query: &str) -> String {
+    let lowered = query.to_ascii_lowercase();
+    if lowered.contains("secret") || lowered.contains("vault") {
+        return "secret statement (SQL redacted)".to_string();
+    }
+    let credential_candidate = lowered.contains("password")
+        && ((lowered.contains("create") && lowered.contains("user"))
+            || (lowered.contains("alter") && lowered.contains("user")));
+    if !credential_candidate {
+        return query.to_string();
+    }
+    match parse_multi(query) {
+        Ok(QueryExpr::CreateUser(stmt)) => {
+            let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+            format!("CREATE USER {target} PASSWORD '***' ROLE {}", stmt.role)
+        }
+        Ok(QueryExpr::AlterUser(stmt))
+            if stmt
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, reddb_rql::ast::AlterUserAttribute::Password(_))) =>
+        {
+            let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+            format!("ALTER USER {target} PASSWORD '***'")
+        }
+        Ok(_) => "credential statement (SQL redacted)".to_string(),
+        Err(_) => "credential statement (SQL redacted)".to_string(),
+    }
+}
+
 fn strip_explain_analyze_prefix(sql: &str) -> Option<&str> {
     let rest = strip_keyword_ci(sql.trim_start(), "EXPLAIN")?.trim_start();
     Some(strip_keyword_ci(rest, "ANALYZE")?.trim_start()).filter(|inner| !inner.is_empty())
 }
 
 fn strip_keyword_ci<'a>(sql: &'a str, keyword: &str) -> Option<&'a str> {
-    if sql.len() < keyword.len() {
-        return None;
-    }
-    let (head, rest) = sql.split_at(keyword.len());
+    // `get` is None past the end or inside a multi-byte character, where
+    // `split_at` would panic (and a release build aborts on panic).
+    let head = sql.get(..keyword.len())?;
+    let rest = &sql[keyword.len()..];
     if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
@@ -3581,6 +3659,192 @@ fn walk_analyze_plan_node(
 
     for child in &node.children {
         walk_analyze_plan_node(child, depth + 1, 0, 0.0, out);
+    }
+}
+
+#[cfg(test)]
+mod declared_model_validation_tests {
+    use super::*;
+    use crate::catalog::CollectionModel;
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+    use reddb_rql::ast::KvCommand;
+
+    fn get(collection: &str) -> QueryExpr {
+        QueryExpr::KvCommand(KvCommand::Get {
+            model: CollectionModel::Kv,
+            collection: collection.into(),
+            key: "item".into(),
+        })
+    }
+
+    #[test]
+    fn declared_model_validation_keeps_mismatches_and_observes_contract_changes() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        runtime
+            .validate_model_operations_before_auth(&get("declared"))
+            .expect("KV contract");
+        let db = runtime.db();
+        for (model, name) in [
+            (CollectionModel::Table, "table"),
+            (CollectionModel::Mixed, "mixed"),
+        ] {
+            let mut contract = db.collection_contract("declared").expect("contract");
+            contract.declared_model = model;
+            db.save_collection_contract(contract)
+                .expect("replace contract");
+            let error = runtime
+                .validate_model_operations_before_auth(&get("declared"))
+                .expect_err("mismatch");
+            assert_eq!(
+                error.to_string(),
+                format!("INVALID_OPERATION: model mismatch: expected kv, got {name}")
+            );
+        }
+    }
+
+    #[test]
+    fn declared_model_validation_preserves_legacy_inference_and_missing_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let db = runtime.db();
+        let store = db.store();
+        store
+            .create_collection("legacy")
+            .expect("legacy collection");
+        store
+            .get_collection("legacy")
+            .expect("manager")
+            .insert(crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(1),
+                "legacy",
+                1,
+                Vec::new(),
+            ))
+            .expect("uncontracted table row");
+        assert!(db.collection_contract("legacy").is_none());
+        let error = runtime
+            .validate_model_operations_before_auth(&get("legacy"))
+            .expect_err("inferred table");
+        assert!(error
+            .to_string()
+            .contains("model mismatch: expected kv, got table"));
+        runtime
+            .validate_model_operations_before_auth(&get("missing"))
+            .expect("missing stays deferred to execution");
+    }
+
+    #[test]
+    fn declared_model_validation_does_not_treat_orphan_contracts_as_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        let db = runtime.db();
+        let mut contract = db.collection_contract("declared").expect("contract");
+        contract.name = "orphan".into();
+        contract.declared_model = CollectionModel::Table;
+        db.save_collection_contract(contract)
+            .expect("orphan contract");
+        assert!(db.store().get_collection("orphan").is_none());
+        runtime
+            .validate_model_operations_before_auth(&get("orphan"))
+            .expect("no physical collection to validate");
+    }
+
+    #[test]
+    fn declared_model_validation_allocates_nothing_with_unrelated_collections() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("KV PUT declared.item = 1")
+            .expect("seed");
+        let expr = get("declared");
+        for unrelated in [0, 64] {
+            let db = runtime.db();
+            let store = db.store();
+            for index in 0..unrelated {
+                let name = format!("unrelated_{index}");
+                store
+                    .create_collection(&name)
+                    .expect("unrelated collection");
+            }
+            runtime
+                .validate_model_operations_before_auth(&expr)
+                .expect("warm contract cache");
+            let (result, count) =
+                measure_allocations(|| runtime.validate_model_operations_before_auth(&expr));
+            result.expect("declared KV");
+            assert_eq!(
+                count.allocs, 0,
+                "validation must only borrow the target contract"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod multibyte_sql_tests {
+    use super::*;
+
+    #[test]
+    fn explain_analyze_prefix_ignores_multibyte_text_at_the_keyword_boundary() {
+        // `strip_keyword_ci` used `split_at(keyword.len())`, which panics when
+        // that byte offset is inside a multi-byte character.
+        for pad in 0..16 {
+            for wide in ["é", "日", "😀"] {
+                let sql = format!("{}{wide}llo", "a".repeat(pad));
+                assert_eq!(strip_explain_analyze_prefix(&sql), None, "{sql:?}");
+            }
+        }
+        assert_eq!(
+            strip_explain_analyze_prefix("explain  analyze DELETE FROM t"),
+            Some("DELETE FROM t")
+        );
+    }
+
+    /// One malformed or unusual statement must never take the process down:
+    /// release builds abort on panic, so any panic reachable from
+    /// `execute_query` is a remote denial of service. Put a multi-byte
+    /// character at every byte offset a keyword matcher might slice at.
+    #[test]
+    fn multibyte_sql_never_panics_execute_query() {
+        let rt = RedDBRuntime::in_memory().expect("in-memory runtime");
+        let seeds = [
+            "",
+            "SELECT ",
+            "SELECT '",
+            "EXPLAIN ",
+            "EXPLAIN ANALYZE ",
+            "CHECKPOINT ",
+            "CHECKOUT ",
+            "RESET ",
+            "MERGE ",
+            "CHERRY PICK ",
+            "REVERT ",
+            "RESOLVE CONFLICT ",
+            "INSERT INTO t VALUES ('",
+        ];
+        let mut panicked = Vec::new();
+        for seed in seeds {
+            for pad in 0..16 {
+                for wide in ["é", "日", "😀"] {
+                    let sql = format!("{seed}{}{wide}llo", "a".repeat(pad));
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = rt.execute_query(&sql);
+                    }));
+                    if outcome.is_err() {
+                        panicked.push(sql);
+                    }
+                }
+            }
+        }
+        assert!(
+            panicked.is_empty(),
+            "execute_query panicked on {} statement(s), first: {:?}",
+            panicked.len(),
+            panicked.first()
+        );
     }
 }
 
@@ -3700,6 +3964,26 @@ mod security_gate_tests {
         }
     }
 
+    struct ScopedIdentityGuard;
+
+    impl ScopedIdentityGuard {
+        fn install(tenant: &str, username: &str, role: Role) -> Self {
+            crate::runtime::execution_context::set_current_auth_principal(
+                crate::auth::UserId::scoped(tenant, username),
+                role,
+            );
+            set_current_tenant(tenant.to_string());
+            Self
+        }
+    }
+
+    impl Drop for ScopedIdentityGuard {
+        fn drop(&mut self) {
+            clear_current_auth_identity();
+            clear_current_tenant();
+        }
+    }
+
     fn runtime_with_user(username: &str, role: Role) -> RedDBRuntime {
         let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
             enabled: true,
@@ -3732,6 +4016,124 @@ mod security_gate_tests {
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         runtime.set_auth_store(std::sync::Arc::clone(&store));
         (runtime, store)
+    }
+
+    #[test]
+    fn tenant_credential_cannot_override_credential_scope() {
+        use crate::runtime::within_clause::{FieldOverride, ScopeOverride};
+
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        store
+            .create_user_in_tenant(Some("acme"), "admin", "pw", Role::Admin)
+            .expect("tenant admin");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(store);
+        let _identity = ScopedIdentityGuard::install("acme", "admin", Role::Admin);
+
+        runtime
+            .execute_query("WITHIN TENANT 'acme' SELECT 1")
+            .expect("own tenant remains valid");
+        for sql in [
+            "WITHIN TENANT 'globex' SELECT 1",
+            "WITHIN TENANT NULL SELECT 1",
+            "WITHIN TENANT 'acme' USER 'other' SELECT 1",
+            "WITHIN TENANT 'acme' AS ROLE 'read' SELECT 1",
+        ] {
+            assert!(runtime.execute_query(sql).is_err(), "must reject {sql}");
+        }
+        assert!(runtime
+            .execute_query_with_scope(
+                "SELECT 1",
+                ScopeOverride {
+                    tenant: FieldOverride::Set("globex".to_string()),
+                    ..ScopeOverride::default()
+                },
+            )
+            .is_err());
+
+        set_current_connection_id(44_201);
+        runtime.execute_query("BEGIN").expect("begin");
+        assert!(runtime.execute_query("SET LOCAL TENANT 'globex'").is_err());
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn tenant_admin_sql_user_lifecycle_is_tenant_bounded() {
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        store
+            .create_user_in_tenant(Some("acme"), "admin", "pw", Role::Admin)
+            .expect("tenant admin");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(std::sync::Arc::clone(&store));
+        let _identity = ScopedIdentityGuard::install("acme", "admin", Role::Admin);
+
+        runtime
+            .execute_query("CREATE USER acme.alice PASSWORD 'pw' ROLE read")
+            .expect("same-tenant create");
+        assert!(runtime
+            .execute_query("CREATE USER globex.alice PASSWORD 'pw' ROLE read")
+            .is_err());
+        assert!(runtime
+            .execute_query("ALTER USER globex.alice PASSWORD 'owned'")
+            .is_err());
+        let cross_tenant_allow = crate::auth::policies::Policy::from_json_str(
+            r#"{
+                "id":"tenant-cross-user",
+                "version":1,
+                "statements":[{
+                    "effect":"allow",
+                    "actions":["user:create","user:password:change"],
+                    "resources":["user:tenant/globex/*"]
+                }]
+            }"#,
+        )
+        .expect("cross-tenant policy");
+        store.put_policy(cross_tenant_allow).expect("put policy");
+        store
+            .attach_policy(
+                crate::auth::store::PrincipalRef::User(crate::auth::UserId::scoped(
+                    "acme", "admin",
+                )),
+                "tenant-cross-user",
+            )
+            .expect("attach policy");
+        assert!(runtime
+            .execute_query("CREATE USER globex.bob PASSWORD 'pw' ROLE read")
+            .is_err());
+        assert!(store.get_user(Some("globex"), "alice").is_none());
+        assert!(store.get_user(Some("globex"), "bob").is_none());
+    }
+
+    #[test]
+    fn slow_log_redacts_user_password_statements() {
+        for sql in [
+            "CREATE USER alice PASSWORD 'super-secret' ROLE admin",
+            "CREATE USER acme.alice PASSWORD 'super-secret' ROLE read",
+            "ALTER USER alice PASSWORD 'super-secret'",
+            "AlTeR UsEr acme.alice PaSsWoRd 'super-secret'",
+            "EXPLAIN CREATE USER alice PASSWORD 'super-secret' ROLE read",
+            "EXPLAIN ALTER USER alice PASSWORD 'super-secret'",
+            "ALTER USER alice PASSWORD 'unterminated",
+        ] {
+            let redacted = redact_sql_for_slow_log(sql);
+            assert!(!redacted.contains("super-secret"), "leaked from {sql}");
+            assert!(!redacted.contains("unterminated"), "leaked from {sql}");
+        }
+        assert_eq!(
+            redact_sql_for_slow_log("SELECT password FROM accounts"),
+            "SELECT password FROM accounts"
+        );
     }
 
     #[test]
@@ -3817,16 +4219,13 @@ mod security_gate_tests {
                 .cloned()
                 .expect("token column")
         };
-        // Any table reader used to get the plaintext; now only an admin or
-        // a principal with an explicit `secret:read` allow does.
+        // Ordinary SELECT stays masked for every role. Plaintext retrieval
+        // requires an explicit reveal operation.
         assert!(
             matches!(token_for("ro", Role::Read), Value::Secret(_)),
             "a read-role principal must see the column masked"
         );
-        assert_eq!(
-            token_for("root", Role::Admin),
-            Value::text("sk_live_abc".to_string())
-        );
+        assert!(matches!(token_for("root", Role::Admin), Value::Secret(_)));
     }
 
     #[test]
@@ -3834,8 +4233,8 @@ mod security_gate_tests {
         let runtime = runtime_with_user("bob", Role::Write);
         let _identity = IdentityGuard::install("bob", Role::Write);
         // These fell through the gate's wildcard arm, so a write-role
-        // principal could scrub or vacuum the store and list every secret.
-        for sql in ["VACUUM", "SCRUB", "SHOW SECRETS"] {
+        // principal could scrub or vacuum the store.
+        for sql in ["VACUUM", "SCRUB"] {
             let err = runtime
                 .execute_query(sql)
                 .expect_err("store-wide operation must be refused for a non-admin");

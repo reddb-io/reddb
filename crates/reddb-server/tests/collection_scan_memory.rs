@@ -1,0 +1,689 @@
+//! Collection pages must clone only the requested payload window, over runtime and HTTP.
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use reddb_server::{EntityData, RedDBOptions, RedDBRuntime, RedDBServer, ScanCursor};
+use reddb_types::Value;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::time::Duration;
+
+struct TrackedAllocator;
+
+#[global_allocator]
+static ALLOCATOR: TrackedAllocator = TrackedAllocator;
+static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+static MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn account_allocated(bytes: usize) {
+    let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+}
+
+// Test-only accounting delegates every allocation to System with its original
+// layout; it never allocates bookkeeping objects or changes pointer ownership.
+unsafe impl GlobalAlloc for TrackedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            account_allocated(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            account_allocated(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let replacement = unsafe { System.realloc(pointer, layout, size) };
+        if !replacement.is_null() {
+            if size >= layout.size() {
+                account_allocated(size - layout.size());
+            } else {
+                LIVE_BYTES.fetch_sub(layout.size() - size, Ordering::Relaxed);
+            }
+        }
+        replacement
+    }
+}
+
+fn get(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
+    let mut stream = TcpStream::connect(addr).expect("connect to owned fixture");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").expect("HTTP framing");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    serde_json::from_str(body).expect("collection page JSON")
+}
+
+#[test]
+fn collection_pages_bound_payload_memory_and_preserve_cursor_and_row_schema() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    runtime
+        .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+        .unwrap();
+    runtime
+        .execute_query("CREATE TABLE wide_rows (id INTEGER, payload JSON)")
+        .unwrap();
+    let payload = format!("{{\"value\":\"{}\"}}", "x".repeat(16 * 1024)).into_bytes();
+    for start in (0_i64..1024).step_by(64) {
+        let mut params = Vec::with_capacity(128);
+        let mut values = Vec::with_capacity(64);
+        for id in start..start + 64 {
+            params.push(Value::Integer(id));
+            params.push(Value::Json(payload.clone()));
+            values.push(format!("(${}, ${})", params.len() - 1, params.len()));
+        }
+        runtime
+            .execute_query_with_params(
+                &format!(
+                    "INSERT INTO wide_rows (id, payload) VALUES {}",
+                    values.join(",")
+                ),
+                &params,
+            )
+            .unwrap();
+    }
+    for offset in [0, 511, 1023, 1024, usize::MAX] {
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let page = runtime
+            .scan_collection("wide_rows", Some(ScanCursor { offset }), 1)
+            .unwrap();
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("runtime_collection_offset={offset} extra_peak_bytes={extra}");
+        assert!(
+            extra < 2 * 1024 * 1024,
+            "one-row collection page allocated {extra} bytes"
+        );
+        assert_eq!(page.total, 1024);
+        if offset < 1024 {
+            assert_eq!(page.items.len(), 1);
+            let EntityData::Row(row) = &page.items[0].data else {
+                panic!("row data")
+            };
+            assert_eq!(row.get_field("id"), Some(&Value::Integer(offset as i64)));
+            assert_eq!(
+                row.get_field("payload"),
+                Some(&Value::Json(payload.clone()))
+            );
+            assert_eq!(
+                page.next.map(|c| c.offset),
+                (offset < 1023).then_some(offset + 1)
+            );
+        } else {
+            assert!(page.items.is_empty());
+            assert!(page.next.is_none());
+        }
+    }
+    let server = RedDBServer::new(runtime);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = server.serve_in_background_on(listener);
+    let first = get(addr, "/collections/wide_rows/scan?limit=1");
+    let expected_payload = first["items"][0]["data"]["columns"][1].clone();
+    drop(first);
+    for offset in [511, 1023, 1024, usize::MAX] {
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let page = get(
+            addr,
+            &format!("/collections/wide_rows/scan?limit=1&offset={offset}"),
+        );
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("http_collection_offset={offset} extra_peak_bytes={extra}");
+        assert!(
+            extra < 2 * 1024 * 1024,
+            "one-row HTTP collection page allocated {extra} bytes"
+        );
+        assert_eq!(page["total"], 1024);
+        assert_eq!(
+            page["items"].as_array().unwrap().len(),
+            usize::from(offset < 1024)
+        );
+        assert_eq!(
+            page["next_offset"],
+            if offset < 1023 {
+                serde_json::json!(offset + 1)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+        if offset < 1024 {
+            assert_eq!(page["items"][0]["data"]["columns"][0], offset);
+            assert_eq!(page["items"][0]["data"]["columns"][1], expected_payload);
+        }
+    }
+}
+
+#[test]
+fn cold_vault_reads_do_not_retain_all_version_payloads() {
+    use reddb_server::auth::{AuthConfig, AuthStore};
+    use std::sync::Arc;
+
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
+    let (_directory, runtime) = cold_runtime();
+    let store = runtime.db().store();
+    let pager = Arc::clone(store.pager().expect("pager"));
+    runtime.set_auth_store(Arc::new(
+        AuthStore::with_vault_certificate(
+            AuthConfig::default(),
+            Arc::clone(&pager),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("test certificate"),
+    ));
+    runtime
+        .execute_query("CREATE VAULT secrets WITH OWN MASTER KEY")
+        .expect("vault");
+    let plaintext = ascii_noise(256 * 1024);
+    runtime
+        .execute_query(&format!("VAULT PUT secrets.seed = '{plaintext}'"))
+        .expect("large version");
+    runtime
+        .execute_query("ROTATE VAULT secrets.seed = 'latest'")
+        .expect("small latest version");
+    let manager = store.get_collection("secrets").expect("secrets");
+    let mut large = None;
+    let mut small = None;
+    manager.for_each_entity(|entity| {
+        let row = entity.data.as_row().expect("Vault row");
+        match row.get_field("version") {
+            Some(Value::Integer(1)) => large = row.get_field("value").cloned(),
+            Some(Value::Integer(2)) => small = row.get_field("value").cloned(),
+            _ => {}
+        }
+        true
+    });
+    let large = large.expect("large encrypted value");
+    let small = small.expect("small encrypted value");
+    assert!(matches!(&large, Value::Secret(bytes) if bytes.len() > 128 * 1024));
+    const VERSIONS: u64 = 128;
+    install_native_history(
+        &runtime,
+        "secrets",
+        "seed",
+        VERSIONS,
+        2 * 1024 * 1024,
+        |version| {
+            if version == VERSIONS {
+                small.clone()
+            } else {
+                large.clone()
+            }
+        },
+    );
+    drop(large);
+    drop(small);
+    for query in [
+        "VAULT GET secrets.seed",
+        "VAULT REVEAL secrets.seed",
+        "VAULT REVEAL secrets.seed VERSION 1",
+        "LIST VAULT secrets",
+    ] {
+        runtime.invalidate_result_cache();
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let result = runtime.execute_query(query).expect("Vault read");
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("cold_vault_versions={VERSIONS} query={query} extra_peak_bytes={extra}");
+        assert!(
+            extra < 8 * 1024 * 1024,
+            "a keyed read retained unselected history payloads: {extra} bytes"
+        );
+        assert_eq!(result.result.records.len(), 1);
+        match query {
+            "VAULT GET secrets.seed" | "LIST VAULT secrets" => assert_eq!(
+                result.result.records[0].get("version"),
+                Some(&Value::Integer(VERSIONS as i64))
+            ),
+            "VAULT REVEAL secrets.seed" => assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text("latest"))
+            ),
+            _ => assert_eq!(
+                result.result.records[0].get("value"),
+                Some(&Value::text(plaintext.as_str()))
+            ),
+        }
+    }
+    assert_eq!(
+        manager.count(),
+        VERSIONS as usize,
+        "reads preserve every physical version"
+    );
+}
+
+fn cold_runtime() -> (tempfile::TempDir, RedDBRuntime) {
+    use reddb_server::storage::StorageDeployPreset;
+    let directory = tempfile::tempdir().expect("cold memory fixture");
+    let options = RedDBOptions::persistent(directory.path().join("memory.rdb"))
+        .with_memory_budget(128 * 1024 * 1024)
+        .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+        .expect("profile");
+    let runtime = RedDBRuntime::with_options(options).expect("runtime");
+    (directory, runtime)
+}
+
+#[test]
+fn cold_collection_pages_include_persisted_rows_in_runtime_and_http() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            r#"CREATE TABLE native_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
+        )
+        .expect("declare native scan");
+    install_native_history(
+        &runtime,
+        "native_scan",
+        "history",
+        6,
+        1024 * 1024,
+        |version| Value::text(format!("persisted-{version}")),
+    );
+    runtime
+        .execute_query(r#"INSERT INTO native_scan ("key","value","version","tombstone") VALUES ('overlay','resident',7,false)"#)
+        .expect("resident overlay");
+    let mut identities = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = runtime
+            .scan_collection("native_scan", cursor, 2)
+            .expect("merged page");
+        assert_eq!(page.total, 7);
+        for entity in &page.items {
+            let EntityData::Row(row) = &entity.data else {
+                panic!("native row")
+            };
+            assert!(row.get_field("value").is_some(), "row schema preserved");
+            identities.push(entity.id);
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(identities.len(), 7);
+    assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+    for offset in [7, usize::MAX] {
+        let page = runtime
+            .scan_collection("native_scan", Some(ScanCursor { offset }), 2)
+            .expect("past end");
+        assert_eq!(page.total, 7);
+        assert!(page.items.is_empty());
+        assert!(page.next.is_none());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+    let address = listener.local_addr().expect("fixture address");
+    let _server = RedDBServer::new(runtime).serve_in_background_on(listener);
+    for offset in [0, 2, 4, 6, 7, usize::MAX] {
+        let page = get(
+            address,
+            &format!("/collections/native_scan/scan?offset={offset}&limit=2"),
+        );
+        assert_eq!(page["total"], 7);
+        assert_eq!(
+            page["items"].as_array().expect("items").len(),
+            7_usize.saturating_sub(offset).min(2)
+        );
+        assert_eq!(
+            page["next_offset"],
+            if offset < 5 {
+                serde_json::json!(offset + 2)
+            } else {
+                serde_json::Value::Null
+            }
+        );
+    }
+}
+
+#[test]
+fn cold_collection_scan_propagates_decode_limit_instead_of_returning_empty_page() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(
+            r#"CREATE TABLE denied_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#,
+        )
+        .expect("declare denied scan");
+    install_native_history(&runtime, "denied_scan", "wide", 1, 32, |_| {
+        Value::text("x".repeat(1024))
+    });
+    let error = runtime
+        .scan_collection("denied_scan", None, 1)
+        .expect_err("cold decode failure cannot become empty success");
+    assert!(
+        error.to_string().to_lowercase().contains("limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cold_collection_page_skips_payloads_before_its_requested_window() {
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query(r#"CREATE TABLE skip_scan ("key" TEXT, "value" TEXT, "version" INT, "tombstone" BOOLEAN)"#)
+        .expect("declare skip scan");
+    install_native_history(
+        &runtime,
+        "skip_scan",
+        "wide-prefix",
+        2,
+        64 * 1024,
+        |version| {
+            Value::text(if version == 1 {
+                "x".repeat(128 * 1024)
+            } else {
+                "small".into()
+            })
+        },
+    );
+    assert!(runtime.scan_collection("skip_scan", None, 1).is_err());
+    let page = runtime
+        .scan_collection("skip_scan", Some(ScanCursor { offset: 1 }), 1)
+        .expect("skip encoded prefix without allocating it");
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    let EntityData::Row(row) = &page.items[0].data else {
+        panic!("native row")
+    };
+    assert_eq!(row.get_field("value"), Some(&Value::text("small")));
+    assert!(page.next.is_none());
+}
+
+#[test]
+fn native_pages_preserve_the_resident_recovery_layout_for_cold_named_records() {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::storage::{EntityId, RowData, UnifiedEntity};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let _measurement = MEASUREMENT_LOCK.lock().expect("isolated fixture");
+    let (_directory, cold) = cold_runtime();
+    let resident = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("resident runtime");
+    // File recovery restores records before runtime declares column schemas.
+    // Deliberately use a declaration order different from recovery's order.
+    resident.db().store().get_or_create_collection("wire_rows");
+    cold.db().store().get_or_create_collection("wire_rows");
+    let store = cold.db().store();
+    let base = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        store.pager().expect("pager"),
+    )));
+    let resident_manager = resident
+        .db()
+        .store()
+        .get_collection("wire_rows")
+        .expect("resident collection");
+    for id in 1..=3 {
+        let mut fields = HashMap::from([
+            ("id".to_string(), Value::Integer(1_699_999_999_999_999_999)),
+            ("payload".to_string(), Value::text("x".repeat(32 * 1024))),
+        ]);
+        if id == 2 {
+            fields.insert("dynamic".to_string(), Value::Boolean(true));
+        }
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "wire_rows", id, vec![]);
+        entity.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        });
+        base.insert(
+            &entity.id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("cold record");
+        resident_manager
+            .restore_snapshot_entity(entity)
+            .expect("ordinary resident recovery");
+    }
+    store
+        .get_collection("wire_rows")
+        .expect("cold collection")
+        .install_backing(
+            Arc::new(PagedCollection::new(Arc::clone(&base))),
+            base.root_page_id(),
+            store.format_version(),
+            1024 * 1024,
+            3,
+        );
+    for runtime in [&resident, &cold] {
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("recovered collection")
+            .set_column_schema_if_empty(vec!["payload".into(), "id".into()]);
+        // Newly written named records are not recovered file records. Keep
+        // their independently observable native representation unchanged.
+        let mut overlay =
+            UnifiedEntity::table_row(EntityId::new(1_000_004), "wire_rows", 4, vec![]);
+        overlay.data = EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(HashMap::from([
+                ("id".into(), Value::Integer(4)),
+                ("payload".into(), Value::text("live")),
+            ])),
+            schema: None,
+        });
+        runtime
+            .db()
+            .store()
+            .get_collection("wire_rows")
+            .expect("overlay collection")
+            .insert(overlay)
+            .expect("live row");
+    }
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for runtime in [resident, cold] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+        addresses.push(listener.local_addr().expect("fixture address"));
+        servers.push(RedDBServer::new(runtime).serve_in_background_on(listener));
+    }
+    for offset in [0, 1, 2, 3, 4, usize::MAX] {
+        let path = format!("/collections/wire_rows/scan?offset={offset}&limit=2");
+        assert_eq!(
+            get(addresses[0], &path),
+            get(addresses[1], &path),
+            "native representation at offset {offset}"
+        );
+    }
+    let recovered = get(addresses[1], "/collections/wire_rows/scan?offset=0&limit=1");
+    assert_eq!(
+        recovered["items"][0]["data"]["columns"][0],
+        serde_json::json!({"$int": "1699999999999999999"})
+    );
+    let overlay = get(addresses[1], "/collections/wire_rows/scan?offset=3&limit=1");
+    assert_eq!(overlay["items"][0]["data"]["named"]["payload"], "live");
+}
+
+fn ascii_noise(bytes: usize) -> String {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut state = 0x1234_5678_u32;
+    (0..bytes)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            alphabet[(state & 63) as usize] as char
+        })
+        .collect()
+}
+
+fn install_native_history(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    key: &str,
+    versions: u64,
+    read_bytes_max: usize,
+    mut value: impl FnMut(u64) -> Value,
+) {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    use reddb_engine::storage::metadata_codec::serialize_entity_record;
+    use reddb_server::storage::{RowData, UnifiedEntity};
+    use std::sync::Arc;
+    let store = runtime.db().store();
+    let manager = store.get_collection(collection).expect("collection");
+    let pager = Arc::clone(store.pager().expect("pager"));
+    let data = Arc::new(reddb_server::storage::engine::BTree::new(Arc::clone(
+        &pager,
+    )));
+    let keys = Arc::new(reddb_server::storage::engine::BTree::new(pager));
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    for version in 1..=versions {
+        let id = store.next_entity_id();
+        let mut entity = UnifiedEntity::table_row(id, collection, version, vec![]);
+        entity.sequence_id = version;
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(key),
+                value(version),
+                Value::Integer(i64::try_from(version).expect("fixture version")),
+                Value::Boolean(false),
+            ],
+            vec![
+                "key".into(),
+                "value".into(),
+                "version".into(),
+                "tombstone".into(),
+            ],
+        ));
+        data.insert(
+            &id.raw().to_be_bytes(),
+            &serialize_entity_record(&entity, None, store.format_version()),
+        )
+        .expect("private history row");
+        keys.insert(
+            &reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw()),
+            &[],
+        )
+        .expect("key candidate");
+    }
+    let root = data.root_page_id();
+    manager.install_backing(
+        Arc::new(PagedCollection::with_key_index(data, keys)),
+        root,
+        store.format_version(),
+        read_bytes_max,
+        versions,
+    );
+    manager.register_row_id(versions);
+    manager.restore_sequence_id_next(versions.checked_add(1).expect("fixture sequence"));
+}
+
+#[test]
+fn cold_config_current_reads_and_writes_do_not_retain_old_payloads() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("isolated allocation measurement");
+    let (_directory, runtime) = cold_runtime();
+    runtime
+        .execute_query("PUT CONFIG cfg_versions seed = 'initial'")
+        .expect("declare config");
+    let large = Value::text(ascii_noise(1024 * 1024));
+    const VERSIONS: u64 = 16; // Existing Config retention window, unchanged.
+    install_native_history(
+        &runtime,
+        "cfg_versions",
+        "seed",
+        VERSIONS,
+        4 * 1024 * 1024,
+        |version| {
+            if version == VERSIONS {
+                Value::text("latest")
+            } else {
+                large.clone()
+            }
+        },
+    );
+    drop(large);
+    for query in ["GET CONFIG cfg_versions seed", "LIST CONFIG cfg_versions"] {
+        runtime.invalidate_result_cache();
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        let result = runtime.execute_query(query).expect("current Config read");
+        let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+        eprintln!("cold_config_versions={VERSIONS} query={query} extra_peak_bytes={extra}");
+        assert!(
+            extra < 8 * 1024 * 1024,
+            "current config read retained old payloads: {extra}"
+        );
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("value"),
+            Some(&Value::text("latest"))
+        );
+    }
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(baseline, Ordering::Relaxed);
+    runtime
+        .execute_query("PUT CONFIG cfg_versions seed = 'updated'")
+        .expect("next version");
+    let extra = PEAK_BYTES.load(Ordering::Relaxed).saturating_sub(baseline);
+    eprintln!("cold_config_versions={VERSIONS} mutation=PUT extra_peak_bytes={extra}");
+    assert!(
+        extra < 8 * 1024 * 1024,
+        "config write retained full payloads to prune history: {extra}"
+    );
+    assert_eq!(
+        runtime
+            .db()
+            .store()
+            .get_collection("cfg_versions")
+            .expect("config")
+            .count(),
+        VERSIONS as usize
+    );
+    let history = runtime
+        .execute_query("HISTORY CONFIG cfg_versions seed")
+        .expect("full retained history");
+    let versions: Vec<_> = history
+        .result
+        .records
+        .iter()
+        .map(|row| row.get("version").cloned())
+        .collect();
+    assert_eq!(
+        versions,
+        (2..=17)
+            .map(|version| Some(Value::Integer(version)))
+            .collect::<Vec<_>>()
+    );
+    let expected = ascii_noise(1024 * 1024);
+    for row in history.result.records.iter().take(14) {
+        assert!(
+            matches!(row.get("value"), Some(Value::Text(value)) if value.as_ref() == expected.as_str()),
+            "retained history payload changed"
+        );
+    }
+}

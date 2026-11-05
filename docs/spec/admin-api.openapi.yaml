@@ -266,7 +266,7 @@ paths:
   /health/ready:
     get:
       summary: Readiness probe.
-      description: 200 once WAL replay and restore-from-remote completed; 503 otherwise.
+      description: 200 once WAL replay and restore-from-remote completed and no timed-out handler remains on the blocking executor; 503 otherwise.
       security: []
       responses:
         "200": { description: Ready, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }

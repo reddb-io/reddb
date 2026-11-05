@@ -15,6 +15,9 @@ mod chaos_replica_apply_gap;
 #[path = "../e2e_issue_596_materialized_view_replica_replay.rs"]
 mod e2e_issue_596_materialized_view_replica_replay;
 
+#[path = "../e2e_issue_835_replication_stale_term_fence.rs"]
+mod e2e_issue_835_replication_stale_term_fence;
+
 #[path = "replication/e2e_issue_813_replica_repull_idempotent.rs"]
 mod e2e_issue_813_replica_repull_idempotent;
 
@@ -59,6 +62,9 @@ mod e2e_issue_1843_replica_authority_divergence;
 
 #[path = "replication/e2e_issue_2134_term_fence_apply.rs"]
 mod e2e_issue_2134_term_fence_apply;
+
+#[path = "replication/e2e_cli_primary_replica.rs"]
+mod e2e_cli_primary_replica;
 
 #[path = "replication/e2e_replica_readonly.rs"]
 mod e2e_replica_readonly;

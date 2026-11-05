@@ -449,6 +449,54 @@ pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut 
     run_backend(&Backend::Local(runtime), stdin, stdout)
 }
 
+/// One JSON-RPC session over an in-process engine, driven a request at a
+/// time instead of by a stdin loop.
+///
+/// This is the transport an embedded language binding (the Node addon) uses
+/// so it speaks the exact protocol and method surface the `red rpc --stdio`
+/// subprocess serves, without spawning anything: transactions, cursors and
+/// prepared statements live in the [`Session`], and the runtime's per-
+/// connection transaction state is keyed by this session's own connection id.
+///
+/// The connection id is a thread-local, so it is installed around every
+/// [`handle`](Self::handle) call rather than once: the caller may service
+/// requests from different threads (a binding's worker pool) and must not
+/// leak the id onto a thread that is returned to a pool.
+pub struct EmbeddedRpcSession {
+    runtime: std::sync::Arc<RedDBRuntime>,
+    session: Session,
+    conn_id: u64,
+}
+
+impl EmbeddedRpcSession {
+    pub fn new(runtime: std::sync::Arc<RedDBRuntime>) -> Self {
+        Self {
+            runtime,
+            session: Session::new(),
+            conn_id: next_stdio_conn_id(),
+        }
+    }
+
+    /// Handle one request line and return the single-line JSON response plus
+    /// whether it was the `close` method (the caller should then drop the
+    /// session). Never panics: handler panics are reported as
+    /// `INTERNAL_ERROR` responses, exactly as over stdio.
+    pub fn handle(&mut self, line: &str) -> (String, bool) {
+        crate::runtime::impl_core::set_current_connection_id(self.conn_id);
+        let response = handle_line(&Backend::Local(&self.runtime), &mut self.session, line);
+        crate::runtime::impl_core::clear_current_connection_id();
+        let closed = response.contains("\"__close__\":true");
+        (response, closed)
+    }
+}
+
+impl Drop for EmbeddedRpcSession {
+    fn drop(&mut self) {
+        // Same as stdio EOF: an open transaction is dropped unapplied.
+        let _ = self.session.take_tx();
+    }
+}
+
 /// Per-stdio-session connection-id counter. Each session captures a
 /// unique id so its `tx.commit` BEGIN/COMMIT pair routes to a distinct
 /// `TxnContext` in the runtime — without this every stdio session
@@ -1837,6 +1885,53 @@ mod tests {
             resp.contains("superseded exact-number envelope"),
             "got: {resp}"
         );
+    }
+
+    #[test]
+    fn embedded_session_serves_the_stdio_protocol_without_a_process() {
+        let rt = std::sync::Arc::new(make_runtime());
+        let mut a = EmbeddedRpcSession::new(rt.clone());
+        let mut b = EmbeddedRpcSession::new(rt);
+
+        let (resp, closed) = a.handle(r#"{"jsonrpc":"2.0","id":1,"method":"version","params":{}}"#);
+        assert!(resp.contains("\"result\""), "got: {resp}");
+        assert!(!closed);
+
+        let (resp, _) = a.handle(
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"CREATE TABLE emb (id INTEGER, name TEXT)"}}"#,
+        );
+        assert!(resp.contains("\"result\""), "got: {resp}");
+        let (resp, _) = a.handle(
+            r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"INSERT INTO emb (id, name) VALUES (1, 'x')"}}"#,
+        );
+        assert!(resp.contains("\"result\""), "got: {resp}");
+
+        // A second session over the same engine sees the committed row.
+        let (resp, _) = b.handle(
+            r#"{"jsonrpc":"2.0","id":4,"method":"query","params":{"sql":"SELECT id, name FROM emb"}}"#,
+        );
+        assert!(resp.contains("\"x\""), "got: {resp}");
+
+        let (resp, closed) = a.handle(r#"{"jsonrpc":"2.0","id":5,"method":"close","params":{}}"#);
+        assert!(closed, "got: {resp}");
+    }
+
+    #[test]
+    fn embedded_session_transactions_are_scoped_to_the_session() {
+        let rt = std::sync::Arc::new(make_runtime());
+        let mut a = EmbeddedRpcSession::new(rt.clone());
+        let mut b = EmbeddedRpcSession::new(rt);
+        let _ = a.handle(
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE emb_tx (id INTEGER)"}}"#,
+        );
+
+        let (begin, _) = a.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tx.begin","params":{}}"#);
+        assert!(begin.contains("\"result\""), "got: {begin}");
+        // `a` has a transaction open; `b` is an independent session and may open its own.
+        let (begin_b, _) = b.handle(r#"{"jsonrpc":"2.0","id":3,"method":"tx.begin","params":{}}"#);
+        assert!(begin_b.contains("\"result\""), "got: {begin_b}");
+        let (again, _) = a.handle(r#"{"jsonrpc":"2.0","id":4,"method":"tx.begin","params":{}}"#);
+        assert!(again.contains("TX_ALREADY_OPEN"), "got: {again}");
     }
 
     #[test]

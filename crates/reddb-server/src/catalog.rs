@@ -10,39 +10,10 @@ use crate::physical::{
 };
 use crate::storage::queue::QueueMode;
 use crate::storage::unified::UnifiedStore;
-use crate::storage::{EntityKind, UnifiedEntity};
+use crate::storage::{EntityKind, SegmentManager, UnifiedEntity};
 use reddb_types::Value;
 
-/// Per-collection analytical-storage seam (PRD #850, Phase 1).
-///
-/// Declares whether a `Metrics`/`TimeSeries` collection's hypertable chunks
-/// are backed by the **columnar** sealed-chunk layout
-/// ([`column_block`](crate::storage::unified::column_block)). In-scope
-/// collections get `columnar = true` automatically; `columnar = false` (or
-/// the whole config absent on older contracts) keeps the row engine.
-///
-/// `time_key` / `order_by_key` mirror the ClickHouse `ORDER BY` intent so
-/// downstream slices (#854 granules, #856 vectorized read) can lay the
-/// columns out in their natural sort order; v1 records them as the durable
-/// contract without yet acting on `order_by_key`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalyticalStorageConfig {
-    /// When true, sealing a chunk routes to the columnar `ColumnBlock`
-    /// writer; otherwise the row engine stays the default.
-    pub columnar: bool,
-    /// Column carrying the time axis (the chunk's partition key).
-    pub time_key: String,
-    /// Optional secondary sort key (ClickHouse `ORDER BY` tail). `None`
-    /// orders by `time_key` alone.
-    pub order_by_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaMode {
-    Strict,
-    SemiStructured,
-    Dynamic,
-}
+pub use reddb_engine::catalog::{AnalyticalStorageConfig, SchemaMode};
 
 // Catalog AST-leaf descriptors re-homed to the neutral keystone crate (ADR
 // 0053, RQL Phase 2 S4b) so the canonical SQL AST
@@ -255,35 +226,94 @@ pub fn snapshot_store_with_declarations(
     declarations: Option<&CatalogDeclarations>,
     contracts: Option<&[CollectionContract]>,
 ) -> CatalogModelSnapshot {
+    let queue_policies = store
+        .get_collection("red_queue_meta")
+        .map(|manager| queue_policies_from_entities(&manager.query_all(|_| true)))
+        .unwrap_or_default();
+    let result = snapshot_store_observations(
+        name,
+        store,
+        index_catalog,
+        declarations,
+        contracts,
+        queue_policies,
+        |manager| Ok::<_, std::convert::Infallible>(collection_observations(manager)),
+    );
+    match result {
+        Ok(snapshot) => snapshot,
+        Err(never) => match never {},
+    }
+}
+
+/// Authoritative catalog reads include the immutable disk base and the resident
+/// overlay. The caller admits the per-row decode allowance before scanning.
+pub fn try_snapshot_store_with_declarations(
+    name: &str,
+    store: &UnifiedStore,
+    index_catalog: Option<&IndexCatalog>,
+    declarations: Option<&CatalogDeclarations>,
+    contracts: Option<&[CollectionContract]>,
+    read_bytes_max: usize,
+) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+    // Keep base/overlay shadowing stable without an O(dirty IDs) workspace.
+    // Admission is performed by the caller before taking the publication fence.
+    let _publication = store.vault_publication_lock.lock();
+    let mut queue_policies = HashMap::new();
+    if let Some(manager) = store.get_collection("red_queue_meta") {
+        manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
+            if let Some((queue, policy)) = queue_policy_from_entity(entity) {
+                queue_policies.insert(queue, policy);
+            }
+            true
+        })?;
+    }
+    snapshot_store_observations(
+        name,
+        store,
+        index_catalog,
+        declarations,
+        contracts,
+        queue_policies,
+        |manager| {
+            let mut observations = CollectionObservations::default();
+            manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
+                observations.observe(entity);
+                true
+            })?;
+            Ok(observations.finish())
+        },
+    )
+}
+
+fn snapshot_store_observations<E>(
+    name: &str,
+    store: &UnifiedStore,
+    index_catalog: Option<&IndexCatalog>,
+    declarations: Option<&CatalogDeclarations>,
+    contracts: Option<&[CollectionContract]>,
+    queue_policies: HashMap<String, QueuePolicySnapshot>,
+    mut observe: impl FnMut(&SegmentManager) -> Result<(CollectionModel, usize, usize), E>,
+) -> Result<CatalogModelSnapshot, E> {
     let index_statuses = index_statuses(declarations);
     let graph_projection_statuses = graph_projection_statuses(declarations);
     let analytics_job_statuses = analytics_job_statuses(declarations);
-
-    let mut grouped: HashMap<String, Vec<UnifiedEntity>> = HashMap::new();
-    for (collection, entity) in store.query_all(|_| true) {
-        grouped.entry(collection).or_default().push(entity);
-    }
-    let queue_policies = queue_policies_from_grouped(&grouped);
 
     let mut stats_by_collection = BTreeMap::new();
     let mut collections = Vec::new();
 
     for collection_name in store.list_collections() {
-        let entities = grouped.remove(&collection_name).unwrap_or_default();
-        let inferred_model = infer_model(&entities);
+        let manager = store.get_collection(&collection_name);
+        let (inferred_model, entity_count, cross_refs) = manager
+            .as_ref()
+            .map(|manager| observe(manager))
+            .transpose()?
+            .unwrap_or((CollectionModel::Mixed, 0, 0));
         let inferred_schema_mode = infer_schema_mode(inferred_model);
         let contract = collection_contract(&collection_name, contracts);
         let model = contract
             .map(|contract| contract.declared_model)
             .unwrap_or(inferred_model);
-        let cross_refs = entities
-            .iter()
-            .map(|entity| entity.cross_refs().len())
-            .sum();
-        let entity_count = entities.len();
-        let manager_stats = store
-            .get_collection(&collection_name)
-            .map(|manager| manager.stats());
+        let manager_stats = manager.map(|manager| manager.stats());
         let segments = manager_stats
             .map(|stats| stats.growing_count + stats.sealed_count + stats.archived_count)
             .unwrap_or(0);
@@ -456,7 +486,7 @@ pub fn snapshot_store_with_declarations(
         updated_at: SystemTime::now(),
     };
 
-    CatalogModelSnapshot {
+    Ok(CatalogModelSnapshot {
         summary,
         collections,
         indices: index_catalog
@@ -507,7 +537,7 @@ pub fn snapshot_store_with_declarations(
         index_statuses,
         graph_projection_statuses,
         analytics_job_statuses,
-    }
+    })
 }
 
 /// Hot-fields snapshot of per-queue policy, materialised at catalog
@@ -522,49 +552,39 @@ pub struct QueuePolicySnapshot {
     pub dlq_target: Option<String>,
 }
 
-fn queue_policies_from_grouped(
-    grouped: &HashMap<String, Vec<UnifiedEntity>>,
-) -> HashMap<String, QueuePolicySnapshot> {
-    let Some(meta) = grouped.get("red_queue_meta") else {
-        return HashMap::new();
-    };
+fn queue_policies_from_entities(meta: &[UnifiedEntity]) -> HashMap<String, QueuePolicySnapshot> {
+    meta.iter().filter_map(queue_policy_from_entity).collect()
+}
 
-    let mut policies = HashMap::new();
-    for entity in meta {
-        let Some(row) = entity.data.as_row() else {
-            continue;
-        };
-        if row_text(row, "kind").as_deref() != Some("queue_config") {
-            continue;
-        }
-        let Some(queue) = row_text(row, "queue") else {
-            continue;
-        };
-        let mode = row_text(row, "mode")
-            .as_deref()
-            .and_then(QueueMode::parse)
-            .unwrap_or_default();
-        let max_attempts = row_u64(row, "max_attempts")
-            .map(|v| v as u32)
-            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS);
-        let lock_deadline_ms = row_u64(row, "lock_deadline_ms")
-            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS);
-        let in_flight_cap_per_group = row_u64(row, "in_flight_cap_per_group")
-            .map(|v| v as u32)
-            .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP);
-        let dlq_target = row_text(row, "dlq");
-        policies.insert(
-            queue,
-            QueuePolicySnapshot {
-                mode,
-                max_attempts,
-                lock_deadline_ms,
-                in_flight_cap_per_group,
-                dlq_target,
-            },
-        );
+fn queue_policy_from_entity(entity: &UnifiedEntity) -> Option<(String, QueuePolicySnapshot)> {
+    let row = entity.data.as_row()?;
+    if row_text(row, "kind").as_deref() != Some("queue_config") {
+        return None;
     }
-    policies
+    let queue = row_text(row, "queue")?;
+    let mode = row_text(row, "mode")
+        .as_deref()
+        .and_then(QueueMode::parse)
+        .unwrap_or_default();
+    let max_attempts = row_u64(row, "max_attempts")
+        .map(|v| v as u32)
+        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS);
+    let lock_deadline_ms =
+        row_u64(row, "lock_deadline_ms").unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS);
+    let in_flight_cap_per_group = row_u64(row, "in_flight_cap_per_group")
+        .map(|v| v as u32)
+        .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP);
+    let dlq_target = row_text(row, "dlq");
+    Some((
+        queue,
+        QueuePolicySnapshot {
+            mode,
+            max_attempts,
+            lock_deadline_ms,
+            in_flight_cap_per_group,
+            dlq_target,
+        },
+    ))
 }
 
 fn row_u64(row: &crate::storage::unified::entity::RowData, key: &str) -> Option<u64> {
@@ -593,26 +613,45 @@ fn collection_contract<'a>(
     })
 }
 
-fn infer_model(entities: &[UnifiedEntity]) -> CollectionModel {
-    let mut has_table = false;
-    let mut has_graph = false;
-    let mut has_vector = false;
+#[derive(Default)]
+struct CollectionObservations {
+    has_table: bool,
+    has_graph: bool,
+    has_vector: bool,
+    entities: usize,
+    cross_refs: usize,
+}
 
-    for entity in entities {
+impl CollectionObservations {
+    fn observe(&mut self, entity: &UnifiedEntity) {
+        self.entities += 1;
+        self.cross_refs += entity.cross_refs().len();
         match &entity.kind {
-            EntityKind::TableRow { .. } => has_table = true,
-            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => has_graph = true,
-            EntityKind::Vector { .. } => has_vector = true,
+            EntityKind::TableRow { .. } => self.has_table = true,
+            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => self.has_graph = true,
+            EntityKind::Vector { .. } => self.has_vector = true,
             EntityKind::TimeSeriesPoint(_) | EntityKind::QueueMessage { .. } => {}
         }
     }
 
-    match (has_table, has_graph, has_vector) {
-        (true, false, false) => CollectionModel::Table,
-        (false, true, false) => CollectionModel::Graph,
-        (false, false, true) => CollectionModel::Vector,
-        _ => CollectionModel::Mixed,
+    fn finish(self) -> (CollectionModel, usize, usize) {
+        let model = match (self.has_table, self.has_graph, self.has_vector) {
+            (true, false, false) => CollectionModel::Table,
+            (false, true, false) => CollectionModel::Graph,
+            (false, false, true) => CollectionModel::Vector,
+            _ => CollectionModel::Mixed,
+        };
+        (model, self.entities, self.cross_refs)
     }
+}
+
+fn collection_observations(manager: &SegmentManager) -> (CollectionModel, usize, usize) {
+    let mut observations = CollectionObservations::default();
+    manager.for_each_entity(|entity| {
+        observations.observe(entity);
+        true
+    });
+    observations.finish()
 }
 
 fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
@@ -1008,10 +1047,12 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
             ) {
                 attention_reasons.push("requires_rebuild".to_string());
             }
-            let queryable = declared_present
-                && operational_present
-                && enabled
-                && matches!(build_state.as_deref().unwrap_or_default(), "ready");
+            let artifact_state = crate::physical::ArtifactState::from_build_state(
+                build_state.as_deref().unwrap_or("declared-unbuilt"),
+                enabled,
+            );
+            let queryable =
+                declared_present && operational_present && artifact_state.is_queryable();
             let requires_rebuild = matches!(
                 build_state.as_deref().unwrap_or_default(),
                 "declared-unbuilt" | "building" | "stale" | "failed"
@@ -1021,10 +1062,6 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
                 + usize::from(declared_present != operational_present)
                 + usize::from(!queryable);
 
-            let artifact_state = crate::physical::ArtifactState::from_build_state(
-                build_state.as_deref().unwrap_or("declared-unbuilt"),
-                enabled,
-            );
             CatalogIndexStatus {
                 name,
                 collection,
@@ -1065,13 +1102,11 @@ fn index_lifecycle_state(
     }
 
     match build_state.unwrap_or_default() {
-        "ready" => "ready".to_string(),
+        "ready" | "catalog-derived" | "registry-loaded" => "ready".to_string(),
         "failed" => "failed".to_string(),
         "stale" => "stale".to_string(),
         "declared-unbuilt" => "declared".to_string(),
-        "catalog-derived" | "metadata-only" | "artifact-published" | "registry-loaded" => {
-            "building".to_string()
-        }
+        "metadata-only" | "artifact-published" => "building".to_string(),
         _ => "building".to_string(),
     }
 }
@@ -1410,4 +1445,112 @@ pub fn analytics_job_attention(snapshot: &CatalogModelSnapshot) -> Vec<CatalogAn
             .then_with(|| left.id.cmp(&right.id))
     });
     statuses
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::storage::{CrossRef, EntityId, RefType};
+
+    fn btree_index(name: &str, build_state: &str) -> PhysicalIndexState {
+        PhysicalIndexState {
+            name: name.to_string(),
+            kind: IndexKind::BTree,
+            collection: Some("events".to_string()),
+            enabled: true,
+            entries: 1,
+            estimated_memory_bytes: 64,
+            last_refresh_ms: Some(1),
+            backend: "btree".to_string(),
+            artifact_kind: None,
+            artifact_root_page: None,
+            artifact_checksum: None,
+            build_state: build_state.to_string(),
+        }
+    }
+
+    #[test]
+    fn reopened_operational_btree_indexes_remain_queryable() {
+        for recovered_state in ["catalog-derived", "registry-loaded"] {
+            let statuses = index_statuses(Some(&CatalogDeclarations {
+                declared_indexes: vec![btree_index("idx_events_id", "ready")],
+                operational_indexes: vec![btree_index("idx_events_id", recovered_state)],
+                ..Default::default()
+            }));
+            let status = statuses.first().expect("index status");
+            assert_eq!(status.lifecycle_state, "ready", "{recovered_state}");
+            assert!(status.queryable, "{recovered_state}");
+            assert_eq!(status.artifact_state, crate::physical::ArtifactState::Ready);
+            assert!(!status.requires_rebuild, "{recovered_state}");
+        }
+    }
+
+    #[test]
+    fn borrowed_catalog_preserves_models_counts_and_cross_references() {
+        let store = UnifiedStore::new();
+        for name in ["rows", "graph", "vectors", "mixed", "empty"] {
+            store.create_collection(name).expect("collection");
+        }
+        let mut row = UnifiedEntity::table_row(
+            EntityId::new(1),
+            "rows",
+            1,
+            vec![Value::text("payload".repeat(10_000))],
+        );
+        row.add_cross_ref(CrossRef::new(
+            EntityId::new(1),
+            EntityId::new(2),
+            "graph",
+            RefType::RowToNode,
+        ));
+        store.insert("rows", row).expect("row");
+        store
+            .insert(
+                "graph",
+                UnifiedEntity::graph_node(EntityId::new(2), "label", "type", HashMap::new()),
+            )
+            .expect("node");
+        store
+            .insert(
+                "vectors",
+                UnifiedEntity::vector(EntityId::new(3), "vectors", vec![1.0, 0.0]),
+            )
+            .expect("vector");
+        store
+            .insert(
+                "mixed",
+                UnifiedEntity::table_row(EntityId::new(4), "mixed", 4, vec![Value::Integer(4)]),
+            )
+            .expect("mixed row");
+        store
+            .insert(
+                "mixed",
+                UnifiedEntity::vector(EntityId::new(5), "mixed", vec![0.0, 1.0]),
+            )
+            .expect("mixed vector");
+
+        let snapshot = snapshot_store("test", &store, None);
+        assert_eq!(snapshot.summary.total_entities, 5);
+        for (name, model, count, references) in [
+            ("rows", CollectionModel::Table, 1, 1),
+            ("graph", CollectionModel::Graph, 1, 0),
+            ("vectors", CollectionModel::Vector, 1, 0),
+            ("mixed", CollectionModel::Mixed, 2, 0),
+            ("empty", CollectionModel::Mixed, 0, 0),
+        ] {
+            let descriptor = snapshot
+                .collections
+                .iter()
+                .find(|item| item.name == name)
+                .expect("descriptor");
+            assert_eq!(
+                (
+                    descriptor.observed_model,
+                    descriptor.entities,
+                    descriptor.cross_refs
+                ),
+                (model, count, references)
+            );
+        }
+    }
 }

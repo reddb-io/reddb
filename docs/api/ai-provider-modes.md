@@ -1,12 +1,11 @@
 # AI provider modes (`red.config.ai.provider`)
 
-RedDB engine-side AI consumers (currently `AskPipeline`) can talk to
-three different wire-protocol families. The mode is selected by the
-`red.config.ai.provider` config key (or the `REDDB_AI_PROVIDER_MODE`
-environment variable, which wins). It is intentionally separate from
-`red.config.ai.default.provider`, which names a *vendor*
-(`openai`, `groq`, `ollama`, ...); the mode key answers the prior
-question of *which HTTP shape to speak*.
+RedDB AI consumers select their provider through `REDDB_AI_PROVIDER`,
+`red.config.ai.ask.provider`, or `red.config.ai.inference.provider`.
+`red.config.ai.provider` (or `REDDB_AI_PROVIDER_MODE`) remains a legacy fallback
+when no provider is selected. A mode setting does not replace an explicitly
+configured vendor or gateway. New gateway configurations should use the
+`openai-compat` or `red-router` provider token and supply both endpoint and key.
 
 ## Modes
 
@@ -35,11 +34,11 @@ Or via SQL:
 SET CONFIG red.config.ai.provider = 'anthropic-native';
 ```
 
-When `openai-compat` is selected the operator is expected to also
-supply the target endpoint via `red.config.ai.{vendor}.{alias}.base_url`
-(or the matching `REDDB_*_API_BASE` env var). Existing vendor-native
-paths are left untouched — switching the mode does not silently
-re-route requests to a different vendor than the one configured.
+When `openai-compat` is the fallback, supply the endpoint at
+`red.config.ai.providers.openai-compat.base_url` (or
+`REDDB_OPENAI_COMPAT_API_BASE`) and the API key through the Vault or
+`REDDB_OPENAI_COMPAT_API_KEY`. Registering through `/ai/credentials` requires
+both fields. See [BYOK gateways and RedRouter](../guides/ai-providers.md#byok-gateways-and-redrouter).
 
 ## Generic OpenAI-compatible client
 
@@ -86,8 +85,8 @@ The built-in provider × modality matrix:
 | `together` | ✅ | ✅ | ✅ | — |
 | `ollama` | ✅ | ✅ | ✅ | — |
 | `groq` | — | ✅ | ✅ | — |
-| `openrouter` | — | ✅ | ✅ | — |
-| `venice` | — | ✅ | ✅ | — |
+| `openrouter` | ✅ | ✅ | ✅ | — |
+| `venice` | ✅ | ✅ | ✅ | — |
 | `deepseek` | — | ✅ | — | — |
 | `huggingface` | ✅ | ✅ | — | — |
 | `local` | ✅ | — | — | — |
@@ -103,13 +102,12 @@ serve is rejected immediately, not on the first write. Per-deployment overrides
 can layer onto the built-in rows when a deployment runs a provider with a
 different capability set.
 
-## Relationship to `red.config.ai.default.provider`
+## Relationship to provider task pointers
 
-* `red.config.ai.default.provider` → names a vendor (`openai`,
-  `groq`, `ollama`, ...) and is used to pick default models,
-  default base URLs, and credential aliases.
-* `red.config.ai.provider` → picks the wire-protocol family.
-  When set, it takes precedence in `resolve_default_provider` and
-  maps the three mode tokens onto the matching `AiProvider`
-  variant (`OpenAi`, `Anthropic`, or a `Custom` placeholder for
-  `openai-compat`).
+`red.config.ai.ask.provider` and `red.config.ai.inference.provider` select the
+provider identity used for model, endpoint, and credential resolution.
+`red.config.ai.embeddings.provider` selects the embedding provider independently.
+The legacy mode selector is consulted only when no generation provider has
+been selected; `openai-compat` maps to the named `OpenAiCompat` provider rather
+than an empty custom provider ID. `red.config.ai.default.provider` is removed;
+writing it returns an error naming the task pointer to use instead.

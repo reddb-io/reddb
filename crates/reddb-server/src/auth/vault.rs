@@ -83,6 +83,7 @@ const VAULT_DATA_MAGIC: &[u8; 4] = b"RDVD";
 /// Current on-disk vault format. v1 was the legacy fixed two-page
 /// format (pages 2 + 3); v2 introduces the dynamic chain.
 const VAULT_VERSION: u8 = 2;
+const VAULT_PASSPHRASE_VERSION: u8 = 3;
 
 /// Last legacy version. Pre-1.0 we refuse to migrate it — operators
 /// re-bootstrap with `red bootstrap` to upgrade.
@@ -215,6 +216,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub enum VaultError {
     /// No certificate available.
     NoKey,
+    InvalidCredential(String),
     /// Encryption failed.
     Encryption,
     /// Decryption failed (wrong key or corrupt data).
@@ -232,8 +234,9 @@ impl std::fmt::Display for VaultError {
         match self {
             Self::NoKey => write!(
                 f,
-                "no vault certificate: set REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
+                "no vault credential: set REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE (or their _FILE variants)"
             ),
+            Self::InvalidCredential(reason) => write!(f, "invalid vault credential: {reason}"),
             Self::Encryption => write!(f, "vault encryption failed"),
             Self::Decryption => write!(f, "vault decryption failed (wrong key or corrupt data)"),
             Self::Io(err) => write!(f, "vault I/O error: {err}"),
@@ -252,9 +255,11 @@ impl From<VaultError> for AuthError {
 }
 
 fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> {
-    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::NoKey)?;
+    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::InvalidCredential("certificate must contain 64 hexadecimal characters; use REDDB_VAULT_PASSPHRASE for a password".into()))?;
     if certificate.len() != 32 {
-        return Err(VaultError::NoKey);
+        return Err(VaultError::InvalidCredential(
+            "certificate must contain exactly 32 bytes (64 hexadecimal characters)".into(),
+        ));
     }
     Ok(certificate)
 }
@@ -531,6 +536,7 @@ impl VaultState {
 pub struct Vault {
     key: SecureKey,
     salt: [u8; 16],
+    version: u8,
 }
 
 /// Argon2id parameters tuned for vault key derivation.
@@ -566,9 +572,17 @@ impl Vault {
     /// the existing page content.  Otherwise a fresh salt is generated
     /// and will be written on the first `save()` call.
     pub fn open(pager: &Pager) -> Result<Self, VaultError> {
-        let cert_hex =
-            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
-        Self::with_certificate(pager, &cert_hex)
+        match (
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE"),
+            crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE"),
+        ) {
+            (Some(_), Some(_)) => Err(VaultError::InvalidCredential(
+                "set either REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE, not both".into(),
+            )),
+            (Some(certificate), None) => Self::with_certificate(pager, &certificate),
+            (None, Some(passphrase)) => Self::with_passphrase(pager, &passphrase),
+            (None, None) => Err(VaultError::NoKey),
+        }
     }
 
     fn salt_for_open(pager: &Pager) -> Result<[u8; 16], VaultError> {
@@ -593,13 +607,59 @@ impl Vault {
     /// Argon2id.  This is the primary unseal mechanism introduced by the
     /// certificate-based seal system.
     pub fn with_certificate(pager: &Pager, certificate_hex: &str) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_VERSION)?;
         let certificate = decode_certificate_hex(certificate_hex)?;
 
         let key = KeyPair::vault_key_from_certificate(&certificate);
 
         let salt = Self::salt_for_open(pager)?;
 
-        Ok(Self { key, salt })
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_VERSION,
+        })
+    }
+
+    /// Passphrases use RFC 9106 Argon2id and the persisted random salt.
+    /// Format v3 distinguishes them from the legacy random-certificate KDF.
+    pub fn with_passphrase(pager: &Pager, passphrase: &str) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_PASSPHRASE_VERSION)?;
+        let salt = Self::salt_for_open(pager)?;
+        let key = Self::passphrase_key(passphrase, &salt)?;
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_PASSPHRASE_VERSION,
+        })
+    }
+
+    fn passphrase_key(passphrase: &str, salt: &[u8; 16]) -> Result<SecureKey, VaultError> {
+        let bytes = reddb_crypto::vault::passphrase_key(passphrase, salt)
+            .map_err(VaultError::InvalidCredential)?;
+        Ok(SecureKey::new(bytes.as_ref()))
+    }
+
+    fn check_credential_format(pager: &Pager, expected: u8) -> Result<(), VaultError> {
+        if Self::has_saved_state(pager) {
+            let page = pager
+                .read_page_no_checksum(VAULT_HEADER_PAGE)
+                .map_err(|err| VaultError::Pager(err.to_string()))?;
+            let version = page.content()[4];
+            if (version == VAULT_VERSION || version == VAULT_PASSPHRASE_VERSION)
+                && version != expected
+            {
+                return Err(VaultError::InvalidCredential(
+                    if version == VAULT_PASSPHRASE_VERSION {
+                        "this vault requires a passphrase"
+                    } else {
+                        "this vault requires a certificate"
+                    }
+                    .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Open a vault from environment variables.
@@ -614,8 +674,11 @@ impl Vault {
     /// Used during bootstrap when the certificate is freshly generated
     /// and not yet hex-encoded.
     pub fn with_certificate_bytes(pager: &Pager, certificate: &[u8]) -> Result<Self, VaultError> {
+        Self::check_credential_format(pager, VAULT_VERSION)?;
         if certificate.len() != 32 {
-            return Err(VaultError::NoKey);
+            return Err(VaultError::InvalidCredential(
+                "certificate must contain 32 bytes".into(),
+            ));
         }
         let key = KeyPair::vault_key_from_certificate(certificate);
 
@@ -629,7 +692,11 @@ impl Vault {
             }
         };
 
-        Ok(Self { key, salt })
+        Ok(Self {
+            key,
+            salt,
+            version: VAULT_VERSION,
+        })
     }
 
     /// Encrypt a vault state into a self-contained logical export blob.
@@ -659,9 +726,21 @@ impl Vault {
     /// Decrypt a logical export blob using the same certificate env var as
     /// normal vault open.
     pub fn unseal_logical_export(blob_hex: &str) -> Result<VaultState, VaultError> {
-        let cert_hex =
-            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE").ok_or(VaultError::NoKey)?;
-        Self::unseal_logical_export_with_certificate(blob_hex, &cert_hex)
+        match (
+            crate::utils::env_with_file_fallback("REDDB_CERTIFICATE"),
+            crate::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE"),
+        ) {
+            (Some(_), Some(_)) => Err(VaultError::InvalidCredential(
+                "set a single vault credential".into(),
+            )),
+            (Some(certificate), None) => {
+                Self::unseal_logical_export_with_certificate(blob_hex, &certificate)
+            }
+            (None, Some(passphrase)) => {
+                Self::unseal_logical_export_with_passphrase(blob_hex, &passphrase)
+            }
+            _ => Err(VaultError::NoKey),
+        }
     }
 
     /// Deterministic helper path that ignores vault env vars.
@@ -672,6 +751,15 @@ impl Vault {
         let (_salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
         let certificate = decode_certificate_hex(certificate_hex)?;
         let key = KeyPair::vault_key_from_certificate(&certificate);
+        Self::decrypt_logical_export(&key, &nonce, &ciphertext)
+    }
+
+    pub fn unseal_logical_export_with_passphrase(
+        blob_hex: &str,
+        passphrase: &str,
+    ) -> Result<VaultState, VaultError> {
+        let (salt, nonce, ciphertext) = Self::decode_logical_export(blob_hex)?;
+        let key = Self::passphrase_key(passphrase, &salt)?;
         Self::decrypt_logical_export(&key, &nonce, &ciphertext)
     }
 
@@ -872,10 +960,10 @@ impl Vault {
                     .to_string(),
             ));
         }
-        if version != VAULT_VERSION {
+        if version != self.version {
             return Err(VaultError::Corrupt(format!(
-                "unsupported vault version: {} (expected {})",
-                version, VAULT_VERSION
+                "vault credential format mismatch: stored {version}, opened {}",
+                self.version
             )));
         }
 
@@ -1004,7 +1092,7 @@ impl Vault {
             return Ok(Vec::new());
         }
         let version = content[4];
-        if version != VAULT_VERSION {
+        if version != VAULT_VERSION && version != VAULT_PASSPHRASE_VERSION {
             // v1 (legacy) had its overflow at fixed page 3; we don't
             // know if that page is "ours" to free. Safer to leak it
             // — the operator is re-bootstrapping anyway.
@@ -1072,7 +1160,7 @@ impl Vault {
         bytes[off..off + VAULT_MAGIC_SIZE].copy_from_slice(VAULT_MAGIC);
         off += VAULT_MAGIC_SIZE;
 
-        bytes[off] = VAULT_VERSION;
+        bytes[off] = self.version;
         off += VAULT_VERSION_SIZE;
 
         bytes[off..off + VAULT_SALT_SIZE].copy_from_slice(&self.salt);
@@ -1281,6 +1369,103 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
+    }
+
+    #[test]
+    fn portable_vault_preserves_native_auth_payload_and_passphrase_contract() {
+        use reddb_engine::query::local_database::LocalDatabase;
+        use reddb_engine::storage::{
+            entity::{EntityId, RowData, UnifiedEntity},
+            manager::ManagerConfig,
+            resident_file::EmbeddedResidentStore,
+            store_wal::StoreWalAction,
+        };
+        use reddb_file::{OpenMode, StdVfs, Vfs};
+
+        let (pager, directory) = temp_pager();
+        let password = "native portable interop password";
+        let native = Vault::with_passphrase(&pager, password).expect("native key");
+        let mut state = sample_state();
+        state.master_secret = Some(vec![42; 32]);
+        let native_envelope = native.seal_logical_export(&state).expect("native envelope");
+        let path = directory.join("portable.rdb");
+        let mut mode = OpenMode::create_new();
+        mode.read = true;
+        let file = StdVfs.open(&path, mode).expect("private file");
+        let mut database = LocalDatabase::create(file, &path, 0).expect("portable database");
+        database
+            .vault_unlock(password, true)
+            .expect("initialize portable collection");
+        let mut store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("physical store");
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1), "red.local.vault", 1, Vec::new());
+        entity.data = reddb_engine::storage::entity::EntityData::Row(RowData::with_names(
+            vec![reddb_types::Value::Secret(
+                hex::decode(native_envelope).expect("hex"),
+            )],
+            vec!["value".into()],
+        ));
+        store
+            .publish_actions(&[StoreWalAction::upsert_entity(
+                "red.local.vault",
+                &entity,
+                None,
+                reddb_file::STORE_VERSION_CURRENT,
+            )])
+            .expect("import native envelope");
+        let mut database =
+            LocalDatabase::open(store.into_inner(), &path).expect("open imported file");
+        let key = database
+            .vault_unlock(password, false)
+            .expect("native passphrase in portable runtime");
+        database
+            .vault_put(&key, "connection:admin", Some("new credential"))
+            .expect("portable mutation");
+        let store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("read back");
+        let (entity, _) = store
+            .get("red.local.vault", EntityId::new(1))
+            .expect("record")
+            .expect("Vault exists");
+        let Some(reddb_types::Value::Secret(blob)) = entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_by_name("value"))
+        else {
+            panic!("sealed Vault")
+        };
+        let restored = Vault::unseal_logical_export_with_passphrase(&hex::encode(blob), password)
+            .expect("portable envelope in native runtime");
+        assert_eq!(restored.master_secret, state.master_secret);
+        assert_eq!(restored.bootstrapped, state.bootstrapped);
+        assert_eq!(restored.users.len(), state.users.len());
+        for (actual, expected) in restored.users.iter().zip(&state.users) {
+            assert_eq!(actual.username, expected.username);
+            assert_eq!(actual.password_hash, expected.password_hash);
+            assert_eq!(actual.tenant_id, expected.tenant_id);
+        }
+        assert_eq!(restored.api_keys.len(), state.api_keys.len());
+        assert_eq!(
+            restored.kv.get("connection:admin").map(String::as_str),
+            Some("new credential")
+        );
+        drop(store);
+        drop(native);
+        drop(pager);
+        std::fs::remove_dir_all(directory).expect("remove test files");
     }
 
     #[test]

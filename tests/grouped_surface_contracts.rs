@@ -35,3 +35,6 @@ mod smoke_embedded;
 
 #[path = "grouped/surface_contracts/cross_transport_result_equivalence.rs"]
 mod cross_transport_result_equivalence;
+
+#[path = "nextest_lane_config.rs"]
+mod nextest_lane_config;

@@ -29,6 +29,7 @@ Using the prebuilt GHCR image:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -39,7 +40,7 @@ If you do not have GHCR access, build locally instead:
 
 ```bash
 docker build -t reddb .
-docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 reddb
+docker run --rm -e REDDB_NO_AUTH=true -p 5050:5050 -p 55055:55055 -p 5000:5000 reddb
 ```
 
 That's it. RedDB binds RedWire on `0.0.0.0:5050`, gRPC on
@@ -70,6 +71,7 @@ To persist data across container restarts, mount a volume:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -79,11 +81,16 @@ docker run --rm \
 
 ---
 
+The default database is `/data/red/database.rdb`. For existing volumes,
+read [Persistent data path and upgrades](../deployment/docker.md#persistent-data-path-and-upgrades)
+before changing the image or path.
+
 ## 2. Production-secure (vault + Docker secrets)
 
 The production pattern has four moving parts:
 
-1. **Bootstrap once** in a one-off container. Capture the certificate.
+1. **Bootstrap once** in a one-off container. Write the certificate directly
+   to an owner-only file.
 2. **Store the certificate** in your secret manager.
 3. **Materialize the cert** as a Docker secret on a tmpfs mount.
 4. **Run the real container** with `REDDB_CERTIFICATE_FILE` pointing at
@@ -94,29 +101,25 @@ The production pattern has four moving parts:
 ```bash
 mkdir -p ./reddb-data ./secrets
 
-# Run bootstrap in a one-off container; capture stdout
+# Run bootstrap in a one-off container; redirect the certificate straight to
+# its secret file rather than copying it through a terminal or log collector.
+umask 077
 docker run --rm \
   -v "$(pwd)/reddb-data:/data" \
   ghcr.io/reddb-io/reddb:latest \
   bootstrap \
-    --path /data/data.rdb \
+    --path /data/red/database.rdb \
     --vault \
     --username admin \
     --password "$(openssl rand -base64 24)" \
     --print-certificate \
-  | tee /tmp/reddb-bootstrap.log
+  > ./secrets/reddb_certificate.txt
 
-# Extract the cert
-CERT=$(grep '^certificate:' /tmp/reddb-bootstrap.log | awk '{print $2}')
-
-echo "$CERT" > ./secrets/reddb_certificate.txt
 chmod 0400 ./secrets/reddb_certificate.txt
-
-shred -u /tmp/reddb-bootstrap.log
 ```
 
-The cert is 64 hex chars. The bootstrap also creates `admin` and prints
-its initial API key — capture both.
+The cert is 64 hex chars. The bootstrap also creates `admin`; keep the chosen
+password in your secret manager.
 
 Bootstrap must run against the same mounted data volume that the server will
 use. A certificate minted from a scratch DB will not unseal a different DB.
@@ -222,7 +225,7 @@ them.
       - reddb-data:/data
 ```
 
-Named volume — the `.rdb` file lives at `/data/data.rdb`. Loss of this
+Named volume — the `.rdb` file lives at `/data/red/database.rdb`. Loss of this
 volume = total data loss unless you have backups configured.
 
 ```yaml
@@ -250,8 +253,9 @@ Names the secret bindings. Each named secret in this list is mounted at
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
 ```
 
-`REDDB_VAULT=true` enables the encrypted auth vault. Without it, the default
-container runs in local unauthenticated mode.
+The official image already sets `REDDB_VAULT=true`; this explicit value keeps
+the Compose contract visible. Supplying the mounted vault credential is
+required both on first boot and when reopening the persisted volume.
 
 ```yaml
     healthcheck:
@@ -416,8 +420,8 @@ with the shared cert.
 
 ## 6. Local dev shortcut
 
-For development on your laptop, the image default keeps `REDDB_VAULT=false`
-and saves you from managing certs. Use this only when:
+For development on your laptop, explicitly set `REDDB_NO_AUTH=true` to bypass
+the image's fail-closed production bootstrap. Use this only when:
 
 - You're running on `127.0.0.1` only.
 - The data has no privacy implications.
@@ -425,6 +429,7 @@ and saves you from managing certs. Use this only when:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -435,6 +440,7 @@ Or, to keep data across restarts:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -442,8 +448,10 @@ docker run --rm \
   ghcr.io/reddb-io/reddb:latest
 ```
 
-The image sets `REDDB_VAULT=false` by default for local bootability. Set
-`-e REDDB_VAULT=true` and provide `REDDB_CERTIFICATE_FILE` for vault mode.
+The image defaults to `REDDB_VAULT=true` and the `production` bootstrap preset.
+`REDDB_NO_AUTH=true` is the explicit, loudly logged local-development escape
+hatch. Omit it and provide bootstrap credentials plus either a vault passphrase
+or an explicit certificate-output path for durable auth.
 
 ---
 

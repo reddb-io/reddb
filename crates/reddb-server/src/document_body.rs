@@ -31,21 +31,7 @@ pub(crate) fn is_binary_container(bytes: &[u8]) -> bool {
 ///
 /// Returns `None` when `bytes` is not a container — so callers fall back to
 /// their existing JSON parse — or when a container fails to decode.
-pub(crate) fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
-    if !is_binary_container(bytes) {
-        return None;
-    }
-    let fields = document_body_codec::decode(bytes).ok()?;
-    let mut map = Map::new();
-    for (key, value) in fields {
-        let json = match &value {
-            Value::Integer(n) => JsonValue::Integer(*n),
-            other => other.to_json(),
-        };
-        map.insert(key, json);
-    }
-    Some(JsonValue::Object(map))
-}
+pub(crate) use reddb_types::document_body_codec::decode_container_to_json;
 
 /// Offset-read a single top-level field from a stored document body.
 ///

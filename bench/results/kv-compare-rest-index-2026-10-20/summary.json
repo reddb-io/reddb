@@ -1,0 +1,5343 @@
+{
+  "schema": "reddb.kv-comparison-summary.v1",
+  "status": "valid-diagnostic",
+  "aggregation": "median and min/max of round-level metrics; no operation-level pooling",
+  "measurements": [
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 1,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 985.3297177839462,
+      "range_throughput_ops_s": [
+        926.1683119628042,
+        1046.099365370451
+      ],
+      "median_batch_p50_us": 935.13,
+      "range_batch_p50_us": [
+        887.347,
+        1016.019
+      ],
+      "median_batch_p95_us": 1359.457,
+      "range_batch_p95_us": [
+        1295.715,
+        1458.634
+      ],
+      "median_batch_p99_us": 2223.059,
+      "range_batch_p99_us": [
+        1791.582,
+        4238.759
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 71.96000000000001,
+      "server_peak_working_set_mib": 80.63,
+      "server_io": [
+        {
+          "unix_ms": 1792519811029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.3MB / 40.7MB"
+        },
+        {
+          "unix_ms": 1792519811529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.3MB / 40.7MB"
+        },
+        {
+          "unix_ms": 1792519812030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.6MB / 42.4MB"
+        },
+        {
+          "unix_ms": 1792519812532,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.6MB / 42.4MB"
+        },
+        {
+          "unix_ms": 1792519813030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18MB / 44.1MB"
+        },
+        {
+          "unix_ms": 1792519813531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18MB / 44.1MB"
+        },
+        {
+          "unix_ms": 1792519814029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.3MB / 45.7MB"
+        },
+        {
+          "unix_ms": 1792519814529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.3MB / 45.7MB"
+        },
+        {
+          "unix_ms": 1792519815029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.7MB / 47.8MB"
+        },
+        {
+          "unix_ms": 1792519815530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.7MB / 47.8MB"
+        },
+        {
+          "unix_ms": 1792519816032,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.1MB / 49.9MB"
+        },
+        {
+          "unix_ms": 1792519816529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.1MB / 49.9MB"
+        },
+        {
+          "unix_ms": 1792519817029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.5MB / 51.7MB"
+        },
+        {
+          "unix_ms": 1792519817529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.5MB / 51.7MB"
+        },
+        {
+          "unix_ms": 1792519818036,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.9MB / 53.7MB"
+        },
+        {
+          "unix_ms": 1792519818532,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.9MB / 53.7MB"
+        },
+        {
+          "unix_ms": 1792519819030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.2MB / 55.4MB"
+        },
+        {
+          "unix_ms": 1792519819529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.2MB / 55.4MB"
+        },
+        {
+          "unix_ms": 1792519820029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.6MB / 57.1MB"
+        },
+        {
+          "unix_ms": 1792519820529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.6MB / 57.1MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 42.7,
+      "client_peak_working_set_mib": 17.46,
+      "client_io": [
+        {
+          "unix_ms": 1792519811029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "41.6MB / 17.9MB"
+        },
+        {
+          "unix_ms": 1792519811530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "41.6MB / 17.9MB"
+        },
+        {
+          "unix_ms": 1792519812030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "43.3MB / 18.3MB"
+        },
+        {
+          "unix_ms": 1792519812532,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "43.3MB / 18.3MB"
+        },
+        {
+          "unix_ms": 1792519813030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "45MB / 18.6MB"
+        },
+        {
+          "unix_ms": 1792519813531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "45MB / 18.6MB"
+        },
+        {
+          "unix_ms": 1792519814029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "46.7MB / 18.9MB"
+        },
+        {
+          "unix_ms": 1792519814529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "46.7MB / 18.9MB"
+        },
+        {
+          "unix_ms": 1792519815029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "48.8MB / 19.4MB"
+        },
+        {
+          "unix_ms": 1792519815531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "48.8MB / 19.4MB"
+        },
+        {
+          "unix_ms": 1792519816032,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "50.9MB / 19.8MB"
+        },
+        {
+          "unix_ms": 1792519816530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "50.9MB / 19.8MB"
+        },
+        {
+          "unix_ms": 1792519817029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "52.7MB / 20.1MB"
+        },
+        {
+          "unix_ms": 1792519817529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "52.7MB / 20.1MB"
+        },
+        {
+          "unix_ms": 1792519818036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "54.7MB / 20.5MB"
+        },
+        {
+          "unix_ms": 1792519818532,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "54.7MB / 20.5MB"
+        },
+        {
+          "unix_ms": 1792519819030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "56.4MB / 20.9MB"
+        },
+        {
+          "unix_ms": 1792519819530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "56.4MB / 20.9MB"
+        },
+        {
+          "unix_ms": 1792519820029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "58.1MB / 21.2MB"
+        },
+        {
+          "unix_ms": 1792519820529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "58.1MB / 21.2MB"
+        }
+      ],
+      "file": "cap64-reddb-query-1000-get-c1-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 1,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-1000-get-c1-p16.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 32,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 1785.1198889681127,
+      "range_throughput_ops_s": [
+        1461.2465198784669,
+        2039.290939003595
+      ],
+      "median_batch_p50_us": 14843.768,
+      "range_batch_p50_us": [
+        12642.607,
+        18305.877
+      ],
+      "median_batch_p95_us": 42941.751,
+      "range_batch_p95_us": [
+        37858.239,
+        51353.387
+      ],
+      "median_batch_p99_us": 59378.075,
+      "range_batch_p99_us": [
+        53001.295,
+        79498.135
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 111.63,
+      "server_peak_working_set_mib": 85.09,
+      "server_io": [
+        {
+          "unix_ms": 1792519833530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.1MB / 94.4MB"
+        },
+        {
+          "unix_ms": 1792519834030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.5MB / 96.7MB"
+        },
+        {
+          "unix_ms": 1792519834530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.5MB / 96.7MB"
+        },
+        {
+          "unix_ms": 1792519835031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.1MB / 99.6MB"
+        },
+        {
+          "unix_ms": 1792519835530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.1MB / 99.6MB"
+        },
+        {
+          "unix_ms": 1792519836030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.6MB / 102MB"
+        },
+        {
+          "unix_ms": 1792519836530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.6MB / 102MB"
+        },
+        {
+          "unix_ms": 1792519837030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "30.3MB / 106MB"
+        },
+        {
+          "unix_ms": 1792519838031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31MB / 109MB"
+        },
+        {
+          "unix_ms": 1792519838531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31MB / 109MB"
+        },
+        {
+          "unix_ms": 1792519839031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.6MB / 112MB"
+        },
+        {
+          "unix_ms": 1792519839531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.6MB / 112MB"
+        },
+        {
+          "unix_ms": 1792519840531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "32.3MB / 116MB"
+        },
+        {
+          "unix_ms": 1792519841030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "32.8MB / 118MB"
+        },
+        {
+          "unix_ms": 1792519841530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "32.8MB / 118MB"
+        },
+        {
+          "unix_ms": 1792519842030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.5MB / 121MB"
+        },
+        {
+          "unix_ms": 1792519842531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.5MB / 121MB"
+        },
+        {
+          "unix_ms": 1792519843030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.1MB / 124MB"
+        },
+        {
+          "unix_ms": 1792519843530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.1MB / 124MB"
+        },
+        {
+          "unix_ms": 1792519844030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.9MB / 128MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 130.655,
+      "client_peak_working_set_mib": 20.57,
+      "client_io": [
+        {
+          "unix_ms": 1792519833530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "95.4MB / 28.7MB"
+        },
+        {
+          "unix_ms": 1792519834030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "97.6MB / 29.1MB"
+        },
+        {
+          "unix_ms": 1792519834530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "97.6MB / 29.1MB"
+        },
+        {
+          "unix_ms": 1792519835031,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "101MB / 29.7MB"
+        },
+        {
+          "unix_ms": 1792519835530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "101MB / 29.7MB"
+        },
+        {
+          "unix_ms": 1792519836030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "103MB / 30.3MB"
+        },
+        {
+          "unix_ms": 1792519836530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "103MB / 30.3MB"
+        },
+        {
+          "unix_ms": 1792519837030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "107MB / 31MB"
+        },
+        {
+          "unix_ms": 1792519838031,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "110MB / 31.6MB"
+        },
+        {
+          "unix_ms": 1792519838531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "110MB / 31.6MB"
+        },
+        {
+          "unix_ms": 1792519839032,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "113MB / 32.3MB"
+        },
+        {
+          "unix_ms": 1792519839531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "113MB / 32.3MB"
+        },
+        {
+          "unix_ms": 1792519840531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "117MB / 33MB"
+        },
+        {
+          "unix_ms": 1792519841030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "119MB / 33.5MB"
+        },
+        {
+          "unix_ms": 1792519841530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "119MB / 33.5MB"
+        },
+        {
+          "unix_ms": 1792519842030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "122MB / 34.1MB"
+        },
+        {
+          "unix_ms": 1792519842531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "122MB / 34.1MB"
+        },
+        {
+          "unix_ms": 1792519843030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "125MB / 34.7MB"
+        },
+        {
+          "unix_ms": 1792519843530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "125MB / 34.7MB"
+        },
+        {
+          "unix_ms": 1792519844030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "129MB / 35.5MB"
+        }
+      ],
+      "file": "cap64-reddb-query-1000-get-c32-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 32,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-1000-get-c32-p16.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 8,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 1820.2172873055156,
+      "range_throughput_ops_s": [
+        1613.6320206700063,
+        2018.2603196276038
+      ],
+      "median_batch_p50_us": 3764.034,
+      "range_batch_p50_us": [
+        3561.922,
+        4132.774
+      ],
+      "median_batch_p95_us": 9041.766,
+      "range_batch_p95_us": [
+        7540.267,
+        11366.418
+      ],
+      "median_batch_p99_us": 13657.801,
+      "range_batch_p99_us": [
+        10319.933,
+        20893.275
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 113.795,
+      "server_peak_working_set_mib": 80.91,
+      "server_io": [
+        {
+          "unix_ms": 1792519822029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21MB / 59.3MB"
+        },
+        {
+          "unix_ms": 1792519822529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21MB / 59.3MB"
+        },
+        {
+          "unix_ms": 1792519823029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.8MB / 63.1MB"
+        },
+        {
+          "unix_ms": 1792519823529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.8MB / 63.1MB"
+        },
+        {
+          "unix_ms": 1792519824030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.6MB / 67MB"
+        },
+        {
+          "unix_ms": 1792519824530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.6MB / 67MB"
+        },
+        {
+          "unix_ms": 1792519825029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.3MB / 70.6MB"
+        },
+        {
+          "unix_ms": 1792519825533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.3MB / 70.6MB"
+        },
+        {
+          "unix_ms": 1792519826030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.9MB / 74MB"
+        },
+        {
+          "unix_ms": 1792519826531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.9MB / 74MB"
+        },
+        {
+          "unix_ms": 1792519827030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.6MB / 77.4MB"
+        },
+        {
+          "unix_ms": 1792519827530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.6MB / 77.4MB"
+        },
+        {
+          "unix_ms": 1792519828029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "25.4MB / 81.2MB"
+        },
+        {
+          "unix_ms": 1792519828529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "25.4MB / 81.2MB"
+        },
+        {
+          "unix_ms": 1792519829030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.1MB / 84.9MB"
+        },
+        {
+          "unix_ms": 1792519829530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.1MB / 84.9MB"
+        },
+        {
+          "unix_ms": 1792519830030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.7MB / 87.9MB"
+        },
+        {
+          "unix_ms": 1792519830531,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.7MB / 87.9MB"
+        },
+        {
+          "unix_ms": 1792519831030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.3MB / 90.5MB"
+        },
+        {
+          "unix_ms": 1792519831530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.3MB / 90.5MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 123.11500000000001,
+      "client_peak_working_set_mib": 18.16,
+      "client_io": [
+        {
+          "unix_ms": 1792519822030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "60.3MB / 21.7MB"
+        },
+        {
+          "unix_ms": 1792519822529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "60.3MB / 21.7MB"
+        },
+        {
+          "unix_ms": 1792519823029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "64.1MB / 22.4MB"
+        },
+        {
+          "unix_ms": 1792519823529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "64.1MB / 22.4MB"
+        },
+        {
+          "unix_ms": 1792519824030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "68MB / 23.2MB"
+        },
+        {
+          "unix_ms": 1792519824530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "68MB / 23.2MB"
+        },
+        {
+          "unix_ms": 1792519825030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "71.6MB / 23.9MB"
+        },
+        {
+          "unix_ms": 1792519825533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "71.6MB / 23.9MB"
+        },
+        {
+          "unix_ms": 1792519826030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "74.9MB / 24.6MB"
+        },
+        {
+          "unix_ms": 1792519826531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "74.9MB / 24.6MB"
+        },
+        {
+          "unix_ms": 1792519827030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "78.4MB / 25.3MB"
+        },
+        {
+          "unix_ms": 1792519827530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "78.4MB / 25.3MB"
+        },
+        {
+          "unix_ms": 1792519828029,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "82.2MB / 26MB"
+        },
+        {
+          "unix_ms": 1792519828529,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "82.2MB / 26MB"
+        },
+        {
+          "unix_ms": 1792519829030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "85.9MB / 26.8MB"
+        },
+        {
+          "unix_ms": 1792519829530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "85.9MB / 26.8MB"
+        },
+        {
+          "unix_ms": 1792519830030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "88.9MB / 27.4MB"
+        },
+        {
+          "unix_ms": 1792519830531,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "88.9MB / 27.4MB"
+        },
+        {
+          "unix_ms": 1792519831030,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "91.5MB / 27.9MB"
+        },
+        {
+          "unix_ms": 1792519831530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "91.5MB / 27.9MB"
+        }
+      ],
+      "file": "cap64-reddb-query-1000-get-c8-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 8,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-1000-get-c8-p16.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 1,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 836.1640834183626,
+      "range_throughput_ops_s": [
+        478.2004669475925,
+        1137.997467156586
+      ],
+      "median_batch_p50_us": 938.136,
+      "range_batch_p50_us": [
+        785.556,
+        1994.465
+      ],
+      "median_batch_p95_us": 2004.566,
+      "range_batch_p95_us": [
+        1331.16,
+        2689.333
+      ],
+      "median_batch_p99_us": 2411.886,
+      "range_batch_p99_us": [
+        1579.778,
+        7503.164
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 77.3,
+      "server_peak_working_set_mib": 103.6,
+      "server_io": [
+        {
+          "unix_ms": 1792520001534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.4MB / 40.6MB"
+        },
+        {
+          "unix_ms": 1792520002034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.6MB / 41.6MB"
+        },
+        {
+          "unix_ms": 1792520002534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.6MB / 41.6MB"
+        },
+        {
+          "unix_ms": 1792520003033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18MB / 43.6MB"
+        },
+        {
+          "unix_ms": 1792520003534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18MB / 43.6MB"
+        },
+        {
+          "unix_ms": 1792520004034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.2MB / 44.7MB"
+        },
+        {
+          "unix_ms": 1792520004534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.2MB / 44.7MB"
+        },
+        {
+          "unix_ms": 1792520005034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.5MB / 46.3MB"
+        },
+        {
+          "unix_ms": 1792520005534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.5MB / 46.3MB"
+        },
+        {
+          "unix_ms": 1792520006034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.8MB / 47.9MB"
+        },
+        {
+          "unix_ms": 1792520006536,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.8MB / 47.9MB"
+        },
+        {
+          "unix_ms": 1792520007039,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19MB / 48.8MB"
+        },
+        {
+          "unix_ms": 1792520007534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19MB / 48.8MB"
+        },
+        {
+          "unix_ms": 1792520008034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.2MB / 49.8MB"
+        },
+        {
+          "unix_ms": 1792520008534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.2MB / 49.8MB"
+        },
+        {
+          "unix_ms": 1792520009034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.6MB / 51.4MB"
+        },
+        {
+          "unix_ms": 1792520009534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.6MB / 51.4MB"
+        },
+        {
+          "unix_ms": 1792520010034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.9MB / 53.3MB"
+        },
+        {
+          "unix_ms": 1792520010534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "19.9MB / 53.3MB"
+        },
+        {
+          "unix_ms": 1792520011034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.4MB / 55.5MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 31.43,
+      "client_peak_working_set_mib": 17.3,
+      "client_io": [
+        {
+          "unix_ms": 1792520001534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "182MB / 60MB"
+        },
+        {
+          "unix_ms": 1792520002034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "184MB / 60.2MB"
+        },
+        {
+          "unix_ms": 1792520002534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "184MB / 60.2MB"
+        },
+        {
+          "unix_ms": 1792520003033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "186MB / 60.6MB"
+        },
+        {
+          "unix_ms": 1792520003534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "186MB / 60.6MB"
+        },
+        {
+          "unix_ms": 1792520004034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "187MB / 60.8MB"
+        },
+        {
+          "unix_ms": 1792520004534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "187MB / 60.8MB"
+        },
+        {
+          "unix_ms": 1792520005034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "188MB / 61.1MB"
+        },
+        {
+          "unix_ms": 1792520005534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "188MB / 61.1MB"
+        },
+        {
+          "unix_ms": 1792520006034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "190MB / 61.4MB"
+        },
+        {
+          "unix_ms": 1792520006536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "190MB / 61.4MB"
+        },
+        {
+          "unix_ms": 1792520007039,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "191MB / 61.6MB"
+        },
+        {
+          "unix_ms": 1792520007534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "191MB / 61.6MB"
+        },
+        {
+          "unix_ms": 1792520008034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "192MB / 61.8MB"
+        },
+        {
+          "unix_ms": 1792520008534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "192MB / 61.8MB"
+        },
+        {
+          "unix_ms": 1792520009034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "193MB / 62.1MB"
+        },
+        {
+          "unix_ms": 1792520009534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "193MB / 62.1MB"
+        },
+        {
+          "unix_ms": 1792520010034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "195MB / 62.5MB"
+        },
+        {
+          "unix_ms": 1792520010534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "195MB / 62.5MB"
+        },
+        {
+          "unix_ms": 1792520011034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "197MB / 63MB"
+        }
+      ],
+      "file": "cap64-reddb-query-10000-get-c1-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 1,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-10000-get-c1-p16.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 32,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 1835.7056071288036,
+      "range_throughput_ops_s": [
+        1745.22202705722,
+        2678.348290929545
+      ],
+      "median_batch_p50_us": 11970.39,
+      "range_batch_p50_us": [
+        10332.741,
+        15914.095
+      ],
+      "median_batch_p95_us": 28993.676,
+      "range_batch_p95_us": [
+        22959.388,
+        40413.196
+      ],
+      "median_batch_p99_us": 40929.773,
+      "range_batch_p99_us": [
+        31194.546,
+        59207.699
+      ],
+      "server_resource_samples": 22,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 156.05,
+      "server_peak_working_set_mib": 117.2,
+      "server_io": [
+        {
+          "unix_ms": 1792520025034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.8MB / 87.2MB"
+        },
+        {
+          "unix_ms": 1792520025534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.3MB / 89.7MB"
+        },
+        {
+          "unix_ms": 1792520026036,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.3MB / 89.7MB"
+        },
+        {
+          "unix_ms": 1792520026535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28MB / 93.2MB"
+        },
+        {
+          "unix_ms": 1792520027034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28MB / 93.2MB"
+        },
+        {
+          "unix_ms": 1792520027534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.5MB / 96.1MB"
+        },
+        {
+          "unix_ms": 1792520028034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.5MB / 96.1MB"
+        },
+        {
+          "unix_ms": 1792520028534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.4MB / 100MB"
+        },
+        {
+          "unix_ms": 1792520029534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "30.4MB / 105MB"
+        },
+        {
+          "unix_ms": 1792520030034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "30.4MB / 105MB"
+        },
+        {
+          "unix_ms": 1792520030534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.3MB / 110MB"
+        },
+        {
+          "unix_ms": 1792520031034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.3MB / 110MB"
+        },
+        {
+          "unix_ms": 1792520031534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "32.4MB / 115MB"
+        },
+        {
+          "unix_ms": 1792520032034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "32.4MB / 115MB"
+        },
+        {
+          "unix_ms": 1792520032534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.5MB / 121MB"
+        },
+        {
+          "unix_ms": 1792520033034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.5MB / 121MB"
+        },
+        {
+          "unix_ms": 1792520033534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.5MB / 126MB"
+        },
+        {
+          "unix_ms": 1792520034035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.5MB / 126MB"
+        },
+        {
+          "unix_ms": 1792520034534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.5MB / 126MB"
+        },
+        {
+          "unix_ms": 1792520035041,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.5MB / 126MB"
+        },
+        {
+          "unix_ms": 1792520035535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "35.2MB / 129MB"
+        },
+        {
+          "unix_ms": 1792520036036,
+          "BlockIO": "0B / 0B",
+          "NetIO": "35.2MB / 129MB"
+        }
+      ],
+      "client_resource_samples": 22,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 128.935,
+      "client_peak_working_set_mib": 21.14,
+      "client_io": [
+        {
+          "unix_ms": 1792520025034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "229MB / 69.3MB"
+        },
+        {
+          "unix_ms": 1792520025534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "232MB / 69.8MB"
+        },
+        {
+          "unix_ms": 1792520026036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "232MB / 69.8MB"
+        },
+        {
+          "unix_ms": 1792520026535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "235MB / 70.5MB"
+        },
+        {
+          "unix_ms": 1792520027034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "235MB / 70.5MB"
+        },
+        {
+          "unix_ms": 1792520027534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "238MB / 71.1MB"
+        },
+        {
+          "unix_ms": 1792520028034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "238MB / 71.1MB"
+        },
+        {
+          "unix_ms": 1792520028534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "242MB / 71.9MB"
+        },
+        {
+          "unix_ms": 1792520029534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "247MB / 72.9MB"
+        },
+        {
+          "unix_ms": 1792520030034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "247MB / 72.9MB"
+        },
+        {
+          "unix_ms": 1792520030534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "252MB / 73.9MB"
+        },
+        {
+          "unix_ms": 1792520031034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "252MB / 73.9MB"
+        },
+        {
+          "unix_ms": 1792520031534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "257MB / 75MB"
+        },
+        {
+          "unix_ms": 1792520032035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "257MB / 75MB"
+        },
+        {
+          "unix_ms": 1792520032534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "263MB / 76.1MB"
+        },
+        {
+          "unix_ms": 1792520033034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "263MB / 76.1MB"
+        },
+        {
+          "unix_ms": 1792520033534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "268MB / 77.1MB"
+        },
+        {
+          "unix_ms": 1792520034035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "268MB / 77.1MB"
+        },
+        {
+          "unix_ms": 1792520034534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "268MB / 77.1MB"
+        },
+        {
+          "unix_ms": 1792520035041,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "268MB / 77.1MB"
+        },
+        {
+          "unix_ms": 1792520035535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "271MB / 77.8MB"
+        },
+        {
+          "unix_ms": 1792520036036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "271MB / 77.8MB"
+        }
+      ],
+      "file": "cap64-reddb-query-10000-get-c32-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 32,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-10000-get-c32-p16.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 8,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 1511.32078850963,
+      "range_throughput_ops_s": [
+        944.3727346617221,
+        2132.7752562464398
+      ],
+      "median_batch_p50_us": 3927.26,
+      "range_batch_p50_us": [
+        3275.032,
+        5107.001
+      ],
+      "median_batch_p95_us": 12983.536,
+      "range_batch_p95_us": [
+        7479.42,
+        27256.546
+      ],
+      "median_batch_p99_us": 24948.798,
+      "range_batch_p99_us": [
+        13582.651,
+        41124.762
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 157.095,
+      "server_peak_working_set_mib": 110.1,
+      "server_io": [
+        {
+          "unix_ms": 1792520013034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21MB / 58.5MB"
+        },
+        {
+          "unix_ms": 1792520013534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21MB / 58.5MB"
+        },
+        {
+          "unix_ms": 1792520014034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.7MB / 62.2MB"
+        },
+        {
+          "unix_ms": 1792520014534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.7MB / 62.2MB"
+        },
+        {
+          "unix_ms": 1792520015538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.1MB / 64.2MB"
+        },
+        {
+          "unix_ms": 1792520016037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.1MB / 64.2MB"
+        },
+        {
+          "unix_ms": 1792520016534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.7MB / 67.3MB"
+        },
+        {
+          "unix_ms": 1792520017036,
+          "BlockIO": "0B / 0B",
+          "NetIO": "22.7MB / 67.3MB"
+        },
+        {
+          "unix_ms": 1792520017535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.1MB / 69.2MB"
+        },
+        {
+          "unix_ms": 1792520018074,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.1MB / 69.2MB"
+        },
+        {
+          "unix_ms": 1792520018535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.5MB / 70.9MB"
+        },
+        {
+          "unix_ms": 1792520019035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.5MB / 70.9MB"
+        },
+        {
+          "unix_ms": 1792520019534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.8MB / 72.7MB"
+        },
+        {
+          "unix_ms": 1792520020035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.8MB / 72.7MB"
+        },
+        {
+          "unix_ms": 1792520020539,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.3MB / 74.9MB"
+        },
+        {
+          "unix_ms": 1792520021034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.3MB / 74.9MB"
+        },
+        {
+          "unix_ms": 1792520021534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.9MB / 78MB"
+        },
+        {
+          "unix_ms": 1792520022037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.9MB / 78MB"
+        },
+        {
+          "unix_ms": 1792520022534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "25.8MB / 82.3MB"
+        },
+        {
+          "unix_ms": 1792520023034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "25.8MB / 82.3MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 119.555,
+      "client_peak_working_set_mib": 18.42,
+      "client_io": [
+        {
+          "unix_ms": 1792520013034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "200MB / 63.6MB"
+        },
+        {
+          "unix_ms": 1792520013534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "200MB / 63.6MB"
+        },
+        {
+          "unix_ms": 1792520014035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "204MB / 64.3MB"
+        },
+        {
+          "unix_ms": 1792520014534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "204MB / 64.3MB"
+        },
+        {
+          "unix_ms": 1792520015538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "206MB / 64.7MB"
+        },
+        {
+          "unix_ms": 1792520016037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "206MB / 64.7MB"
+        },
+        {
+          "unix_ms": 1792520016535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "209MB / 65.3MB"
+        },
+        {
+          "unix_ms": 1792520017036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "209MB / 65.3MB"
+        },
+        {
+          "unix_ms": 1792520017535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "211MB / 65.7MB"
+        },
+        {
+          "unix_ms": 1792520018074,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "211MB / 65.7MB"
+        },
+        {
+          "unix_ms": 1792520018535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "213MB / 66.1MB"
+        },
+        {
+          "unix_ms": 1792520019035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "213MB / 66.1MB"
+        },
+        {
+          "unix_ms": 1792520019534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "215MB / 66.4MB"
+        },
+        {
+          "unix_ms": 1792520020035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "215MB / 66.4MB"
+        },
+        {
+          "unix_ms": 1792520020539,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "217MB / 66.9MB"
+        },
+        {
+          "unix_ms": 1792520021034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "217MB / 66.9MB"
+        },
+        {
+          "unix_ms": 1792520021534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "220MB / 67.5MB"
+        },
+        {
+          "unix_ms": 1792520022037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "220MB / 67.5MB"
+        },
+        {
+          "unix_ms": 1792520022534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "224MB / 68.3MB"
+        },
+        {
+          "unix_ms": 1792520023035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "224MB / 68.3MB"
+        }
+      ],
+      "file": "cap64-reddb-query-10000-get-c8-p1.json"
+    },
+    {
+      "engine": "reddb-query",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 8,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-query-10000-get-c8-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 1,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 2025.5020151604617,
+      "range_throughput_ops_s": [
+        1896.1661426147496,
+        2096.0134838101535
+      ],
+      "median_batch_p50_us": 451.192,
+      "range_batch_p50_us": [
+        443.617,
+        495.68
+      ],
+      "median_batch_p95_us": 640.345,
+      "range_batch_p95_us": [
+        627.519,
+        702.86
+      ],
+      "median_batch_p99_us": 764.881,
+      "range_batch_p99_us": [
+        732.638,
+        882.135
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 61.52,
+      "server_peak_working_set_mib": 71.18,
+      "server_io": [
+        {
+          "unix_ms": 1792519777028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "855B / 664B"
+        },
+        {
+          "unix_ms": 1792519777528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "248kB / 578kB"
+        },
+        {
+          "unix_ms": 1792519778029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "248kB / 578kB"
+        },
+        {
+          "unix_ms": 1792519778528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "684kB / 1.61MB"
+        },
+        {
+          "unix_ms": 1792519779528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.13MB / 2.66MB"
+        },
+        {
+          "unix_ms": 1792519780028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.13MB / 2.66MB"
+        },
+        {
+          "unix_ms": 1792519780528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.55MB / 3.65MB"
+        },
+        {
+          "unix_ms": 1792519781028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.55MB / 3.65MB"
+        },
+        {
+          "unix_ms": 1792519781528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.95MB / 4.61MB"
+        },
+        {
+          "unix_ms": 1792519782028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.95MB / 4.61MB"
+        },
+        {
+          "unix_ms": 1792519782528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.41MB / 5.71MB"
+        },
+        {
+          "unix_ms": 1792519783029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.41MB / 5.71MB"
+        },
+        {
+          "unix_ms": 1792519783528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.87MB / 6.78MB"
+        },
+        {
+          "unix_ms": 1792519784028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.87MB / 6.78MB"
+        },
+        {
+          "unix_ms": 1792519784528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.33MB / 7.87MB"
+        },
+        {
+          "unix_ms": 1792519785028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.33MB / 7.87MB"
+        },
+        {
+          "unix_ms": 1792519785528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.77MB / 8.92MB"
+        },
+        {
+          "unix_ms": 1792519786028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.77MB / 8.92MB"
+        },
+        {
+          "unix_ms": 1792519786529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.21MB / 9.97MB"
+        },
+        {
+          "unix_ms": 1792519787033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.21MB / 9.97MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 46.745000000000005,
+      "client_peak_working_set_mib": 16.67,
+      "client_io": [
+        {
+          "unix_ms": 1792519777028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "975kB / 638kB"
+        },
+        {
+          "unix_ms": 1792519777528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.55MB / 883kB"
+        },
+        {
+          "unix_ms": 1792519778029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.55MB / 883kB"
+        },
+        {
+          "unix_ms": 1792519778528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.59MB / 1.32MB"
+        },
+        {
+          "unix_ms": 1792519779528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.64MB / 1.77MB"
+        },
+        {
+          "unix_ms": 1792519780028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.64MB / 1.77MB"
+        },
+        {
+          "unix_ms": 1792519780528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.63MB / 2.18MB"
+        },
+        {
+          "unix_ms": 1792519781028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.63MB / 2.18MB"
+        },
+        {
+          "unix_ms": 1792519781528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.58MB / 2.59MB"
+        },
+        {
+          "unix_ms": 1792519782028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.58MB / 2.59MB"
+        },
+        {
+          "unix_ms": 1792519782528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.69MB / 3.05MB"
+        },
+        {
+          "unix_ms": 1792519783029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.69MB / 3.05MB"
+        },
+        {
+          "unix_ms": 1792519783528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.76MB / 3.5MB"
+        },
+        {
+          "unix_ms": 1792519784028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.76MB / 3.5MB"
+        },
+        {
+          "unix_ms": 1792519784528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.85MB / 3.96MB"
+        },
+        {
+          "unix_ms": 1792519785028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.85MB / 3.96MB"
+        },
+        {
+          "unix_ms": 1792519785528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.9MB / 4.41MB"
+        },
+        {
+          "unix_ms": 1792519786028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.9MB / 4.41MB"
+        },
+        {
+          "unix_ms": 1792519786529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.9MB / 4.85MB"
+        },
+        {
+          "unix_ms": 1792519787033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.9MB / 4.85MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-1000-get-c1-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 1,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-1000-get-c1-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 32,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 2617.5296084267165,
+      "range_throughput_ops_s": [
+        2161.661654549218,
+        3084.9528264498404
+      ],
+      "median_batch_p50_us": 9513.157,
+      "range_batch_p50_us": [
+        8290.569,
+        11509.084
+      ],
+      "median_batch_p95_us": 31731.923,
+      "range_batch_p95_us": [
+        25326.952,
+        37904.37
+      ],
+      "median_batch_p99_us": 46400.805,
+      "range_batch_p99_us": [
+        36713.893,
+        58936.629
+      ],
+      "server_resource_samples": 21,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 82.33,
+      "server_peak_working_set_mib": 72.91,
+      "server_io": [
+        {
+          "unix_ms": 1792519799529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.2MB / 26.5MB"
+        },
+        {
+          "unix_ms": 1792519800035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.2MB / 26.5MB"
+        },
+        {
+          "unix_ms": 1792519800532,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.7MB / 27.6MB"
+        },
+        {
+          "unix_ms": 1792519801029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.7MB / 27.6MB"
+        },
+        {
+          "unix_ms": 1792519801529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.2MB / 28.7MB"
+        },
+        {
+          "unix_ms": 1792519802029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.2MB / 28.7MB"
+        },
+        {
+          "unix_ms": 1792519802528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.8MB / 30.2MB"
+        },
+        {
+          "unix_ms": 1792519803030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.8MB / 30.2MB"
+        },
+        {
+          "unix_ms": 1792519803529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.6MB / 32.2MB"
+        },
+        {
+          "unix_ms": 1792519804030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.6MB / 32.2MB"
+        },
+        {
+          "unix_ms": 1792519804529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.3MB / 33.7MB"
+        },
+        {
+          "unix_ms": 1792519805029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.3MB / 33.7MB"
+        },
+        {
+          "unix_ms": 1792519805536,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.8MB / 35MB"
+        },
+        {
+          "unix_ms": 1792519806030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.8MB / 35MB"
+        },
+        {
+          "unix_ms": 1792519806529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.4MB / 36.3MB"
+        },
+        {
+          "unix_ms": 1792519807029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.4MB / 36.3MB"
+        },
+        {
+          "unix_ms": 1792519807571,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.4MB / 36.3MB"
+        },
+        {
+          "unix_ms": 1792519808030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16MB / 37.6MB"
+        },
+        {
+          "unix_ms": 1792519808529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16MB / 37.6MB"
+        },
+        {
+          "unix_ms": 1792519809031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16.5MB / 39MB"
+        },
+        {
+          "unix_ms": 1792519809530,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16.5MB / 39MB"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 126.73,
+      "client_peak_working_set_mib": 20.91,
+      "client_io": [
+        {
+          "unix_ms": 1792519799529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.5MB / 11.9MB"
+        },
+        {
+          "unix_ms": 1792519800035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "27.5MB / 11.9MB"
+        },
+        {
+          "unix_ms": 1792519800532,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.6MB / 12.3MB"
+        },
+        {
+          "unix_ms": 1792519801029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "28.6MB / 12.3MB"
+        },
+        {
+          "unix_ms": 1792519801529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.7MB / 12.8MB"
+        },
+        {
+          "unix_ms": 1792519802029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "29.7MB / 12.8MB"
+        },
+        {
+          "unix_ms": 1792519802529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.7MB / 13.6MB"
+        },
+        {
+          "unix_ms": 1792519803030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "31.7MB / 13.6MB"
+        },
+        {
+          "unix_ms": 1792519803529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.2MB / 14.3MB"
+        },
+        {
+          "unix_ms": 1792519804030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "33.2MB / 14.3MB"
+        },
+        {
+          "unix_ms": 1792519804529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.7MB / 14.9MB"
+        },
+        {
+          "unix_ms": 1792519805029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "34.7MB / 14.9MB"
+        },
+        {
+          "unix_ms": 1792519805537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "36MB / 15.5MB"
+        },
+        {
+          "unix_ms": 1792519806030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "36MB / 15.5MB"
+        },
+        {
+          "unix_ms": 1792519806529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "37.2MB / 16MB"
+        },
+        {
+          "unix_ms": 1792519807029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "37.2MB / 16MB"
+        },
+        {
+          "unix_ms": 1792519807571,
+          "BlockIO": "0B / 0B",
+          "NetIO": "37.2MB / 16MB"
+        },
+        {
+          "unix_ms": 1792519808031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "38.6MB / 16.6MB"
+        },
+        {
+          "unix_ms": 1792519808529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "38.6MB / 16.6MB"
+        },
+        {
+          "unix_ms": 1792519809031,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "39.9MB / 17.2MB"
+        },
+        {
+          "unix_ms": 1792519809530,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "39.9MB / 17.2MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-1000-get-c32-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 32,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-1000-get-c32-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 8,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 2911.0114863827275,
+      "range_throughput_ops_s": [
+        2730.377690908179,
+        3220.0775164257043
+      ],
+      "median_batch_p50_us": 2210.047,
+      "range_batch_p50_us": [
+        2048.038,
+        2294.378
+      ],
+      "median_batch_p95_us": 6394.789,
+      "range_batch_p95_us": [
+        5536.411,
+        7069.723
+      ],
+      "median_batch_p99_us": 9751.167,
+      "range_batch_p99_us": [
+        8055.916,
+        11750.339
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 79.86,
+      "server_peak_working_set_mib": 71.66,
+      "server_io": [
+        {
+          "unix_ms": 1792519788028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.62MB / 10.9MB"
+        },
+        {
+          "unix_ms": 1792519788529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.8MB / 11.3MB"
+        },
+        {
+          "unix_ms": 1792519789029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.8MB / 11.3MB"
+        },
+        {
+          "unix_ms": 1792519789529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.49MB / 13MB"
+        },
+        {
+          "unix_ms": 1792519790031,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.49MB / 13MB"
+        },
+        {
+          "unix_ms": 1792519790533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.21MB / 14.7MB"
+        },
+        {
+          "unix_ms": 1792519791029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.21MB / 14.7MB"
+        },
+        {
+          "unix_ms": 1792519791528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.83MB / 16.2MB"
+        },
+        {
+          "unix_ms": 1792519792029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.83MB / 16.2MB"
+        },
+        {
+          "unix_ms": 1792519792529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.42MB / 17.6MB"
+        },
+        {
+          "unix_ms": 1792519793028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.42MB / 17.6MB"
+        },
+        {
+          "unix_ms": 1792519793529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.08MB / 19.1MB"
+        },
+        {
+          "unix_ms": 1792519794528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.73MB / 20.7MB"
+        },
+        {
+          "unix_ms": 1792519795030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.73MB / 20.7MB"
+        },
+        {
+          "unix_ms": 1792519795529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.38MB / 22.2MB"
+        },
+        {
+          "unix_ms": 1792519796029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.38MB / 22.2MB"
+        },
+        {
+          "unix_ms": 1792519796529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10MB / 23.7MB"
+        },
+        {
+          "unix_ms": 1792519797030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10MB / 23.7MB"
+        },
+        {
+          "unix_ms": 1792519797529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.6MB / 25.1MB"
+        },
+        {
+          "unix_ms": 1792519798033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.6MB / 25.1MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 119.81,
+      "client_peak_working_set_mib": 17.84,
+      "client_io": [
+        {
+          "unix_ms": 1792519788028,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.9MB / 5.25MB"
+        },
+        {
+          "unix_ms": 1792519788529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.3MB / 5.43MB"
+        },
+        {
+          "unix_ms": 1792519789029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.3MB / 5.43MB"
+        },
+        {
+          "unix_ms": 1792519789529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14MB / 6.13MB"
+        },
+        {
+          "unix_ms": 1792519790033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14MB / 6.13MB"
+        },
+        {
+          "unix_ms": 1792519790534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.7MB / 6.85MB"
+        },
+        {
+          "unix_ms": 1792519791029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.7MB / 6.85MB"
+        },
+        {
+          "unix_ms": 1792519791528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.1MB / 7.46MB"
+        },
+        {
+          "unix_ms": 1792519792029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.1MB / 7.46MB"
+        },
+        {
+          "unix_ms": 1792519792529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.5MB / 8.06MB"
+        },
+        {
+          "unix_ms": 1792519793029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "18.5MB / 8.06MB"
+        },
+        {
+          "unix_ms": 1792519793529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "20.1MB / 8.72MB"
+        },
+        {
+          "unix_ms": 1792519794528,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.6MB / 9.37MB"
+        },
+        {
+          "unix_ms": 1792519795030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "21.6MB / 9.37MB"
+        },
+        {
+          "unix_ms": 1792519795529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.2MB / 10MB"
+        },
+        {
+          "unix_ms": 1792519796029,
+          "BlockIO": "0B / 0B",
+          "NetIO": "23.2MB / 10MB"
+        },
+        {
+          "unix_ms": 1792519796529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.6MB / 10.6MB"
+        },
+        {
+          "unix_ms": 1792519797030,
+          "BlockIO": "0B / 0B",
+          "NetIO": "24.6MB / 10.6MB"
+        },
+        {
+          "unix_ms": 1792519797529,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.1MB / 11.2MB"
+        },
+        {
+          "unix_ms": 1792519798033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "26.1MB / 11.2MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-1000-get-c8-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 8,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-1000-get-c8-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "put",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 1,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 76.67148450668654,
+      "range_throughput_ops_s": [
+        9.09799746264509,
+        84.17499802982704
+      ],
+      "median_batch_p50_us": 11628.274,
+      "range_batch_p50_us": [
+        10563.299,
+        23627.566
+      ],
+      "median_batch_p95_us": 22285.507,
+      "range_batch_p95_us": [
+        17122.92,
+        582032.9
+      ],
+      "median_batch_p99_us": 45941.304,
+      "range_batch_p99_us": [
+        34758.913,
+        1090377.679
+      ],
+      "server_resource_samples": 164,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 2.67,
+      "server_peak_working_set_mib": 105.4,
+      "server_io": [
+        {
+          "unix_ms": 1792520052535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.05MB / 6.66MB"
+        },
+        {
+          "unix_ms": 1792520053035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.05MB / 6.66MB"
+        },
+        {
+          "unix_ms": 1792520053535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.08MB / 6.69MB"
+        },
+        {
+          "unix_ms": 1792520054035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.08MB / 6.69MB"
+        },
+        {
+          "unix_ms": 1792520054535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.12MB / 6.73MB"
+        },
+        {
+          "unix_ms": 1792520055035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.12MB / 6.73MB"
+        },
+        {
+          "unix_ms": 1792520055535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.16MB / 6.78MB"
+        },
+        {
+          "unix_ms": 1792520056035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.16MB / 6.78MB"
+        },
+        {
+          "unix_ms": 1792520056535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.2MB / 6.82MB"
+        },
+        {
+          "unix_ms": 1792520057035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.2MB / 6.82MB"
+        },
+        {
+          "unix_ms": 1792520057535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.23MB / 6.86MB"
+        },
+        {
+          "unix_ms": 1792520058535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.33MB / 7.06MB"
+        },
+        {
+          "unix_ms": 1792520059035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.33MB / 7.06MB"
+        },
+        {
+          "unix_ms": 1792520059535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.39MB / 7.18MB"
+        },
+        {
+          "unix_ms": 1792520060035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.39MB / 7.18MB"
+        },
+        {
+          "unix_ms": 1792520060535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.41MB / 7.2MB"
+        },
+        {
+          "unix_ms": 1792520061035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.41MB / 7.2MB"
+        },
+        {
+          "unix_ms": 1792520061535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.45MB / 7.23MB"
+        },
+        {
+          "unix_ms": 1792520062035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.45MB / 7.23MB"
+        },
+        {
+          "unix_ms": 1792520062535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.48MB / 7.28MB"
+        },
+        {
+          "unix_ms": 1792520063035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.48MB / 7.28MB"
+        },
+        {
+          "unix_ms": 1792520063535,
+          "BlockIO": "0B / 958kB",
+          "NetIO": "3.52MB / 7.32MB"
+        },
+        {
+          "unix_ms": 1792520064035,
+          "BlockIO": "0B / 958kB",
+          "NetIO": "3.52MB / 7.32MB"
+        },
+        {
+          "unix_ms": 1792520064535,
+          "BlockIO": "0B / 2.29MB",
+          "NetIO": "3.56MB / 7.36MB"
+        },
+        {
+          "unix_ms": 1792520065035,
+          "BlockIO": "0B / 2.29MB",
+          "NetIO": "3.56MB / 7.36MB"
+        },
+        {
+          "unix_ms": 1792520065535,
+          "BlockIO": "0B / 3.31MB",
+          "NetIO": "3.69MB / 7.65MB"
+        },
+        {
+          "unix_ms": 1792520066035,
+          "BlockIO": "0B / 3.31MB",
+          "NetIO": "3.69MB / 7.65MB"
+        },
+        {
+          "unix_ms": 1792520066535,
+          "BlockIO": "0B / 6.89MB",
+          "NetIO": "3.73MB / 7.69MB"
+        },
+        {
+          "unix_ms": 1792520067035,
+          "BlockIO": "0B / 6.89MB",
+          "NetIO": "3.73MB / 7.69MB"
+        },
+        {
+          "unix_ms": 1792520067535,
+          "BlockIO": "0B / 8.25MB",
+          "NetIO": "3.76MB / 7.72MB"
+        },
+        {
+          "unix_ms": 1792520068035,
+          "BlockIO": "0B / 8.25MB",
+          "NetIO": "3.76MB / 7.72MB"
+        },
+        {
+          "unix_ms": 1792520068535,
+          "BlockIO": "0B / 9.49MB",
+          "NetIO": "3.8MB / 7.76MB"
+        },
+        {
+          "unix_ms": 1792520069035,
+          "BlockIO": "0B / 9.49MB",
+          "NetIO": "3.8MB / 7.76MB"
+        },
+        {
+          "unix_ms": 1792520069535,
+          "BlockIO": "0B / 13MB",
+          "NetIO": "3.83MB / 7.79MB"
+        },
+        {
+          "unix_ms": 1792520070036,
+          "BlockIO": "0B / 13MB",
+          "NetIO": "3.83MB / 7.79MB"
+        },
+        {
+          "unix_ms": 1792520070536,
+          "BlockIO": "0B / 14.2MB",
+          "NetIO": "3.86MB / 7.83MB"
+        },
+        {
+          "unix_ms": 1792520071036,
+          "BlockIO": "0B / 14.2MB",
+          "NetIO": "3.86MB / 7.83MB"
+        },
+        {
+          "unix_ms": 1792520071535,
+          "BlockIO": "0B / 15.5MB",
+          "NetIO": "3.89MB / 7.86MB"
+        },
+        {
+          "unix_ms": 1792520072035,
+          "BlockIO": "0B / 15.5MB",
+          "NetIO": "3.89MB / 7.86MB"
+        },
+        {
+          "unix_ms": 1792520072535,
+          "BlockIO": "0B / 18.5MB",
+          "NetIO": "4.03MB / 8.15MB"
+        },
+        {
+          "unix_ms": 1792520073035,
+          "BlockIO": "0B / 18.5MB",
+          "NetIO": "4.03MB / 8.15MB"
+        },
+        {
+          "unix_ms": 1792520073535,
+          "BlockIO": "0B / 19.8MB",
+          "NetIO": "4.06MB / 8.18MB"
+        },
+        {
+          "unix_ms": 1792520074036,
+          "BlockIO": "0B / 19.8MB",
+          "NetIO": "4.06MB / 8.18MB"
+        },
+        {
+          "unix_ms": 1792520074536,
+          "BlockIO": "0B / 21MB",
+          "NetIO": "4.09MB / 8.22MB"
+        },
+        {
+          "unix_ms": 1792520075035,
+          "BlockIO": "0B / 21MB",
+          "NetIO": "4.09MB / 8.22MB"
+        },
+        {
+          "unix_ms": 1792520075535,
+          "BlockIO": "0B / 24.3MB",
+          "NetIO": "4.12MB / 8.25MB"
+        },
+        {
+          "unix_ms": 1792520076038,
+          "BlockIO": "0B / 24.3MB",
+          "NetIO": "4.12MB / 8.25MB"
+        },
+        {
+          "unix_ms": 1792520076536,
+          "BlockIO": "0B / 25.6MB",
+          "NetIO": "4.15MB / 8.28MB"
+        },
+        {
+          "unix_ms": 1792520077036,
+          "BlockIO": "0B / 25.6MB",
+          "NetIO": "4.15MB / 8.28MB"
+        },
+        {
+          "unix_ms": 1792520077535,
+          "BlockIO": "0B / 26.5MB",
+          "NetIO": "4.17MB / 8.31MB"
+        },
+        {
+          "unix_ms": 1792520078037,
+          "BlockIO": "0B / 26.5MB",
+          "NetIO": "4.17MB / 8.31MB"
+        },
+        {
+          "unix_ms": 1792520078536,
+          "BlockIO": "0B / 27.1MB",
+          "NetIO": "4.19MB / 8.32MB"
+        },
+        {
+          "unix_ms": 1792520079036,
+          "BlockIO": "0B / 27.1MB",
+          "NetIO": "4.19MB / 8.32MB"
+        },
+        {
+          "unix_ms": 1792520079536,
+          "BlockIO": "0B / 27.7MB",
+          "NetIO": "4.2MB / 8.34MB"
+        },
+        {
+          "unix_ms": 1792520080536,
+          "BlockIO": "0B / 30.4MB",
+          "NetIO": "4.33MB / 8.62MB"
+        },
+        {
+          "unix_ms": 1792520081036,
+          "BlockIO": "0B / 30.4MB",
+          "NetIO": "4.33MB / 8.62MB"
+        },
+        {
+          "unix_ms": 1792520081536,
+          "BlockIO": "0B / 31.2MB",
+          "NetIO": "4.35MB / 8.64MB"
+        },
+        {
+          "unix_ms": 1792520082035,
+          "BlockIO": "0B / 31.2MB",
+          "NetIO": "4.35MB / 8.64MB"
+        },
+        {
+          "unix_ms": 1792520082535,
+          "BlockIO": "0B / 31.8MB",
+          "NetIO": "4.36MB / 8.66MB"
+        },
+        {
+          "unix_ms": 1792520083035,
+          "BlockIO": "0B / 31.8MB",
+          "NetIO": "4.36MB / 8.66MB"
+        },
+        {
+          "unix_ms": 1792520083536,
+          "BlockIO": "0B / 32.2MB",
+          "NetIO": "4.37MB / 8.67MB"
+        },
+        {
+          "unix_ms": 1792520084035,
+          "BlockIO": "0B / 32.2MB",
+          "NetIO": "4.37MB / 8.67MB"
+        },
+        {
+          "unix_ms": 1792520084535,
+          "BlockIO": "0B / 32.5MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520085036,
+          "BlockIO": "0B / 32.5MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520085536,
+          "BlockIO": "0B / 32.5MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520086036,
+          "BlockIO": "0B / 32.5MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520086535,
+          "BlockIO": "0B / 32.6MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520087035,
+          "BlockIO": "0B / 32.6MB",
+          "NetIO": "4.38MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520087536,
+          "BlockIO": "0B / 32.8MB",
+          "NetIO": "4.39MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520088036,
+          "BlockIO": "0B / 32.8MB",
+          "NetIO": "4.39MB / 8.68MB"
+        },
+        {
+          "unix_ms": 1792520088535,
+          "BlockIO": "0B / 32.9MB",
+          "NetIO": "4.39MB / 8.69MB"
+        },
+        {
+          "unix_ms": 1792520089036,
+          "BlockIO": "0B / 32.9MB",
+          "NetIO": "4.39MB / 8.69MB"
+        },
+        {
+          "unix_ms": 1792520089536,
+          "BlockIO": "0B / 33.1MB",
+          "NetIO": "4.4MB / 8.69MB"
+        },
+        {
+          "unix_ms": 1792520090036,
+          "BlockIO": "0B / 33.1MB",
+          "NetIO": "4.4MB / 8.69MB"
+        },
+        {
+          "unix_ms": 1792520090535,
+          "BlockIO": "0B / 33.3MB",
+          "NetIO": "4.4MB / 8.7MB"
+        },
+        {
+          "unix_ms": 1792520091036,
+          "BlockIO": "0B / 33.3MB",
+          "NetIO": "4.4MB / 8.7MB"
+        },
+        {
+          "unix_ms": 1792520091535,
+          "BlockIO": "0B / 33.5MB",
+          "NetIO": "4.41MB / 8.7MB"
+        },
+        {
+          "unix_ms": 1792520092035,
+          "BlockIO": "0B / 33.5MB",
+          "NetIO": "4.41MB / 8.7MB"
+        },
+        {
+          "unix_ms": 1792520092536,
+          "BlockIO": "0B / 36MB",
+          "NetIO": "4.41MB / 8.71MB"
+        },
+        {
+          "unix_ms": 1792520093036,
+          "BlockIO": "0B / 36MB",
+          "NetIO": "4.41MB / 8.71MB"
+        },
+        {
+          "unix_ms": 1792520093537,
+          "BlockIO": "0B / 36.1MB",
+          "NetIO": "4.42MB / 8.72MB"
+        },
+        {
+          "unix_ms": 1792520094036,
+          "BlockIO": "0B / 36.1MB",
+          "NetIO": "4.42MB / 8.72MB"
+        },
+        {
+          "unix_ms": 1792520094536,
+          "BlockIO": "0B / 36.5MB",
+          "NetIO": "4.43MB / 8.73MB"
+        },
+        {
+          "unix_ms": 1792520095036,
+          "BlockIO": "0B / 36.5MB",
+          "NetIO": "4.43MB / 8.73MB"
+        },
+        {
+          "unix_ms": 1792520095537,
+          "BlockIO": "0B / 36.7MB",
+          "NetIO": "4.43MB / 8.74MB"
+        },
+        {
+          "unix_ms": 1792520096036,
+          "BlockIO": "0B / 36.7MB",
+          "NetIO": "4.43MB / 8.74MB"
+        },
+        {
+          "unix_ms": 1792520096536,
+          "BlockIO": "0B / 37MB",
+          "NetIO": "4.44MB / 8.74MB"
+        },
+        {
+          "unix_ms": 1792520097036,
+          "BlockIO": "0B / 37MB",
+          "NetIO": "4.44MB / 8.74MB"
+        },
+        {
+          "unix_ms": 1792520097536,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520098036,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520098536,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520099036,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520099536,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520100036,
+          "BlockIO": "0B / 37.3MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520100536,
+          "BlockIO": "0B / 37.4MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520101036,
+          "BlockIO": "0B / 37.4MB",
+          "NetIO": "4.45MB / 8.75MB"
+        },
+        {
+          "unix_ms": 1792520101536,
+          "BlockIO": "0B / 37.6MB",
+          "NetIO": "4.46MB / 8.76MB"
+        },
+        {
+          "unix_ms": 1792520102036,
+          "BlockIO": "0B / 37.6MB",
+          "NetIO": "4.46MB / 8.76MB"
+        },
+        {
+          "unix_ms": 1792520102536,
+          "BlockIO": "0B / 38.2MB",
+          "NetIO": "4.47MB / 8.77MB"
+        },
+        {
+          "unix_ms": 1792520103036,
+          "BlockIO": "0B / 38.2MB",
+          "NetIO": "4.47MB / 8.77MB"
+        },
+        {
+          "unix_ms": 1792520103536,
+          "BlockIO": "0B / 38.2MB",
+          "NetIO": "4.47MB / 8.77MB"
+        },
+        {
+          "unix_ms": 1792520104036,
+          "BlockIO": "0B / 38.2MB",
+          "NetIO": "4.47MB / 8.77MB"
+        },
+        {
+          "unix_ms": 1792520104536,
+          "BlockIO": "0B / 38.3MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520105036,
+          "BlockIO": "0B / 38.3MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520105536,
+          "BlockIO": "0B / 38.3MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520106036,
+          "BlockIO": "0B / 38.3MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520106536,
+          "BlockIO": "0B / 38.4MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520107036,
+          "BlockIO": "0B / 38.4MB",
+          "NetIO": "4.47MB / 8.78MB"
+        },
+        {
+          "unix_ms": 1792520107536,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520108036,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520108536,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520109036,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520109536,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520110036,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520110536,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520111036,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520111536,
+          "BlockIO": "0B / 39.1MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.49MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.2MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520116536,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520118061,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520120462,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520120465,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.8MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520120537,
+          "BlockIO": "0B / 39.3MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520121036,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520121537,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520122036,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520122537,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520123036,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520123537,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520124036,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520124537,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520125037,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520125536,
+          "BlockIO": "0B / 39.4MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520126037,
+          "BlockIO": "0B / 39.5MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520126536,
+          "BlockIO": "0B / 39.5MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520127037,
+          "BlockIO": "0B / 39.6MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520127537,
+          "BlockIO": "0B / 39.6MB",
+          "NetIO": "4.5MB / 8.81MB"
+        },
+        {
+          "unix_ms": 1792520128037,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520128537,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520129037,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520129536,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520130036,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520130537,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520131037,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520131760,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520132037,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520132537,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520133037,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520133537,
+          "BlockIO": "0B / 42.1MB",
+          "NetIO": "4.51MB / 8.82MB"
+        },
+        {
+          "unix_ms": 1792520134067,
+          "BlockIO": "0B / 42.3MB",
+          "NetIO": "4.52MB / 8.83MB"
+        },
+        {
+          "unix_ms": 1792520134570,
+          "BlockIO": "0B / 42.3MB",
+          "NetIO": "4.52MB / 8.83MB"
+        },
+        {
+          "unix_ms": 1792520135037,
+          "BlockIO": "0B / 42.7MB",
+          "NetIO": "4.53MB / 8.84MB"
+        }
+      ],
+      "client_resource_samples": 164,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 0.92,
+      "client_peak_working_set_mib": 17.7,
+      "client_io": [
+        {
+          "unix_ms": 1792520052535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520053035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520053535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520054035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520054535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520055035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.7MB"
+        },
+        {
+          "unix_ms": 1792520055535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.8MB"
+        },
+        {
+          "unix_ms": 1792520056035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.8MB"
+        },
+        {
+          "unix_ms": 1792520056535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.8MB"
+        },
+        {
+          "unix_ms": 1792520057035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.8MB"
+        },
+        {
+          "unix_ms": 1792520057535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 81.8MB"
+        },
+        {
+          "unix_ms": 1792520058535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520059035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520059535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520060035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520060535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520061035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82MB"
+        },
+        {
+          "unix_ms": 1792520061535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520062035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520062535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520063035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "282MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520063535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520064035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.1MB"
+        },
+        {
+          "unix_ms": 1792520064535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.2MB"
+        },
+        {
+          "unix_ms": 1792520065035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.2MB"
+        },
+        {
+          "unix_ms": 1792520065535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.3MB"
+        },
+        {
+          "unix_ms": 1792520066035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.3MB"
+        },
+        {
+          "unix_ms": 1792520066535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.3MB"
+        },
+        {
+          "unix_ms": 1792520067035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.3MB"
+        },
+        {
+          "unix_ms": 1792520067535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520068035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520068535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520069035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520069535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520070036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.4MB"
+        },
+        {
+          "unix_ms": 1792520070536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.5MB"
+        },
+        {
+          "unix_ms": 1792520071036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.5MB"
+        },
+        {
+          "unix_ms": 1792520071535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.5MB"
+        },
+        {
+          "unix_ms": 1792520072035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.5MB"
+        },
+        {
+          "unix_ms": 1792520072535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.6MB"
+        },
+        {
+          "unix_ms": 1792520073035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.6MB"
+        },
+        {
+          "unix_ms": 1792520073535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520074036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520074536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520075035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520075536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520076038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.7MB"
+        },
+        {
+          "unix_ms": 1792520076536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520077036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "283MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520077535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520078037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520078536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520079036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520079536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.8MB"
+        },
+        {
+          "unix_ms": 1792520080536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.9MB"
+        },
+        {
+          "unix_ms": 1792520081036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 82.9MB"
+        },
+        {
+          "unix_ms": 1792520081536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520082035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520082535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520083035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520083536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520084035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520084535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520085036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520085536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520086036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520086536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520087035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520087536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520088036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520088535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520089036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520089536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520090036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520090535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520091036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520091535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520092035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520092536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520093036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520093537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520094036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520094536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520095036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83MB"
+        },
+        {
+          "unix_ms": 1792520095537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520096036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520096536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520097036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520097536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520098036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520098536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520099036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520099536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520100036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520100536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520101040,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520101536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520102036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520102536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520103036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520103536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520104036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520104536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520105036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520105536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520106036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520106536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520107036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520107561,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520108137,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520108536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520109036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520109552,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520110036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520110592,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520111075,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116106,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520116109,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520118060,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520118098,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120465,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120502,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520120544,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520121036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520121537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520122036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520122537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520123036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520123537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520124036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520124537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520125037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520125536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520126037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520126536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520127037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520127537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520128037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520128537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520129037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520129536,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520130036,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520130537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520131760,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520131760,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520132037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520132537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520133037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520133537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520134068,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520134570,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        },
+        {
+          "unix_ms": 1792520135037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "284MB / 83.1MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-1000-put-c1-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "put",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 1000,
+      "workers": 8,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 101.99254645870022,
+      "range_throughput_ops_s": [
+        93.95028938080793,
+        112.1367911531145
+      ],
+      "median_batch_p50_us": 75380.793,
+      "range_batch_p50_us": [
+        68942.938,
+        77644.577
+      ],
+      "median_batch_p95_us": 101213.69,
+      "range_batch_p95_us": [
+        90482.915,
+        119322.216
+      ],
+      "median_batch_p99_us": 122354.676,
+      "range_batch_p99_us": [
+        111865.912,
+        348685.803
+      ],
+      "server_resource_samples": 48,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 14.91,
+      "server_peak_working_set_mib": 122.1,
+      "server_io": [
+        {
+          "unix_ms": 1792520151537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "934kB / 1.68MB"
+        },
+        {
+          "unix_ms": 1792520152037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.13MB / 2.08MB"
+        },
+        {
+          "unix_ms": 1792520152538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.13MB / 2.08MB"
+        },
+        {
+          "unix_ms": 1792520153037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.18MB / 2.13MB"
+        },
+        {
+          "unix_ms": 1792520153537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.18MB / 2.13MB"
+        },
+        {
+          "unix_ms": 1792520154037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.22MB / 2.18MB"
+        },
+        {
+          "unix_ms": 1792520154538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.22MB / 2.18MB"
+        },
+        {
+          "unix_ms": 1792520155038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.27MB / 2.23MB"
+        },
+        {
+          "unix_ms": 1792520155537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.27MB / 2.23MB"
+        },
+        {
+          "unix_ms": 1792520156037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.44MB / 2.58MB"
+        },
+        {
+          "unix_ms": 1792520156537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.44MB / 2.58MB"
+        },
+        {
+          "unix_ms": 1792520157038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.48MB / 2.62MB"
+        },
+        {
+          "unix_ms": 1792520157537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.48MB / 2.62MB"
+        },
+        {
+          "unix_ms": 1792520158037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.53MB / 2.68MB"
+        },
+        {
+          "unix_ms": 1792520158537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.53MB / 2.68MB"
+        },
+        {
+          "unix_ms": 1792520159037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.57MB / 2.73MB"
+        },
+        {
+          "unix_ms": 1792520159537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.57MB / 2.73MB"
+        },
+        {
+          "unix_ms": 1792520160038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.62MB / 2.78MB"
+        },
+        {
+          "unix_ms": 1792520161037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.77MB / 3.1MB"
+        },
+        {
+          "unix_ms": 1792520161537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.77MB / 3.1MB"
+        },
+        {
+          "unix_ms": 1792520162038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.81MB / 3.14MB"
+        },
+        {
+          "unix_ms": 1792520162538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.81MB / 3.14MB"
+        },
+        {
+          "unix_ms": 1792520163038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.85MB / 3.19MB"
+        },
+        {
+          "unix_ms": 1792520163537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.85MB / 3.19MB"
+        },
+        {
+          "unix_ms": 1792520164037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.89MB / 3.23MB"
+        },
+        {
+          "unix_ms": 1792520164538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.89MB / 3.23MB"
+        },
+        {
+          "unix_ms": 1792520165037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.93MB / 3.28MB"
+        },
+        {
+          "unix_ms": 1792520165538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "1.93MB / 3.28MB"
+        },
+        {
+          "unix_ms": 1792520166538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.01MB / 3.4MB"
+        },
+        {
+          "unix_ms": 1792520167037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.01MB / 3.4MB"
+        },
+        {
+          "unix_ms": 1792520167538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.14MB / 3.66MB"
+        },
+        {
+          "unix_ms": 1792520168038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.14MB / 3.66MB"
+        },
+        {
+          "unix_ms": 1792520168538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.18MB / 3.71MB"
+        },
+        {
+          "unix_ms": 1792520169037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.18MB / 3.71MB"
+        },
+        {
+          "unix_ms": 1792520169538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.22MB / 3.75MB"
+        },
+        {
+          "unix_ms": 1792520170038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.22MB / 3.75MB"
+        },
+        {
+          "unix_ms": 1792520170538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.26MB / 3.8MB"
+        },
+        {
+          "unix_ms": 1792520171038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.26MB / 3.8MB"
+        },
+        {
+          "unix_ms": 1792520171538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.3MB / 3.84MB"
+        },
+        {
+          "unix_ms": 1792520172038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.3MB / 3.84MB"
+        },
+        {
+          "unix_ms": 1792520172537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.46MB / 4.18MB"
+        },
+        {
+          "unix_ms": 1792520173038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.46MB / 4.18MB"
+        },
+        {
+          "unix_ms": 1792520173537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.51MB / 4.22MB"
+        },
+        {
+          "unix_ms": 1792520174038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.51MB / 4.22MB"
+        },
+        {
+          "unix_ms": 1792520174538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.55MB / 4.27MB"
+        },
+        {
+          "unix_ms": 1792520175038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.55MB / 4.27MB"
+        },
+        {
+          "unix_ms": 1792520175538,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.59MB / 4.32MB"
+        },
+        {
+          "unix_ms": 1792520176038,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.59MB / 4.32MB"
+        }
+      ],
+      "client_resource_samples": 48,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 5.04,
+      "client_peak_working_set_mib": 18.24,
+      "client_io": [
+        {
+          "unix_ms": 1792520151537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "286MB / 84.4MB"
+        },
+        {
+          "unix_ms": 1792520152037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.6MB"
+        },
+        {
+          "unix_ms": 1792520152538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.6MB"
+        },
+        {
+          "unix_ms": 1792520153037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520153537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520154037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520154538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520155038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520155537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.7MB"
+        },
+        {
+          "unix_ms": 1792520156037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.9MB"
+        },
+        {
+          "unix_ms": 1792520156537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 84.9MB"
+        },
+        {
+          "unix_ms": 1792520157038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 85MB"
+        },
+        {
+          "unix_ms": 1792520157537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 85MB"
+        },
+        {
+          "unix_ms": 1792520158037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 85MB"
+        },
+        {
+          "unix_ms": 1792520158537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "287MB / 85MB"
+        },
+        {
+          "unix_ms": 1792520159037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.1MB"
+        },
+        {
+          "unix_ms": 1792520159537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.1MB"
+        },
+        {
+          "unix_ms": 1792520160038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.1MB"
+        },
+        {
+          "unix_ms": 1792520161037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.2MB"
+        },
+        {
+          "unix_ms": 1792520161537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.2MB"
+        },
+        {
+          "unix_ms": 1792520162038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.3MB"
+        },
+        {
+          "unix_ms": 1792520162538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.3MB"
+        },
+        {
+          "unix_ms": 1792520163038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.3MB"
+        },
+        {
+          "unix_ms": 1792520163537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.3MB"
+        },
+        {
+          "unix_ms": 1792520164037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.4MB"
+        },
+        {
+          "unix_ms": 1792520164538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.4MB"
+        },
+        {
+          "unix_ms": 1792520165037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.4MB"
+        },
+        {
+          "unix_ms": 1792520165538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.4MB"
+        },
+        {
+          "unix_ms": 1792520166538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.5MB"
+        },
+        {
+          "unix_ms": 1792520167037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.5MB"
+        },
+        {
+          "unix_ms": 1792520167538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.6MB"
+        },
+        {
+          "unix_ms": 1792520168038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "288MB / 85.6MB"
+        },
+        {
+          "unix_ms": 1792520168538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520169037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520169538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520170038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520170538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520171038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.7MB"
+        },
+        {
+          "unix_ms": 1792520171538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.8MB"
+        },
+        {
+          "unix_ms": 1792520172038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.8MB"
+        },
+        {
+          "unix_ms": 1792520172537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.9MB"
+        },
+        {
+          "unix_ms": 1792520173038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 85.9MB"
+        },
+        {
+          "unix_ms": 1792520173537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86MB"
+        },
+        {
+          "unix_ms": 1792520174038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86MB"
+        },
+        {
+          "unix_ms": 1792520174538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86MB"
+        },
+        {
+          "unix_ms": 1792520175038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86MB"
+        },
+        {
+          "unix_ms": 1792520175538,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86.1MB"
+        },
+        {
+          "unix_ms": 1792520176038,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "289MB / 86.1MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-1000-put-c8-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 1,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 1781.9961593096887,
+      "range_throughput_ops_s": [
+        1413.5766543635195,
+        2133.1091077594756
+      ],
+      "median_batch_p50_us": 537.392,
+      "range_batch_p50_us": [
+        436.232,
+        578.383
+      ],
+      "median_batch_p95_us": 725.463,
+      "range_batch_p95_us": [
+        605.276,
+        1013.051
+      ],
+      "median_batch_p99_us": 950.091,
+      "range_batch_p99_us": [
+        716.997,
+        3235.181
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 60.11,
+      "server_peak_working_set_mib": 86.53,
+      "server_io": [
+        {
+          "unix_ms": 1792519961033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.12MB / 5MB"
+        },
+        {
+          "unix_ms": 1792519961533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.39MB / 5.63MB"
+        },
+        {
+          "unix_ms": 1792519962033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.39MB / 5.63MB"
+        },
+        {
+          "unix_ms": 1792519962533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.77MB / 6.53MB"
+        },
+        {
+          "unix_ms": 1792519963032,
+          "BlockIO": "0B / 0B",
+          "NetIO": "2.77MB / 6.53MB"
+        },
+        {
+          "unix_ms": 1792519963533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.16MB / 7.44MB"
+        },
+        {
+          "unix_ms": 1792519964033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.16MB / 7.44MB"
+        },
+        {
+          "unix_ms": 1792519964533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.16MB / 7.44MB"
+        },
+        {
+          "unix_ms": 1792519965033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.55MB / 8.37MB"
+        },
+        {
+          "unix_ms": 1792519965533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.55MB / 8.37MB"
+        },
+        {
+          "unix_ms": 1792519966033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.95MB / 9.3MB"
+        },
+        {
+          "unix_ms": 1792519966533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "3.95MB / 9.3MB"
+        },
+        {
+          "unix_ms": 1792519967535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.26MB / 10MB"
+        },
+        {
+          "unix_ms": 1792519968033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.52MB / 10.7MB"
+        },
+        {
+          "unix_ms": 1792519968533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.52MB / 10.7MB"
+        },
+        {
+          "unix_ms": 1792519969033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.98MB / 11.7MB"
+        },
+        {
+          "unix_ms": 1792519969533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "4.98MB / 11.7MB"
+        },
+        {
+          "unix_ms": 1792519970033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.44MB / 12.8MB"
+        },
+        {
+          "unix_ms": 1792519970533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.44MB / 12.8MB"
+        },
+        {
+          "unix_ms": 1792519971033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "5.92MB / 13.9MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 47.480000000000004,
+      "client_peak_working_set_mib": 17.18,
+      "client_io": [
+        {
+          "unix_ms": 1792519961033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "147MB / 44.7MB"
+        },
+        {
+          "unix_ms": 1792519961533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "148MB / 45MB"
+        },
+        {
+          "unix_ms": 1792519962033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "148MB / 45MB"
+        },
+        {
+          "unix_ms": 1792519962533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "148MB / 45.4MB"
+        },
+        {
+          "unix_ms": 1792519963032,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "148MB / 45.4MB"
+        },
+        {
+          "unix_ms": 1792519963533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "149MB / 45.7MB"
+        },
+        {
+          "unix_ms": 1792519964033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "149MB / 45.7MB"
+        },
+        {
+          "unix_ms": 1792519964533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "149MB / 45.7MB"
+        },
+        {
+          "unix_ms": 1792519965033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "150MB / 46.1MB"
+        },
+        {
+          "unix_ms": 1792519965533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "150MB / 46.1MB"
+        },
+        {
+          "unix_ms": 1792519966033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "151MB / 46.5MB"
+        },
+        {
+          "unix_ms": 1792519966533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "151MB / 46.5MB"
+        },
+        {
+          "unix_ms": 1792519967535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "152MB / 46.8MB"
+        },
+        {
+          "unix_ms": 1792519968033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "153MB / 47.1MB"
+        },
+        {
+          "unix_ms": 1792519968533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "153MB / 47.1MB"
+        },
+        {
+          "unix_ms": 1792519969033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "154MB / 47.6MB"
+        },
+        {
+          "unix_ms": 1792519969534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "154MB / 47.6MB"
+        },
+        {
+          "unix_ms": 1792519970033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "155MB / 48MB"
+        },
+        {
+          "unix_ms": 1792519970533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "155MB / 48MB"
+        },
+        {
+          "unix_ms": 1792519971033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "156MB / 48.5MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-10000-get-c1-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 1,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-10000-get-c1-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 32,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 2404.7749215159943,
+      "range_throughput_ops_s": [
+        1887.5885516942365,
+        3405.9908049616006
+      ],
+      "median_batch_p50_us": 9612.078,
+      "range_batch_p50_us": [
+        7290.844,
+        12334.454
+      ],
+      "median_batch_p95_us": 38338.719,
+      "range_batch_p95_us": [
+        23474.936,
+        47450.483
+      ],
+      "median_batch_p99_us": 61066.531,
+      "range_batch_p99_us": [
+        40068.39,
+        69798.808
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 79.2,
+      "server_peak_working_set_mib": 89.98,
+      "server_io": [
+        {
+          "unix_ms": 1792519988534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.5MB / 27.1MB"
+        },
+        {
+          "unix_ms": 1792519989033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.7MB / 27.6MB"
+        },
+        {
+          "unix_ms": 1792519989534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "11.7MB / 27.6MB"
+        },
+        {
+          "unix_ms": 1792519990037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.2MB / 28.7MB"
+        },
+        {
+          "unix_ms": 1792519991034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.7MB / 29.8MB"
+        },
+        {
+          "unix_ms": 1792519991545,
+          "BlockIO": "0B / 0B",
+          "NetIO": "12.7MB / 29.8MB"
+        },
+        {
+          "unix_ms": 1792519992042,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.3MB / 31.2MB"
+        },
+        {
+          "unix_ms": 1792519992534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.3MB / 31.2MB"
+        },
+        {
+          "unix_ms": 1792519993034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.8MB / 32.3MB"
+        },
+        {
+          "unix_ms": 1792519993539,
+          "BlockIO": "0B / 0B",
+          "NetIO": "13.8MB / 32.3MB"
+        },
+        {
+          "unix_ms": 1792519994059,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.3MB / 33.5MB"
+        },
+        {
+          "unix_ms": 1792519994534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.3MB / 33.5MB"
+        },
+        {
+          "unix_ms": 1792519995035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.9MB / 34.8MB"
+        },
+        {
+          "unix_ms": 1792519995545,
+          "BlockIO": "0B / 0B",
+          "NetIO": "14.9MB / 34.8MB"
+        },
+        {
+          "unix_ms": 1792519996034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.3MB / 35.7MB"
+        },
+        {
+          "unix_ms": 1792519996533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.3MB / 35.7MB"
+        },
+        {
+          "unix_ms": 1792519997535,
+          "BlockIO": "0B / 0B",
+          "NetIO": "15.7MB / 36.7MB"
+        },
+        {
+          "unix_ms": 1792519998033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16.2MB / 37.9MB"
+        },
+        {
+          "unix_ms": 1792519998533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "16.2MB / 37.9MB"
+        },
+        {
+          "unix_ms": 1792519999034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "17.1MB / 40MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 125.4,
+      "client_peak_working_set_mib": 20.67,
+      "client_io": [
+        {
+          "unix_ms": 1792519988534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "169MB / 54.1MB"
+        },
+        {
+          "unix_ms": 1792519989033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "169MB / 54.3MB"
+        },
+        {
+          "unix_ms": 1792519989534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "169MB / 54.3MB"
+        },
+        {
+          "unix_ms": 1792519990037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "171MB / 54.8MB"
+        },
+        {
+          "unix_ms": 1792519991034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "172MB / 55.3MB"
+        },
+        {
+          "unix_ms": 1792519991546,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "172MB / 55.3MB"
+        },
+        {
+          "unix_ms": 1792519992042,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "173MB / 55.9MB"
+        },
+        {
+          "unix_ms": 1792519992534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "173MB / 55.9MB"
+        },
+        {
+          "unix_ms": 1792519993034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "174MB / 56.4MB"
+        },
+        {
+          "unix_ms": 1792519993539,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "174MB / 56.4MB"
+        },
+        {
+          "unix_ms": 1792519994059,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "175MB / 56.9MB"
+        },
+        {
+          "unix_ms": 1792519994534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "175MB / 56.9MB"
+        },
+        {
+          "unix_ms": 1792519995035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "177MB / 57.4MB"
+        },
+        {
+          "unix_ms": 1792519995545,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "177MB / 57.4MB"
+        },
+        {
+          "unix_ms": 1792519996034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "178MB / 57.9MB"
+        },
+        {
+          "unix_ms": 1792519996533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "178MB / 57.9MB"
+        },
+        {
+          "unix_ms": 1792519997535,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "179MB / 58.3MB"
+        },
+        {
+          "unix_ms": 1792519998033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "180MB / 58.8MB"
+        },
+        {
+          "unix_ms": 1792519998533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "180MB / 58.8MB"
+        },
+        {
+          "unix_ms": 1792519999034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "182MB / 59.7MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-10000-get-c32-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 32,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-10000-get-c32-p16.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "valid-diagnostic",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 8,
+      "pipeline": 1,
+      "fence_writes": false,
+      "median_throughput_ops_s": 2212.794425957141,
+      "range_throughput_ops_s": [
+        2109.9018696996845,
+        3334.80128365317
+      ],
+      "median_batch_p50_us": 2069.492,
+      "range_batch_p50_us": [
+        1906.753,
+        2330.789
+      ],
+      "median_batch_p95_us": 12363.123,
+      "range_batch_p95_us": [
+        5593.658,
+        13313.803
+      ],
+      "median_batch_p99_us": 23858.93,
+      "range_batch_p99_us": [
+        8983.676,
+        26844.247
+      ],
+      "server_resource_samples": 20,
+      "server_cpu_zero_only_samples": false,
+      "server_median_cpu_percent": 87.745,
+      "server_peak_working_set_mib": 86.99,
+      "server_io": [
+        {
+          "unix_ms": 1792519975035,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.13MB / 14.5MB"
+        },
+        {
+          "unix_ms": 1792519975533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.13MB / 14.5MB"
+        },
+        {
+          "unix_ms": 1792519976034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.57MB / 15.5MB"
+        },
+        {
+          "unix_ms": 1792519976539,
+          "BlockIO": "0B / 0B",
+          "NetIO": "6.57MB / 15.5MB"
+        },
+        {
+          "unix_ms": 1792519977037,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.09MB / 16.7MB"
+        },
+        {
+          "unix_ms": 1792519977539,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.09MB / 16.7MB"
+        },
+        {
+          "unix_ms": 1792519978033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.54MB / 17.8MB"
+        },
+        {
+          "unix_ms": 1792519978537,
+          "BlockIO": "0B / 0B",
+          "NetIO": "7.54MB / 17.8MB"
+        },
+        {
+          "unix_ms": 1792519979033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8MB / 18.8MB"
+        },
+        {
+          "unix_ms": 1792519979534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8MB / 18.8MB"
+        },
+        {
+          "unix_ms": 1792519980039,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.56MB / 20.2MB"
+        },
+        {
+          "unix_ms": 1792519980544,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.56MB / 20.2MB"
+        },
+        {
+          "unix_ms": 1792519981034,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.96MB / 21.1MB"
+        },
+        {
+          "unix_ms": 1792519981533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "8.96MB / 21.1MB"
+        },
+        {
+          "unix_ms": 1792519982072,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.44MB / 22.2MB"
+        },
+        {
+          "unix_ms": 1792519982540,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.44MB / 22.2MB"
+        },
+        {
+          "unix_ms": 1792519983042,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.92MB / 23.4MB"
+        },
+        {
+          "unix_ms": 1792519983534,
+          "BlockIO": "0B / 0B",
+          "NetIO": "9.92MB / 23.4MB"
+        },
+        {
+          "unix_ms": 1792519984033,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.5MB / 24.8MB"
+        },
+        {
+          "unix_ms": 1792519984533,
+          "BlockIO": "0B / 0B",
+          "NetIO": "10.5MB / 24.8MB"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_cpu_zero_only_samples": false,
+      "client_median_cpu_percent": 128.87,
+      "client_peak_working_set_mib": 18.15,
+      "client_io": [
+        {
+          "unix_ms": 1792519975035,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "156MB / 48.7MB"
+        },
+        {
+          "unix_ms": 1792519975533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "156MB / 48.7MB"
+        },
+        {
+          "unix_ms": 1792519976034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "157MB / 49.2MB"
+        },
+        {
+          "unix_ms": 1792519976539,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "157MB / 49.2MB"
+        },
+        {
+          "unix_ms": 1792519977037,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "159MB / 49.7MB"
+        },
+        {
+          "unix_ms": 1792519977539,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "159MB / 49.7MB"
+        },
+        {
+          "unix_ms": 1792519978033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "160MB / 50.1MB"
+        },
+        {
+          "unix_ms": 1792519978537,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "160MB / 50.1MB"
+        },
+        {
+          "unix_ms": 1792519979033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "161MB / 50.6MB"
+        },
+        {
+          "unix_ms": 1792519979534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "161MB / 50.6MB"
+        },
+        {
+          "unix_ms": 1792519980039,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "162MB / 51.1MB"
+        },
+        {
+          "unix_ms": 1792519980544,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "162MB / 51.1MB"
+        },
+        {
+          "unix_ms": 1792519981034,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "163MB / 51.5MB"
+        },
+        {
+          "unix_ms": 1792519981534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "163MB / 51.5MB"
+        },
+        {
+          "unix_ms": 1792519982072,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "164MB / 52MB"
+        },
+        {
+          "unix_ms": 1792519982540,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "164MB / 52MB"
+        },
+        {
+          "unix_ms": 1792519983042,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "165MB / 52.5MB"
+        },
+        {
+          "unix_ms": 1792519983534,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "165MB / 52.5MB"
+        },
+        {
+          "unix_ms": 1792519984033,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "167MB / 53.1MB"
+        },
+        {
+          "unix_ms": 1792519984533,
+          "BlockIO": "0B / 2.35MB",
+          "NetIO": "167MB / 53.1MB"
+        }
+      ],
+      "file": "cap64-reddb-rest-10000-get-c8-p1.json"
+    },
+    {
+      "engine": "reddb-rest",
+      "operation": "get",
+      "status": "unsupported",
+      "profile": "cap64",
+      "keys": 10000,
+      "workers": 8,
+      "pipeline": 16,
+      "fence_writes": false,
+      "reason": "this harness does not implement HTTP pipelining",
+      "file": "cap64-reddb-rest-10000-get-c8-p16.json"
+    }
+  ],
+  "artifact_sha256": {
+    "cap64-reddb-query-1000-get-c1-p1.json": "d8ee9dcfaac9aec0de19d6fac3d10ddfce8b154d8d30307611001fa6316f5120",
+    "cap64-reddb-query-1000-get-c1-p16.json": "5c4bf7a4a590ded42b557c51b3c168000971db4f836c5bb9b2e1fe6a13e9053d",
+    "cap64-reddb-query-1000-get-c32-p1.json": "39684384ee7c7406a8db069862f448740a25356c13f145478c2ac9b5030b5f92",
+    "cap64-reddb-query-1000-get-c32-p16.json": "eae1ceeed1a1e1ba18796c446c37f61fbe736d0c15f555f515a6d745a0a0b985",
+    "cap64-reddb-query-1000-get-c8-p1.json": "06eef1185ac480d3fad19ba38ddae729b58b808d42503176b2421d6a5a0ac4fd",
+    "cap64-reddb-query-1000-get-c8-p16.json": "b3cc71dbd2eeabffd5d7181f8d937afc9875f0cc8ffd708bfaca666730e3fd4d",
+    "cap64-reddb-query-10000-get-c1-p1.json": "d19359d0f990c413aa69cbd58ec25b6e0abc131cd291968aba94a56fcfdaf143",
+    "cap64-reddb-query-10000-get-c1-p16.json": "b53343d66447e5e3a209998fe9da4f37f491339344c0cc8744b7843a20665567",
+    "cap64-reddb-query-10000-get-c32-p1.json": "192c107d8515017119216bce1d7833fad22088ed6b5e23fa8787cee804171570",
+    "cap64-reddb-query-10000-get-c32-p16.json": "878d627c407e5c47fdcd7ff4498fccb5f81539d72d6997915a05b9bcaca25d43",
+    "cap64-reddb-query-10000-get-c8-p1.json": "866c69d14a3e19a538e0243dda8ee3c1941d301ac680c2fe2c510122c41db409",
+    "cap64-reddb-query-10000-get-c8-p16.json": "0db3e1506d7a87845425048e6f8ce657f5ac2cdde04c36b25bbe2aadcfdbbc95",
+    "cap64-reddb-rest-1000-get-c1-p1.json": "509ce0f1aa3b3eff9973c03ed4ce4df54cbe52d0310a180e3fbf0573099ad206",
+    "cap64-reddb-rest-1000-get-c1-p16.json": "bfb512f295b595cbc681e663dd9fa481f3d2144d7fc34b7291db1bbb708ed137",
+    "cap64-reddb-rest-1000-get-c32-p1.json": "99684dc3f0e10ef006cfe653f50d9bbc98754394273b28df39ab8d1de70cf5b6",
+    "cap64-reddb-rest-1000-get-c32-p16.json": "f9fd318d401d38131c975c78f5c487ecc799a0d62dbec461f87ee1b806708f73",
+    "cap64-reddb-rest-1000-get-c8-p1.json": "297126c9e893f0423dc8bc04a2d93d05d6ec86952c8c7762d604c68df7e39347",
+    "cap64-reddb-rest-1000-get-c8-p16.json": "2108ed6f89a70b4717e9cdaac65cdd6917627cf37be2160195b2979f380d3b98",
+    "cap64-reddb-rest-1000-get-recovery.json": "21831783bff1e0b9498fa729a107a8c4e5a19d6d2aef9bb379c44e13a9dcb199",
+    "cap64-reddb-rest-1000-put-c1-p1-recovery.json": "c25cc51c11af2d37cf71b65a04b6df4ef7d859f8b1bbfaa6250fe02457264324",
+    "cap64-reddb-rest-1000-put-c1-p1-seed.json": "ffb5896492403d90148759707ceac1a8c6f2aadc56aa0b3a6e4071974c0a6d2f",
+    "cap64-reddb-rest-1000-put-c1-p1.json": "7521ea7c2d6234d56dc147b091edb382784198b56935428dff1025b88317d569",
+    "cap64-reddb-rest-1000-put-c8-p1-recovery.json": "bf9765de543326e8787db6061a2604b69d07df2634da504f494158c34beabe82",
+    "cap64-reddb-rest-1000-put-c8-p1-seed.json": "34c511e8f8f759d47a4a412364a4799eb914b088cc99e53acde0cc9916ba29f8",
+    "cap64-reddb-rest-1000-put-c8-p1.json": "4407a04127d2fe5aba64734d76244d7f80c1aa64d35bf996194dace1e26516a8",
+    "cap64-reddb-rest-1000-reopen.json": "9a33713fef813be57e07bacb5f2c6dc59e4bfb8bfb47f1e455d2bd0d4a5f1ba3",
+    "cap64-reddb-rest-1000-seed.json": "d187b30544b64f99dde8d6bfc26b0bfd1705c5f4a07925197b4c6c1139cdf67f",
+    "cap64-reddb-rest-10000-get-c1-p1.json": "62e6705edb7cc48f60b9dfcbcdabbaff655b0d59538d474e444db202afe975dc",
+    "cap64-reddb-rest-10000-get-c1-p16.json": "dea84af37a41b2f3a43b1bf4c502e5a0cccc39664b2cca98bb7cfdac94332029",
+    "cap64-reddb-rest-10000-get-c32-p1.json": "ca5dfcea035530d001ef2dd131a20bbf6cbefa80075bba4c6a3cb9bd93ff10d4",
+    "cap64-reddb-rest-10000-get-c32-p16.json": "a191b023cb0118cdd4a15b3147c3875639fb991c677410517f83afd2c23487cb",
+    "cap64-reddb-rest-10000-get-c8-p1.json": "cf6468c6213e374b8c8c714a2830865f08ef681b5b9cf58843aee30d5b2b0fe3",
+    "cap64-reddb-rest-10000-get-c8-p16.json": "cddcc4670c15bb8e8f948e57b0ea9932e0c8545605eec5f2ef748331cc9fcea0",
+    "cap64-reddb-rest-10000-get-recovery.json": "b69013a697989ed155afbc49124a28a0c3f73e3385c9a8e59ffa19299838fd8a",
+    "cap64-reddb-rest-10000-reopen.json": "b7ea55384067769eef089b80aa8b83d63f7b993a1f88fad0301ccf01d8459f7f",
+    "cap64-reddb-rest-10000-seed.json": "288e11f4138a1f9b6aab764152d9a19738ccf5d8ad148c24d09efa8427568391",
+    "resources-reddb-kv-rest-after-20261020.jsonl": "0d840ea5d6ff4c983b0524d22729500c9653ad34f186c99161ff8768f0c58cd0",
+    "manifest.json": "c9c5a91ce0bd9205d6fbc536ff0ad58a0d996349f602f7175eef378c26f0842c"
+  }
+}

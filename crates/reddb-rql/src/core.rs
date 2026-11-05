@@ -3328,7 +3328,7 @@ pub enum KvCommand {
         collection: String,
         key: String,
     },
-    Unseal {
+    Reveal {
         collection: String,
         key: String,
         version: Option<i64>,

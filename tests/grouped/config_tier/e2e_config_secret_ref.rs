@@ -147,7 +147,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
     })
     .expect_err("resolve without vault:read must fail");
     let denied = denied.to_string();
-    assert!(denied.contains("vault:read"), "{denied}");
+    assert!(denied.contains("vault:reveal"), "{denied}");
     assert!(!denied.contains(secret));
 
     attach_user_policy(
@@ -197,7 +197,7 @@ fn config_secret_ref_get_is_reference_and_resolve_is_explicit_authorized_and_aud
     assert!(rt.audit_log().wait_idle(std::time::Duration::from_secs(2)));
     let audit_body = std::fs::read_to_string(rt.audit_log().path()).unwrap_or_default();
     assert!(audit_body.contains("config/resolve"));
-    assert!(audit_body.contains("vault/unseal"));
+    assert!(audit_body.contains("vault/reveal"));
     assert!(audit_body.contains("\"outcome\":\"denied\""));
     assert!(audit_body.contains("\"outcome\":\"success\""));
     assert!(audit_body.contains(&format!("{app}.api_key")));

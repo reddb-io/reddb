@@ -400,8 +400,7 @@ pub fn read_physical_metadata_document(path: &Path) -> RdbFileResult<String> {
 
 pub fn write_physical_metadata_json_document(path: &Path, pretty_json: &str) -> RdbFileResult<()> {
     let bytes = encode_physical_metadata_json_document(pretty_json)?;
-    fs::write(path, bytes)?;
-    Ok(())
+    write_physical_metadata_bytes_atomically(path, &bytes)
 }
 
 pub fn write_physical_metadata_binary_document(
@@ -409,9 +408,18 @@ pub fn write_physical_metadata_binary_document(
     compact_json: &str,
 ) -> RdbFileResult<()> {
     let bytes = encode_physical_metadata_binary_document(compact_json)?;
-    fs::write(path, bytes)?;
-    Ok(())
+    write_physical_metadata_bytes_atomically(path, &bytes)
 }
+
+/// Publish a metadata document so a concurrent reader or a crash sees the
+/// old document or the new one, never a truncated one (#2376): write a
+/// temporary sibling, fsync it, rename it over `path`, fsync the directory.
+///
+/// The temporary name is unique per call so two unserialised writers can
+/// never interleave inside one temporary file.
+#[path = "physical_metadata/atomic.rs"]
+mod atomic;
+use atomic::write_physical_metadata_bytes_atomically;
 
 pub fn copy_physical_metadata_binary_to_journal(
     data_path: &Path,

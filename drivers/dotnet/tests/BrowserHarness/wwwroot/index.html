@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<base href="/interop/blazor/">
+<title>RedDB Blazor interop conformance</title>
+<div id="app"></div>
+<script>
+  window.probeResult = new Promise((resolve, reject) => {
+    window.probeComplete = resolve
+    window.probeFailed = reject
+  })
+</script>
+<script src="_framework/blazor.webassembly.js"></script>

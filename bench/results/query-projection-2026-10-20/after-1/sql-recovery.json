@@ -1,0 +1,26 @@
+{
+  "schema": "reddb.query-read-paths.v1",
+  "status": "verified",
+  "rounds": [],
+  "config": {
+    "host": "reddb-query-after-20261020",
+    "port": 5000,
+    "kv_collection": "kv_diag_10000",
+    "keys": 10000,
+    "value_bytes": 100,
+    "workers": 1,
+    "seconds": 2,
+    "rounds": 5,
+    "case": "kv",
+    "setup": false,
+    "verify_only": true,
+    "out": "/results/after-1/sql-recovery.json"
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36"
+  },
+  "started_unix_ms": 1792522028517,
+  "classification": "shared-host diagnostic; fixed duration; every response checked; result cache off",
+  "finished_unix_ms": 1792522028718
+}

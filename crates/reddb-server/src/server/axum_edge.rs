@@ -36,7 +36,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoConnBuilder;
 use hyper_util::service::TowerToHyperService;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::http_connection_limiter::HttpConnectionPermit;
 use super::http_handler_metrics::{HttpRejectReason, HttpTransport};
@@ -45,6 +45,8 @@ use super::transport::{
     cors_header_pairs, find_header_end, json_error, parse_query_string, HttpRequest, HttpResponse,
 };
 use super::RedDBServer;
+use crate::transport::execution_admission::ExecutionAdmissionError;
+use crate::transport::overload::{problem_json, OverloadReason, OverloadSnapshot};
 
 /// Bounded buffer between the sync streaming producer (running on the
 /// `spawn_blocking` pool) and the async hyper body. Small enough to apply
@@ -266,14 +268,18 @@ impl RedDBServer {
             Err(response) => return response,
         };
 
+        let is_health_request = uses_health_capacity(&request);
+
         // Admission control is now per in-flight request, not per
         // connection: an idle keep-alive connection holds no slot, so the
         // cap no longer bounds connection count (issue #931 / AC #4).
         //
-        // Two gates, in order:
-        //   1. Global cap — bounds *total* in-flight work (async
-        //      backpressure). Exhaustion is a server-wide 503; it hits
-        //      every caller equally, which is the backpressure signal.
+        // Exact GET health probes use a separate bounded reserve so query
+        // saturation cannot evict a healthy process from its EndpointSlice.
+        // Every other request passes through two gates, in order:
+        //   1. Global query cap — bounds normal in-flight work (async
+        //      backpressure). Exhaustion is a server-wide 503 for normal
+        //      callers.
         //   2. Per-principal cap (issue #934) — bounds any *single*
         //      caller's share so one abusive principal can't drain the
         //      global cap and starve the rest. Over-cap is a structured
@@ -281,34 +287,55 @@ impl RedDBServer {
         //      off precisely. Checked second: there is no point telling a
         //      caller "you're over your share" when the server has no room
         //      for anyone.
-        let permit = match self.http_limiter.try_acquire() {
+        let limiter = if is_health_request {
+            &self.health_limiter
+        } else {
+            &self.http_limiter
+        };
+        let permit = match limiter.try_acquire() {
             Some(permit) => permit,
             None => {
                 self.http_metrics
                     .record_reject(transport, HttpRejectReason::CapExhausted);
-                return self.reject_capacity_response();
+                let reason = if is_health_request {
+                    OverloadReason::HealthReserveExhausted
+                } else {
+                    OverloadReason::GlobalInflightExhausted
+                };
+                return self.reject_capacity_response(reason, limiter.cap(), limiter.current());
             }
         };
 
-        let principal = super::routing::principal_for(&request.headers);
-        let principal_permit = match self.principal_limiter.try_acquire(&principal) {
-            Ok(principal_permit) => principal_permit,
-            Err(err) => {
-                // Drop the global permit before returning so the slot this
-                // refused caller briefly held is freed immediately.
-                drop(permit);
-                self.http_metrics
-                    .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
-                return self.reject_principal_response(&err);
+        let principal_permit = if is_health_request {
+            None
+        } else {
+            let principal = super::routing::principal_for(&request.headers);
+            match self.principal_limiter.try_acquire(&principal) {
+                Ok(principal_permit) => Some(principal_permit),
+                Err(err) => {
+                    // Drop the global permit before returning so the slot this
+                    // refused caller briefly held is freed immediately.
+                    drop(permit);
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::PrincipalCapExhausted);
+                    return self.reject_principal_response(&err);
+                }
             }
         };
 
         let response = if self.is_streaming_request(&request) {
-            self.serve_streaming_request(request, permit, principal_permit)
+            self.serve_streaming_request(request, permit, principal_permit, transport, started)
                 .await
         } else {
-            self.serve_buffered_request(request, permit, principal_permit, transport)
-                .await
+            self.serve_buffered_request(
+                request,
+                permit,
+                principal_permit,
+                transport,
+                is_health_request,
+                started,
+            )
+            .await
         };
         self.http_metrics
             .record_duration(transport, started.elapsed().as_secs_f64());
@@ -321,38 +348,110 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
-        principal_permit: PrincipalInflightPermit,
+        principal_permit: Option<PrincipalInflightPermit>,
         transport: HttpTransport,
+        is_health_request: bool,
+        started: Instant,
     ) -> Response {
+        let execution_permit = if is_health_request {
+            None
+        } else {
+            let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+            match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+                Ok(Ok(execution_permit)) => {
+                    self.http_metrics
+                        .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
+                    Some(execution_permit)
+                }
+                Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueFull);
+                    let limit = self
+                        .execution_admission
+                        .active_max()
+                        .saturating_add(self.execution_admission.queued_max());
+                    let current = self
+                        .execution_admission
+                        .active()
+                        .saturating_add(self.execution_admission.queued());
+                    return self.reject_capacity_response(
+                        OverloadReason::ExecutionQueueFull,
+                        limit,
+                        current,
+                    );
+                }
+                Ok(Err(ExecutionAdmissionError::Closed)) => {
+                    return internal_error_response();
+                }
+                Err(_elapsed) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueTimeout);
+                    let limit = self
+                        .execution_admission
+                        .active_max()
+                        .saturating_add(self.execution_admission.queued_max());
+                    let current = self
+                        .execution_admission
+                        .active()
+                        .saturating_add(self.execution_admission.queued());
+                    return self.reject_capacity_response(
+                        OverloadReason::ExecutionQueueTimeout,
+                        limit,
+                        current,
+                    );
+                }
+            }
+        };
+
         let server = self.clone();
+        let execution_ticket = (!is_health_request).then(|| self.execution_watchdog.start());
+        let worker_ticket = execution_ticket.clone();
+        let cancellation = crate::runtime::query_budget::RequestCancellation::new();
+        let worker_cancellation = cancellation.clone();
         let join = tokio::task::spawn_blocking(move || {
+            let _execution_completion = worker_ticket.as_ref().map(|ticket| ticket.completion());
+            let _cancellation_scope = worker_cancellation.install();
             // Both the global and per-principal permits are held for the
             // duration of the engine call and released when this closure
             // returns — so the per-principal slot is occupied for exactly
             // as long as the request is in flight.
             let _permit = permit;
             let _principal_permit = principal_permit;
+            let _execution_permit = execution_permit;
             // Test-only hook (shared with the retired sync path): a slow
             // injection keeps the request in flight while it sleeps, so an
             // integration test can saturate the per-principal cap with a
             // handful of concurrent requests instead of racing real load.
             // The atomic is 0 in production, so this is a single relaxed
             // load on the hot path.
-            let inject_ms = server
-                .slow_inject_ms
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if inject_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(inject_ms));
+            // Finite delays retain the legacy health-deadline test contract.
+            // Only the deterministic blocking gate stays query-scoped so a
+            // readiness probe can observe the stalled worker.
+            if !is_health_request || !server.test_slow_inject_is_blocking_gate() {
+                server.apply_test_slow_inject();
             }
             server.route(request)
         });
-        match tokio::time::timeout(self.handler_timeout, join).await {
+        let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+        match tokio::time::timeout(remaining, join).await {
             Ok(Ok(response)) => buffered_response_to_axum(response),
             Ok(Err(_join_err)) => internal_error_response(),
             Err(_elapsed) => {
+                // Dropping a JoinHandle does not stop spawn_blocking work.
+                // Signal the transport-neutral query budget so cooperative
+                // engine checkpoints unwind the worker and release both
+                // admission permits instead of leaving capacity stranded.
+                cancellation.cancel();
+                if let Some(ticket) = execution_ticket {
+                    ticket.mark_timed_out();
+                }
                 self.http_metrics
                     .record_reject(transport, HttpRejectReason::HandlerTimeout);
-                handler_timeout_response()
+                self.reject_capacity_response(
+                    OverloadReason::HandlerDeadlineExceeded,
+                    self.handler_timeout.as_millis().min(usize::MAX as u128) as usize,
+                    started.elapsed().as_millis().min(usize::MAX as u128) as usize,
+                )
             }
         }
     }
@@ -368,20 +467,75 @@ impl RedDBServer {
         &self,
         request: HttpRequest,
         permit: HttpConnectionPermit,
-        principal_permit: PrincipalInflightPermit,
+        principal_permit: Option<PrincipalInflightPermit>,
+        transport: HttpTransport,
+        started: Instant,
     ) -> Response {
+        let execution_permit = if self.streaming_request_uses_execution_admission(&request) {
+            let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+            let permit =
+                match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+                    Ok(Ok(execution_permit)) => {
+                        self.http_metrics
+                            .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
+                        execution_permit
+                    }
+                    Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                        self.http_metrics
+                            .record_reject(transport, HttpRejectReason::ExecutionQueueFull);
+                        let limit = self
+                            .execution_admission
+                            .active_max()
+                            .saturating_add(self.execution_admission.queued_max());
+                        let current = self
+                            .execution_admission
+                            .active()
+                            .saturating_add(self.execution_admission.queued());
+                        return self.reject_capacity_response(
+                            OverloadReason::ExecutionQueueFull,
+                            limit,
+                            current,
+                        );
+                    }
+                    Ok(Err(ExecutionAdmissionError::Closed)) => return internal_error_response(),
+                    Err(_) => {
+                        self.http_metrics
+                            .record_reject(transport, HttpRejectReason::ExecutionQueueTimeout);
+                        let limit = self
+                            .execution_admission
+                            .active_max()
+                            .saturating_add(self.execution_admission.queued_max());
+                        let current = self
+                            .execution_admission
+                            .active()
+                            .saturating_add(self.execution_admission.queued());
+                        return self.reject_capacity_response(
+                            OverloadReason::ExecutionQueueTimeout,
+                            limit,
+                            current,
+                        );
+                    }
+                };
+            Some(permit)
+        } else {
+            None
+        };
         let (head_tx, head_rx) = oneshot::channel::<EdgeStreamResponse>();
         let server = self.clone();
         tokio::task::spawn_blocking(move || {
-            // Held for the whole stream lifetime (head + body): the
-            // per-principal slot is released only when the synchronous
-            // streaming handler returns, matching the global permit.
+            // Connection/principal permits cover the whole stream. The
+            // execution permit is released by the handler as soon as engine
+            // work ends, before a slow client drains the materialised rows.
             let _permit = permit;
             let _principal_permit = principal_permit;
             let mut sink = StreamSink::new(head_tx);
             // Errors here are connection-level (client gone / broken
             // pipe); the sync handler already wrote what it could.
-            let _ = server.try_route_streaming(&request, &mut sink);
+            let _ = server.try_route_streaming_with_execution_permit(
+                &request,
+                &mut sink,
+                execution_permit,
+            );
             sink.finish();
         });
         match head_rx.await {
@@ -404,17 +558,32 @@ impl RedDBServer {
         buffered_response_to_axum(response)
     }
 
-    /// 503 emitted when the in-flight-request admission cap is exhausted.
-    /// Carries `Retry-After` and the canonical CORS posture.
-    fn reject_capacity_response(&self) -> Response {
-        let body = format!(
-            "{{\"error\":\"server at capacity\",\"retry_after_secs\":{}}}",
-            self.retry_after_secs
+    /// Machine-actionable 503 emitted when a bounded request or execution
+    /// resource is exhausted. The legacy `error` string remains present.
+    fn reject_capacity_response(
+        &self,
+        reason: OverloadReason,
+        limit: usize,
+        current: usize,
+    ) -> Response {
+        let body = problem_json(
+            reason,
+            OverloadSnapshot {
+                limit,
+                current,
+                execution_active_limit: self.execution_admission.active_max(),
+                execution_active: self.execution_admission.active(),
+                execution_queue_limit: self.execution_admission.queued_max(),
+                execution_queued: self.execution_admission.queued(),
+            },
+            self.retry_after_secs,
         );
         let mut builder = Response::builder()
             .status(503)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .header(http::header::RETRY_AFTER, self.retry_after_secs.to_string());
+            .header(http::header::CONTENT_TYPE, "application/json");
+        if reason != OverloadReason::HandlerDeadlineExceeded {
+            builder = builder.header(http::header::RETRY_AFTER, self.retry_after_secs.to_string());
+        }
         for (name, value) in cors_header_pairs() {
             builder = builder.header(name, value);
         }
@@ -422,6 +591,17 @@ impl RedDBServer {
             .body(Body::from(body))
             .unwrap_or_else(|_| internal_error_response())
     }
+}
+
+/// Health capacity is intentionally narrow: only the exact, read-only
+/// endpoints used by process and Kubernetes probes bypass normal query
+/// admission. Prefix matches or write methods must never enter the reserve.
+fn uses_health_capacity(request: &HttpRequest) -> bool {
+    request.method == "GET"
+        && matches!(
+            request.path.as_str(),
+            "/health" | "/health/live" | "/health/ready" | "/health/startup"
+        )
 }
 
 /// Convert an incoming axum request into the internal [`HttpRequest`] the
@@ -470,7 +650,7 @@ async fn read_edge_request(
 
 /// Build a hyper response from a buffered [`HttpResponse`], applying the
 /// single CORS choke point plus any guard-validated `extra_headers`.
-fn buffered_response_to_axum(response: HttpResponse) -> Response {
+pub(super) fn buffered_response_to_axum(response: HttpResponse) -> Response {
     let mut builder = Response::builder()
         .status(response.status)
         .header(http::header::CONTENT_TYPE, response.content_type);
@@ -524,20 +704,6 @@ fn internal_error_response() -> Response {
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Body::from("{\"ok\":false,\"error\":\"internal error\"}"))
         .expect("static 500 response is well-formed")
-}
-
-fn handler_timeout_response() -> Response {
-    let mut builder = Response::builder()
-        .status(503)
-        .header(http::header::CONTENT_TYPE, "application/json");
-    for (name, value) in cors_header_pairs() {
-        builder = builder.header(name, value);
-    }
-    builder
-        .body(Body::from(
-            "{\"ok\":false,\"error\":\"handler deadline exceeded\"}",
-        ))
-        .unwrap_or_else(|_| internal_error_response())
 }
 
 /// Outcome the [`StreamSink`] hands back to the async edge once it has

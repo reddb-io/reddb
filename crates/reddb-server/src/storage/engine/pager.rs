@@ -32,165 +32,35 @@
 //! - Turso `core/storage/pager.rs:54-134` - HeaderRef::from_pager()
 //! - Turso `core/storage/pager.rs:120` - pager.add_dirty(&page)
 
-use super::freelist::FreeList;
-use super::page::{Page, PageError, PageType, PAGE_SIZE};
-use super::page_cache::PageCache;
+#[cfg(test)]
+use super::page::PageType;
+use super::page::{Page, PAGE_SIZE};
 use crate::storage::wal::writer::WalWriter;
 use fs2::FileExt;
+pub use reddb_engine::storage::pager::{DatabaseHeader, ExtentId, PagerError, PhysicalFileHeader};
+use reddb_engine::storage::pager::{
+    Pager as SharedPager, PagerConfig as SharedPagerConfig, WalBarrier,
+};
+#[cfg(test)]
+use reddb_engine::storage::pager_io::{
+    DWB_ZONE_BYTES, DWB_ZONE_START_PAGE, FIRST_ALLOCATABLE_PAGE,
+};
 use std::fs::{File, OpenOptions};
+#[cfg(test)]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-
-pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
-
-/// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
-const DWB_ZONE_START_PAGE: u32 = 3;
-const DWB_ZONE_PAGES: u32 = 64;
-const DWB_ZONE_BYTES: usize = DWB_ZONE_PAGES as usize * PAGE_SIZE;
-const DWB_MAX_PAGES_PER_FRAME: usize =
-    (DWB_ZONE_BYTES - reddb_file::PAGED_DWB_HEADER_SIZE) / reddb_file::PAGED_DWB_ENTRY_SIZE;
-const FIRST_ALLOCATABLE_PAGE: u32 = DWB_ZONE_START_PAGE + DWB_ZONE_PAGES;
-
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
-
-/// Pager error types
-#[derive(Debug)]
-pub enum PagerError {
-    /// I/O error
-    Io(std::io::Error),
-    /// Page error
-    Page(PageError),
-    /// Invalid database file
-    InvalidDatabase(String),
-    /// Database is read-only
-    ReadOnly,
-    /// Page not found
-    PageNotFound(u32),
-    /// Database is locked
-    Locked,
-    /// A Mutex or RwLock was poisoned (another thread panicked while holding it)
-    LockPoisoned,
-    /// Database is encrypted but no key was supplied.
-    EncryptionRequired,
-    /// Plain (unencrypted) database opened with an encryption key.
-    PlainDatabaseRefusesKey,
-    /// Encryption key validation failed for an encrypted database.
-    InvalidKey,
-    /// Both superblock copies failed validation (ADR 0074 §2).
-    SuperblockZoneUnrecoverable(PathBuf),
-    /// The internal manifest zone failed its checksum (ADR 0074 §2).
-    ManifestZoneCorrupt(PathBuf),
-    /// The in-file double-write zone failed validation (ADR 0074 §2).
-    DwbZoneCorrupt(PathBuf),
-    /// The store still carries a retired phase-1 pager sidecar (ADR 0038 §4).
-    LegacySidecarStore { sidecar: PathBuf },
-    /// The store predates the phase-3 in-file DWB layout marker (ADR 0038 §4).
-    LegacyPagedStore { path: PathBuf },
-}
-
-/// A contiguous run of database pages reserved for vector-turbo payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtentId {
-    pub start_page: u32,
-    pub n_pages: u32,
-}
-
-impl std::fmt::Display for PagerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "I/O error: {}", e),
-            Self::Page(e) => write!(f, "Page error: {}", e),
-            Self::InvalidDatabase(msg) => write!(f, "Invalid database: {}", msg),
-            Self::ReadOnly => write!(f, "Database is read-only"),
-            Self::PageNotFound(id) => write!(f, "Page {} not found", id),
-            Self::Locked => write!(f, "Database is locked"),
-            Self::LockPoisoned => write!(f, "Internal lock poisoned (concurrent thread panicked)"),
-            Self::EncryptionRequired => write!(
-                f,
-                "Database is encrypted but no key was supplied (set PagerConfig::encryption)"
-            ),
-            Self::PlainDatabaseRefusesKey => write!(
-                f,
-                "Plain (unencrypted) database opened with an encryption key — refusing"
-            ),
-            Self::InvalidKey => write!(f, "Encryption key validation failed for this database"),
-            Self::SuperblockZoneUnrecoverable(path) => write!(
-                f,
-                "superblock zone of {} is unrecoverable: both ping-pong copies failed \
-                 validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with red salvage \
-                 (ADR 0074 §4); it reads the damaged file without writing to it and \
-                 reports what it could not verify.",
-                path.display()
-            ),
-            Self::ManifestZoneCorrupt(path) => write!(
-                f,
-                "internal manifest zone of {} failed its checksum: the zone that names \
-                 collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
-                 and `red salvage` to extract what survives (ADR 0074 §2/§4).",
-                path.display()
-            ),
-            Self::DwbZoneCorrupt(path) => write!(
-                f,
-                "double-write zone of {} failed validation: page recovery cannot prove \
-                 whether the protected in-place write completed. The store will not be opened \
-                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
-                 rows (ADR 0074 §2/§4).",
-                path.display()
-            ),
-            Self::LegacySidecarStore { sidecar } => write!(
-                f,
-                "refusing to open a legacy sidecar-backed store: found {}. The superblock \
-                 pair, internal manifest, and double-write recovery state now live inside the \
-                 .rdb file (ADR 0038 §2/§4), \
-                 and the engine never reads the retired sidecars silently. Convert the store \
-                 first with the offline migration tool \
-                 (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is reversible.",
-                sidecar.display()
-            ),
-            Self::LegacyPagedStore { path } => write!(
-                f,
-                "refusing to open a pre-phase-3 paged store: {} does not carry the layout marker \
-                 for the in-file double-write zone. Convert the store first with the offline \
-                 migration tool (`reddb_server::pager_zone_migration::migrate_to_zoned`); it is \
-                 reversible.",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PagerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Page(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for PagerError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<PageError> for PagerError {
-    fn from(e: PageError) -> Self {
-        Self::Page(e)
-    }
-}
 
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and durable resume counters.
+    pub disk_residency: bool,
     /// Page cache capacity
     pub cache_size: usize,
     /// Whether to open read-only
@@ -212,6 +82,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: DEFAULT_CACHE_SIZE,
             read_only: false,
             create: true,
@@ -222,50 +93,167 @@ impl Default for PagerConfig {
     }
 }
 
-/// Page I/O Manager
-///
-/// Handles reading/writing pages and manages the page cache.
+/// Native host adapter for the shared pager.
 pub struct Pager {
-    /// Database file path
-    path: PathBuf,
-    /// File handle
-    file: Mutex<File>,
-    /// Exclusive file lock (held for lifetime, released on drop)
-    _lock_file: Option<File>,
-    /// Whether mutable pages are protected by the in-file DWB zone.
-    dwb_enabled: bool,
-    /// Page cache
-    cache: PageCache,
-    /// Free page list
-    freelist: RwLock<FreeList>,
-    /// Database header
-    header: RwLock<DatabaseHeader>,
-    /// Configuration
+    core: SharedPager<NativePagerFile, NativeWalBarrier>,
     config: PagerConfig,
-    /// Dirty flag for header
-    header_dirty: Mutex<bool>,
-    /// Optional WAL writer for WAL-first flush ordering.
-    ///
-    /// When set, [`Pager::flush`] computes the maximum `header.lsn` of
-    /// every dirty page and calls [`WalWriter::flush_until`] before
-    /// passing the batch to the double-write buffer. This guarantees
-    /// the postgres-style invariant: a page on disk implies its WAL
-    /// record is already durable.
-    ///
-    /// Wired in via [`Pager::set_wal_writer`] post-construction so
-    /// existing callers that build a Pager without a WAL keep working
-    /// unchanged. See `PLAN.md` § Target 3.
-    wal: RwLock<Option<Arc<Mutex<WalWriter>>>>,
-    /// Optional page encryptor + header. When set, `read_page` /
-    /// `write_page` route through AES-GCM transparently and page 0
-    /// bypasses encryption (it carries the encryption marker +
-    /// header itself). When `None`, all pages are stored plaintext
-    /// and any DB header carrying the `RDBE` marker is rejected at
-    /// open time.
     pub(crate) encryption: Option<(
         crate::storage::encryption::PageEncryptor,
         crate::storage::encryption::EncryptionHeader,
     )>,
+}
+
+#[doc(hidden)]
+pub struct NativePagerFile(File);
+
+#[cfg(unix)]
+impl Drop for NativePagerFile {
+    fn drop(&mut self) {
+        // flock belongs to the open file description: a concurrent spawn can
+        // retain it until exec closes the inherited CLOEXEC descriptor. That
+        // descriptor is not a pager owner. Release our fence at the end of the
+        // actual owner's lifetime, rather than waiting for every inherited FD.
+        // File close remains the fallback if the explicit unlock fails.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+impl reddb_file::VfsFile for NativePagerFile {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn file_len(&self) -> std::io::Result<u64> {
+        Ok(self.0.metadata()?.len())
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.0.set_len(len)
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(&mut self.0, bytes)
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, bytes)
+    }
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.0, pos)
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.0.sync_all()
+    }
+}
+
+/// Durable ownership callbacks installed only while a fenced epoch is active.
+pub(crate) trait PageOwnershipRecorder: Send + Sync {
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct NativeWalBarrier(
+    RwLock<Option<Arc<Mutex<WalWriter>>>>,
+    RwLock<Option<Arc<dyn PageOwnershipRecorder>>>,
+);
+
+impl NativeWalBarrier {
+    fn ownership_recorder(&self) -> std::io::Result<Option<Arc<dyn PageOwnershipRecorder>>> {
+        Ok(self
+            .1
+            .read()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?
+            .clone())
+    }
+}
+
+impl WalBarrier for NativeWalBarrier {
+    fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+        Ok(self.ownership_recorder()?.is_some())
+    }
+
+    fn needs_page_image(&self, page_id: u32) -> std::io::Result<bool> {
+        self.ownership_recorder()?
+            .map_or(Ok(false), |recorder| recorder.needs_page_image(page_id))
+    }
+
+    fn capture_page_image(&self, page: &Page) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.capture_page_image(page)?;
+        }
+        Ok(())
+    }
+
+    fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
+        let wal = self
+            .0
+            .read()
+            .map_err(|_| std::io::Error::other("WAL slot lock poisoned"))?
+            .clone();
+        if let Some(wal) = wal {
+            let mut writer = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            writer.flush_until(lsn)?;
+        } else if lsn != 0 {
+            return Err(std::io::Error::other(
+                "nonzero page LSN requires a WAL durability barrier",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.reserve_pages(start, count)?;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.detach_free_pages(pages)?;
+        }
+        Ok(())
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.retire_pages(pages)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Pager {
+    type Target = SharedPager<NativePagerFile, NativeWalBarrier>;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl reddb_engine::storage::page_store::PageStore for Pager {
+    fn read_page(&self, id: u32) -> Result<Page, PagerError> {
+        self.core.read_page(id)
+    }
+    fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
+        self.core.write_page(id, page)
+    }
+    fn allocate_page(&self, kind: super::page::PageType) -> Result<Page, PagerError> {
+        self.core.allocate_page(kind)
+    }
+    fn free_page(&self, id: u32) -> Result<(), PagerError> {
+        self.core.free_page(id)
+    }
+    fn page_count(&self) -> Result<u32, PagerError> {
+        self.core.page_count()
+    }
+    fn prefetch_hint(&self, id: u32) {
+        self.prefetch_hint(id)
+    }
 }
 
 #[path = "pager/impl.rs"]
@@ -287,6 +275,50 @@ mod tests {
     };
     use std::fs;
     use std::io::Write;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_pager_drop_releases_lock_with_inherited_descriptor() {
+        use fs2::FileExt;
+        let directory = tempfile::tempdir().expect("lock fixture");
+        let path = directory.path().join("owner.rdb");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("owner file");
+        file.try_lock_exclusive().expect("owner lock");
+        let owner = NativePagerFile(file);
+        // dup and fork retain the same open file description. A concurrent
+        // spawn may hold this non-owner descriptor until the child execs,
+        // even though Rust opens it with CLOEXEC.
+        let inherited = owner.0.try_clone().expect("inherited descriptor");
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("independent contender");
+        assert!(
+            contender.try_lock_exclusive().is_err(),
+            "live owner must exclude a second writer"
+        );
+        drop(owner);
+        contender
+            .try_lock_exclusive()
+            .expect("closed owner must permit immediate reopen, before the child execs");
+        // Releasing the inherited descriptor must not unlock the new owner.
+        drop(inherited);
+        let third = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("third handle");
+        assert!(
+            third.try_lock_exclusive().is_err(),
+            "replacement writer retains its independent fence"
+        );
+    }
 
     fn temp_db_path() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -409,6 +441,42 @@ mod tests {
     }
 
     #[test]
+    fn native_pager_lock_guards_own_io_and_releases_on_drop() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("locked-io.rdb");
+        let pager = Pager::open_default(&path).expect("locked pager opens");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate under lock");
+        let id = page.page_id();
+        page.insert_cell(b"key", b"kept").expect("cell");
+        pager.write_page(id, page).expect("write under lock");
+        pager.sync().expect("sync under lock");
+        assert_eq!(
+            pager
+                .read_page(id)
+                .expect("read under lock")
+                .read_cell(0)
+                .expect("cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+        assert!(
+            matches!(Pager::open_default(&path), Err(PagerError::Locked)),
+            "the writer fence remains exclusive"
+        );
+        drop(pager);
+        let reopened = Pager::open_default(&path).expect("last I/O handle releases writer fence");
+        assert_eq!(
+            reopened
+                .read_page(id)
+                .expect("durable page")
+                .read_cell(0)
+                .expect("durable cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+    }
+
+    #[test]
     fn test_pager_reopen() {
         let path = temp_db_path();
         cleanup(&path);
@@ -514,12 +582,11 @@ mod tests {
             let page1 = pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
-            let page2 = pager
+            pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
 
             let id1 = page1.page_id();
-            let id2 = page2.page_id();
 
             // Free page 1
             pager.free_page(id1).expect("free_page() should succeed");
@@ -1006,6 +1073,32 @@ mod tests {
         let path = temp_db_path();
         let pager = Pager::open(&path, PagerConfig::default()).expect("open() should succeed");
         assert!(!pager.has_wal_writer());
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn flush_refuses_nonzero_lsn_without_a_wal_writer() {
+        let path = temp_db_path();
+        let pager = Pager::open(&path, PagerConfig::default()).expect("open pager");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.set_lsn(42);
+        pager.write_page(page.page_id(), page).expect("write page");
+
+        assert!(
+            pager.flush().is_err(),
+            "a page with an LSN needs a WAL barrier"
+        );
+        assert!(
+            pager.dirty_page_count() > 0,
+            "failed flush must retain dirty pages"
+        );
+        assert!(
+            pager.flush().is_err(),
+            "failed writeback must remain fenced"
+        );
         drop(pager);
         cleanup(&path);
     }

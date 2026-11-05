@@ -246,7 +246,7 @@ impl RedDBRuntime {
                     bytes,
                     migrated_from_legacy_hex: false,
                 }),
-                Value::Text(data_hex) if reject_legacy_hex => {
+                Value::Text(_) if reject_legacy_hex => {
                     return Err(RedDBError::Internal(format!(
                         "legacy hex-encoded {kind} state for '{name}' is rejected after probabilistic state migrated to raw bytes"
                     )));
@@ -722,6 +722,14 @@ impl RedDBRuntime {
         );
         if is_mutation {
             self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        }
+        if let ProbabilisticCommand::CreateHll { name, .. }
+        | ProbabilisticCommand::CreateSketch { name, .. }
+        | ProbabilisticCommand::CreateFilter { name, .. } = cmd
+        {
+            if super::impl_ddl::is_system_schema_name(name) {
+                return Err(RedDBError::Query("system schema is read-only".to_string()));
+            }
         }
         match cmd {
             // ── HyperLogLog ──────────────────────────────────────────

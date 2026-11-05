@@ -5,68 +5,43 @@ pub(in crate::runtime) fn eval_projection_value(
     proj: &Projection,
     source: &UnifiedRecord,
 ) -> Option<Value> {
-    match proj {
-        Projection::Column(col) => {
-            if let Some(lit_val) = col.strip_prefix("LIT:") {
-                if lit_val.is_empty() {
-                    return Some(Value::Null);
-                }
-                // Composite sentinel — Array/Vector/Blob roundtrip via
-                // JSON-ish encoding (see `serialize_value_json` in
-                // `sql_lowering`). Preserves shape across the
-                // Projection-based legacy scalar dispatcher.
-                if let Some(payload) = lit_val.strip_prefix("@RL:") {
-                    if let Some(v) = parse_rl_literal(payload) {
-                        return Some(v);
-                    }
-                }
-                if let Ok(n) = lit_val.parse::<i64>() {
-                    return Some(Value::Integer(n));
-                }
-                if let Ok(n) = lit_val.parse::<f64>() {
-                    return Some(Value::Float(n));
-                }
-                return Some(Value::text(lit_val.to_string()));
-            }
-            source.get(col.as_str()).cloned()
-        }
-        Projection::Alias(col, _) => {
-            eval_projection_value(&Projection::Column(col.clone()), source)
-        }
-        Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
-        Projection::Function(name, inner_args) => reddb_rql::sql_lowering::projection_to_expr(proj)
-            .and_then(|(expr, _)| {
-                let row = RecordRow {
-                    db: None,
-                    record: source,
-                    table_name: None,
-                    table_alias: None,
-                };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-            })
-            .or_else(|| evaluate_scalar_function(name, inner_args, source)),
-        Projection::Expression(filter, _) => reddb_rql::sql_lowering::projection_to_expr(proj)
-            .and_then(|(expr, _)| {
-                let row = RecordRow {
-                    db: None,
-                    record: source,
-                    table_name: None,
-                    table_alias: None,
-                };
-                crate::storage::query::evaluator::evaluate(&expr, &row).ok()
-            })
-            .or_else(|| {
-                Some(Value::Boolean(evaluate_runtime_filter(
-                    source, filter, None, None,
-                )))
-            }),
-        Projection::All => None,
-        // Slice 7b (#590): window output is pre-materialised on the
-        // record under the alias by `runtime::window_phase::apply`.
-        Projection::Window { name, alias, .. } => {
-            let label: String = alias.clone().unwrap_or_else(|| name.clone());
-            source.get(label.as_str()).cloned()
-        }
+    reddb_engine::query::runtime::projection_value::eval_projection_value_with_host(
+        &RuntimeProjectionValueHost,
+        proj,
+        source,
+    )
+}
+
+struct RuntimeProjectionValueHost;
+impl reddb_engine::query::runtime::projection_value::ProjectionValueHost
+    for RuntimeProjectionValueHost
+{
+    fn try_expression(
+        &self,
+        expression: &reddb_rql::ast::Expr,
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        let row = RecordRow {
+            db: None,
+            record: source,
+            table_name: None,
+            table_alias: None,
+        };
+        crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row).ok()
+    }
+    fn fallback_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Option<Value> {
+        evaluate_scalar_function(name, arguments, source)
+    }
+    fn fallback_filter(&self, filter: &Filter, source: &UnifiedRecord) -> bool {
+        evaluate_runtime_filter(source, filter, None, None)
+    }
+    fn secret_query_input(&self, value: Value) -> Option<Value> {
+        crate::runtime::execution_context::secret_query_input(value)
     }
 }
 
@@ -84,6 +59,88 @@ pub(in crate::runtime) fn eval_projection_value_with_db(
         ))),
         _ => eval_projection_value(proj, source),
     }
+}
+
+/// Resolve aggregate/scalar inputs without converting a read failure into NULL
+/// or retrying an optional evaluator after admission has rejected the value.
+pub(in crate::runtime) fn try_eval_projection_value_with_db(
+    db: Option<&RedDB>,
+    projection: &Projection,
+    source: &UnifiedRecord,
+) -> crate::RedDBResult<Option<Value>> {
+    let value = match projection {
+        Projection::Column(column) | Projection::Alias(column, _) => {
+            if column.starts_with("LIT:") {
+                reddb_engine::query::runtime::projection_value::decode_projection_literal(column)
+            } else {
+                source.get(column.as_str()).cloned()
+            }
+        }
+        Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
+        Projection::Function(_, _) | Projection::Expression(_, _) => {
+            if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
+                let row = RecordRow {
+                    db,
+                    record: source,
+                    table_name: None,
+                    table_alias: None,
+                };
+                match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(
+                    &expression,
+                    &row,
+                ) {
+                    Ok(value) => Some(value),
+                    Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
+                        ..
+                    })
+                    | Err(crate::storage::query::evaluator::EvalError::UnknownColumn(_)) => {
+                        crate::runtime::expr_eval::try_evaluate_runtime_expr_with_db(
+                            db,
+                            &expression,
+                            source,
+                            None,
+                            None,
+                        )?
+                    }
+                    Err(error) => {
+                        let sensitive = projection_uses_secret(projection, source, None, None);
+                        return Err(crate::RedDBError::Query(
+                            if sensitive
+                                && !matches!(
+                                    &error,
+                                    crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                                )
+                            {
+                                "secret expression evaluation failed".into()
+                            } else {
+                                error.to_string()
+                            },
+                        ));
+                    }
+                }
+            } else {
+                match projection {
+                    Projection::Function(name, arguments) => {
+                        crate::runtime::expr_eval::try_evaluate_projection_function(
+                            db, name, arguments, source,
+                        )?
+                    }
+                    Projection::Expression(filter, _) => Some(Value::Boolean(
+                        evaluate_runtime_filter_result_with_db(db, source, filter, None, None)?,
+                    )),
+                    _ => unreachable!("matched function or expression projection"),
+                }
+            }
+        }
+        Projection::All => None,
+        Projection::Window { name, alias, .. } => {
+            source.get(alias.as_ref().unwrap_or(name).as_str()).cloned()
+        }
+    };
+    value
+        .map(try_secret_runtime_input)
+        .transpose()
+        .map(Option::flatten)
 }
 
 /// Handle ML_CLASSIFY / ML_PREDICT_PROBA / SEMANTIC_CACHE_* scalars.
@@ -287,11 +344,7 @@ pub(in crate::runtime::join_filter) fn evaluate_projection_secret_ref(
     args: &[Projection],
 ) -> Option<Value> {
     let key = projection_path_text(args.first()?)?.to_ascii_lowercase();
-    if crate::runtime::impl_core::current_secret_value(&key).is_some() {
-        Some(Value::text("***"))
-    } else {
-        Some(Value::Null)
-    }
+    crate::runtime::impl_core::current_secret_value(&key).or(Some(Value::Null))
 }
 
 /// Resolve `$kv.*` in a projection. Unlike secrets, plain KV values are
@@ -328,243 +381,11 @@ pub(in crate::runtime::join_filter) fn projection_default_value_with_db(
     }
 }
 
-pub(in crate::runtime::join_filter) fn resolve_time_bucket_duration(
-    args: &[Projection],
-    index: usize,
-) -> Option<u64> {
-    let Projection::Column(column) = args.get(index)? else {
-        return None;
-    };
-    let literal = column.strip_prefix("LIT:")?;
-    crate::storage::timeseries::retention::parse_duration_ns(literal)
-}
-
-pub(in crate::runtime::join_filter) fn resolve_time_bucket_timestamp(
-    args: &[Projection],
-    source: &UnifiedRecord,
-) -> Option<u64> {
-    if let Some(value) = args
-        .get(1)
-        .and_then(|_| resolve_scalar_arg(args, 1, source))
-    {
-        return value_to_bucket_timestamp_ns(&value);
-    }
-
-    source
-        .get("timestamp_ns")
-        .and_then(value_to_bucket_timestamp_ns)
-        .or_else(|| {
-            source
-                .get("timestamp_ms")
-                .and_then(value_to_bucket_timestamp_ns)
-        })
-        .or_else(|| {
-            source
-                .get("timestamp")
-                .and_then(value_to_bucket_timestamp_ns)
-        })
-}
-
-pub(in crate::runtime::join_filter) fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
-    match value {
-        Value::UnsignedInteger(v) => Some(*v),
-        Value::Integer(v) if *v >= 0 => Some(*v as u64),
-        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
-        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
-        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
-        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
-        _ => None,
-    }
-}
-
-pub(in crate::runtime::join_filter) fn substring_text(
-    text: &str,
-    start: i64,
-    count: Option<i64>,
-) -> Option<String> {
-    if count.is_some_and(|count| count < 0) {
-        return None;
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let start_idx = if start <= 1 {
-        0
-    } else {
-        usize::try_from(start - 1).ok()?
-    };
-
-    if start_idx >= chars.len() {
-        return Some(String::new());
-    }
-
-    let end_idx = match count {
-        Some(count) => start_idx.saturating_add(count as usize).min(chars.len()),
-        None => chars.len(),
-    };
-
-    Some(chars[start_idx..end_idx].iter().collect())
-}
-
-pub(in crate::runtime::join_filter) fn substring_pattern_text(
-    text: &str,
-    pattern: &str,
-) -> Option<String> {
-    let regex = regex::Regex::new(pattern).ok()?;
-    let captures = regex.captures(text)?;
-    if captures.len() > 1 {
-        return captures.get(1).map(|capture| capture.as_str().to_string());
-    }
-    captures.get(0).map(|capture| capture.as_str().to_string())
-}
-
-pub(in crate::runtime::join_filter) fn position_text(needle: &str, haystack: &str) -> i64 {
-    if needle.is_empty() {
-        return 1;
-    }
-    haystack
-        .find(needle)
-        .map(|byte_idx| haystack[..byte_idx].chars().count() as i64 + 1)
-        .unwrap_or(0)
-}
-
-pub(in crate::runtime::join_filter) fn slice_left_text(text: &str, count: i64) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let take = normalized_slice_len(chars.len(), count);
-    chars.into_iter().take(take).collect()
-}
-
-pub(in crate::runtime::join_filter) fn slice_right_text(text: &str, count: i64) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let take = normalized_slice_len(chars.len(), count);
-    let len = chars.len();
-    chars.into_iter().skip(len.saturating_sub(take)).collect()
-}
-
-pub(in crate::runtime::join_filter) fn normalized_slice_len(len: usize, count: i64) -> usize {
-    if count >= 0 {
-        usize::try_from(count).unwrap_or(usize::MAX).min(len)
-    } else {
-        len.saturating_sub(count.unsigned_abs() as usize)
-    }
-}
-
-pub(in crate::runtime::join_filter) fn quote_literal_text(text: &str) -> String {
-    let escaped = text.replace('\'', "''");
-    if text.contains('\\') {
-        format!("E'{}'", escaped.replace('\\', "\\\\"))
-    } else {
-        format!("'{escaped}'")
-    }
-}
-
-pub(in crate::runtime::join_filter) fn trim_text(
-    text: &str,
-    chars: Option<&str>,
-    left: bool,
-    right: bool,
-) -> String {
-    match chars {
-        Some(chars) => {
-            let predicate = |ch| chars.contains(ch);
-            match (left, right) {
-                (true, true) => text.trim_matches(predicate).to_string(),
-                (true, false) => text.trim_start_matches(predicate).to_string(),
-                (false, true) => text.trim_end_matches(predicate).to_string(),
-                (false, false) => text.to_string(),
-            }
-        }
-        None => match (left, right) {
-            (true, true) => text.trim().to_string(),
-            (true, false) => text.trim_start().to_string(),
-            (false, true) => text.trim_end().to_string(),
-            (false, false) => text.to_string(),
-        },
-    }
-}
-
-/// Resolve two geographic points from function arguments.
-/// Supports: (column, POINT(lat, lon)) or (col1, col2)
-pub(in crate::runtime::join_filter) fn resolve_two_geo_points(
-    args: &[Projection],
-    source: &UnifiedRecord,
-) -> Option<(f64, f64, f64, f64)> {
-    match args {
-        [left, right] => {
-            let (lat1, lon1) = resolve_geo_arg(left, source)?;
-            let (lat2, lon2) = resolve_geo_arg(right, source)?;
-            Some((lat1, lon1, lat2, lon2))
-        }
-        [left, lat, lon] => {
-            let (lat1, lon1) = resolve_geo_arg(left, source)?;
-            let lat2 = resolve_geo_number(lat, source)?;
-            let lon2 = resolve_geo_number(lon, source)?;
-            Some((lat1, lon1, lat2, lon2))
-        }
-        [lat1, lon1, lat2, lon2] => Some((
-            resolve_geo_number(lat1, source)?,
-            resolve_geo_number(lon1, source)?,
-            resolve_geo_number(lat2, source)?,
-            resolve_geo_number(lon2, source)?,
-        )),
-        _ => None,
-    }
-}
-
-/// Resolve a single geo argument — either a column (GeoPoint/Latitude/Longitude) or POINT literal.
 pub(in crate::runtime::join_filter) fn resolve_geo_arg(
-    arg: &Projection,
+    argument: &Projection,
     source: &UnifiedRecord,
 ) -> Option<(f64, f64)> {
-    match arg {
-        Projection::Column(col) => {
-            // POINT:lat:lon literal
-            if let Some(rest) = col.strip_prefix("POINT:") {
-                let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    let lat: f64 = parts[0].parse().ok()?;
-                    let lon: f64 = parts[1].parse().ok()?;
-                    return Some((lat, lon));
-                }
-            }
-            // Column reference → look up in record values
-            let val = source
-                .get(col.as_str())
-                .cloned()
-                .or_else(|| resolve_runtime_document_path(source, col))?;
-            match &val {
-                value if crate::geo::recognize_geo_value(value).is_some() => {
-                    crate::geo::recognize_geo_value(value)
-                }
-                Value::Float(f) => {
-                    // Could be a lat or lon — check for "lat"/"lon" sibling columns
-                    let lat_keys = ["lat", "latitude"];
-                    let lon_keys = ["lon", "longitude", "lng"];
-                    if lat_keys.contains(&col.as_str()) {
-                        let lon =
-                            lon_keys
-                                .iter()
-                                .find_map(|k| source.get(k))
-                                .and_then(|v| match v {
-                                    Value::Float(f) => Some(*f),
-                                    Value::Integer(n) => Some(*n as f64),
-                                    _ => None,
-                                })?;
-                        Some((*f, lon))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        }
-        _ => {
-            let value = eval_projection_value(arg, source)?;
-            crate::geo::recognize_geo_value(&value)
-        }
-    }
-}
-
-fn resolve_geo_number(arg: &Projection, source: &UnifiedRecord) -> Option<f64> {
-    let value = eval_projection_value(arg, source)?;
-    value_as_number(&value).map(NumOperand::as_f64)
+    reddb_engine::query::runtime::geographic::resolve_geo_arg(argument, source, &|argument| {
+        eval_projection_value(argument, source)
+    })
 }

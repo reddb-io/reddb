@@ -65,7 +65,9 @@ impl<'a> Parser<'a> {
                     key,
                 }))
             }
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("UNSEAL") => {
+            Token::Ident(ref name)
+                if name.eq_ignore_ascii_case("REVEAL") || name.eq_ignore_ascii_case("UNSEAL") =>
+            {
                 self.advance()?;
                 if model != CollectionModel::Vault {
                     return Err(ParseError::expected(
@@ -76,7 +78,7 @@ impl<'a> Parser<'a> {
                 }
                 let (collection, key) = self.parse_kv_key(model)?;
                 let version = self.parse_optional_vault_version()?;
-                Ok(QueryExpr::KvCommand(KvCommand::Unseal {
+                Ok(QueryExpr::KvCommand(KvCommand::Reveal {
                     collection,
                     key,
                     version,
@@ -178,7 +180,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 if model == CollectionModel::Vault {
                     vec![
-                        "PUT", "GET", "UNSEAL", "ROTATE", "HISTORY", "LIST", "WATCH", "DELETE",
+                        "PUT", "GET", "REVEAL", "ROTATE", "HISTORY", "LIST", "WATCH", "DELETE",
                         "PURGE", "INCR", "DECR", "CAS",
                     ]
                 } else {
@@ -229,9 +231,9 @@ impl<'a> Parser<'a> {
 
     /// Parse `UNSEAL VAULT <collection.key>`.
     pub fn parse_unseal_vault_command(&mut self) -> Result<QueryExpr, ParseError> {
-        if !self.consume_ident_ci("UNSEAL")? {
+        if !self.consume_ident_ci("REVEAL")? && !self.consume_ident_ci("UNSEAL")? {
             return Err(ParseError::expected(
-                vec!["UNSEAL"],
+                vec!["REVEAL"],
                 self.peek(),
                 self.position(),
             ));
@@ -245,7 +247,7 @@ impl<'a> Parser<'a> {
         }
         let (collection, key) = self.parse_kv_key(CollectionModel::Vault)?;
         let version = self.parse_optional_vault_version()?;
-        Ok(QueryExpr::KvCommand(KvCommand::Unseal {
+        Ok(QueryExpr::KvCommand(KvCommand::Reveal {
             collection,
             key,
             version,
@@ -408,7 +410,11 @@ impl<'a> Parser<'a> {
         &mut self,
         model: CollectionModel,
     ) -> Result<(String, String), ParseError> {
-        let first = self.parse_kv_key_part()?;
+        let first = if matches!(self.peek(), Token::QuotedIdent(_)) {
+            self.collection_name_segment(false)?
+        } else {
+            self.parse_kv_key_part()?
+        };
         if self.consume(&Token::Colon)? {
             let second = self.parse_kv_key_part()?;
             return Err(self.unquoted_kv_special_key_error(format!("'{first}:{second}'")));
@@ -474,7 +480,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_keyed_list(&mut self, model: CollectionModel) -> Result<QueryExpr, ParseError> {
-        let collection = self.expect_ident_or_keyword()?;
+        let collection = self.parse_keyed_collection_name()?;
         let mut prefix = None;
         let mut limit = None;
         let mut offset = 0usize;
@@ -513,13 +519,9 @@ impl<'a> Parser<'a> {
         &mut self,
         model: CollectionModel,
     ) -> Result<QueryExpr, ParseError> {
-        let first = self.expect_ident()?;
+        let first = self.collection_name_segment(false)?;
         let (collection, key, prefix) = if model != CollectionModel::Kv {
-            let mut collection = first;
-            if self.consume(&Token::Dot)? {
-                let next = self.expect_ident_or_keyword()?;
-                collection = format!("{collection}.{next}");
-            }
+            let collection = self.finish_collection_name(first, false)?;
             if self.consume_ident_ci("PREFIX")? {
                 (collection, self.expect_ident_or_keyword()?, true)
             } else {
@@ -564,12 +566,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_keyed_collection_name(&mut self) -> Result<String, ParseError> {
-        let mut collection = self.expect_ident_or_keyword()?;
-        if self.consume(&Token::Dot)? {
-            let next = self.expect_ident_or_keyword()?;
-            collection = format!("{collection}.{next}");
-        }
-        Ok(collection)
+        let name = self.collection_name_segment(true)?;
+        self.finish_collection_name(name, false)
     }
 
     /// Parse `INCR/DECR key [BY n] [EXPIRE dur]`. `sign` is +1 or -1.
@@ -928,7 +926,7 @@ mod tests {
                 .parse_frontend_statement()
                 .unwrap()
                 .into_query_expr(),
-            QueryExpr::KvCommand(KvCommand::Unseal {
+            QueryExpr::KvCommand(KvCommand::Reveal {
                 collection,
                 key,
                 version: Some(2),

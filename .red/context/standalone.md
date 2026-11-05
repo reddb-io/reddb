@@ -9,6 +9,8 @@ Part of the [glossary map](../CONTEXT-MAP.md). The embedded single-file single-n
 - **Embedded superblock pair** — two ping-pong superblock copies inside the single-file `.rdb`, each carrying generation and checksum metadata. Open chooses the newest valid copy to root the embedded internal manifest.
 - **Embedded WAL region** — circular internal WAL zone inside the single-file `.rdb`. Entries may be overwritten only after the checkpoint/superblock boundary proves they are no longer needed for recovery.
 
+- **RedDB Browser foundation** — experimental Rust/WASM bindings to the shared embedded artifact, RQL front-end and storage-independent query operators (ADR 0077), using an exclusively owned OPFS sync handle. Storage-free scalar SELECTs execute in the worker. This is not yet a supported database/deploy profile: storage-backed five-model execution, transactions and server synchronization are pending. Local file publication preserves the canonical `.rdb` contract; Web Locks and OPFS enforce one owner, and another opener receives `FILE_BUSY` until request forwarding is implemented.
+
 ## Ephemeral store
 
 - **Ephemeral store** — throwaway in-memory embedded store materialized from local data files for the duration of a single query invocation, then discarded. CSV/TSV files surface as row tables; JSON/NDJSON files surface as document collections. Each file is addressable by its sanitized file-stem name and by a positional alias. It is a real store: writes work by construction, and nothing durable is created unless the user graduates it.

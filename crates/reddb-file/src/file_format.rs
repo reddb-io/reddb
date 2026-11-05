@@ -8,11 +8,17 @@ use std::fmt;
 /// Magic bytes for database file identification: `RDDB`.
 pub const PAGE_FILE_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x42];
 
-/// Database file version 1.0.1.
-///
-/// 1.0.1 is the positive layout marker for ADR 0038 phase 3 stores whose
-/// double-write buffer lives in the reserved in-file zone.
-pub const PAGE_FILE_VERSION: u32 = 0x0001_0001;
+/// The first version with durable page-ownership recovery.
+pub const PAGE_OWNERSHIP_FILE_VERSION: u32 = 0x0001_0002;
+/// Checkpoint before-images must be restored before following published roots.
+pub const PAGE_CHECKPOINT_UNDO_FILE_VERSION: u32 = 0x0001_0003;
+/// Current database file version. The phase-3 DWB layout itself starts at
+/// 1.0.1; older readers reject this version before using the new contract.
+pub const PAGE_DISK_RESIDENCY_FILE_VERSION: u32 = 0x0001_0004;
+/// Generation-bound secondary trees participate in catalog ownership/reclamation.
+/// Older readers must reject the file before recovering or recycling pages.
+pub const PAGE_SECONDARY_INDEX_FILE_VERSION: u32 = 0x0001_0005;
+pub const PAGE_FILE_VERSION: u32 = PAGE_SECONDARY_INDEX_FILE_VERSION;
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;
@@ -476,7 +482,8 @@ pub struct DatabaseHeader {
 impl Default for DatabaseHeader {
     fn default() -> Self {
         Self {
-            version: PAGE_FILE_VERSION,
+            // Prepared disk residency is an explicit host opt-in.
+            version: PAGE_CHECKPOINT_UNDO_FILE_VERSION,
             page_size: PAGED_PAGE_SIZE as u32,
             page_count: 1,
             freelist_head: 0,

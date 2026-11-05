@@ -157,6 +157,24 @@ pub struct ActionEntry {
 /// delete the row. To remove one: change it to `Removed` (and only
 /// delete after a release cycle).
 pub const ACTIONS: &[ActionEntry] = &[
+    ActionEntry {
+        name: "cache:read",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read or probe a native Blob Cache namespace",
+    },
+    ActionEntry {
+        name: "cache:write",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "write values to a native Blob Cache namespace",
+    },
+    ActionEntry {
+        name: "cache:invalidate",
+        category: ActionCategory::Other,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "invalidate or flush a native Blob Cache namespace",
+    },
     // -- DML / DDL / privilege management --------------------------------
     ActionEntry {
         name: "select",
@@ -336,6 +354,24 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "any user lifecycle verb",
     },
+    ActionEntry {
+        name: "tenant:assume",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "assume or clear a tenant routing scope",
+    },
+    ActionEntry {
+        name: "identity:assume",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "project another user or role into statement scope",
+    },
+    ActionEntry {
+        name: "metrics:cross-tenant",
+        category: ActionCategory::Admin,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "read or write Prometheus data for another tenant",
+    },
     // -- KV --------------------------------------------------------------
     ActionEntry {
         name: "kv:invalidate",
@@ -407,10 +443,28 @@ pub const ACTIONS: &[ActionEntry] = &[
         gates_description: "read vault entry metadata (no plaintext)",
     },
     ActionEntry {
+        name: "vault:use",
+        category: ActionCategory::Vault,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "use a secret inside query evaluation without revealing its value",
+    },
+    ActionEntry {
+        name: "vault:reveal",
+        category: ActionCategory::Vault,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "explicitly reveal vault entry plaintext",
+    },
+    ActionEntry {
+        name: "vault:reveal_history",
+        category: ActionCategory::Vault,
+        lifecycle_state: LifecycleState::Active,
+        gates_description: "explicitly reveal historical vault entry plaintext",
+    },
+    ActionEntry {
         name: "vault:read",
         category: ActionCategory::Vault,
         lifecycle_state: LifecycleState::Active,
-        gates_description: "reveal vault entry plaintext",
+        gates_description: "compatibility alias for vault:reveal",
     },
     ActionEntry {
         name: "vault:write",
@@ -422,13 +476,13 @@ pub const ACTIONS: &[ActionEntry] = &[
         name: "secret:read",
         category: ActionCategory::Vault,
         lifecycle_state: LifecycleState::Active,
-        gates_description: "read user-managed SQL vault secrets",
+        gates_description: "compatibility alias for vault:use on default-vault SQL secrets",
     },
     ActionEntry {
         name: "secret:write",
         category: ActionCategory::Vault,
         lifecycle_state: LifecycleState::Active,
-        gates_description: "write or delete user-managed SQL vault secrets",
+        gates_description: "compatibility alias for vault:write on default-vault SQL secrets",
     },
     ActionEntry {
         name: "secret:*",
@@ -442,19 +496,15 @@ pub const ACTIONS: &[ActionEntry] = &[
         lifecycle_state: LifecycleState::Active,
         gates_description: "unseal the vault master key for this session",
     },
-    // Deprecated: `vault:unseal_history` was the previous name for
-    // reading the audit trail of unseal events. The capability is now
-    // surfaced through `vault:read_metadata` on the unseal-events
-    // resource, so the dedicated verb is retained for back-compat but
-    // policy authors should migrate.
+    // Previous historical reveal capability, retained for existing policies.
     ActionEntry {
         name: "vault:unseal_history",
         category: ActionCategory::Vault,
         lifecycle_state: LifecycleState::Deprecated {
-            replacement: Some("vault:read_metadata"),
+            replacement: Some("vault:reveal_history"),
             since_version: "0.5.0",
         },
-        gates_description: "read the vault unseal-event audit trail",
+        gates_description: "compatibility alias for vault:reveal_history",
     },
     ActionEntry {
         name: "vault:purge",

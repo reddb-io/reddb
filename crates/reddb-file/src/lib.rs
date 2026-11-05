@@ -38,12 +38,17 @@ pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
 pub mod native_index_artifact;
+pub mod native_key_index;
+pub mod native_resume;
 pub mod native_store;
+pub mod native_value;
 pub mod operational_manifest;
+pub mod page_ownership_journal;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
 pub mod profile;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod salvage;
 pub mod scrub;
 pub mod serverless;
@@ -115,8 +120,8 @@ pub use bloom_segment::{
 pub use btree_value_layout::{
     btree_projected_cell_len, btree_value_pointer_head, decode_btree_inline_payload,
     decode_btree_value_cell, encode_btree_inline_compressed, encode_btree_inline_raw,
-    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
-    BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
+    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_COMPRESSION_THRESHOLD,
+    BTREE_VALUE_MAX_SIZE, BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
@@ -132,9 +137,11 @@ pub use control_store::{
     TERM_TEMP_EXTENSION,
 };
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
+#[cfg(not(target_arch = "wasm32"))]
+pub use embedded::EmbeddedRdbWriterLock;
 pub use embedded::{
-    EmbeddedRdbArtifact, EmbeddedRdbManifest, EmbeddedRdbOpen, EmbeddedRdbSuperblock,
-    EmbeddedRdbWriterLock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
+    EmbeddedRdbArtifact, EmbeddedRdbFile, EmbeddedRdbManifest, EmbeddedRdbOpen,
+    EmbeddedRdbSuperblock, RdbFileError, RdbFileResult, DEFAULT_FORMAT_VERSION,
     EMBEDDED_RDB_MANIFEST_0_OFFSET, EMBEDDED_RDB_MANIFEST_1_OFFSET,
     EMBEDDED_RDB_MANIFEST_SLOT_SIZE, EMBEDDED_RDB_MANIFEST_ZONE_END,
     EMBEDDED_RDB_SUPERBLOCK_0_OFFSET, EMBEDDED_RDB_SUPERBLOCK_1_OFFSET,
@@ -235,7 +242,8 @@ pub use native_store::{
     decode_native_len_prefixed_string, decode_native_manifest_summary_page,
     decode_native_metadata_overflow_continuation_header, decode_native_metadata_overflow_header,
     decode_native_metadata_state_summary_page, decode_native_paged_collection_root,
-    decode_native_paged_cross_ref, decode_native_paged_metadata_header,
+    decode_native_paged_cross_ref, decode_native_paged_deferred_pages,
+    decode_native_paged_metadata_header, decode_native_paged_retired_trees,
     decode_native_recovery_summary_page, decode_native_registry_summary_page,
     decode_native_store_header, decode_native_vector_artifact_store_page, encode_native_blob_page,
     encode_native_catalog_summary_page, encode_native_collection_roots_page,
@@ -245,11 +253,12 @@ pub use native_store::{
     encode_native_manifest_summary_page, encode_native_metadata_overflow_continuation_header,
     encode_native_metadata_overflow_header, encode_native_metadata_state_summary_page,
     encode_native_paged_collection_root, encode_native_paged_cross_ref,
-    encode_native_paged_metadata_header, encode_native_recovery_summary_page,
+    encode_native_paged_deferred_pages, encode_native_paged_metadata_header,
+    encode_native_paged_retired_trees, encode_native_recovery_summary_page,
     encode_native_registry_summary_page, encode_native_store_header,
     encode_native_vector_artifact_store_page, is_supported_store_version,
     native_blob_chunk_capacity, native_store_magic_matches, native_store_page_checksum,
-    verify_native_store_crc32_footer, write_native_store_bytes_atomically,
+    native_store_payload, verify_native_store_crc32_footer, write_native_store_bytes_atomically,
     NativeCatalogCollectionSummary, NativeCatalogSummary, NativeDumpCollectionHeader,
     NativeDumpCrossRef, NativeEntityRecordFrame, NativeExportSummary, NativeManifestEntrySummary,
     NativeManifestSummary, NativeMetadataOverflowContinuationHeader, NativeMetadataOverflowHeader,
@@ -332,7 +341,7 @@ pub use vector_ivf_index::{
     decode_ivf_index_frame, encode_ivf_index_frame, IvfIndexFrame, IvfIndexFrameError,
     IvfListFrame, IVF_INDEX_HEADER_LEN, IVF_INDEX_MAGIC,
 };
-pub use vfs::{OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
+pub use vfs::{BorrowedStdFile, OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
@@ -347,6 +356,7 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
+#[cfg(not(target_arch = "wasm32"))]
 pub use salvage::{
     salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
     StorageSalvageSkippedRegion,
@@ -375,8 +385,8 @@ pub use spill::{
     SPILL_FILE_HEADER_LEN, SPILL_FILE_MAGIC, SPILL_FILE_VERSION_V1, SPILL_FILE_VERSION_V2,
 };
 pub use store_wal::{
-    decode_store_wal_action_frame, encode_store_wal_action_frame, StoreWalActionFrame,
-    STORE_WAL_ACTION_VERSION,
+    decode_store_wal_action_frame, encode_store_wal_action_frame, visit_store_wal_entity_records,
+    StoreWalActionFrame, STORE_WAL_ACTION_VERSION,
 };
 pub use table_def::{decode_table_def, encode_table_def, TABLE_DEF_MAGIC};
 pub use transaction_wal::{
@@ -402,10 +412,11 @@ pub use wal_header::{
 };
 pub use wal_record::{
     decode_main_wal_record_frame, decode_main_wal_record_frame_with_authority,
-    encode_main_wal_record_frame, encode_main_wal_record_frame_into,
-    encode_main_wal_record_frame_with_authority, encode_main_wal_record_frame_with_authority_into,
-    MainWalCompression, MainWalRecordAuthority, MainWalRecordFrame, MainWalRecordFrameRef,
-    MainWalRecordType, MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
+    encode_main_wal_commit_batch_with_visitor, encode_main_wal_record_frame,
+    encode_main_wal_record_frame_into, encode_main_wal_record_frame_with_authority,
+    encode_main_wal_record_frame_with_authority_into, MainWalCompression, MainWalRecordAuthority,
+    MainWalRecordFrame, MainWalRecordFrameRef, MainWalRecordType,
+    MAIN_WAL_DEFAULT_COMPRESS_THRESHOLD,
 };
 pub use zone_map::{
     read_zone_map_sidecar, write_zone_map_sidecar, PersistedZone, ZoneMapPersistError,

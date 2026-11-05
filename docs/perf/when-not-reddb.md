@@ -92,11 +92,11 @@ make duel-official OFFICIAL_SCENARIOS=aggregate_group OFFICIAL_DB=duel-core
 
 ## Gap 4 — `select_filtered`: ≈ 13× behind MongoDB
 
-**What this measures.** `SELECT ... WHERE` with a predicate against
-an indexed column. Mongo's index path is direct; RedDB's secondary
-indices currently snapshot at `CREATE INDEX` time and don't
-auto-update on insert/update/delete, so the bench falls back to a
-full-table scan that deserialises every row.
+**What this measures.** `SELECT ... WHERE` with a predicate against an indexed
+column. At the time of the cited session, RedDB's secondary indexes were not
+maintained after `CREATE INDEX`, so the bench fell back to a full-table scan.
+Current write paths maintain them through `IndexStore::index_entity_*`; the
+historical numbers below still need a fresh benchmark run.
 
 **Cited session.** `sess-20260416215030-1190998` (mongo lock window).
 `BASELINE.md` aggregate: RedDB 113 ops/s vs Mongo 1,491 ops/s,
@@ -107,9 +107,9 @@ PG 683 ops/s.
 - [#156 — UnifiedRecord schema-shared layout](../../issues/156-unifiedrecord-schema-shared.md)
   (in flight). Cuts the per-row `HashMap` allocation that dominates
   scan CPU.
-- [#160 — IncrementalIndexMaintainer](../../issues/160-incremental-index-maintainer.md)
-  (in flight). Maintains secondary indices on every write so the
-  query planner can use them, instead of re-scanning the segment.
+- [#160 — secondary-index write maintenance](../../issues/160-incremental-index-maintainer.md)
+  (implemented by the live `IndexStore` write paths). The unused standalone
+  maintainer prototype was retired rather than kept as a second write path.
 
 **Reproducing.**
 

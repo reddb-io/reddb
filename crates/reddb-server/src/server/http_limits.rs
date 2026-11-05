@@ -1,15 +1,18 @@
-//! Resolution of the three HTTP handler-pool knobs (issue #574 slice 5).
+//! Resolution of the HTTP admission and execution knobs.
 //!
 //! The values are configurable through the standard precedence chain
 //! used elsewhere in the boot path:
 //!
 //!   flag > red_config > env > built-in default
 //!
-//! Built-in defaults reproduce the hard-coded values from slices 1+2:
+//! Built-in defaults preserve the existing request envelope and add a
+//! CPU-sized synchronous execution bound:
 //!   - max_handlers      = (2 * num_cpus).clamp(8, 256)
+//!   - execution_workers = num_cpus, clamped to max_handlers
 //!   - handler_timeout   = 30_000 ms
 //!   - retry_after_secs  = 5
-//!   - max_inflight_per_principal = 64   (issue #934; 0 disables)
+//!   - max_inflight_per_principal = min(64, max_handlers - 1)
+//!     (issue #934; 0 disables; one slot is reserved when possible)
 //!
 //! Each knob is validated at parse time and at resolution time so a
 //! stale red_config value cannot corrupt the running server.
@@ -32,6 +35,15 @@ pub fn default_max_handlers() -> usize {
     (2 * cores).clamp(8, 256)
 }
 
+/// Synchronous engine calls are CPU/storage work, not connection work. Keep
+/// their default parallelism tied to the CPU budget while the larger
+/// `max_handlers` allowance becomes the bounded wait envelope.
+pub fn default_execution_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+}
+
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 
@@ -39,17 +51,27 @@ pub const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
 /// any single principal's concurrent in-flight requests at the async edge so
 /// one caller can't drain the whole global handler cap and starve the rest.
 /// `0` disables the per-principal cap entirely; a single-tenant deployment
-/// can set it there to pay nothing. Chosen below the typical multi-core
-/// global cap (256) so it provides real fairness headroom, while sitting
-/// above the global cap on tiny boxes (where there is no abuse pressure) so
-/// it never trips spuriously.
+/// can set it there to pay nothing. The effective default is clamped below
+/// the global handler envelope when possible so even a one-CPU server keeps
+/// one request slot available for another principal.
 pub const DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL: usize = 64;
+
+fn default_max_inflight_per_principal(max_handlers: usize) -> usize {
+    DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL.min(max_handlers.saturating_sub(1).max(1))
+}
 
 /// Validate a `max_handlers` candidate from any source. Returns the
 /// value unchanged on success.
 pub fn validate_max_handlers(value: usize) -> Result<usize, String> {
     if value == 0 {
         return Err("http max_handlers must be >= 1".to_string());
+    }
+    Ok(value)
+}
+
+pub fn validate_execution_workers(value: usize) -> Result<usize, String> {
+    if value == 0 {
+        return Err("http execution_workers must be >= 1".to_string());
     }
     Ok(value)
 }
@@ -89,6 +111,8 @@ pub fn validate_retry_after_secs(value: u64) -> Result<u64, String> {
 pub struct HttpLimitsCliInput {
     pub max_handlers_flag: Option<usize>,
     pub max_handlers_env: Option<usize>,
+    pub execution_workers_flag: Option<usize>,
+    pub execution_workers_env: Option<usize>,
     pub handler_timeout_ms_flag: Option<u64>,
     pub handler_timeout_ms_env: Option<u64>,
     pub retry_after_secs_flag: Option<u64>,
@@ -102,6 +126,10 @@ pub struct HttpLimitsCliInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpLimitsResolved {
     pub max_handlers: usize,
+    /// Maximum synchronous engine calls running concurrently. Values from
+    /// configuration are clamped to `max_handlers`, which is the outer
+    /// admitted-request envelope.
+    pub execution_workers: usize,
     pub handler_timeout_ms: u64,
     pub retry_after_secs: u64,
     /// Per-principal concurrent in-flight cap (issue #934). `0` disables.
@@ -110,11 +138,13 @@ pub struct HttpLimitsResolved {
 
 impl HttpLimitsResolved {
     pub fn builtin_defaults() -> Self {
+        let max_handlers = default_max_handlers();
         Self {
-            max_handlers: default_max_handlers(),
+            max_handlers,
+            execution_workers: default_execution_workers().min(max_handlers),
             handler_timeout_ms: DEFAULT_HANDLER_TIMEOUT_MS,
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
-            max_inflight_per_principal: DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
+            max_inflight_per_principal: default_max_inflight_per_principal(max_handlers),
         }
     }
 }
@@ -140,6 +170,17 @@ where
         })
         .or(input.max_handlers_env)
         .unwrap_or(defaults.max_handlers);
+
+    let execution_workers = input
+        .execution_workers_flag
+        .or_else(|| {
+            config_lookup("red.http.execution_workers")
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .and_then(|value| validate_execution_workers(value).ok())
+        })
+        .or(input.execution_workers_env)
+        .unwrap_or(defaults.execution_workers)
+        .min(max_handlers);
 
     let handler_timeout_ms = input
         .handler_timeout_ms_flag
@@ -169,10 +210,11 @@ where
                 .and_then(|v| validate_max_inflight_per_principal(v).ok())
         })
         .or(input.max_inflight_per_principal_env)
-        .unwrap_or(defaults.max_inflight_per_principal);
+        .unwrap_or_else(|| default_max_inflight_per_principal(max_handlers));
 
     HttpLimitsResolved {
         max_handlers,
+        execution_workers,
         handler_timeout_ms,
         retry_after_secs,
         max_inflight_per_principal,
@@ -203,6 +245,8 @@ mod tests {
         let input = HttpLimitsCliInput {
             max_handlers_flag: Some(16),
             max_handlers_env: Some(99),
+            execution_workers_flag: Some(4),
+            execution_workers_env: Some(12),
             handler_timeout_ms_flag: Some(5_000),
             handler_timeout_ms_env: Some(7_000),
             retry_after_secs_flag: Some(3),
@@ -211,6 +255,7 @@ mod tests {
         };
         let resolved = resolve_http_limits(&input, no_config());
         assert_eq!(resolved.max_handlers, 16);
+        assert_eq!(resolved.execution_workers, 4);
         assert_eq!(resolved.handler_timeout_ms, 5_000);
         assert_eq!(resolved.retry_after_secs, 3);
     }
@@ -219,17 +264,20 @@ mod tests {
     fn flag_wins_over_red_config() {
         let input = HttpLimitsCliInput {
             max_handlers_flag: Some(16),
+            execution_workers_flag: Some(4),
             handler_timeout_ms_flag: Some(5_000),
             retry_after_secs_flag: Some(3),
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
             ("red.http.max_handlers", "64"),
+            ("red.http.execution_workers", "32"),
             ("red.http.handler_timeout_ms", "9000"),
             ("red.http.retry_after_secs", "9"),
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         assert_eq!(resolved.max_handlers, 16);
+        assert_eq!(resolved.execution_workers, 4);
         assert_eq!(resolved.handler_timeout_ms, 5_000);
         assert_eq!(resolved.retry_after_secs, 3);
     }
@@ -238,17 +286,20 @@ mod tests {
     fn red_config_wins_over_env() {
         let input = HttpLimitsCliInput {
             max_handlers_env: Some(99),
+            execution_workers_env: Some(12),
             handler_timeout_ms_env: Some(7_000),
             retry_after_secs_env: Some(7),
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
             ("red.http.max_handlers", "64"),
+            ("red.http.execution_workers", "8"),
             ("red.http.handler_timeout_ms", "9000"),
             ("red.http.retry_after_secs", "9"),
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         assert_eq!(resolved.max_handlers, 64);
+        assert_eq!(resolved.execution_workers, 8);
         assert_eq!(resolved.handler_timeout_ms, 9_000);
         assert_eq!(resolved.retry_after_secs, 9);
     }
@@ -257,12 +308,14 @@ mod tests {
     fn env_wins_over_default() {
         let input = HttpLimitsCliInput {
             max_handlers_env: Some(11),
+            execution_workers_env: Some(3),
             handler_timeout_ms_env: Some(1_500),
             retry_after_secs_env: Some(2),
             ..Default::default()
         };
         let resolved = resolve_http_limits(&input, no_config());
         assert_eq!(resolved.max_handlers, 11);
+        assert_eq!(resolved.execution_workers, 3);
         assert_eq!(resolved.handler_timeout_ms, 1_500);
         assert_eq!(resolved.retry_after_secs, 2);
     }
@@ -277,12 +330,19 @@ mod tests {
         };
         let lookup = map_lookup(HashMap::from([
             ("red.http.max_handlers", "0"),        // rejected by validate
+            ("red.http.execution_workers", "0"),   // rejected by validate
             ("red.http.handler_timeout_ms", "5"),  // rejected by validate
             ("red.http.retry_after_secs", "9999"), // rejected by validate
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         // max_handlers: red_config invalid -> env (11)
         assert_eq!(resolved.max_handlers, 11);
+        assert_eq!(
+            resolved.execution_workers,
+            HttpLimitsResolved::builtin_defaults()
+                .execution_workers
+                .min(11)
+        );
         // handler_timeout_ms: red_config invalid, no env -> default
         assert_eq!(resolved.handler_timeout_ms, DEFAULT_HANDLER_TIMEOUT_MS);
         // retry_after_secs: red_config invalid, no env -> default
@@ -293,6 +353,9 @@ mod tests {
     fn validators_reject_zero_equivalent_values() {
         assert!(validate_max_handlers(0).is_err());
         assert!(validate_max_handlers(1).is_ok());
+
+        assert!(validate_execution_workers(0).is_err());
+        assert!(validate_execution_workers(1).is_ok());
 
         assert!(validate_handler_timeout_ms(0).is_err());
         assert!(validate_handler_timeout_ms(MIN_HANDLER_TIMEOUT_MS - 1).is_err());
@@ -311,12 +374,38 @@ mod tests {
     }
 
     #[test]
+    fn execution_workers_are_positive_and_never_exceed_handler_envelope() {
+        let defaults = HttpLimitsResolved::builtin_defaults();
+        assert!(defaults.execution_workers >= 1);
+        assert!(defaults.execution_workers <= defaults.max_handlers);
+
+        let input = HttpLimitsCliInput {
+            max_handlers_flag: Some(2),
+            execution_workers_flag: Some(16),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, no_config()).execution_workers,
+            2
+        );
+    }
+
+    #[test]
     fn max_inflight_per_principal_follows_precedence_chain() {
         // default
         let resolved = resolve_http_limits(&HttpLimitsCliInput::default(), no_config());
         assert_eq!(
             resolved.max_inflight_per_principal,
-            DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL
+            default_max_inflight_per_principal(resolved.max_handlers)
+        );
+
+        let input = HttpLimitsCliInput {
+            max_handlers_flag: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_http_limits(&input, no_config()).max_inflight_per_principal,
+            1
         );
 
         // env over default

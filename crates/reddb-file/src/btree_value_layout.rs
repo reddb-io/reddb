@@ -5,8 +5,12 @@
 
 use crate::vector_value_codec;
 
-/// At or below this length a B-tree value stores inline in the leaf.
-pub const BTREE_VALUE_OVERFLOW_THRESHOLD: usize = 1024;
+/// Encoded values up to one quarter of a native page share its leaf.
+/// The threshold affects new writes, not the persisted cell grammar.
+pub const BTREE_VALUE_OVERFLOW_THRESHOLD: usize = crate::PAGED_PAGE_SIZE / 4;
+
+/// Keep the established compression trigger independent of leaf packing.
+pub const BTREE_VALUE_COMPRESSION_THRESHOLD: usize = 1024;
 
 /// Hard upper bound on logical B-tree value size: 2^28 = 256 MiB.
 pub const BTREE_VALUE_MAX_SIZE: usize = 256 * 1024 * 1024;
@@ -137,12 +141,13 @@ pub fn btree_value_pointer_head(stored: &[u8]) -> Option<u32> {
 
 /// Return the value-cell size the B-tree stores for the chosen codec length.
 pub fn btree_projected_cell_len(input_len: usize, codec_len: usize) -> usize {
-    if input_len <= BTREE_VALUE_OVERFLOW_THRESHOLD {
+    if input_len <= BTREE_VALUE_COMPRESSION_THRESHOLD {
         return 1 + input_len;
     }
 
-    if codec_len < input_len && codec_len <= BTREE_VALUE_OVERFLOW_THRESHOLD {
-        1 + codec_len
+    let stored_len = input_len.min(codec_len);
+    if stored_len <= BTREE_VALUE_OVERFLOW_THRESHOLD {
+        1 + stored_len
     } else {
         BTREE_VALUE_POINTER_CELL_LEN
     }
@@ -215,8 +220,11 @@ mod tests {
     fn projected_len_matches_inline_and_pointer_cases() {
         assert_eq!(btree_projected_cell_len(10, 10), 11);
         assert_eq!(btree_projected_cell_len(2048, 100), 101);
+        assert_eq!(btree_projected_cell_len(2048, 2048), 2049);
+        assert_eq!(btree_projected_cell_len(2048, 2300), 2049);
+        assert_eq!(btree_projected_cell_len(4096, 4096), 4097);
         assert_eq!(
-            btree_projected_cell_len(2048, 2048),
+            btree_projected_cell_len(4097, 4097),
             BTREE_VALUE_POINTER_CELL_LEN
         );
     }

@@ -1,0 +1,42 @@
+{
+  "schema": "reddb.kv-compare.v1",
+  "classification": "shared-host-diagnostic",
+  "engine": "kividb",
+  "operation": "get",
+  "config": {
+    "engine": "kividb",
+    "host": "reddb-kv-final-kivi-20261020",
+    "port": 6380,
+    "collection": "kv_durable",
+    "profile": "default",
+    "keys": 1000,
+    "value_bytes": 100,
+    "operations": 2000,
+    "seconds": 0,
+    "workers": 1,
+    "warmup": 10,
+    "rounds": 5,
+    "pipeline": 1,
+    "operation": "get",
+    "prepare_only": true,
+    "verify_only": false,
+    "fence_writes": true,
+    "recovery_from": null,
+    "verification": "full",
+    "verification_workers": 8
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+    "implementation": "stdlib threads; client saturation must be checked externally"
+  },
+  "created_unix_ms": 1792542757843,
+  "status": "prepared",
+  "rounds": [],
+  "latency_contract": "batch completion including response validation; pipeline=1 is one request",
+  "verification": {
+    "keys_checked": 1000,
+    "expected_sha256": "1e160a63edb755b084a12b4d42cb9b7ff9bd6173cb3419bcbdf0a907f80a141e",
+    "verification_workers": 8
+  }
+}

@@ -1,0 +1,52 @@
+name: Release gRPC compatibility runtimes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grpc-runtime-release
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  publish:
+    name: Verify and publish compatibility runtimes
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Verify versions, provenance and fixed dependency graphs
+        run: |
+          bash scripts/check-versions.sh
+          node --test scripts/release_tooling_contract.test.mjs
+      - name: Verify runtime and codec behavior
+        run: cargo test --locked -p reddb-io-tonic --features gzip,zstd,transport -p reddb-io-tonic-prost --lib
+      - name: Publish runtime, then codec
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_one() {
+            local output
+            if output=$(cargo publish --locked -p "$1" "${@:2}" 2>&1); then
+              printf '%s\n' "$output"
+            elif [[ "$output" == *"already uploaded"* || "$output" == *"already exists"* ]]; then
+              printf '%s is already published\n' "$1"
+            else
+              printf '%s\n' "$output" >&2
+              return 1
+            fi
+          }
+          publish_one reddb-io-tonic --features gzip,zstd
+          publish_one reddb-io-tonic-prost

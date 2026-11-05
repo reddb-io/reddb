@@ -117,7 +117,7 @@ plugins:
         # introduced it rather than a CI round later.
         iteration:
           - cargo fmt --all -- --check
-          - cargo check --locked --workspace --all-targets
+          - ./scripts/cargo-fast.sh check --locked --workspace --all-targets
 
         # After DONE, at the fork point. This is the shift-left gate: it
         # must catch everything CI's Quality job would, because a failure
@@ -127,8 +127,8 @@ plugins:
           # Boundary-discipline lint (ADR 0010). Catches untyped
           # serialization in tracing headers, JSON, audit, etc.
           - scripts/lint-no-untyped-serialization.sh
-          - cargo clippy --locked --all -- -D warnings
-          - cargo check --locked --workspace --all-targets
+          - ./scripts/cargo-fast.sh clippy --locked --all -- -D warnings
+          - ./scripts/cargo-fast.sh check --locked --workspace --all-targets
           # `drivers/` is a SEPARATE cargo workspace — the line above never
           # compiles it, and a stale lock or a renamed type there fails only
           # in the Drivers CI job. Cheap to catch here (#2190).
@@ -139,7 +139,7 @@ plugins:
         # final moment and owns freshness against the merged result.
         landing:
           - cargo fmt --all -- --check
-          - cargo clippy --locked --all -- -D warnings
+          - ./scripts/cargo-fast.sh clippy --locked --all -- -D warnings
 
       # ----------------------------------------------------------------
       # Hooks — intercept the AFK loop at named lifecycle points.

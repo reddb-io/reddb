@@ -15,6 +15,13 @@
 # See ADR 0010 (`docs/adr/0010-serialization-boundary-discipline.md`)
 # for the boundary discipline this lint enforces.
 
+# Pinned upstream Tonic foundation: the generic HTTP parser validates metadata;
+# the other calls below are upstream test fixtures. Source hashes are enforced
+# by release_tooling_contract.test.mjs, and public metadata tests reject CR/LF/NUL.
+crates/reddb-tonic/src/metadata/value.rs:^[[:space:]]*HeaderValue::from_str\(s\)[[:space:]]*$ # upstream checked header parser, not application header emission (PR #2519)
+crates/reddb-tonic/src/transport/channel/service/user_agent.rs:HeaderValue::from_str\(&format!\("Greeter 1.1 \{TONIC_USER_AGENT\}"\)\)\.unwrap\(\) # pinned upstream constant-only test fixture (PR #2519)
+crates/reddb-tonic/src/transport/service/grpc_timeout.rs:let hv = HeaderValue::from_str\(v\)\.unwrap\(\); # pinned upstream timeout test fixture (PR #2519)
+
 # ---------------------------------------------------------------------
 # A. user-WIP territory.
 #

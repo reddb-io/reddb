@@ -6,7 +6,7 @@ use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
 use crate::storage::{EntityId, UnifiedEntity};
 use crate::{RedDBError, RedDBResult};
-use reddb_types::{DataType, Value};
+use reddb_types::Value;
 
 #[derive(Debug, Clone)]
 pub struct CreateEntityOutput {
@@ -122,23 +122,7 @@ pub fn row_damage_vector(
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RowUpdateColumnRule {
-    pub name: String,
-    pub data_type: DataType,
-    pub data_type_name: String,
-    pub not_null: bool,
-    pub enum_variants: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RowUpdateContractPlan {
-    pub has_expressions: bool,
-    pub timestamps_enabled: bool,
-    pub strict_schema: bool,
-    pub declared_rules: HashMap<String, RowUpdateColumnRule>,
-    pub unique_columns: HashMap<String, ()>,
-}
+pub use reddb_engine::catalog::enforcement::{RowUpdateColumnRule, RowUpdateContractPlan};
 
 #[derive(Debug, Clone)]
 pub struct CreateRowInput {

@@ -98,6 +98,18 @@ pub trait VfsFile: Sized {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
     /// Read up to `buf.len()` bytes at the current position.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    /// Fill the buffer, tolerating short reads and interrupted operations.
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            match self.read(buf) {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(count) => buf = &mut buf[count..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
     /// Reposition the cursor.
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64>;
     /// Force the file's contents durable.
@@ -203,6 +215,37 @@ impl VfsFile for StdFile {
         } else {
             Err(io::Error::last_os_error())
         }
+    }
+}
+
+/// Borrow an already-locked native file without duplicating or releasing it.
+/// Cloning is unsupported: the owner retains the handle and its lock lifetime.
+pub struct BorrowedStdFile<'a>(pub &'a mut std::fs::File);
+
+impl VfsFile for BorrowedStdFile<'_> {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.0.metadata().map(|metadata| metadata.len())
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.0.set_len(len)
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        std::io::Write::write_all(self.0, bytes)
+    }
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(self.0, bytes)
+    }
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(self.0, position)
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.0.sync_all()
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.0.sync_data()
     }
 }
 

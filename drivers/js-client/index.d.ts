@@ -30,6 +30,12 @@ export interface QueryResult {
   affected: number
   columns: string[]
   rows: Array<Record<string, unknown>>
+  /** Present when the server reports it. */
+  ok?: boolean
+  /** Causal-consistency token returned by a write; pass it to a later read. */
+  bookmark?: string
+  /** Execution statistics, when the server reports them. */
+  stats?: Record<string, unknown>
 }
 
 export type QueryParam =
@@ -91,9 +97,12 @@ export interface CachePutOptions {
   ttl_ms?: number
   tags?: string[]
   policy?: {
-    idle_evict_ms?: number
-    stale_while_revalidate_ms?: number
-    jitter_ms?: number
+    ttl_ms?: number
+    expires_at_unix_ms?: number
+    max_blob_bytes?: number
+    l1_admission?: 'auto' | 'always' | 'never'
+    priority?: number
+    version?: number
   }
 }
 
@@ -325,6 +334,7 @@ export class VaultClient {
     options?: { collection?: string; tags?: string[] },
   ): Promise<QueryResult>
   get(key: string, options?: { collection?: string }): Promise<QueryResult>
+  reveal(key: string, options?: { collection?: string }): Promise<QueryResult>
   unseal(key: string, options?: { collection?: string }): Promise<QueryResult>
 }
 

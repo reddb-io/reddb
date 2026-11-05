@@ -1,5 +1,139 @@
 # @reddb-io/sdk
 
+## 1.28.10
+
+## 1.28.9
+
+## 1.28.8
+
+## 1.28.7
+
+## 1.28.6
+
+## 1.28.5
+
+## 1.28.4
+
+## 1.28.3
+
+## 1.28.2
+
+## 1.28.1
+
+## 1.28.0
+
+## 1.27.13
+
+## 1.27.12
+
+## 1.27.11
+
+## 1.27.10
+
+### Patch Changes
+
+- [#2564](https://github.com/reddb-io/reddb/pull/2564) [`9e2dadb`](https://github.com/reddb-io/reddb/commit/9e2dadb7b40195ec8fa02e679799775a779a6593) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix memory ownership through query results, binary encoders and RedWire sends; admit index candidates before allocation and release completed transport buffers.
+
+  Fix checkpoint progress and cold MVCC reclamation so committed data can outgrow the resident arena, active transactions remain visible, and paused cleanup does not retain page generations that force full-history copies. Preserve cold catalog models, counts and audit visibility.
+
+  Add explicit opt-in disk residency for standalone local single-file stores, generation-bound native HASH/BTREE projections, and an offline compactor that verifies persisted records while preserving its source. Preparing disk-resident files fences older writers; retain an independent unconverted backup for rollback. Replicated, remote and serverless profiles remain rejected by the explicit disk-residency option.
+
+  Keep the feature disabled by default. Historical-copy and workload measurements describe the tested scenarios and do not establish a global process-memory ceiling. CI now reports the first test failure without automatic retries and isolates client release-size artifacts from test runners.
+
+## 1.27.9
+
+## 1.27.8
+
+## 1.27.7
+
+## 1.27.6
+
+## 1.27.5
+
+## 1.27.4
+
+## 1.27.3
+
+## 1.27.2
+
+## 1.27.1
+
+## 1.27.0
+
+## 1.26.8
+
+## 1.26.7
+
+## 1.26.6
+
+## 1.26.5
+
+## 1.26.4
+
+## 1.26.3
+
+## 1.26.2
+
+## 1.26.1
+
+## 1.26.0
+
+## 1.25.7
+
+## 1.25.6
+
+## 1.25.5
+
+## 1.25.4
+
+## 1.25.3
+
+## 1.25.2
+
+## 1.25.1
+
+## 1.25.0
+
+## 1.24.15
+
+## 1.24.14
+
+## 1.24.13
+
+## 1.24.12
+
+## 1.24.11
+
+## 1.24.10
+
+## 1.24.9
+
+## 1.24.8
+
+## 1.24.7
+
+## 1.24.6
+
+## 1.24.5
+
+## 1.24.4
+
+## 1.24.3
+
+## 1.24.2
+
+## 1.24.1
+
+## 1.24.0
+
+### Minor Changes
+
+- [#2357](https://github.com/reddb-io/reddb/pull/2357) [`88dfc21`](https://github.com/reddb-io/reddb/commit/88dfc2183a40f462557694e476cab1ca83513d53) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Drop the `postinstall` download from `@reddb-io/cli` and `@reddb-io/sdk`. The `red` binary now ships as per-platform npm packages (`@reddb-io/red-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-linux-arm64-musl`, `-linux-arm`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) declared as `optionalDependencies`, so the package manager installs only the one for your OS/CPU/libc. Installs run no script and need no network beyond the registry, and work with `--ignore-scripts`. Don't install with `--omit=optional`. `REDDB_BIN` still overrides; `REDDB_SKIP_POSTINSTALL`, `REDDB_POSTINSTALL_VERSION` and `REDDB_POSTINSTALL_REPO` are gone.
+
+- [#2391](https://github.com/reddb-io/reddb/pull/2391) [`a88cab4`](https://github.com/reddb-io/reddb/commit/a88cab431df12fc720ca9cff377fdc3cfb53dae2) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Expose the native Blob Cache over authenticated HTTP with tenant-scoped namespaces, hard TTL, binary values, existence probes and key/prefix/tag/namespace invalidation. The remote JavaScript client now uses application-authorized endpoints for tag invalidation and namespace flush, without requiring an operator credential. Align cache policy types with the implemented HTTP contract.
+
+- [#2360](https://github.com/reddb-io/reddb/pull/2360) [`302cb07`](https://github.com/reddb-io/reddb/commit/302cb0758c2db1c5e9e27ef12c577ae9b5873e86) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Embedded mode can now run the engine in process. On platforms whose `@reddb-io/red-*` package ships `reddb.node`, `connect('memory://')` / `connect('file://…')` load it instead of spawning `red rpc --stdio` — same API and transaction semantics, no subprocess. Platforms without an addon, and calls that pass `options.binary`, keep the subprocess path. `REDDB_NATIVE_ADDON=/path/to/reddb.node` overrides the lookup. The addon aborts the process on an engine panic, like `red`.
+
 ## 1.23.4
 
 ## 1.23.3

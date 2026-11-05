@@ -75,6 +75,9 @@ mod e2e_storage_integrity_errors;
 #[path = "storage_durability/mixed_bulk_kind_index.rs"]
 mod mixed_bulk_kind_index;
 
+#[path = "storage_durability/temp_db_cleanup_harness.rs"]
+mod temp_db_cleanup_harness;
+
 #[path = "runtime_persistence/e2e_seqn_journal_policy.rs"]
 mod e2e_seqn_journal_policy;
 
@@ -84,14 +87,8 @@ mod e2e_shm_provisioning;
 #[path = "config_tier/e2e_tier_wiring.rs"]
 mod e2e_tier_wiring;
 
-#[path = "mvcc_transactions/e2e_txcommitbatch_wal.rs"]
-mod e2e_txcommitbatch_wal;
-
 #[path = "runtime_persistence/fold_dwb_into_wal_bench.rs"]
 mod fold_dwb_into_wal_bench;
-
-#[path = "http_grpc_auth/lease_atomic_http_opt_in.rs"]
-mod lease_atomic_http_opt_in;
 
 #[path = "storage_durability/wal_crash_harness.rs"]
 mod wal_crash_harness;

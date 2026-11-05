@@ -1,0 +1,2669 @@
+{
+  "schema": "reddb.query-projection-summary.v1",
+  "status": "valid-diagnostic",
+  "aggregation": "five-round medians per process, then median of two process samples/version; no pooling or confidence interval",
+  "resource_scope": "whole cell including warmups and validation; CPU 100% per core; memory cgroup working set; IO endpoints cumulative",
+  "measurements": [
+    {
+      "file": "before-1/kv-c1.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 1,
+      "median_queries_s": 1912.524052130426,
+      "range_queries_s": [
+        1896.1158289426294,
+        1934.6267418392483
+      ],
+      "median_p50_us": 511.741,
+      "range_p50_us": [
+        507.803,
+        516.029
+      ],
+      "median_p95_us": 574.885,
+      "range_p95_us": [
+        565.345,
+        588.631
+      ],
+      "median_p99_us": 650.72,
+      "range_p99_us": [
+        621.304,
+        687.061
+      ],
+      "server_resource_samples": 18,
+      "server_median_cpu_percent": 76.13,
+      "server_peak_working_set_mib": 117.7,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536463947,
+          "NetIO": "600kB / 2.94MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536472436,
+          "NetIO": "6.56MB / 32.1MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 18,
+      "client_median_cpu_percent": 45.81,
+      "client_peak_working_set_mib": 16.81,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536463947,
+          "NetIO": "19.4MB / 5.1MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536472436,
+          "NetIO": "48.6MB / 11.1MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/kv-c8.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 8,
+      "median_queries_s": 3160.89131151821,
+      "range_queries_s": [
+        3124.8332160271525,
+        3249.9926501883706
+      ],
+      "median_p50_us": 2337.527,
+      "range_p50_us": [
+        2276.438,
+        2371.894
+      ],
+      "median_p95_us": 4612.002,
+      "range_p95_us": [
+        4495.712,
+        4662.079
+      ],
+      "median_p99_us": 5882.14,
+      "range_p99_us": [
+        5833.567,
+        6031.26
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 102.88,
+      "server_peak_working_set_mib": 120.6,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536473436,
+          "NetIO": "7.3MB / 35.8MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536482936,
+          "NetIO": "19.1MB / 93.5MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 129.34,
+      "client_peak_working_set_mib": 17.95,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536473436,
+          "NetIO": "52.3MB / 11.8MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536482936,
+          "NetIO": "110MB / 23.6MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/kv-c32.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 32,
+      "median_queries_s": 3579.16453240616,
+      "range_queries_s": [
+        3552.594074703707,
+        3624.9423400762093
+      ],
+      "median_p50_us": 8131.914,
+      "range_p50_us": [
+        8016.401,
+        8169.257
+      ],
+      "median_p95_us": 17942.682,
+      "range_p95_us": [
+        17564.402,
+        18078.233
+      ],
+      "median_p99_us": 23038.243,
+      "range_p99_us": [
+        22717.697,
+        23326.62
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 109.91,
+      "server_peak_working_set_mib": 122.8,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536483936,
+          "NetIO": "19.9MB / 97.7MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536493936,
+          "NetIO": "33.7MB / 165MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 133.21,
+      "client_peak_working_set_mib": 20.5,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536483936,
+          "NetIO": "114MB / 24.4MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536493936,
+          "NetIO": "181MB / 38.2MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/sql-point-c1.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 1,
+      "median_queries_s": 365.8143439101739,
+      "range_queries_s": [
+        363.81337211320084,
+        367.41919348885517
+      ],
+      "median_p50_us": 2644.198,
+      "range_p50_us": [
+        2640.13,
+        2660.073
+      ],
+      "median_p95_us": 3273.188,
+      "range_p95_us": [
+        3141.602,
+        3374.614
+      ],
+      "median_p99_us": 3786.123,
+      "range_p99_us": [
+        3745.323,
+        3823.514
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 92.145,
+      "server_peak_working_set_mib": 122.5,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536494937,
+          "NetIO": "34.5MB / 169MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536504437,
+          "NetIO": "35.7MB / 174MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 11.02,
+      "client_peak_working_set_mib": 16.97,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536494937,
+          "NetIO": "186MB / 39MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536504437,
+          "NetIO": "190MB / 40.2MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/sql-point-c8.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 8,
+      "median_queries_s": 1135.686270854453,
+      "range_queries_s": [
+        1113.4571443164032,
+        1150.3276795121465
+      ],
+      "median_p50_us": 6693.275,
+      "range_p50_us": [
+        6608.832,
+        6872.501
+      ],
+      "median_p95_us": 11734.188,
+      "range_p95_us": [
+        11618.176,
+        12008.31
+      ],
+      "median_p99_us": 14594.957,
+      "range_p99_us": [
+        14406.676,
+        15099.797
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 343.01,
+      "server_peak_working_set_mib": 123.4,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536505437,
+          "NetIO": "35.8MB / 175MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536515437,
+          "NetIO": "39.5MB / 191MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 41.1,
+      "client_peak_working_set_mib": 17.68,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536505437,
+          "NetIO": "191MB / 40.3MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536515437,
+          "NetIO": "207MB / 44MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/sql-point-c32.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 32,
+      "median_queries_s": 1349.2104068528529,
+      "range_queries_s": [
+        1320.3731149220882,
+        1357.4132268407932
+      ],
+      "median_p50_us": 19646.298,
+      "range_p50_us": [
+        19114.426,
+        20165.171
+      ],
+      "median_p95_us": 53609.207,
+      "range_p95_us": [
+        51656.122,
+        55742.509
+      ],
+      "median_p99_us": 70904.849,
+      "range_p99_us": [
+        65949.986,
+        77910.7
+      ],
+      "server_resource_samples": 22,
+      "server_median_cpu_percent": 384.46500000000003,
+      "server_peak_working_set_mib": 133.2,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536516437,
+          "NetIO": "39.9MB / 192MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536526938,
+          "NetIO": "44.9MB / 214MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 22,
+      "client_median_cpu_percent": 50.2,
+      "client_peak_working_set_mib": 20.3,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536516437,
+          "NetIO": "209MB / 44.4MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536526938,
+          "NetIO": "230MB / 49.4MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/sql-100-c1.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "sql-100",
+      "workers": 1,
+      "median_queries_s": 50.34340685669897,
+      "range_queries_s": [
+        43.77165727088389,
+        50.911310409882
+      ],
+      "median_p50_us": 19680.089,
+      "range_p50_us": [
+        19488.069,
+        24257.678
+      ],
+      "median_p95_us": 21302.382,
+      "range_p95_us": [
+        20812.934,
+        26329.932
+      ],
+      "median_p99_us": 22544.649,
+      "range_p99_us": [
+        21278.196,
+        28268.277
+      ],
+      "server_resource_samples": 22,
+      "server_median_cpu_percent": 167.69,
+      "server_peak_working_set_mib": 660.4,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536527937,
+          "NetIO": "45.2MB / 215MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536538437,
+          "NetIO": "45.4MB / 231MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 22,
+      "client_median_cpu_percent": 4.55,
+      "client_peak_working_set_mib": 17.0,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536527937,
+          "NetIO": "231MB / 49.6MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536538437,
+          "NetIO": "247MB / 49.9MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-1/sql-1000-c1.json",
+      "run": "before-1",
+      "status": "valid-diagnostic",
+      "case": "sql-1000",
+      "workers": 1,
+      "median_queries_s": 33.07952344845728,
+      "range_queries_s": [
+        32.97085379759732,
+        33.1236187543285
+      ],
+      "median_p50_us": 30034.286,
+      "range_p50_us": [
+        29867.864,
+        30352.652
+      ],
+      "median_p95_us": 32155.275,
+      "range_p95_us": [
+        31468.033,
+        32245.471
+      ],
+      "median_p99_us": 33243.753,
+      "range_p99_us": [
+        32638.871,
+        34801.5
+      ],
+      "server_resource_samples": 23,
+      "server_median_cpu_percent": 133.05,
+      "server_peak_working_set_mib": 762.0,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536539438,
+          "NetIO": "45.4MB / 232MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536550438,
+          "NetIO": "45.6MB / 342MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 23,
+      "client_median_cpu_percent": 15.99,
+      "client_peak_working_set_mib": 19.58,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536539438,
+          "NetIO": "249MB / 49.9MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536550438,
+          "NetIO": "358MB / 50.1MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/kv-c1.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 1,
+      "median_queries_s": 1954.279956866647,
+      "range_queries_s": [
+        1948.2371574453614,
+        1971.6594214737702
+      ],
+      "median_p50_us": 502.824,
+      "range_p50_us": [
+        499.207,
+        504.156
+      ],
+      "median_p95_us": 550.747,
+      "range_p95_us": [
+        550.506,
+        554.273
+      ],
+      "median_p99_us": 596.796,
+      "range_p99_us": [
+        595.002,
+        615.442
+      ],
+      "server_resource_samples": 18,
+      "server_median_cpu_percent": 76.37,
+      "server_peak_working_set_mib": 121.5,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536557752,
+          "NetIO": "624kB / 3.06MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536566251,
+          "NetIO": "6.69MB / 32.9MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 18,
+      "client_median_cpu_percent": 46.22,
+      "client_peak_working_set_mib": 16.66,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536557752,
+          "NetIO": "379MB / 53MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536566251,
+          "NetIO": "409MB / 59MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/kv-c8.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 8,
+      "median_queries_s": 3261.5928389968717,
+      "range_queries_s": [
+        3145.8852709200073,
+        3266.22959284944
+      ],
+      "median_p50_us": 2268.5,
+      "range_p50_us": [
+        2255.586,
+        2337.895
+      ],
+      "median_p95_us": 4485.213,
+      "range_p95_us": [
+        4449.192,
+        4654.289
+      ],
+      "median_p99_us": 5779.612,
+      "range_p99_us": [
+        5595.205,
+        6056.888
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 104.05,
+      "server_peak_working_set_mib": 124.6,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536567251,
+          "NetIO": "7.44MB / 36.6MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536576752,
+          "NetIO": "19.4MB / 95.6MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 128.735,
+      "client_peak_working_set_mib": 18.23,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536567251,
+          "NetIO": "412MB / 59.8MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536576752,
+          "NetIO": "471MB / 71.8MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/kv-c32.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 32,
+      "median_queries_s": 3555.8985296210312,
+      "range_queries_s": [
+        3476.7877375551693,
+        3560.8945594558495
+      ],
+      "median_p50_us": 8176.517,
+      "range_p50_us": [
+        8098.277,
+        8330.135
+      ],
+      "median_p95_us": 17981.509,
+      "range_p95_us": [
+        17857.19,
+        18556.619
+      ],
+      "median_p99_us": 23795.531,
+      "range_p99_us": [
+        23185.77,
+        23834.152
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 110.38,
+      "server_peak_working_set_mib": 126.2,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536577752,
+          "NetIO": "20.3MB / 99.5MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536587752,
+          "NetIO": "33.8MB / 166MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 133.06,
+      "client_peak_working_set_mib": 20.6,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536577752,
+          "NetIO": "475MB / 72.6MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536587752,
+          "NetIO": "542MB / 86.1MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/sql-point-c1.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 1,
+      "median_queries_s": 1896.6463484413352,
+      "range_queries_s": [
+        1864.0945612826551,
+        1908.6551098391635
+      ],
+      "median_p50_us": 517.363,
+      "range_p50_us": [
+        513.414,
+        520.097
+      ],
+      "median_p95_us": 576.026,
+      "range_p95_us": [
+        571.106,
+        611.604
+      ],
+      "median_p99_us": 631.153,
+      "range_p99_us": [
+        618.037,
+        728.652
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 72.495,
+      "server_peak_working_set_mib": 126.6,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536588752,
+          "NetIO": "34.6MB / 170MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536598252,
+          "NetIO": "40.5MB / 196MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 42.94,
+      "client_peak_working_set_mib": 17.1,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536588752,
+          "NetIO": "546MB / 87MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536598252,
+          "NetIO": "571MB / 92.8MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/sql-point-c8.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 8,
+      "median_queries_s": 3195.6108900832246,
+      "range_queries_s": [
+        3140.875316815375,
+        3219.0249547820144
+      ],
+      "median_p50_us": 2318.416,
+      "range_p50_us": [
+        2282.757,
+        2373.759
+      ],
+      "median_p95_us": 4566.577,
+      "range_p95_us": [
+        4462.265,
+        4623.136
+      ],
+      "median_p99_us": 5841.637,
+      "range_p99_us": [
+        5553.021,
+        5879.942
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 103.17,
+      "server_peak_working_set_mib": 126.5,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536599252,
+          "NetIO": "41.1MB / 198MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536608752,
+          "NetIO": "51.8MB / 244MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 127.695,
+      "client_peak_working_set_mib": 17.94,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536599252,
+          "NetIO": "574MB / 93.4MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536608752,
+          "NetIO": "620MB / 104MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/sql-point-c32.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 32,
+      "median_queries_s": 3668.663599437877,
+      "range_queries_s": [
+        3573.0439145367454,
+        3673.4134555907667
+      ],
+      "median_p50_us": 7939.725,
+      "range_p50_us": [
+        7886.221,
+        8122.487
+      ],
+      "median_p95_us": 17394.306,
+      "range_p95_us": [
+        17211.712,
+        17848.52
+      ],
+      "median_p99_us": 22716.101,
+      "range_p99_us": [
+        22103.952,
+        24514.846
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 114.06,
+      "server_peak_working_set_mib": 126.7,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536609753,
+          "NetIO": "52.4MB / 247MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536619753,
+          "NetIO": "65MB / 302MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 133.72,
+      "client_peak_working_set_mib": 20.7,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536609753,
+          "NetIO": "623MB / 105MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536619753,
+          "NetIO": "677MB / 117MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/sql-100-c1.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "sql-100",
+      "workers": 1,
+      "median_queries_s": 50.19443258318329,
+      "range_queries_s": [
+        50.151127169284784,
+        50.573183245528085
+      ],
+      "median_p50_us": 19785.468,
+      "range_p50_us": [
+        19639.487,
+        19834.557
+      ],
+      "median_p95_us": 21131.189,
+      "range_p95_us": [
+        21022.854,
+        21716.878
+      ],
+      "median_p99_us": 21926.885,
+      "range_p99_us": [
+        21488.065,
+        22690.992
+      ],
+      "server_resource_samples": 22,
+      "server_median_cpu_percent": 169.41,
+      "server_peak_working_set_mib": 233.7,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536620753,
+          "NetIO": "65.4MB / 304MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536631253,
+          "NetIO": "65.6MB / 320MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 22,
+      "client_median_cpu_percent": 4.59,
+      "client_peak_working_set_mib": 17.49,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536620753,
+          "NetIO": "680MB / 118MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536631253,
+          "NetIO": "696MB / 118MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-1/sql-1000-c1.json",
+      "run": "after-1",
+      "status": "valid-diagnostic",
+      "case": "sql-1000",
+      "workers": 1,
+      "median_queries_s": 33.11637425747985,
+      "range_queries_s": [
+        32.8882884332968,
+        33.126241912171494
+      ],
+      "median_p50_us": 30120.07,
+      "range_p50_us": [
+        30001.154,
+        30287.775
+      ],
+      "median_p95_us": 31630.039,
+      "range_p95_us": [
+        30983.661,
+        31724.595
+      ],
+      "median_p99_us": 33099.596,
+      "range_p99_us": [
+        32287.004,
+        34235.585
+      ],
+      "server_resource_samples": 23,
+      "server_median_cpu_percent": 134.95,
+      "server_peak_working_set_mib": 256.8,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536632253,
+          "NetIO": "65.6MB / 321MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536643253,
+          "NetIO": "65.8MB / 433MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 23,
+      "client_median_cpu_percent": 15.88,
+      "client_peak_working_set_mib": 19.89,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536632253,
+          "NetIO": "697MB / 118MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536643253,
+          "NetIO": "809MB / 118MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/kv-c1.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 1,
+      "median_queries_s": 1942.7944290718433,
+      "range_queries_s": [
+        1902.972945033228,
+        1967.2380435417638
+      ],
+      "median_p50_us": 504.056,
+      "range_p50_us": [
+        498.034,
+        513.883
+      ],
+      "median_p95_us": 565.585,
+      "range_p95_us": [
+        558.552,
+        578.519
+      ],
+      "median_p99_us": 625.301,
+      "range_p99_us": [
+        618.679,
+        638.323
+      ],
+      "server_resource_samples": 18,
+      "server_median_cpu_percent": 76.39,
+      "server_peak_working_set_mib": 120.9,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536650366,
+          "NetIO": "613kB / 3.01MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536658866,
+          "NetIO": "6.62MB / 32.5MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 18,
+      "client_median_cpu_percent": 46.6,
+      "client_peak_working_set_mib": 16.61,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536650366,
+          "NetIO": "827MB / 121MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536658866,
+          "NetIO": "857MB / 127MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/kv-c8.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 8,
+      "median_queries_s": 3146.099088722257,
+      "range_queries_s": [
+        3058.5431000242065,
+        3208.2391144616226
+      ],
+      "median_p50_us": 2355.589,
+      "range_p50_us": [
+        2298.554,
+        2411.658
+      ],
+      "median_p95_us": 4646.634,
+      "range_p95_us": [
+        4542.373,
+        4759.583
+      ],
+      "median_p99_us": 5962.941,
+      "range_p99_us": [
+        5615.688,
+        6196.234
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 104.82,
+      "server_peak_working_set_mib": 124.0,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536659866,
+          "NetIO": "7.36MB / 36.2MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536669366,
+          "NetIO": "19MB / 93.3MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 129.09,
+      "client_peak_working_set_mib": 17.98,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536659866,
+          "NetIO": "860MB / 128MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536669366,
+          "NetIO": "917MB / 139MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/kv-c32.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 32,
+      "median_queries_s": 3517.6336184588686,
+      "range_queries_s": [
+        3501.8571685284037,
+        3607.225863345334
+      ],
+      "median_p50_us": 8163.618,
+      "range_p50_us": [
+        8022.786,
+        8312.125
+      ],
+      "median_p95_us": 18256.36,
+      "range_p95_us": [
+        17479.395,
+        18317.609
+      ],
+      "median_p99_us": 23460.486,
+      "range_p99_us": [
+        22801.884,
+        24097.09
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 111.08,
+      "server_peak_working_set_mib": 126.0,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536670366,
+          "NetIO": "19.8MB / 97.2MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536680366,
+          "NetIO": "33.4MB / 164MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 133.22,
+      "client_peak_working_set_mib": 20.92,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536670366,
+          "NetIO": "921MB / 140MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536680366,
+          "NetIO": "988MB / 154MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/sql-point-c1.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 1,
+      "median_queries_s": 1846.3765672796942,
+      "range_queries_s": [
+        1830.0938875693669,
+        1869.8974685709852
+      ],
+      "median_p50_us": 531.479,
+      "range_p50_us": [
+        520.047,
+        533.243
+      ],
+      "median_p95_us": 604.482,
+      "range_p95_us": [
+        602.025,
+        613.017
+      ],
+      "median_p99_us": 683.895,
+      "range_p99_us": [
+        657.432,
+        716.346
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 73.21000000000001,
+      "server_peak_working_set_mib": 126.2,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536681366,
+          "NetIO": "34.2MB / 168MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536690867,
+          "NetIO": "39.9MB / 193MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 42.745000000000005,
+      "client_peak_working_set_mib": 17.28,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536681366,
+          "NetIO": "992MB / 155MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536690867,
+          "NetIO": "1.02GB / 160MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/sql-point-c8.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 8,
+      "median_queries_s": 3256.655288041257,
+      "range_queries_s": [
+        3235.629357552337,
+        3283.761867287494
+      ],
+      "median_p50_us": 2262.831,
+      "range_p50_us": [
+        2255.157,
+        2280.315
+      ],
+      "median_p95_us": 4445.146,
+      "range_p95_us": [
+        4411.322,
+        4473.632
+      ],
+      "median_p99_us": 5700.039,
+      "range_p99_us": [
+        5542.312,
+        5846.361
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 104.31,
+      "server_peak_working_set_mib": 126.1,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536691867,
+          "NetIO": "40.5MB / 195MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536701367,
+          "NetIO": "51.4MB / 243MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 127.865,
+      "client_peak_working_set_mib": 18.36,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536691867,
+          "NetIO": "1.02GB / 161MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536701367,
+          "NetIO": "1.07GB / 172MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/sql-point-c32.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 32,
+      "median_queries_s": 3569.4660141759346,
+      "range_queries_s": [
+        3552.3090369391302,
+        3607.5179620356457
+      ],
+      "median_p50_us": 8136.236,
+      "range_p50_us": [
+        8042.976,
+        8243.835
+      ],
+      "median_p95_us": 17807.264,
+      "range_p95_us": [
+        17663.426,
+        17952.385
+      ],
+      "median_p99_us": 23072.231,
+      "range_p99_us": [
+        22731.561,
+        23559.023
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 111.8,
+      "server_peak_working_set_mib": 126.5,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536702367,
+          "NetIO": "52.1MB / 246MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536712367,
+          "NetIO": "64.4MB / 299MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 132.63,
+      "client_peak_working_set_mib": 20.7,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536702367,
+          "NetIO": "1.07GB / 172MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536712367,
+          "NetIO": "1.12GB / 185MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/sql-100-c1.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "sql-100",
+      "workers": 1,
+      "median_queries_s": 49.63515655763224,
+      "range_queries_s": [
+        49.15250657340264,
+        49.901408439726715
+      ],
+      "median_p50_us": 19975.702,
+      "range_p50_us": [
+        19945.003,
+        20039.606
+      ],
+      "median_p95_us": 21141.649,
+      "range_p95_us": [
+        20959.667,
+        22263.973
+      ],
+      "median_p99_us": 22858.695,
+      "range_p99_us": [
+        21637.329,
+        27280.874
+      ],
+      "server_resource_samples": 22,
+      "server_median_cpu_percent": 168.13,
+      "server_peak_working_set_mib": 243.6,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536713367,
+          "NetIO": "64.8MB / 301MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536723867,
+          "NetIO": "65MB / 317MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 22,
+      "client_median_cpu_percent": 4.5,
+      "client_peak_working_set_mib": 17.4,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536713367,
+          "NetIO": "1.12GB / 185MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536723867,
+          "NetIO": "1.14GB / 185MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "after-2/sql-1000-c1.json",
+      "run": "after-2",
+      "status": "valid-diagnostic",
+      "case": "sql-1000",
+      "workers": 1,
+      "median_queries_s": 32.71115184468619,
+      "range_queries_s": [
+        32.220473488945395,
+        32.90044066713918
+      ],
+      "median_p50_us": 30327.215,
+      "range_p50_us": [
+        30257.069,
+        30736.394
+      ],
+      "median_p95_us": 32242.974,
+      "range_p95_us": [
+        31536.714,
+        34304.977
+      ],
+      "median_p99_us": 34669.899,
+      "range_p99_us": [
+        32224.548,
+        36447.205
+      ],
+      "server_resource_samples": 23,
+      "server_median_cpu_percent": 130.84,
+      "server_peak_working_set_mib": 275.7,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536724868,
+          "NetIO": "65MB / 318MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536735868,
+          "NetIO": "65.2MB / 428MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 23,
+      "client_median_cpu_percent": 15.74,
+      "client_peak_working_set_mib": 19.97,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536724868,
+          "NetIO": "1.14GB / 185MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536735868,
+          "NetIO": "1.25GB / 186MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/kv-c1.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 1,
+      "median_queries_s": 1950.0573008749097,
+      "range_queries_s": [
+        1941.6865331745676,
+        1962.359640850146
+      ],
+      "median_p50_us": 503.564,
+      "range_p50_us": [
+        500.379,
+        504.597
+      ],
+      "median_p95_us": 557.439,
+      "range_p95_us": [
+        553.731,
+        565.285
+      ],
+      "median_p99_us": 616.442,
+      "range_p99_us": [
+        606.453,
+        644.158
+      ],
+      "server_resource_samples": 18,
+      "server_median_cpu_percent": 76.23,
+      "server_peak_working_set_mib": 118.3,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536744028,
+          "NetIO": "605kB / 2.96MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536752527,
+          "NetIO": "6.67MB / 32.7MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 18,
+      "client_median_cpu_percent": 45.68,
+      "client_peak_working_set_mib": 17.01,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536744028,
+          "NetIO": "1.27GB / 188MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536752527,
+          "NetIO": "1.3GB / 195MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/kv-c8.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 8,
+      "median_queries_s": 3202.6231093727442,
+      "range_queries_s": [
+        3132.8956654418344,
+        3282.4954240490165
+      ],
+      "median_p50_us": 2299.753,
+      "range_p50_us": [
+        2246.289,
+        2358.967
+      ],
+      "median_p95_us": 4577.481,
+      "range_p95_us": [
+        4452.52,
+        4685.78
+      ],
+      "median_p99_us": 5873.64,
+      "range_p99_us": [
+        5672.883,
+        6031.9
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 105.26,
+      "server_peak_working_set_mib": 121.4,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536753527,
+          "NetIO": "7.44MB / 36.5MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536763028,
+          "NetIO": "19.3MB / 94.8MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 130.005,
+      "client_peak_working_set_mib": 18.48,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536753527,
+          "NetIO": "1.3GB / 195MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536763028,
+          "NetIO": "1.36GB / 207MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/kv-c32.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "kv",
+      "workers": 32,
+      "median_queries_s": 3635.8880169001386,
+      "range_queries_s": [
+        3584.4731768877064,
+        3660.4523814021913
+      ],
+      "median_p50_us": 8013.397,
+      "range_p50_us": [
+        7946.719,
+        8122.668
+      ],
+      "median_p95_us": 17448.807,
+      "range_p95_us": [
+        17313.405,
+        17656.399
+      ],
+      "median_p99_us": 23151.509,
+      "range_p99_us": [
+        21917.611,
+        24117.97
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 113.58,
+      "server_peak_working_set_mib": 123.5,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536764028,
+          "NetIO": "20.1MB / 98.6MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536774028,
+          "NetIO": "34.1MB / 167MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 135.37,
+      "client_peak_working_set_mib": 20.96,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536764028,
+          "NetIO": "1.37GB / 208MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536774028,
+          "NetIO": "1.43GB / 222MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/sql-point-c1.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 1,
+      "median_queries_s": 262.4511411781531,
+      "range_queries_s": [
+        214.55880722700965,
+        358.1644675855002
+      ],
+      "median_p50_us": 3610.875,
+      "range_p50_us": [
+        2692.243,
+        4557.504
+      ],
+      "median_p95_us": 5112.637,
+      "range_p95_us": [
+        3380.911,
+        5894.347
+      ],
+      "median_p99_us": 6262.74,
+      "range_p99_us": [
+        3718.901,
+        7214.838
+      ],
+      "server_resource_samples": 20,
+      "server_median_cpu_percent": 90.93,
+      "server_peak_working_set_mib": 123.6,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536775028,
+          "NetIO": "34.9MB / 171MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536784528,
+          "NetIO": "35.8MB / 175MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 20,
+      "client_median_cpu_percent": 10.855,
+      "client_peak_working_set_mib": 17.08,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536775028,
+          "NetIO": "1.44GB / 223MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536784528,
+          "NetIO": "1.44GB / 224MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/sql-point-c8.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 8,
+      "median_queries_s": 774.2949736117554,
+      "range_queries_s": [
+        631.8793052724735,
+        880.8569509013258
+      ],
+      "median_p50_us": 9731.364,
+      "range_p50_us": [
+        8426.192,
+        11875.411
+      ],
+      "median_p95_us": 17894.293,
+      "range_p95_us": [
+        15939.848,
+        21934.319
+      ],
+      "median_p99_us": 22104.009,
+      "range_p99_us": [
+        19759.644,
+        26694.33
+      ],
+      "server_resource_samples": 21,
+      "server_median_cpu_percent": 344.73,
+      "server_peak_working_set_mib": 123.8,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536787029,
+          "NetIO": "35.9MB / 175MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536797028,
+          "NetIO": "38.5MB / 186MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 21,
+      "client_median_cpu_percent": 39.95,
+      "client_peak_working_set_mib": 17.79,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536787029,
+          "NetIO": "1.44GB / 224MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536797028,
+          "NetIO": "1.45GB / 226MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/sql-point-c32.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "sql-point",
+      "workers": 32,
+      "median_queries_s": 964.5100695536908,
+      "range_queries_s": [
+        926.0863813711435,
+        1046.1254703744669
+      ],
+      "median_p50_us": 29920.508,
+      "range_p50_us": [
+        26840.295,
+        31616.247
+      ],
+      "median_p95_us": 66783.654,
+      "range_p95_us": [
+        64031.402,
+        74628.68
+      ],
+      "median_p99_us": 88196.034,
+      "range_p99_us": [
+        86729.965,
+        108891.603
+      ],
+      "server_resource_samples": 24,
+      "server_median_cpu_percent": 383.89,
+      "server_peak_working_set_mib": 132.4,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536798539,
+          "NetIO": "38.7MB / 187MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536810029,
+          "NetIO": "42.6MB / 204MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 24,
+      "client_median_cpu_percent": 48.394999999999996,
+      "client_peak_working_set_mib": 20.25,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536798539,
+          "NetIO": "1.45GB / 227MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536810029,
+          "NetIO": "1.47GB / 230MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/sql-100-c1.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "sql-100",
+      "workers": 1,
+      "median_queries_s": 40.464108417013094,
+      "range_queries_s": [
+        35.87292293321359,
+        42.480269430608985
+      ],
+      "median_p50_us": 24446.377,
+      "range_p50_us": [
+        23781.752,
+        26505.737
+      ],
+      "median_p95_us": 28277.658,
+      "range_p95_us": [
+        27574.999,
+        33917.91
+      ],
+      "median_p99_us": 30087.241,
+      "range_p99_us": [
+        28158.948,
+        47099.942
+      ],
+      "server_resource_samples": 23,
+      "server_median_cpu_percent": 165.03,
+      "server_peak_working_set_mib": 643.8,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536811028,
+          "NetIO": "42.7MB / 205MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536822029,
+          "NetIO": "42.9MB / 219MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 23,
+      "client_median_cpu_percent": 4.25,
+      "client_peak_working_set_mib": 17.29,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536811028,
+          "NetIO": "1.47GB / 231MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536822029,
+          "NetIO": "1.49GB / 231MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    },
+    {
+      "file": "before-2/sql-1000-c1.json",
+      "run": "before-2",
+      "status": "valid-diagnostic",
+      "case": "sql-1000",
+      "workers": 1,
+      "median_queries_s": 28.784364367113454,
+      "range_queries_s": [
+        25.15218904065557,
+        29.17350998655099
+      ],
+      "median_p50_us": 35327.431,
+      "range_p50_us": [
+        31995.175,
+        39571.079
+      ],
+      "median_p95_us": 44498.624,
+      "range_p95_us": [
+        40292.057,
+        50754.105
+      ],
+      "median_p99_us": 46169.643,
+      "range_p99_us": [
+        42449.98,
+        51624.791
+      ],
+      "server_resource_samples": 23,
+      "server_median_cpu_percent": 134.64,
+      "server_peak_working_set_mib": 754.8,
+      "server_io_endpoints": [
+        {
+          "unix_ms": 1792536823029,
+          "NetIO": "42.9MB / 223MB",
+          "BlockIO": "0B / 0B"
+        },
+        {
+          "unix_ms": 1792536834029,
+          "NetIO": "43.1MB / 310MB",
+          "BlockIO": "0B / 0B"
+        }
+      ],
+      "client_resource_samples": 23,
+      "client_median_cpu_percent": 15.05,
+      "client_peak_working_set_mib": 19.5,
+      "client_io_endpoints": [
+        {
+          "unix_ms": 1792536823029,
+          "NetIO": "1.49GB / 231MB",
+          "BlockIO": "0B / 2.35MB"
+        },
+        {
+          "unix_ms": 1792536834029,
+          "NetIO": "1.58GB / 231MB",
+          "BlockIO": "0B / 2.35MB"
+        }
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "case": "kv",
+      "workers": 1,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            1912.524052130426,
+            1950.0573008749097
+          ],
+          "median": 1931.2906765026678,
+          "range": [
+            1912.524052130426,
+            1950.0573008749097
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            511.741,
+            503.564
+          ],
+          "median": 507.65250000000003,
+          "range": [
+            503.564,
+            511.741
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            574.885,
+            557.439
+          ],
+          "median": 566.162,
+          "range": [
+            557.439,
+            574.885
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            650.72,
+            616.442
+          ],
+          "median": 633.581,
+          "range": [
+            616.442,
+            650.72
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            1954.279956866647,
+            1942.7944290718433
+          ],
+          "median": 1948.537192969245,
+          "range": [
+            1942.7944290718433,
+            1954.279956866647
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            502.824,
+            504.056
+          ],
+          "median": 503.44,
+          "range": [
+            502.824,
+            504.056
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            550.747,
+            565.585
+          ],
+          "median": 558.1659999999999,
+          "range": [
+            550.747,
+            565.585
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            596.796,
+            625.301
+          ],
+          "median": 611.0485000000001,
+          "range": [
+            596.796,
+            625.301
+          ]
+        }
+      },
+      "throughput_ratio": 1.0089300469765683,
+      "p99_ratio": 0.9644362757090255
+    },
+    {
+      "case": "kv",
+      "workers": 8,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            3160.89131151821,
+            3202.6231093727442
+          ],
+          "median": 3181.757210445477,
+          "range": [
+            3160.89131151821,
+            3202.6231093727442
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            2337.527,
+            2299.753
+          ],
+          "median": 2318.6400000000003,
+          "range": [
+            2299.753,
+            2337.527
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            4612.002,
+            4577.481
+          ],
+          "median": 4594.7415,
+          "range": [
+            4577.481,
+            4612.002
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            5882.14,
+            5873.64
+          ],
+          "median": 5877.89,
+          "range": [
+            5873.64,
+            5882.14
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            3261.5928389968717,
+            3146.099088722257
+          ],
+          "median": 3203.845963859564,
+          "range": [
+            3146.099088722257,
+            3261.5928389968717
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            2268.5,
+            2355.589
+          ],
+          "median": 2312.0445,
+          "range": [
+            2268.5,
+            2355.589
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            4485.213,
+            4646.634
+          ],
+          "median": 4565.9235,
+          "range": [
+            4485.213,
+            4646.634
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            5779.612,
+            5962.941
+          ],
+          "median": 5871.2765,
+          "range": [
+            5779.612,
+            5962.941
+          ]
+        }
+      },
+      "throughput_ratio": 1.006942312676018,
+      "p99_ratio": 0.998874851349719
+    },
+    {
+      "case": "kv",
+      "workers": 32,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            3579.16453240616,
+            3635.8880169001386
+          ],
+          "median": 3607.5262746531494,
+          "range": [
+            3579.16453240616,
+            3635.8880169001386
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            8131.914,
+            8013.397
+          ],
+          "median": 8072.6555,
+          "range": [
+            8013.397,
+            8131.914
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            17942.682,
+            17448.807
+          ],
+          "median": 17695.7445,
+          "range": [
+            17448.807,
+            17942.682
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            23038.243,
+            23151.509
+          ],
+          "median": 23094.875999999997,
+          "range": [
+            23038.243,
+            23151.509
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            3555.8985296210312,
+            3517.6336184588686
+          ],
+          "median": 3536.7660740399497,
+          "range": [
+            3517.6336184588686,
+            3555.8985296210312
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            8176.517,
+            8163.618
+          ],
+          "median": 8170.0675,
+          "range": [
+            8163.618,
+            8176.517
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            17981.509,
+            18256.36
+          ],
+          "median": 18118.9345,
+          "range": [
+            17981.509,
+            18256.36
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            23795.531,
+            23460.486
+          ],
+          "median": 23628.0085,
+          "range": [
+            23460.486,
+            23795.531
+          ]
+        }
+      },
+      "throughput_ratio": 0.9803853956351287,
+      "p99_ratio": 1.0230844495549578
+    },
+    {
+      "case": "sql-100",
+      "workers": 1,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            50.34340685669897,
+            40.464108417013094
+          ],
+          "median": 45.40375763685603,
+          "range": [
+            40.464108417013094,
+            50.34340685669897
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            19680.089,
+            24446.377
+          ],
+          "median": 22063.233,
+          "range": [
+            19680.089,
+            24446.377
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            21302.382,
+            28277.658
+          ],
+          "median": 24790.02,
+          "range": [
+            21302.382,
+            28277.658
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            22544.649,
+            30087.241
+          ],
+          "median": 26315.945,
+          "range": [
+            22544.649,
+            30087.241
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            50.19443258318329,
+            49.63515655763224
+          ],
+          "median": 49.914794570407764,
+          "range": [
+            49.63515655763224,
+            50.19443258318329
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            19785.468,
+            19975.702
+          ],
+          "median": 19880.585,
+          "range": [
+            19785.468,
+            19975.702
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            21131.189,
+            21141.649
+          ],
+          "median": 21136.419,
+          "range": [
+            21131.189,
+            21141.649
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            21926.885,
+            22858.695
+          ],
+          "median": 22392.79,
+          "range": [
+            21926.885,
+            22858.695
+          ]
+        }
+      },
+      "throughput_ratio": 1.099353823743653,
+      "p99_ratio": 0.8509209910569429
+    },
+    {
+      "case": "sql-1000",
+      "workers": 1,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            33.07952344845728,
+            28.784364367113454
+          ],
+          "median": 30.931943907785367,
+          "range": [
+            28.784364367113454,
+            33.07952344845728
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            30034.286,
+            35327.431
+          ],
+          "median": 32680.8585,
+          "range": [
+            30034.286,
+            35327.431
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            32155.275,
+            44498.624
+          ],
+          "median": 38326.9495,
+          "range": [
+            32155.275,
+            44498.624
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            33243.753,
+            46169.643
+          ],
+          "median": 39706.698,
+          "range": [
+            33243.753,
+            46169.643
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            33.11637425747985,
+            32.71115184468619
+          ],
+          "median": 32.91376305108302,
+          "range": [
+            32.71115184468619,
+            33.11637425747985
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            30120.07,
+            30327.215
+          ],
+          "median": 30223.6425,
+          "range": [
+            30120.07,
+            30327.215
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            31630.039,
+            32242.974
+          ],
+          "median": 31936.5065,
+          "range": [
+            31630.039,
+            32242.974
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            33099.596,
+            34669.899
+          ],
+          "median": 33884.7475,
+          "range": [
+            33099.596,
+            34669.899
+          ]
+        }
+      },
+      "throughput_ratio": 1.0640703070329456,
+      "p99_ratio": 0.8533761104990397
+    },
+    {
+      "case": "sql-point",
+      "workers": 1,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            365.8143439101739,
+            262.4511411781531
+          ],
+          "median": 314.1327425441635,
+          "range": [
+            262.4511411781531,
+            365.8143439101739
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            2644.198,
+            3610.875
+          ],
+          "median": 3127.5365,
+          "range": [
+            2644.198,
+            3610.875
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            3273.188,
+            5112.637
+          ],
+          "median": 4192.9125,
+          "range": [
+            3273.188,
+            5112.637
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            3786.123,
+            6262.74
+          ],
+          "median": 5024.4315,
+          "range": [
+            3786.123,
+            6262.74
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            1896.6463484413352,
+            1846.3765672796942
+          ],
+          "median": 1871.5114578605148,
+          "range": [
+            1846.3765672796942,
+            1896.6463484413352
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            517.363,
+            531.479
+          ],
+          "median": 524.421,
+          "range": [
+            517.363,
+            531.479
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            576.026,
+            604.482
+          ],
+          "median": 590.2539999999999,
+          "range": [
+            576.026,
+            604.482
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            631.153,
+            683.895
+          ],
+          "median": 657.524,
+          "range": [
+            631.153,
+            683.895
+          ]
+        }
+      },
+      "throughput_ratio": 5.957708969472998,
+      "p99_ratio": 0.13086535262745647
+    },
+    {
+      "case": "sql-point",
+      "workers": 8,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            1135.686270854453,
+            774.2949736117554
+          ],
+          "median": 954.9906222331042,
+          "range": [
+            774.2949736117554,
+            1135.686270854453
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            6693.275,
+            9731.364
+          ],
+          "median": 8212.3195,
+          "range": [
+            6693.275,
+            9731.364
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            11734.188,
+            17894.293
+          ],
+          "median": 14814.2405,
+          "range": [
+            11734.188,
+            17894.293
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            14594.957,
+            22104.009
+          ],
+          "median": 18349.483,
+          "range": [
+            14594.957,
+            22104.009
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            3195.6108900832246,
+            3256.655288041257
+          ],
+          "median": 3226.1330890622407,
+          "range": [
+            3195.6108900832246,
+            3256.655288041257
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            2318.416,
+            2262.831
+          ],
+          "median": 2290.6235,
+          "range": [
+            2262.831,
+            2318.416
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            4566.577,
+            4445.146
+          ],
+          "median": 4505.8615,
+          "range": [
+            4445.146,
+            4566.577
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            5841.637,
+            5700.039
+          ],
+          "median": 5770.838,
+          "range": [
+            5700.039,
+            5841.637
+          ]
+        }
+      },
+      "throughput_ratio": 3.378183004057575,
+      "p99_ratio": 0.31449594519910995
+    },
+    {
+      "case": "sql-point",
+      "workers": 32,
+      "before": {
+        "queries_s": {
+          "process_run_medians": [
+            1349.2104068528529,
+            964.5100695536908
+          ],
+          "median": 1156.8602382032718,
+          "range": [
+            964.5100695536908,
+            1349.2104068528529
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            19646.298,
+            29920.508
+          ],
+          "median": 24783.403,
+          "range": [
+            19646.298,
+            29920.508
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            53609.207,
+            66783.654
+          ],
+          "median": 60196.4305,
+          "range": [
+            53609.207,
+            66783.654
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            70904.849,
+            88196.034
+          ],
+          "median": 79550.4415,
+          "range": [
+            70904.849,
+            88196.034
+          ]
+        }
+      },
+      "after": {
+        "queries_s": {
+          "process_run_medians": [
+            3668.663599437877,
+            3569.4660141759346
+          ],
+          "median": 3619.064806806906,
+          "range": [
+            3569.4660141759346,
+            3668.663599437877
+          ]
+        },
+        "p50_us": {
+          "process_run_medians": [
+            7939.725,
+            8136.236
+          ],
+          "median": 8037.9805,
+          "range": [
+            7939.725,
+            8136.236
+          ]
+        },
+        "p95_us": {
+          "process_run_medians": [
+            17394.306,
+            17807.264
+          ],
+          "median": 17600.785,
+          "range": [
+            17394.306,
+            17807.264
+          ]
+        },
+        "p99_us": {
+          "process_run_medians": [
+            22716.101,
+            23072.231
+          ],
+          "median": 22894.165999999997,
+          "range": [
+            22716.101,
+            23072.231
+          ]
+        }
+      },
+      "throughput_ratio": 3.128350934100477,
+      "p99_ratio": 0.2877943298403944
+    }
+  ],
+  "artifact_sha256": {
+    "after-1/kv-c1.json": "52e8269e95a5e499e47ed91ac919f7d4b2aa022a0183da76b6f06c6a37523d9a",
+    "after-1/kv-c32.json": "b54abf343f39329169dcf4048fd0fa1cc481c4342075971e1d9cb134548c13cd",
+    "after-1/kv-c8.json": "c90649bb5ebe2d6e22f510af55677dd2ce449546058a295fbd94b0dc240b632a",
+    "after-1/kv-recovery.json": "ec4a2b4988595e7698b1dd5da662a7ed4b10f54b87072c18c8842af146d133b5",
+    "after-1/resources-reddb-architecture-after-20261020.jsonl": "3032bff9b5c01377786c972e8df46e688c07e3648aacfab3d5c7d2f2b1607c7c",
+    "after-1/sql-100-c1.json": "47b856b1d19813346eeeb7654f7870f5e29ae6bcd77476c7e6a80adcf70a13ef",
+    "after-1/sql-1000-c1.json": "a8355978cd38e186b52ac0d888cbf5613ee6f1100bfadf9108769cb692fb5a05",
+    "after-1/sql-point-c1.json": "bc195cc9a374fee90638aa7305bc25b50bdbd1ef16b4096d144dde98f56c3cf5",
+    "after-1/sql-point-c32.json": "5f9c3cfb753c772f7e97ac7d8ca017ea6b38bad8313831138eb6cb05602279d1",
+    "after-1/sql-point-c8.json": "4c94a342908979567cb579c8ab08ae86b6439b49fdda056cfce4a0d720c1c7d2",
+    "after-1/sql-recovery.json": "1d2819aa63ad46f90ac4a462c72651dd4ade80ff2494db127b403bb147fd8ff8",
+    "after-2/kv-c1.json": "c75589485835a28b7cf68c07750d55c1b0a93502459753dcfdbaaec25726cc12",
+    "after-2/kv-c32.json": "fac3e6ef0599e406e7e4a78006f985bf87b63cf15f5ad4bcc59cd4163cc068a3",
+    "after-2/kv-c8.json": "e6d064b3dc25f80d6b9ba4107c618ddc1b26a2ba4856d56fbd68e2e8a72a5b8c",
+    "after-2/kv-recovery.json": "6fe09b1b81a8a0e36a9f52cdf8617ac699d93858b965885c7ecb0d45f4daaa89",
+    "after-2/resources-reddb-architecture-after-20261020.jsonl": "554bdedf613a3752e429f462ae197acebabbdc80c09e8e80ff845cb902f3478c",
+    "after-2/sql-100-c1.json": "7f029a380f5fc7b94e7bcfec81a441bc3ba767cfe992b14e6b46379ac6740639",
+    "after-2/sql-1000-c1.json": "935b3484d1876a6c6749dead8c4277cb4734e4a8dcc2d1524b90f0e7ca5d3851",
+    "after-2/sql-point-c1.json": "1dd7475de785103f093c3c8668351c416133870cf7f03bf9d834e13768b9263d",
+    "after-2/sql-point-c32.json": "deba5205d478c5ddb0d6c88c8d174adcf7fdebb0891caad84d04fb26259d4489",
+    "after-2/sql-point-c8.json": "fb3c207dc9fe6a646aa0e77f5aede8336e4a871b04e2ab14c7f4f3321e66264d",
+    "after-2/sql-recovery.json": "92c2672b3f52f3e9289bffbc01dab06a27a3cc93e4aa7d25d0bf9525d275faca",
+    "after-kv-prepared.json": "94fb20159b7a7826eb6b406628151c0a70a9dbc96aa800db7e53c4f9c197367f",
+    "after-setup.json": "6a443fd75e9e128ec7bbf306bb08d6ee2c74866c3e7064e8c7a0e4c7eff6d137",
+    "before-1/kv-c1.json": "85fbf580dc731805c42af53feeb3da3ce88df1837a72f27d4f405115c36420f3",
+    "before-1/kv-c32.json": "ee4de5ee85cce9dbdb4c9c4cc8688ae753fa833bf6b21410f886ea5c1e4064e8",
+    "before-1/kv-c8.json": "b1ab2a07d9fb23a4b0f5b14f5b7ab401a6034e1099d4c6839378810943e6f9fb",
+    "before-1/kv-recovery.json": "5446d0e69645ea22e8255e8a657398bc3e7d545275cc78a7ef2111d70d6644af",
+    "before-1/resources-reddb-architecture-before-20261020.jsonl": "48c48624f977d75c42cc23265a276a714b54affcddedc63800550b10c62d6174",
+    "before-1/sql-100-c1.json": "610bb75d5ad2a5c309100c4c4b7513e617d2b6ea80b59f7b3f367f84eaf021bd",
+    "before-1/sql-1000-c1.json": "45a5ebf03a1bb9f57ad348e2bd5dc36f77e1f84ee2f8a94a5de5dfa6747fa180",
+    "before-1/sql-point-c1.json": "afc98bea3c80885f0f5a57d3fb901786199ea58dcf79f3b6d14c6acf4df98330",
+    "before-1/sql-point-c32.json": "494a1ca4c2003b101b0f3b4dd076b84c9379adae7c7ce74001177b5b0345bdae",
+    "before-1/sql-point-c8.json": "654878c101123be7fa63ba2861061dc98f107e728c9c29c9516ba2634fd25035",
+    "before-1/sql-recovery.json": "956769762ad66d12a038bc4779fe9918505ebe9176f8b1db54045f53699606c8",
+    "before-2/kv-c1.json": "afa21cef8048385b032151a46987216801d55796feebece62b168ef391535487",
+    "before-2/kv-c32.json": "67de1781d5c336b7c3447342cfefe2ba39adf0e992bc8aa113debfd91626052a",
+    "before-2/kv-c8.json": "acc4c0c18a5943545385ad326d66251aa59fddbf980ab587a38eead7419013ae",
+    "before-2/kv-recovery.json": "bdebce5fc683376bfa8de882b6a66dce5262ecfd98ce2b3c1762d6049b254c1f",
+    "before-2/resources-reddb-architecture-before-20261020.jsonl": "9c78f00d93fb547f93d5bfcdc6ac6406501067b8291d0a1c8dd8115272b83446",
+    "before-2/sql-100-c1.json": "6052122e650f6bfc24a3cd3b910247c3eb8fc06927ae4573087a3385f3e4a556",
+    "before-2/sql-1000-c1.json": "4bdc799668e194275e1025312114369c2d21aaa4e49ef9a6afc6b8703106f84b",
+    "before-2/sql-point-c1.json": "6eedd04aa52a80239e907f36b7482d3dae4ebb388c489b1db81380016c5b1d81",
+    "before-2/sql-point-c32.json": "1dc39d97588c0cd3d5c524a8b3df458d51318e214fab1b0eb2575ad5b25f8241",
+    "before-2/sql-point-c8.json": "215f1cdad4711466c804bf8ae1e45c9f89e8a65b64898cf0ba16cee410e2c93b",
+    "before-2/sql-recovery.json": "e1245c290d1f2f4b033c81f251810f2d15c0eb29dfd1cad28c8df2c19f268b5e",
+    "before-kv-prepared.json": "32a0a588e23e3ce38f6fa3526c1118c17be64f86c41f481232cedb2e13b9ac8c",
+    "before-setup.json": "f3e95920022eba99d4142f935099d0aecbd27e40911a74e5418afa52b9278789",
+    "manifest.json": "a7e86d7577a00801aabe07eb46fe0908ee6b9dc6c494fd51b8c1e9a6ab242b14"
+  }
+}

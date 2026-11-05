@@ -2,12 +2,51 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
+
+test("gRPC compatibility runtimes retain upstream Rust sources and fixed compression bindings", () => {
+  for (const folder of ["reddb-tonic", "reddb-tonic-prost"]) {
+    const directory = `crates/${folder}`;
+    const hashes = JSON.parse(read(`${directory}/upstream-rust-sha256.json`));
+    for (const [file, expected] of Object.entries(hashes)) {
+      const actual = createHash("sha256").update(read(`${directory}/${file}`)).digest("hex");
+      assert.equal(actual, expected, `${directory}/${file} drifted from the pinned upstream source`);
+    }
+    assert.match(read(`${directory}/LICENSE`), /Permission is hereby granted/);
+    assert.match(read(`${directory}/Cargo.toml`), /^license = "MIT"$/m);
+  }
+  assert.match(read("crates/reddb-tonic/Cargo.toml"), /\[dependencies\.zstd\]\nversion = "0\.14\.3"/);
+  assert.match(read("crates/reddb-tonic-prost/Cargo.toml"), /\[dependencies\.tonic\]\nworkspace = true/);
+  for (const lockfile of ["Cargo.lock", "drivers/node/Cargo.lock", "drivers/python/Cargo.lock"]) {
+    const packages = read(lockfile).split("[[package]]");
+    assert.ok(packages.some(entry => /^name = "reddb-io-tonic"$/m.test(entry)));
+    assert.ok(packages.some(entry => /^name = "reddb-io-tonic-prost"$/m.test(entry)));
+    assert.ok(!packages.some(entry => /^name = "tonic"$/m.test(entry)), `${lockfile} retained upstream runtime`);
+    for (const entry of packages) {
+      if (/^name = "zstd"$/m.test(entry)) assert.match(entry, /^version = "0\.14\.3"$/m);
+      if (/^name = "zstd-safe"$/m.test(entry)) assert.match(entry, /^version = "8\.2\.0"$/m);
+    }
+  }
+});
+
+test("gRPC compatibility runtimes are versioned and published before generated stubs", () => {
+  const release = read(".github/workflows/release.yml");
+  assert.ok(release.indexOf("publish_one reddb-io-tonic\n") < release.indexOf("publish_one reddb-io-tonic-prost\n"));
+  assert.ok(release.indexOf("publish_one reddb-io-tonic-prost\n") < release.indexOf("publish_one reddb-io-grpc-proto\n"));
+  const sync = read("scripts/sync-version.js");
+  for (const name of ["reddb-io-tonic", "reddb-io-tonic-prost"]) {
+    assert.equal(sync.split(`'${name}'`).length - 1, 3, `${name} must track all three lockfiles`);
+  }
+  for (const folder of ["reddb-tonic", "reddb-tonic-prost"]) {
+    assert.ok(sync.includes(`'crates/${folder}/Cargo.toml'`));
+  }
+});
 
 /**
  * Regex source matching `uses: <repo>@<tag>` in either of the forms the
@@ -139,19 +178,22 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
   const script = read("scripts/verify-release-assets.sh");
   const workflow = read(".github/workflows/release.yml");
   const runbook = read("docs/release-runbook.md");
-  const assetName = read("drivers/js/src/internal/asset-fetcher/asset-name.js");
+  const assetName = read("packages/internal-asset-fetcher/src/asset-name.js");
 
   for (const suffix of [
     "linux-x86_64",
     "linux-aarch64",
-    "linux-armv7",
     "windows-x86_64.exe",
   ]) {
     assert.ok(script.includes(suffix), `verify script lists ${suffix}`);
     assert.ok(assetName.includes(suffix), `asset-name.js still maps to ${suffix}`);
   }
-  for (const suffix of ["macos-x86_64", "macos-aarch64"]) {
+  for (const suffix of ["macos-aarch64"]) {
     assert.ok(assetName.includes(suffix), `asset-name.js still maps optional ${suffix}`);
+  }
+  for (const suffix of ["linux-armv7", "macos-x86_64"]) {
+    assert.ok(!script.includes(suffix), `verify script must not require retired ${suffix}`);
+    assert.ok(!assetName.includes(suffix), `asset-name.js must not map retired ${suffix}`);
   }
   assert.match(script, /BINS=\(red red_client\)/);
   assert.match(
@@ -168,13 +210,54 @@ test("verify-release-assets gates every npm publish on the binary contract (#418
     "publish-js-client",
     "publish-bun-client",
   ]) {
-    const re = new RegExp(`${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets\\]`);
+    const re = new RegExp(`${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets(, publish-npm-platforms)?\\]`);
     assert.match(workflow, re, `${job} must depend on verify-release-assets`);
   }
 
   assert.match(runbook, /Release asset contract/);
   assert.match(runbook, /checksums\.txt/);
   assert.match(runbook, /verify-release-assets\.sh/);
+});
+
+test("npm platform packages publish before cli/sdk and no package runs an install script", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const rc = read(".github/workflows/release-candidate.yml");
+
+  assert.match(workflow, /publish-npm-platforms:[\s\S]*?needs: \[plan, publish-github, verify-release-assets\]/);
+  for (const job of ["publish-npm", "publish-js-driver"]) {
+    assert.match(
+      workflow,
+      new RegExp(`  ${job}:[\\s\\S]*?needs: \\[plan, publish-github, verify-release-assets, publish-npm-platforms\\]`),
+      `${job} must wait for the platform packages it depends on`,
+    );
+  }
+  assert.match(workflow, /npm-platform-packages\.mjs inject --version "[^"]+" package\.json/);
+  assert.match(workflow, /npm-platform-packages\.mjs inject --version "[^"]+" drivers\/js\/package\.json/);
+  assert.match(rc, /npm-platform-packages\.mjs build --allow-missing/);
+  assert.match(rc, /npm-platform-packages\.mjs inject/);
+
+  for (const manifest of ["package.json", "drivers/js/package.json", "drivers/js-client/package.json"]) {
+    const scripts = JSON.parse(read(manifest)).scripts ?? {};
+    for (const hook of ["preinstall", "install", "postinstall"]) {
+      assert.equal(scripts[hook], undefined, `${manifest} must not define ${hook}`);
+    }
+  }
+});
+
+test("the Node addon is only shipped after it loaded on its own runner, and never blocks the release", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const buildJob = workflow.slice(workflow.indexOf("\n  build:\n"), workflow.indexOf("\n  artifact-sizes:\n"));
+  const step = buildJob.slice(buildJob.indexOf("- name: Build + smoke-test Node addon"));
+  const stepBody = step.slice(0, step.indexOf("\n      - name: Strip"));
+
+  assert.match(stepBody, /if: "!matrix\.cross"/, "cross/musl legs must not build an addon they cannot load");
+  assert.match(stepBody, /continue-on-error: true/, "an addon failure must not block the release");
+  assert.match(stepBody, /cargo build --locked --release --target \$\{\{ matrix\.target \}\}/);
+  assert.match(stepBody, /Engine\.open\(\)/, "the addon must be loaded and opened before it ships");
+  assert.match(stepBody, /rm -f "\$\{OUT\}"/, "an addon that fails to load must be dropped");
+  assert.match(buildJob, /reddb-node-\$\{\{ matrix\.asset_name \}\}\*/, "addon is uploaded with the leg's assets");
+  assert.match(buildJob, /timeout-minutes: 60/, "the second engine compile needs the longer timeout");
+  assert.match(workflow, /-name 'reddb-node-\*'/, "the addon must be in SHA256SUMS so the platform package can verify it");
 });
 
 test("release workflows publish aggregate checksum manifests for installers", () => {
@@ -335,7 +418,6 @@ test("vendored asset-fetcher copies match the source package byte for byte", () 
   const sourceDir = "packages/internal-asset-fetcher/src";
   const vendored = [
     "drivers/js/src/internal/asset-fetcher",
-    "drivers/js-client/src/internal/asset-fetcher",
     "packages/mcp/src/internal/asset-fetcher",
   ];
   const files = ["index.js", "download.js", "checksum.js", "asset-name.js"];

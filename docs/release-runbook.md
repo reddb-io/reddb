@@ -8,7 +8,8 @@ maintenance.
 > The previous `pnpm version <patch|minor|major>` flow ran the bump
 > **locally** before CI built anything, which opened a window where
 > `package.json` on `main` had a version that no GitHub Release covered.
-> The `postinstall` hook in `@reddb-io/sdk` would `404` in that window.
+> The `@reddb-io/red-*` platform packages are built from the GitHub Release
+> assets, so they would have nothing to build from in that window.
 > The Changesets flow described below eliminates that race: the version
 > bump and the release tag are produced atomically by CI.
 
@@ -36,19 +37,20 @@ and write a one-line summary. Commit the generated
    will refresh the PR.
 4. **Merge the Release PR.** That re-fires the changesets workflow,
    which now sees zero pending changesets and therefore:
-   - runs `pnpm release:version` — `changeset version` bumps the four
-     npm packages and writes `CHANGELOG.md`, then
-     `node scripts/sync-version.js` propagates the new version into
-     every lock-stepped manifest (`Cargo.toml`, `crates/**/Cargo.toml`,
-     `drivers/python/{Cargo,pyproject}.toml`,
-     `packages/internal-*/package.json`, `drivers/bun/package.json`).
-   - commits the version bump with author `github-actions[bot]`.
    - runs [`scripts/changesets-tag-release.sh`](../../scripts/changesets-tag-release.sh),
-     which creates and pushes `v<version>`.
-5. The pushed tag triggers `.github/workflows/release.yml`, which
+     which creates and pushes `v<version>`, then dispatches the publisher
+     on that immutable tag. The synchronized manifests and changelog were
+     already generated in the release PR by `pnpm release:version`.
+5. The explicit dispatch starts `.github/workflows/release.yml`, which
    builds every platform binary, creates the GitHub Release with the
    assets attached, and only **after** that publishes to npm /
    crates.io / PyPI / GHCR.
+
+Checkout uses the workflow token, whose tag pushes do not start other workflows.
+The publisher therefore uses `workflow_dispatch` with Actions write permission.
+Re-running Changesets recovers an existing tag that has no release run; an
+existing run for the tag's commit is observed without submitting another. Use
+that run's failed-job recovery when publication itself fails.
 
 There is no step at which an `@reddb-io/sdk@X.Y.Z` exists on npm
 without a corresponding GitHub Release containing `red-<plat>-<arch>`
@@ -330,19 +332,30 @@ flipping the switch.
 ## Release asset contract
 
 Every `v<x.y.z>` stable GitHub Release **must** carry the following
-twelve binary assets before any npm package at the same version may
-ship. The list mirrors the platform/arch matrix served by the SDK
-postinstall (`drivers/js/src/internal/asset-fetcher/asset-name.js`)
-plus the `red_client` thin-client variant of each:
+binary assets before any npm package at the same version may
+ship. The npm `@reddb-io/red-<os>-<cpu>[-musl]` platform packages are built
+from these assets by `scripts/npm-platform-packages.mjs` (the `PLATFORMS`
+table there is the source of truth), plus the `red_client` thin-client
+variant of each:
 
-| Bin          | linux-x86_64 | linux-aarch64 | linux-armv7 | macos-x86_64 | macos-aarch64 | windows-x86_64.exe |
-|--------------|--------------|---------------|-------------|--------------|---------------|---------------------|
-| `red`        | required     | required      | required    | required     | required      | required            |
-| `red_client` | required     | required      | required    | required     | required      | required            |
+| Bin          | linux-x86_64 | linux-aarch64 | macos-aarch64 | windows-x86_64.exe |
+|--------------|--------------|---------------|-----------------|---------------------|
+| `red`        | required     | required      | required        | required            |
+| `red_client` | required     | required      | required        | required            |
 
-The musl variant (`linux-aarch64-static`) is built but **not** part of
-the contract — it backs the thin `Dockerfile.client` image, not npm
-postinstall.
+The static musl variants (`linux-x86_64-static`, `linux-aarch64-static`)
+are also required: they back the `-musl` npm platform packages and the thin
+`Dockerfile.client` image.
+
+The in-process Node addon is a separate, **optional** asset per platform,
+`reddb-node-<suffix>.node` (e.g. `reddb-node-linux-x86_64.node`). It is built
+only on legs that run on their own architecture and is uploaded only after the
+build job loaded it and got a response to a `version` request; it is covered by
+`checksums.txt` / `SHA256SUMS` like the binaries. `scripts/npm-platform-packages.mjs`
+ships it inside the matching `@reddb-io/red-*` package as `reddb.node`, and
+`@reddb-io/sdk` prefers it over spawning `red`. A missing addon is not a release
+failure: that platform keeps the subprocess path. The `-static` musl variants
+are cross-compiled and therefore do not carry the addon.
 
 Every stable release also publishes two aggregate SHA-256 manifests for the
 downloadable binaries and SBOMs:
@@ -407,7 +420,7 @@ The release workflow enforces the contract automatically:
 
 1.0.5 shipped `@reddb-io/sdk@1.0.5` to npm without
 `red-linux-x86_64` on the GitHub Release. Every fresh Linux x86_64
-install hit a 404 in postinstall and had to fall back to `REDDB_BIN`.
+install failed to get a binary and had to fall back to `REDDB_BIN`.
 The recovery playbook for any future repeat:
 
 1. Run `scripts/verify-release-assets.sh v<x.y.z>` to enumerate
@@ -422,25 +435,18 @@ The recovery playbook for any future repeat:
    npm deprecate @reddb-io/sdk@<x.y.z> \
      "missing red-<suffix> binary — install v<x.y.z+1> or set REDDB_BIN"
    ```
-4. The SDK postinstall already prints an actionable error
-   (`drivers/js/postinstall.js`, `formatFailure` for the
-   `ASSET_NOT_FOUND` code) — verify the message renders correctly
-   once with a deliberately bad tag:
-   ```bash
-   REDDB_POSTINSTALL_VERSION=v0.0.0-does-not-exist npm rebuild @reddb-io/sdk
-   ```
+4. The `publish-npm-platforms` job builds the platform packages from the
+   release assets and verifies every binary against `SHA256SUMS`; it fails
+   before publishing anything if an asset is missing or does not match. It
+   skips versions already on the registry, so re-running a partially failed
+   release is safe.
 
-## macOS x86_64 binary
+## Retired prebuilt targets
 
-Before issue #404 (this runbook entry), `red-macos-x86_64` and
-`red_client-macos-x86_64` were **not produced** — only Apple Silicon
-(`macos-aarch64`) shipped. The build matrix in
-`.github/workflows/release.yml` now includes a `macos-13` job for the
-`x86_64-apple-darwin` target; from `v1.0.6` onward both Intel and
-Apple Silicon assets ship side-by-side.
-
-Older releases (`v1.0.5` and earlier): Intel Mac users must either run
-the aarch64 binary under Rosetta 2 or build from source.
+`linux-armv7` and `macos-x86_64` were published through `v1.28.0`. They were
+removed from the primary release matrix to keep releases bounded around the
+platforms used by the server images and current SDK packages. Users on those
+targets can set `REDDB_BIN` to a locally built binary.
 
 ---
 

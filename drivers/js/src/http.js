@@ -27,8 +27,8 @@
  *   cache.exists            → GET    /cache/ns/:ns/:key/exists
  *   cache.invalidate        → DELETE /cache/ns/:ns/:key
  *   cache.invalidate_prefix → DELETE /cache/ns/:ns?prefix=...
- *   cache.invalidate_tags   → DELETE /cache/ns/:ns/tags  (body: {tags})
- *   cache.flush_namespace   → POST   /admin/blob_cache/flush_namespace
+ *   cache.invalidate_tags   → POST   /cache/ns/:ns/invalidate-tags (body: {tags})
+ *   cache.flush_namespace   → POST   /cache/ns/:ns/flush
  *
  * Auth: every request after construction carries `Authorization:
  * Bearer <token>` (when set). `setToken(token)` updates it in
@@ -195,11 +195,11 @@ const ROUTES = {
     init: { method: 'DELETE' },
   }),
   'cache.invalidate_tags': (base, { namespace, tags }) => ({
-    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/tags`,
-    init: { method: 'DELETE', body: JSON.stringify({ tags }) },
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/invalidate-tags`,
+    init: { method: 'POST', body: JSON.stringify({ tags }) },
   }),
   'cache.flush_namespace': (base, { namespace }) => ({
-    url: `${base}/admin/blob_cache/flush_namespace`,
-    init: { method: 'POST', body: JSON.stringify({ namespace }) },
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/flush`,
+    init: { method: 'POST' },
   }),
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditFieldEscaper, Outcome};
 use crate::runtime::impl_core::{
     clear_current_auth_identity, clear_current_tenant, current_auth_identity,
-    current_connection_id, current_tenant, set_current_auth_identity, set_current_tenant,
+    current_connection_id, current_tenant, set_current_auth_principal, set_current_tenant,
 };
 use crate::runtime::queue_telemetry::NackOutcomeLabel;
 use crate::storage::queue::QueueMode;
@@ -93,27 +93,29 @@ pub(super) fn queue_wait_scope() -> String {
 
 fn with_redwire_wait_context<T>(
     auth_identity: &Option<(String, crate::auth::Role)>,
+    auth_principal: &Option<crate::auth::UserId>,
     tenant: &Option<String>,
     f: impl FnOnce() -> T,
 ) -> T {
     let previous_auth = current_auth_identity();
+    let previous_principal = super::execution_context::current_auth_principal();
     let previous_tenant = current_tenant();
     match tenant {
         Some(t) => set_current_tenant(t.clone()),
         None => clear_current_tenant(),
     }
-    match auth_identity {
-        Some((username, role)) => set_current_auth_identity(username.clone(), *role),
-        None => clear_current_auth_identity(),
+    match (auth_identity, auth_principal) {
+        (Some((_, role)), Some(principal)) => set_current_auth_principal(principal.clone(), *role),
+        _ => clear_current_auth_identity(),
     }
     let result = f();
     match previous_tenant {
         Some(t) => set_current_tenant(t),
         None => clear_current_tenant(),
     }
-    match previous_auth {
-        Some((username, role)) => set_current_auth_identity(username, role),
-        None => clear_current_auth_identity(),
+    match (previous_auth, previous_principal) {
+        (Some((_, role)), Some(principal)) => set_current_auth_principal(principal, role),
+        _ => clear_current_auth_identity(),
     }
     result
 }
@@ -137,9 +139,6 @@ fn map_qse(err: QueueStoreError) -> RedDBError {
             "delivery_id '{id}' does not resolve to a live pending delivery"
         )),
         QueueStoreError::UnknownQueue(q) => RedDBError::NotFound(format!("queue '{q}' not found")),
-        QueueStoreError::ReplicaImmutable => {
-            RedDBError::Internal("replica QueueStore is immutable".to_string())
-        }
     }
 }
 
@@ -401,10 +400,11 @@ impl RedDBRuntime {
         count: usize,
         wait_ms: u64,
         auth_identity: Option<(String, crate::auth::Role)>,
+        auth_principal: Option<crate::auth::UserId>,
         tenant: Option<String>,
     ) -> RedDBResult<RedwireWaitOutcome> {
         let group_owned: RedDBResult<String> =
-            with_redwire_wait_context(&auth_identity, &tenant, || {
+            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
                 let expr = reddb_rql::ast::QueryExpr::QueueCommand(
                     reddb_rql::ast::QueueCommand::GroupRead {
                         queue: queue.to_string(),
@@ -426,7 +426,7 @@ impl RedDBRuntime {
 
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-                with_redwire_wait_context(&auth_identity, &tenant, || {
+                with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
                     let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
                     lifecycle
                         .group_read(&txn, queue, group_ref, consumer, count)
@@ -447,7 +447,8 @@ impl RedDBRuntime {
         }
 
         let registry = self.queue_wait_registry();
-        let scope = with_redwire_wait_context(&auth_identity, &tenant, queue_wait_scope);
+        let scope =
+            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, queue_wait_scope);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         let telemetry = self.queue_telemetry();
         telemetry.record_wait_started(&scope, queue);
@@ -555,6 +556,8 @@ impl RedDBRuntime {
         queue: &str,
         payload: Value,
     ) -> RedDBResult<EntityId> {
+        let _event_snapshot = super::delete_publication::event_context(self)
+            .map(super::execution_context::CurrentSnapshotGuard::install);
         let store = self.inner.db.store();
         // Auto-create the queue if it does not exist yet.
         if store.get_collection(queue).is_none() {
@@ -650,6 +653,7 @@ impl RedDBRuntime {
         config: &QueueRuntimeConfig,
         payload: Value,
     ) -> RedDBResult<EntityId> {
+        let event_xid = super::delete_publication::event_writer(self);
         let position = next_queue_position(store, queue, QueueSide::Right)?;
         let mut entity = UnifiedEntity::new(
             EntityId::new(0),
@@ -666,9 +670,17 @@ impl RedDBRuntime {
                 acked: false,
             }),
         );
-        if let Some(xid) = self.current_xid() {
+        if let Some(xid) = self.current_xid().or(event_xid) {
             entity.set_xmin(xid);
         }
+        // Keep the resident message and transient WAL copies inside the same
+        // engine budget as the source mutation, including outbox/DLQ writers.
+        let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
+        let _admission = self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::SegmentArena,
+            "enqueue event",
+            bytes.saturating_mul(3),
+        )?;
         let id = store
             .insert_auto(queue, entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -687,6 +699,9 @@ impl RedDBRuntime {
         query: &CreateQueueQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if super::impl_ddl::is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         if query.dlq.as_deref() == Some(query.name.as_str()) {
             return Err(RedDBError::Query(
                 "dead-letter queue must be different from the source queue".to_string(),
@@ -1039,6 +1054,14 @@ impl RedDBRuntime {
                 if let Some(xid) = self.current_xid() {
                     entity.set_xmin(xid);
                 }
+                // As for event inserts, reserve resident/WAL payload overlap
+                // before publishing either the message or its metadata.
+                let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
+                let _admission = self.admit_non_evictable_growth(
+                    crate::storage::memory_pools::MemoryPool::SegmentArena,
+                    "queue push",
+                    bytes.saturating_mul(3),
+                )?;
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -1884,7 +1907,7 @@ impl RedDBRuntime {
     /// A `CLAIM` on a queue collection is a delivery *acquisition* — select
     /// and lock pending messages — not a raw UPDATE of the underlying queue
     /// rows. Dispatching here keeps the `QueueLifecycle` state machine
-    /// (ACK/NACK, retry, DLQ, pending delivery, replica replay) the sole
+    /// (ACK/NACK, retry, DLQ, pending delivery) the sole
     /// authority for delivery state, instead of `execute_update_inner_tracked`
     /// mutating queue storage directly.
     ///
@@ -2166,22 +2189,31 @@ fn load_queue_groups(store: &UnifiedStore, queue: &str) -> RedDBResult<Vec<Queue
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return Ok(Vec::new());
     };
-    Ok(manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_group")
-                    && row_text(row, "queue").as_deref() == Some(queue)
-            })
-        })
-        .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            Some(QueueGroupEntry {
-                entity_id: entity.id,
-                group: row_text(row, "group")?,
-            })
-        })
-        .collect())
+    let _publication = manager
+        .has_backing()
+        .then(|| store.vault_publication_lock.lock());
+    let mut groups = Vec::new();
+    super::function_budget::try_scan(
+        |visit| manager.try_for_each_entity(usize::MAX, visit),
+        |entity| {
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            if row_text(row, "kind").as_deref() == Some("queue_group")
+                && row_text(row, "queue").as_deref() == Some(queue)
+            {
+                let Some(group) = row_text(row, "group") else {
+                    return true;
+                };
+                groups.push(QueueGroupEntry {
+                    entity_id: entity.id,
+                    group,
+                });
+            }
+            true
+        },
+    )?;
+    Ok(groups)
 }
 
 fn save_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResult<()> {
@@ -2876,24 +2908,32 @@ pub(super) fn next_queue_position(
     queue: &str,
     side: QueueSide,
 ) -> RedDBResult<u64> {
-    let messages = load_queue_message_views(store, queue)?;
-    if messages.is_empty() {
-        return Ok(QUEUE_POSITION_CENTER);
-    }
-    match side {
-        QueueSide::Left => Ok(messages
-            .iter()
-            .map(|message| message.position)
-            .min()
-            .unwrap_or(QUEUE_POSITION_CENTER)
-            .saturating_sub(1)),
-        QueueSide::Right => Ok(messages
-            .iter()
-            .map(|message| message.position)
-            .max()
-            .unwrap_or(QUEUE_POSITION_CENTER)
-            .saturating_add(1)),
-    }
+    let manager = store
+        .get_collection(queue)
+        .ok_or_else(|| RedDBError::NotFound(format!("queue '{queue}' not found")))?;
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let mut boundary: Option<u64> = None;
+    // Positioning needs one scalar, not copies of every queued payload. The
+    // fallible merged visitor also refuses a partial/empty answer on cold I/O.
+    manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, |entity| {
+        let EntityKind::QueueMessage { position, .. } = &entity.kind else {
+            return true;
+        };
+        if !matches!(entity.data, EntityData::QueueMessage(_)) {
+            return true;
+        }
+        boundary = Some(boundary.map_or(*position, |current| match side {
+            QueueSide::Left => current.min(*position),
+            QueueSide::Right => current.max(*position),
+        }));
+        true
+    })?;
+    Ok(
+        boundary.map_or(QUEUE_POSITION_CENTER, |position| match side {
+            QueueSide::Left => position.saturating_sub(1),
+            QueueSide::Right => position.saturating_add(1),
+        }),
+    )
 }
 
 pub(super) fn increment_queue_attempts(

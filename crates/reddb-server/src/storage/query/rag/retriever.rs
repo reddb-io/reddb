@@ -132,7 +132,7 @@ impl MultiSourceRetriever {
     /// Retrieve context using vector search
     fn retrieve_vector(
         &self,
-        query: &str,
+        _query: &str,
         analysis: &QueryAnalysis,
         config: &RagConfig,
         context: &mut RetrievalContext,
@@ -152,7 +152,7 @@ impl MultiSourceRetriever {
         // For each collection, execute vector search
         for collection in collections {
             // Check if collection exists
-            if let Some(coll) = self.vector_store.get(collection) {
+            if self.vector_store.get(collection).is_some() {
                 // Note: In a real implementation, we'd need to embed the query text
                 // For now, we'll look for pre-embedded entities that might match
 
@@ -184,9 +184,9 @@ impl MultiSourceRetriever {
     /// Search a collection by keywords (simplified - would use embeddings in real impl)
     fn search_collection_by_keywords(
         &self,
-        collection: &str,
-        keywords: &[String],
-        limit: usize,
+        _collection: &str,
+        _keywords: &[String],
+        _limit: usize,
     ) -> Vec<(u64, String, f32)> {
         // This is a placeholder - in a real implementation:
         // 1. Embed the keywords using an embedding model
@@ -201,7 +201,7 @@ impl MultiSourceRetriever {
     /// Retrieve context using graph traversal
     fn retrieve_graph(
         &self,
-        query: &str,
+        _query: &str,
         analysis: &QueryAnalysis,
         config: &RagConfig,
         context: &mut RetrievalContext,
@@ -530,7 +530,7 @@ impl MultiSourceRetriever {
         entity_id: &str,
         entity_type: EntityType,
         depth: u32,
-        config: &RagConfig,
+        _config: &RagConfig,
     ) -> Result<RetrievalContext, ExecutionError> {
         let start = std::time::Instant::now();
         let mut context = RetrievalContext::new(format!(
@@ -566,12 +566,11 @@ impl MultiSourceRetriever {
     pub fn find_similar(
         &self,
         collection: &str,
-        entity_id: u64,
-        k: usize,
+        _entity_id: u64,
+        _k: usize,
     ) -> Result<Vec<SimilarEntity>, ExecutionError> {
         // Get the vector for this entity
-        let coll = self
-            .vector_store
+        self.vector_store
             .get(collection)
             .ok_or_else(|| ExecutionError::new(format!("Collection not found: {}", collection)))?;
 

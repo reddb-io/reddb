@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-file"
-version = "1.23.4"
+version = "1.28.10"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB file artifact layer: single-file .rdb layout, WAL, snapshots, checkpoints, locks, and recovery."
@@ -19,13 +19,12 @@ path = "src/lib.rs"
 reddb-types = { workspace = true }
 blake3 = "1"
 crc32fast = "1.5"
-fs2 = "0.4"
 hex = "0.4"
 lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [dev-dependencies]
 toml = "1.1"
@@ -33,6 +32,9 @@ tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2 = "0.4"
 
 [lints]
 workspace = true

@@ -253,6 +253,11 @@ pub struct RedDBOptions {
     /// of physical RAM. There is no "unlimited" value: `Some(0)` is rejected
     /// at boot, exactly like an unparseable env var.
     pub memory_budget_bytes: Option<u64>,
+    /// Opt into bounded resident segments and generation-bound disk indexes.
+    /// Currently supported only for standalone, single-file databases. Preparing
+    /// the file upgrades its writer format; retain an unconverted downgrade copy.
+    /// This is not a guarantee that every server workspace is memory-bounded.
+    pub bounded_disk_residency: bool,
 }
 
 impl fmt::Debug for RedDBOptions {
@@ -292,6 +297,7 @@ impl fmt::Debug for RedDBOptions {
             .field("layout_overrides", &self.layout_overrides)
             .field("storage_profile", &self.storage_profile)
             .field("memory_budget_bytes", &self.memory_budget_bytes)
+            .field("bounded_disk_residency", &self.bounded_disk_residency)
             .finish()
     }
 }
@@ -330,6 +336,7 @@ impl Clone for RedDBOptions {
             storage_profile: self.storage_profile,
             layout_explicit: self.layout_explicit,
             memory_budget_bytes: self.memory_budget_bytes,
+            bounded_disk_residency: self.bounded_disk_residency,
         }
     }
 }
@@ -376,6 +383,7 @@ impl Default for RedDBOptions {
             ),
             layout_explicit: false,
             memory_budget_bytes: None,
+            bounded_disk_residency: false,
         }
     }
 }
@@ -660,6 +668,13 @@ impl RedDBOptions {
         self
     }
 
+    /// Select disk-backed residency explicitly, using the segment share of the
+    /// resolved memory budget. Opening an unsupported profile fails before I/O.
+    pub fn with_bounded_disk_residency(mut self, enabled: bool) -> Self {
+        self.bounded_disk_residency = enabled;
+        self
+    }
+
     pub fn with_storage_profile(
         mut self,
         selection: crate::storage::profile::StorageProfileSelection,
@@ -834,47 +849,7 @@ impl SchemaManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorageIntegrityError {
-    pub zone: String,
-    pub id: String,
-    pub collection: Option<String>,
-    pub detail: String,
-}
-
-impl StorageIntegrityError {
-    pub fn new(
-        zone: impl Into<String>,
-        id: impl Into<String>,
-        collection: Option<String>,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self {
-            zone: zone.into(),
-            id: id.into(),
-            collection,
-            detail: detail.into(),
-        }
-    }
-}
-
-impl fmt::Display for StorageIntegrityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "storage integrity failure: zone={} id={}",
-            self.zone, self.id
-        )?;
-        if let Some(collection) = &self.collection {
-            write!(f, " collection={collection}")?;
-        }
-        write!(
-            f,
-            ": {}. RedDB refused to serve unverified bytes; run the `SCRUB` statement to classify the fault, or `red salvage` to recover trusted rows.",
-            self.detail
-        )
-    }
-}
+pub use reddb_engine::storage::error::StorageIntegrityError;
 
 #[derive(Debug)]
 pub enum RedDBError {
@@ -984,6 +959,25 @@ impl From<crate::storage::engine::DatabaseError> for RedDBError {
 impl From<crate::storage::wal::TxError> for RedDBError {
     fn from(err: crate::storage::wal::TxError) -> Self {
         Self::Engine(err.to_string())
+    }
+}
+
+impl From<reddb_engine::catalog::enforcement::ContractError> for RedDBError {
+    fn from(error: reddb_engine::catalog::enforcement::ContractError) -> Self {
+        match error {
+            reddb_engine::catalog::enforcement::ContractError::Query(message) => {
+                Self::Query(message)
+            }
+            reddb_engine::catalog::enforcement::ContractError::InvalidOperation(message) => {
+                Self::InvalidOperation(message)
+            }
+        }
+    }
+}
+
+impl From<reddb_engine::catalog::schema::ContractExpressionError> for RedDBError {
+    fn from(error: reddb_engine::catalog::schema::ContractExpressionError) -> Self {
+        Self::Query(error.message)
     }
 }
 

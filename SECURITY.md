@@ -2,9 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@reddb.io** privately. Do not file a public GitHub issue for security-impacting bugs.
-
-You can also use [GitHub Security Advisories](https://github.com/reddb-io/reddb/security/advisories) for private coordinated disclosure.
+Use [GitHub private vulnerability reporting](https://github.com/reddb-io/reddb/security/advisories/new) to send security-impacting findings to the maintainers. Do not file a public GitHub issue for security-impacting bugs.
 
 We acknowledge reports within **48 business hours**, confirm or reject within 5 business days, and target a fix or mitigation within **90 days** for non-critical issues. Critical issues (data loss, auth bypass, RCE) are prioritized and patched as fast as we can ship and verify a fix.
 

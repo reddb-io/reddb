@@ -1,8 +1,8 @@
 //! Runtime contract for nested query composition across SQL, graph TVFs,
 //! joins, and JSON literals.
 
-use reddb_types::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")

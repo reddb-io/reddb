@@ -95,8 +95,8 @@ Two Linux x86_64 assets are published per release:
 | **`red-linux-x86_64-static`** | **None** — fully static (musl); runs on any Linux kernel | **Recommended.** Any distro old or new, containers, minimal/scratch images. |
 | `red-linux-x86_64` | glibc ≥ the build runner's version (currently **2.39**) | Only on a recent distro (Ubuntu 24.04+, Debian 13+, Fedora 39+). |
 
-The installer script and the npm postinstall prefer the **static** asset, so you normally
-don't choose. If you download manually and hit:
+The installer script prefers the **static** asset, and the npm packages pick the matching
+libc variant (`-musl` on Alpine and other musl hosts), so you normally don't choose. If you download manually and hit:
 
 ```
 red: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by red)
@@ -110,14 +110,13 @@ static with:
 ldd ./red        # a static binary prints: "not a dynamic executable"
 ```
 
-ARM Linux: `red-linux-aarch64-static` (static) or `red-linux-aarch64` (glibc); 32-bit
-ARMv7: `red-linux-armv7`.
+ARM Linux: `red-linux-aarch64-static` (static) or `red-linux-aarch64` (glibc).
+For 32-bit ARM, build from source and set `REDDB_BIN` to that binary.
 
 ### macOS
 
-`red-macos-aarch64` (Apple Silicon) and `red-macos-x86_64` (Intel) depend only on system
-libraries present on every supported macOS — no extra install. The binaries target
-macOS 11+.
+`red-macos-aarch64` targets Apple Silicon and depends only on system libraries
+present on supported macOS versions. Intel Macs require a source build.
 
 ### Windows
 
@@ -175,49 +174,35 @@ const result = await db.query('SELECT * FROM users LIMIT 10')
 await db.close()
 ```
 
-## Troubleshooting: `npm install @reddb-io/sdk` printed a warning
+## Troubleshooting: `binary "red" not found` after `npm install @reddb-io/sdk`
 
-The npm packages `@reddb-io/sdk`, `@reddb-io/cli`, and `@reddb-io/client` ship a `postinstall` hook that downloads the matching `red` (or `red_client`) binary from GitHub Releases. The hook is **soft-fail** — if the download can't complete, the package still installs and exits 0, but the driver can't actually run until you provide a binary.
+`@reddb-io/sdk` and `@reddb-io/cli` run no install script and download nothing. The `red` binary arrives as a
+per-platform package (`@reddb-io/red-<os>-<cpu>[-musl]`, e.g. `@reddb-io/red-linux-x64`) that your package
+manager installs automatically because it is an `optionalDependency` matching your OS, CPU and libc.
+`@reddb-io/client` is pure JavaScript and needs no binary at all.
 
-You may see one of these warnings:
+If `connect()` says the binary was not found, the platform package was not installed. Common causes:
 
-- **`release asset not found (HTTP 404)`** — usually means the GitHub Release for that SDK version has not been published yet, or your platform has no prebuilt binary in that release.
-- **`no prebuilt red binary for <platform>/<arch>`** — your platform/arch combination is not (yet) produced by the release pipeline. macOS Intel (`darwin/x64`) was added recently and is only present from `v1.0.6` onward.
+- **Optional dependencies were skipped** (`npm install --omit=optional`, `pnpm install --no-optional`, or a
+  config that sets `optional=false`). Reinstall with optional dependencies enabled.
+- **Your platform has no prebuilt package.** Supported: Linux x64/arm64 (glibc and musl), macOS arm64, and Windows x64.
+- **An old package manager** that ignores the `libc` field installs both Linux variants; that is harmless, the
+  resolver tries the matching one first.
 
-### Three ways to unblock
+### Bring your own binary
 
-1. **Install the latest stable `red` via the official installer and point the SDK at it.** The SDK consults `REDDB_BIN` before anything else, so this works regardless of which release contains your platform's asset:
+The SDK consults `REDDB_BIN` before anything else, so this works on any platform:
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
-   export REDDB_BIN="$(command -v red)"
-   ```
+```bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+export REDDB_BIN="$(command -v red)"
+```
 
-2. **Pin the postinstall to a release tag you know exists** and re-run the hook:
-
-   ```bash
-   REDDB_POSTINSTALL_VERSION=v1.0.5 pnpm rebuild @reddb-io/sdk
-   # or:  REDDB_POSTINSTALL_VERSION=v1.0.5 npm rebuild @reddb-io/sdk
-   ```
-
-   Check available tags at <https://github.com/reddb-io/reddb/releases>.
-
-3. **Skip the download entirely** if you'll bring your own binary:
-
-   ```bash
-   REDDB_SKIP_POSTINSTALL=1 pnpm add @reddb-io/sdk
-   export REDDB_BIN=/path/to/red
-   ```
-
-### Postinstall env-var reference
+### Env-var reference
 
 | Variable                    | Effect                                                        |
 |-----------------------------|---------------------------------------------------------------|
-| `REDDB_BIN`                 | Runtime override consulted by `@reddb-io/sdk` and `@reddb-io/cli` before falling back to the bundled binary. Also tells `cli-postinstall` to skip downloading. |
-| `REDDB_CLIENT_BIN`          | Same idea for `@reddb-io/client`'s `red_client` helper.       |
-| `REDDB_SKIP_POSTINSTALL=1`  | Don't try to download anything during `npm install`.          |
-| `REDDB_POSTINSTALL_VERSION` | Pull a specific release tag instead of `v${pkg.version}`.     |
-| `REDDB_POSTINSTALL_REPO`    | Pull from a fork (defaults to `reddb-io/reddb`).              |
+| `REDDB_BIN`                 | Runtime override consulted by `@reddb-io/sdk` and `@reddb-io/cli` before the installed platform package. |
 
 ## Build from source
 

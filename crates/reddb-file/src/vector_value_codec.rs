@@ -80,15 +80,26 @@ pub fn would_encode_to(input: &[u8]) -> usize {
     }
 }
 
+/// Inspect the authoritative codec framing before reserving expansion space.
+pub fn decoded_length(flag: ValueFlag, bytes: &[u8]) -> Result<usize, ValueCodecError> {
+    match flag {
+        ValueFlag::Raw => Ok(bytes.len()),
+        ValueFlag::Lz4 => {
+            let header = bytes.get(..4).ok_or(ValueCodecError::TruncatedHeader)?;
+            let length =
+                u32::from_le_bytes(header.try_into().expect("invariant: four-byte header"));
+            Ok(usize::try_from(length)
+                .expect("invariant: supported address spaces are at least 32 bits"))
+        }
+    }
+}
+
 /// Decode a `(flag, bytes)` pair produced by [`encode`].
 pub fn decode(flag: ValueFlag, bytes: &[u8]) -> Result<Vec<u8>, ValueCodecError> {
     match flag {
         ValueFlag::Raw => Ok(bytes.to_vec()),
         ValueFlag::Lz4 => {
-            if bytes.len() < 4 {
-                return Err(ValueCodecError::TruncatedHeader);
-            }
-            let raw_len = u32::from_le_bytes(bytes[0..4].try_into().expect("len checked")) as usize;
+            let raw_len = decoded_length(flag, bytes)?;
             lz4_flex::decompress(&bytes[4..], raw_len)
                 .map_err(|e| ValueCodecError::Lz4Decode(e.to_string()))
         }

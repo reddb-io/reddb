@@ -1,0 +1,22 @@
+revision=9c7035351e1a2011595731a411ddbb9bca34cff4
+exit_code=101
+
+running 1 test
+test runtime::impl_kv::transactions::tests::checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch ... FAILED
+
+failures:
+
+failures:
+    runtime::impl_kv::transactions::tests::checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5314 filtered out; finished in 0.14s
+
+
+
+thread 'runtime::impl_kv::transactions::tests::checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch' (32044) panicked at crates\reddb-server\src\runtime\impl_kv\transactions.rs:408:13:
+child:
+thread 'runtime::impl_kv::transactions::tests::checkpoint_during_vault_prepare_cannot_recover_an_uncommitted_batch' (37720) panicked at crates\reddb-server\src\runtime\impl_kv\transactions.rs:353:59:
+called `Result::unwrap()` on an `Err` value: Catalog("I/O error: I/O error: The process cannot access the file because another process has locked a portion of the file. (os error 33)")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

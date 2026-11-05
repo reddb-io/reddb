@@ -24,9 +24,28 @@
 //! This codec is compiled and tested but not yet wired into any storage or
 //! query path.  Behaviour cutover happens in a later PRD-1398 slice.
 
+use crate::json::{Map, Value as JsonValue};
 use crate::key_dictionary::KeyDictionary;
 use crate::types::Value;
 use crate::value_codec;
+
+/// Decode a self-describing binary document body into its canonical JSON value.
+/// Returns `None` for non-container bytes or invalid container data.
+pub fn decode_container_to_json(bytes: &[u8]) -> Option<JsonValue> {
+    if !bytes.starts_with(MAGIC) {
+        return None;
+    }
+    let fields = decode(bytes).ok()?;
+    let mut map = Map::new();
+    for (key, value) in fields {
+        let json = match &value {
+            Value::Integer(n) => JsonValue::Integer(*n),
+            other => other.to_json(),
+        };
+        map.insert(key, json);
+    }
+    Some(JsonValue::Object(map))
+}
 
 /// Magic bytes at the start of every document body container.
 pub const MAGIC: &[u8; 4] = b"RDOC";

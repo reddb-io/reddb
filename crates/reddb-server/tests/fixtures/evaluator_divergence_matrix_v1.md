@@ -30,7 +30,7 @@ The table covers the known LIKE case/byte, NULL equality and 3VL, overflow, divi
 | float edge cases / -0.0 = 0.0 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
 | integer boundaries / i64::MAX = same u64 | `true` | `true` | `true` | `false` | `false` | `true` | `true` | `unsupported` |
 | integer boundaries / i64::MIN < -1 | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `true` |
-| integer boundaries / i64::MAX < u64::MAX | `error:implicit cast UnsignedInteger -> Integer failed: number too large to fit in target type` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
+| integer boundaries / i64::MAX < u64::MAX | `true` | `true` | `true` | `true` | `true` | `true` | `true` | `unsupported` |
 | arithmetic errors / i64::MAX + 1 | `error:overflow` | `i64:9223372036854775807` | `error:overflow` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
 | arithmetic errors / 1 / 0 | `error:division-by-zero` | `none` | `error:division-by-zero` | `unsupported` | `unsupported` | `unsupported` | `unsupported` | `unsupported` |
 | numeric coercion / Integer(5) = Text(5) | `error:operator Eq not defined for (Integer, Text)` | `true` | `true` | `false` | `false` | `false` | `true` | `false` |

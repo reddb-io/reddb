@@ -30,15 +30,15 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::application::OperationContext;
 use crate::auth::Role;
+use crate::runtime::query_request::{PreparedRegistry, QueryRequest, QueryRequestExecutor};
 use crate::runtime::RedDBRuntime;
-use crate::serde_json::Value as JsonValue;
 use crate::server::output_stream::{
     self as outs, Clock, OpenStreamError, StreamConfig, SystemClock,
 };
 pub use reddb_wire::redwire::stream::{
     OpenStreamParseError, OpenStreamRequest, StreamCancelRequest,
 };
-use reddb_wire::redwire::{encode_frame, Frame};
+use reddb_wire::redwire::Frame;
 
 pub fn parse_open_stream(payload: &[u8]) -> Result<OpenStreamRequest, OpenStreamParseError> {
     reddb_wire::redwire::stream::parse_open_stream(payload)
@@ -166,7 +166,7 @@ pub fn build_stream_error_frame(
 /// → StreamEnd via the supplied `send` closure, observing the
 /// `cancel_rx` between rows to honour `StreamCancel` (AC #3).
 ///
-/// The function materialises `execute_query`'s result first
+/// The function materialises an admitted request result first
 /// (matching the S1 HTTP behaviour — pull-based scan executors
 /// are PRD #759 phase 3) and then dribbles rows out as
 /// `StreamChunk` envelopes via the same byte/row/latency
@@ -183,7 +183,22 @@ pub async fn run_output_stream(
     role: Role,
 ) {
     let clock = SystemClock;
-    let config = StreamConfig::load(&runtime);
+    let config = match StreamConfig::load(&runtime) {
+        Ok(config) => config,
+        Err(error) => {
+            if let Ok(frame) = build_stream_error_frame(
+                correlation_id,
+                stream_id,
+                "stream_config_unavailable",
+                &error.to_string(),
+            ) {
+                if send.send_frame(frame).await.is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+    };
     let snapshot_lsn = runtime.cdc_current_lsn();
 
     let lease = match outs::open_stream(config, snapshot_lsn, in_transaction, &clock) {
@@ -199,7 +214,7 @@ pub async fn run_output_stream(
                 Ok(f) => f,
                 Err(_) => return,
             };
-            send.send_frame(frame).await;
+            let _ = send.send_frame(frame).await;
             return;
         }
     };
@@ -215,12 +230,36 @@ pub async fn run_output_stream(
         Ok(f) => f,
         Err(_) => return,
     };
-    send.send_frame(ack).await;
+    if send.send_frame(ack).await.is_err() {
+        return;
+    }
 
-    // Materialise.
-    let result = super::session::execute_with_redwire_context(&operation_context, role, || {
-        runtime.execute_query(&request.sql)
-    });
+    // The query itself shares the runtime-wide execution budget with every
+    // server transport and runs off Tokio's I/O workers. The completed
+    // result retains its separate memory admission while a slow peer drains;
+    // the scarce execution slot is released as soon as the engine returns.
+    let task_runtime = Arc::clone(&runtime);
+    let result = match super::session::redwire_spawn_blocking(runtime.as_ref(), move || {
+        super::session::execute_with_redwire_context(&operation_context, role, || {
+            QueryRequestExecutor::new(&task_runtime, &PreparedRegistry::new())
+                .execute(QueryRequest::sql(request.sql, Vec::new()))
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if let Ok(frame) = build_stream_error_frame(
+                correlation_id,
+                stream_id,
+                error.code(),
+                &error.client_message(),
+            ) {
+                let _ = send.send_frame(frame).await;
+            }
+            return;
+        }
+    };
 
     // Stream rows out as StreamChunk envelopes.
     let mut seq: u64 = 0;
@@ -230,14 +269,6 @@ pub async fn run_output_stream(
 
     match result {
         Ok(qr) => {
-            let columns = qr.result.columns.clone();
-            let rows: Vec<JsonValue> = qr
-                .result
-                .records
-                .iter()
-                .map(|r| crate::presentation::query_result_json::unified_record_json(r, &columns))
-                .collect();
-
             // One `StreamChunk` envelope per row. The page-aligned
             // batcher used by the HTTP NDJSON path (S1) is byte-
             // oriented; on the wire path each row already ships as
@@ -245,7 +276,7 @@ pub async fn run_output_stream(
             // handles the batching for us. Keeping one row per
             // envelope keeps `StreamCancel` latency bounded to
             // "between two adjacent rows".
-            for row in rows {
+            for record in &qr.result.records {
                 // Check cancel between rows (AC #3).
                 if let Ok(()) = cancel_rx.try_recv() {
                     cancelled = true;
@@ -258,7 +289,14 @@ pub async fn run_output_stream(
                     ));
                     break;
                 }
-                let row_bytes = row.to_string_compact().into_bytes();
+                // Render only the next row. Retaining a second complete JSON
+                // result beside the admitted records doubles stream residency.
+                let row_bytes = crate::presentation::query_result_json::unified_record_json(
+                    record,
+                    &qr.result.columns,
+                )
+                .to_string_compact()
+                .into_bytes();
                 let frame =
                     match reddb_wire::redwire::stream::build_stream_chunk_frame_from_json_bytes(
                         correlation_id,
@@ -268,9 +306,17 @@ pub async fn run_output_stream(
                         false,
                     ) {
                         Ok(f) => f,
-                        Err(_) => break,
+                        Err(error) => {
+                            had_error = Some((
+                                "stream_chunk_encoding_failed".to_string(),
+                                error.to_string(),
+                            ));
+                            break;
+                        }
                     };
-                send.send_frame(frame).await;
+                if send.send_frame(frame).await.is_err() {
+                    return;
+                }
                 seq += 1;
                 row_count += 1;
             }
@@ -292,7 +338,7 @@ pub async fn run_output_stream(
             &code,
             &message,
         ) {
-            send.send_frame(frame).await;
+            let _ = send.send_frame(frame).await;
         }
     }
 
@@ -307,7 +353,7 @@ pub async fn run_output_stream(
         lease.snapshot_lsn,
         cancelled,
     ) {
-        send.send_frame(frame).await;
+        let _ = send.send_frame(frame).await;
     }
 }
 
@@ -318,27 +364,210 @@ pub async fn run_output_stream(
 /// (AC #2 — interleaved chunks for two streams on one connection).
 #[derive(Clone)]
 pub struct FrameTx {
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    runtime: Arc<RedDBRuntime>,
+    failure: tokio::sync::watch::Sender<bool>,
 }
 
 impl FrameTx {
-    pub fn new(tx: tokio::sync::mpsc::Sender<Vec<u8>>) -> Self {
-        Self { tx }
+    pub fn new(tx: tokio::sync::mpsc::Sender<bytes::Bytes>, runtime: Arc<RedDBRuntime>) -> Self {
+        Self {
+            tx,
+            runtime,
+            failure: tokio::sync::watch::channel(false).0,
+        }
     }
 
-    /// Encode + enqueue. Drops silently if the receiver has been
-    /// dropped (connection torn down); the worker's next iteration
-    /// will hit cancellation / EOF and exit naturally.
-    pub async fn send_frame(&self, frame: Frame) {
-        let bytes = encode_frame(&frame);
-        let _ = self.tx.send(bytes).await;
+    pub(crate) fn spawn_writer<W>(
+        &self,
+        mut receiver: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+        mut writer: W,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        use tokio::io::AsyncWriteExt;
+        let failure = self.failure.clone();
+        tokio::spawn(async move {
+            let mut failed = failure.subscribe();
+            // Do not retain a frame sender here: clean Bye/half-close must
+            // drain to EOF. Failure cancels even a blocked socket write and
+            // drops both its current buffer and all queued buffers.
+            tokio::select! {
+                biased;
+                _ = failed.wait_for(|value| *value) => {},
+                _ = async {
+                    while let Some(bytes) = receiver.recv().await {
+                        if writer.write_all(&bytes).await.is_err() {
+                            failure.send_replace(true);
+                            break;
+                        }
+                    }
+                } => {},
+            }
+        })
+    }
+
+    pub(crate) async fn failed(&self) {
+        let _ = self.failure.subscribe().wait_for(|value| *value).await;
+    }
+
+    /// Reserve both the payload and the encoded allocation before copying.
+    /// Exhaustion fails this connection; never deliver a truncated success or
+    /// let a stream worker silently discard a frame and continue with StreamEnd.
+    pub async fn send_frame(&self, frame: Frame) -> std::io::Result<()> {
+        let result = self.send_frame_inner(frame).await;
+        if result.is_err() {
+            self.failure.send_replace(true);
+        }
+        result
+    }
+
+    /// Keep the original result reservation while admitting the RedWire copy.
+    /// Existing direct-scan/error buffers are explicitly charged as scratch;
+    /// already admitted materialized replies must not be charged twice.
+    pub(crate) async fn send_legacy_response(
+        &self,
+        response: crate::wire::listener::LegacyQueryResponse,
+        correlation_id: u64,
+    ) -> std::io::Result<()> {
+        let result = self
+            .send_legacy_response_inner(response, correlation_id)
+            .await;
+        if result.is_err() {
+            self.failure.send_replace(true);
+        }
+        result
+    }
+
+    async fn send_legacy_response_inner(
+        &self,
+        response: crate::wire::listener::LegacyQueryResponse,
+        correlation_id: u64,
+    ) -> std::io::Result<()> {
+        use reddb_wire::redwire::builder::BorrowedLegacyReply;
+        if *self.failure.borrow() {
+            return Err(std::io::Error::other("redwire: write channel failed"));
+        }
+        let capacity = BorrowedLegacyReply::new(&response, correlation_id)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            .encoded_len();
+        let bytes = self
+            .runtime
+            .serialize_query_buffer(capacity, response.unadmitted_capacity(), move |buffer| {
+                BorrowedLegacyReply::new(&response, correlation_id)
+                    .expect("validated immutable legacy response")
+                    .encode_into(buffer);
+                drop(response);
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "redwire: response exceeds shared memory budget",
+                )
+            })?;
+        self.send_bytes(bytes).await
+    }
+
+    async fn send_frame_inner(&self, mut frame: Frame) -> std::io::Result<()> {
+        use reddb_wire::redwire::{Flags, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};
+        if *self.failure.borrow() {
+            return Err(std::io::Error::other("redwire: write channel failed"));
+        }
+        // Session builders emit uncompressed replies. A producer requesting
+        // compression gets the protocol's existing plaintext fallback until
+        // the compression workspace has its own admission. Preserve all other
+        // flags and avoid allocating an unaccounted compressor workspace.
+        frame.flags = Flags::from_bits(frame.flags.bits() & !Flags::COMPRESSED.bits());
+        let capacity = frame
+            .payload
+            .len()
+            .checked_add(FRAME_HEADER_SIZE)
+            .filter(|size| *size <= MAX_FRAME_SIZE as usize)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "redwire: response exceeds frame limit",
+                )
+            })?;
+        let bytes = self
+            .runtime
+            .serialize_query_buffer(capacity, frame.payload.capacity(), move |buffer| {
+                reddb_wire::redwire::codec::encode_uncompressed_frame_into(&frame, buffer);
+                drop(frame);
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "redwire: response exceeds shared memory budget",
+                )
+            })?;
+        self.send_bytes(bytes).await
+    }
+
+    async fn send_bytes(&self, bytes: bytes::Bytes) -> std::io::Result<()> {
+        tokio::select! {
+            biased;
+            _ = self.failed() => Err(std::io::Error::other("redwire: write channel failed")),
+            result = self.tx.send(bytes) => result.map_err(|_| std::io::Error::other("redwire: write channel closed")),
+        }
     }
 }
+
+#[cfg(test)]
+mod memory_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use reddb_wire::redwire::MessageKind;
+
+    #[tokio::test]
+    async fn outbound_memory_survives_queue_receive_and_response_clones() {
+        use crate::storage::memory_pools::MemoryPool;
+        let runtime = RedDBRuntime::with_options(
+            crate::RedDBOptions::in_memory().with_memory_budget(1024 * 1024),
+        )
+        .expect("bounded runtime");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let runtime = Arc::new(runtime);
+        let sender = FrameTx::new(tx, Arc::clone(&runtime));
+        sender
+            .send_frame(
+                reddb_wire::redwire::build_reply_frame(7, MessageKind::Result, vec![1; 128 * 1024])
+                    .expect("reply fixture"),
+            )
+            .await
+            .expect("admitted response");
+        assert!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers)
+                >= 128 * 1024,
+            "queued encoded responses must remain charged to the runtime budget"
+        );
+        let bytes = rx.recv().await.expect("queued response");
+        let copy = bytes.clone();
+        drop(bytes);
+        assert!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers)
+                >= copy.len() as u64,
+            "socket ownership and clones must retain admission after dequeue"
+        );
+        let (frame, consumed) = reddb_wire::redwire::decode_frame(&copy).expect("wire bytes");
+        assert_eq!(consumed, copy.len());
+        assert_eq!(frame.correlation_id, 7);
+        assert_eq!(frame.payload, vec![1; 128 * 1024]);
+        drop(copy);
+        assert_eq!(
+            runtime
+                .memory_accounting()
+                .used_bytes(MemoryPool::QueryBuffers),
+            0
+        );
+    }
 
     #[test]
     fn parse_open_stream_accepts_minimal_payload() {

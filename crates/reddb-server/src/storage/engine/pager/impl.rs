@@ -4,24 +4,13 @@ pub(super) const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
 pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
-/// The superblock zone occupies the head of page 0 (ADR 0038 §2 phase 1).
+#[cfg(test)]
+const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
+
+#[cfg(test)]
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+#[cfg(test)]
 pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
-pub(super) const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
-
-/// The newest valid superblock copy together with its slot image.
-type NewestSuperblock = (
-    reddb_file::PagedSuperblockSelection,
-    [u8; SUPERBLOCK_SLOT_SIZE],
-);
-
-/// Take the first slot's worth of a freshly-built page-0 image. The database
-/// header and the encryption header both live well inside this prefix.
-fn superblock_slot_image(page: &[u8; PAGE_SIZE]) -> [u8; SUPERBLOCK_SLOT_SIZE] {
-    let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
-    image.copy_from_slice(&page[..SUPERBLOCK_SLOT_SIZE]);
-    image
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CowFilesystemKind {
@@ -215,18 +204,16 @@ impl Pager {
             }
         }
 
-        // Acquire file lock (exclusive for writes, shared for read-only)
-        let lock_file = if !config.read_only {
-            let lf = OpenOptions::new().read(true).write(true).open(&path)?;
-            lf.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
-            Some(lf)
+        // Lock the same handle that performs page I/O. Windows byte-range
+        // locks deny reads/writes through a separately opened handle even in
+        // this process. The owned VFS handle holds the fence until it closes.
+        if !config.read_only {
+            file.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
         } else {
-            let lf = OpenOptions::new().read(true).open(&path)?;
-            match lf.try_lock_shared() {
-                Ok(_) => Some(lf),
-                Err(_) => None,
-            }
-        };
+            let _ = FileExt::try_lock_shared(&file);
+        }
+        // Own lock release across both ordinary close and later open failures.
+        let file = NativePagerFile(file);
 
         // ADR 0038 phase 3: the DWB sidecar is retired. When DWB is active,
         // the recovery frame is written to a reserved zone inside the data
@@ -247,7 +234,7 @@ impl Pager {
         }
         if !config.double_write && !config.read_only && !fold_dwb {
             let skip_dwb_on_cow =
-                Self::cow_filesystem_has_atomic_page_writes(&path, &file).is_some();
+                Self::cow_filesystem_has_atomic_page_writes(&path, &file.0).is_some();
             if !skip_dwb_on_cow {
                 tracing::warn!(
                     path = %path.display(),
@@ -259,31 +246,29 @@ impl Pager {
         }
         let dwb_enabled = config.double_write && !config.read_only && !fold_dwb;
 
-        let mut pager = Self {
+        let core = SharedPager::open_owned(
+            file,
             path,
-            file: Mutex::new(file),
-            _lock_file: lock_file,
-            dwb_enabled,
-            cache: PageCache::new(config.cache_size),
-            freelist: RwLock::new(FreeList::new()),
-            header: RwLock::new(DatabaseHeader::default()),
+            SharedPagerConfig {
+                disk_residency: config.disk_residency,
+                cache_size: config.cache_size,
+                read_only: config.read_only,
+                verify_checksums: config.verify_checksums,
+                double_write: dwb_enabled,
+            },
+            NativeWalBarrier::default(),
+            !exists,
+        )?;
+        let mut pager = Self {
+            core,
             config,
-            header_dirty: Mutex::new(false),
-            wal: RwLock::new(None),
             encryption: None,
         };
 
         if exists {
-            // Recover from the in-file double-write zone before loading the
-            // header or allowing WAL replay to read pages.
-            pager.ensure_phase3_dwb_zone_layout()?;
-            pager.recover_from_dwb()?;
-            // Load existing database (with header shadow fallback)
-            pager.load_header()?;
             pager.bind_encryption_for_existing()?;
         } else {
             // Initialize new database
-            pager.initialize()?;
             pager.bind_encryption_for_new()?;
         }
 
@@ -411,305 +396,6 @@ impl Pager {
         Self::open(path, PagerConfig::default())
     }
 
-    /// Initialize a new database
-    fn initialize(&self) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        // Create header page. Page ids 1 and 2 are reserved for fixed
-        // metadata/vault pages. ADR 0038 phase 3 reserves the following DWB
-        // zone in-file so normal B-tree allocation starts after it.
-        let initial_page_count = FIRST_ALLOCATABLE_PAGE;
-        let header_page = Page::new_header_page(initial_page_count);
-        self.header_write()?.page_count = initial_page_count;
-
-        // Reserve page 0 (the superblock zone) plus the reserved pages so any
-        // scan over 0..page_count can read every allocated page in a brand-new
-        // database. The zone's own bytes are published below, one slot at a
-        // time; this first whole-page write only sizes the file.
-        self.write_page_raw(0, &header_page)?;
-        let mut metadata_page = Page::new(PageType::Header, 1);
-        metadata_page.update_checksum();
-        self.write_page_raw(1, &metadata_page)?;
-        let mut vault_page = Page::new(PageType::Vault, 2);
-        vault_page.update_checksum();
-        self.write_page_raw(2, &vault_page)?;
-        self.clear_dwb_zone()?;
-
-        // Publish both superblock copies so the ping-pong invariant — one
-        // valid copy always survives a crash — holds from the very first
-        // update onward, not just from the second.
-        let mut slot = superblock_slot_image(header_page.as_bytes());
-        self.write_superblock_slot(&mut slot, 0, 1)?;
-        self.write_superblock_slot(&mut slot, 1, 2)?;
-
-        // Sync to disk
-        self.sync()?;
-
-        Ok(())
-    }
-
-    /// Acquire a write lock on the header RwLock, mapping poison errors.
-    fn header_write(&self) -> Result<std::sync::RwLockWriteGuard<'_, DatabaseHeader>, PagerError> {
-        self.header.write().map_err(|_| PagerError::LockPoisoned)
-    }
-
-    /// Acquire a read lock on the header RwLock, mapping poison errors.
-    fn header_read(&self) -> Result<std::sync::RwLockReadGuard<'_, DatabaseHeader>, PagerError> {
-        self.header.read().map_err(|_| PagerError::LockPoisoned)
-    }
-
-    /// Acquire a write lock on the freelist RwLock, mapping poison errors.
-    fn freelist_write(&self) -> Result<std::sync::RwLockWriteGuard<'_, FreeList>, PagerError> {
-        self.freelist.write().map_err(|_| PagerError::LockPoisoned)
-    }
-
-    /// Acquire a lock on the file Mutex, mapping poison errors.
-    fn file_lock(&self) -> Result<std::sync::MutexGuard<'_, File>, PagerError> {
-        self.file.lock().map_err(|_| PagerError::LockPoisoned)
-    }
-
-    /// Acquire a lock on the header_dirty Mutex, mapping poison errors.
-    fn header_dirty_lock(&self) -> Result<std::sync::MutexGuard<'_, bool>, PagerError> {
-        self.header_dirty
-            .lock()
-            .map_err(|_| PagerError::LockPoisoned)
-    }
-
-    /// Read the whole superblock zone (both ping-pong copies) from the head of
-    /// the file. A file shorter than the zone yields zero-filled tail bytes,
-    /// which decode as "slot never written".
-    fn read_superblock_zone(&self) -> Result<[u8; SUPERBLOCK_ZONE_SIZE], PagerError> {
-        let mut file = self.file_lock()?;
-        let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-        let mut zone = [0u8; SUPERBLOCK_ZONE_SIZE];
-        let readable = len.min(SUPERBLOCK_ZONE_SIZE as u64) as usize;
-        if readable > 0 {
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut zone[..readable])?;
-        }
-        Ok(zone)
-    }
-
-    /// The newest valid superblock copy, with its slot image.
-    ///
-    /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
-    /// §2): the store does not open, and the error names the zone and points
-    /// at salvage rather than panicking or silently re-initialising.
-    fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
-        let zone = self.read_superblock_zone()?;
-        let selection = reddb_file::select_paged_superblock(&zone)
-            .ok_or_else(|| PagerError::SuperblockZoneUnrecoverable(self.path.clone()))?;
-
-        let start = selection.copy_index * SUPERBLOCK_SLOT_SIZE;
-        let mut image = [0u8; SUPERBLOCK_SLOT_SIZE];
-        image.copy_from_slice(&zone[start..start + SUPERBLOCK_SLOT_SIZE]);
-        Ok((selection, image))
-    }
-
-    fn ensure_phase3_dwb_zone_layout(&self) -> Result<(), PagerError> {
-        let (_, image) = self.newest_superblock()?;
-        let header = reddb_file::decode_database_header(&image)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        if header.version < PHASE3_DWB_ZONE_FILE_VERSION {
-            return Err(PagerError::LegacyPagedStore {
-                path: self.path.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Seal `slot` for `copy_index`/`generation` and write exactly that slot,
-    /// then fsync. The caller guarantees `copy_index` is the stale copy.
-    fn write_superblock_slot(
-        &self,
-        slot: &mut [u8; SUPERBLOCK_SLOT_SIZE],
-        copy_index: usize,
-        generation: u64,
-    ) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-        reddb_file::seal_paged_superblock_slot(slot, copy_index, generation)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-
-        let mut file = self.file_lock()?;
-        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
-            copy_index,
-        )))?;
-        file.write_all(slot)?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    /// Publish `mutate`'s edit of the newest slot image into the *stale* copy.
-    ///
-    /// Reading the newest image first means every byte the pager does not
-    /// explicitly rewrite — most importantly the encryption marker and header —
-    /// carries forward untouched.
-    fn commit_superblock(
-        &self,
-        mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
-    ) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-        let (newest, mut image) = self.newest_superblock()?;
-        mutate(&mut image)?;
-        let next_copy = reddb_file::paged_superblock_next_copy(Some(newest));
-        self.write_superblock_slot(&mut image, next_copy, newest.generation.saturating_add(1))
-    }
-
-    /// Load the database header from the newest valid superblock copy.
-    fn load_header(&self) -> Result<(), PagerError> {
-        let (_, image) = self.newest_superblock()?;
-
-        let decoded_header = reddb_file::decode_database_header(&image)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        let freelist_head = decoded_header.freelist_head;
-
-        {
-            let mut header = self.header_write()?;
-            *header = decoded_header;
-        }
-
-        // Initialize freelist
-        {
-            let mut freelist = self.freelist_write()?;
-            *freelist = FreeList::from_header(freelist_head, 0);
-        }
-
-        Ok(())
-    }
-
-    /// Publish the in-memory database header as a new superblock generation.
-    fn write_header(&self) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        let header = self.header_read()?.clone();
-        self.commit_superblock(|image| {
-            reddb_file::encode_database_header(image, &header)
-                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
-        })?;
-        *self.header_dirty_lock()? = false;
-
-        Ok(())
-    }
-
-    /// Read a page from disk (bypassing cache)
-    fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
-        let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-
-        let mut buf = [0u8; PAGE_SIZE];
-        file.read_exact(&mut buf)?;
-
-        let page = Page::from_bytes(buf);
-
-        // Page 0 is the superblock zone, not a checksummed page: its two slots
-        // are sealed independently, so no whole-page checksum can hold across
-        // a ping-pong write. Slot CRCs are its integrity contract.
-        if self.config.verify_checksums && page_id != 0 {
-            page.verify_checksum()?;
-        }
-
-        Ok(page)
-    }
-
-    /// Write a page to disk (bypassing cache)
-    fn write_page_raw(&self, page_id: u32, page: &Page) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(page.as_bytes())?;
-
-        Ok(())
-    }
-
-    /// Read a page (cache-aware)
-    pub fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
-        // Check cache first
-        if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
-        }
-
-        // Cache miss - read from disk
-        let page = self.read_page_raw(page_id)?;
-
-        // Add to cache
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
-        }
-
-        Ok(page)
-    }
-
-    /// Read a page without verifying checksum (for encrypted pages)
-    ///
-    /// Use this when the page content has its own integrity protection
-    /// (e.g., AES-GCM authentication tag for encrypted pages).
-    pub fn read_page_no_checksum(&self, page_id: u32) -> Result<Page, PagerError> {
-        // Check cache first
-        if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
-        }
-
-        // Cache miss - read from disk (skip checksum verification)
-        let mut file = self.file_lock()?;
-        let offset = (page_id as u64) * (PAGE_SIZE as u64);
-
-        file.seek(SeekFrom::Start(offset))?;
-
-        let mut buf = [0u8; PAGE_SIZE];
-        file.read_exact(&mut buf)?;
-        drop(file);
-
-        let page = Page::from_bytes(buf);
-
-        // Add to cache (no checksum verification)
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
-        }
-
-        Ok(page)
-    }
-
-    /// Write a page (cache-aware)
-    pub fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        // Update checksum
-        page.update_checksum();
-
-        // Add to cache and mark dirty. If the cache had to evict a
-        // dirty entry, write it through immediately — the evicted
-        // page will never be flushed otherwise (same bug fixed in
-        // `allocate_page`).
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
-        }
-        self.cache.mark_dirty(page_id);
-
-        Ok(())
-    }
-
     /// Read a page through the configured encryptor if any. Page 0
     /// is always returned plaintext (it carries the encryption marker
     /// + header). Callers that want raw cipher bytes can use
@@ -757,173 +443,6 @@ impl Pager {
         self.write_page_no_checksum(page_id, cipher_page)
     }
 
-    /// Write a page without updating checksum (for encrypted pages)
-    ///
-    /// Use this when the page content has its own integrity protection
-    /// (e.g., AES-GCM authentication tag for encrypted pages).
-    pub fn write_page_no_checksum(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        // Add to cache and mark dirty (no checksum update). Same
-        // eviction-write-through guard as `write_page`.
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
-        }
-        self.cache.mark_dirty(page_id);
-
-        Ok(())
-    }
-
-    /// Allocate a new page
-    pub fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        // Try to get from freelist first
-        let page_id = {
-            let mut freelist = self.freelist_write()?;
-            if let Some(id) = freelist.allocate() {
-                id
-            } else if freelist.trunk_head() != 0 {
-                let trunk_id = freelist.trunk_head();
-                drop(freelist);
-
-                let trunk = self.read_page(trunk_id).map_err(|e| match e {
-                    PagerError::PageNotFound(_) => {
-                        PagerError::InvalidDatabase("Freelist trunk missing".to_string())
-                    }
-                    other => other,
-                })?;
-
-                let mut freelist = self.freelist_write()?;
-                freelist
-                    .load_from_trunk(&trunk)
-                    .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
-                let id = freelist.allocate().ok_or_else(|| {
-                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
-                })?;
-
-                let mut header = self.header_write()?;
-                header.freelist_head = freelist.trunk_head();
-                *self.header_dirty_lock()? = true;
-
-                id
-            } else {
-                // No free pages, extend file
-                let mut header = self.header_write()?;
-                let id = header.page_count;
-                header.page_count += 1;
-                *self.header_dirty_lock()? = true;
-                id
-            }
-        };
-
-        let page = Page::new(page_type, page_id);
-
-        // Write to cache. The evicted page (if any) is dirty by
-        // definition — `cache.insert` only returns `Some` when it
-        // had to evict a dirty entry to make room. The previous
-        // version dropped that return value, which silently lost
-        // writes whenever a freshly-allocated page caused an LRU
-        // eviction. This shows up under heavy ingest as
-        // "B-tree insert error: Pager error: I/O error: failed to
-        // fill whole buffer" later, when something tries to read
-        // back the never-flushed page. Mirror `read_page`'s
-        // handling: write the evicted page through immediately so
-        // the on-disk image stays consistent.
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
-        }
-        self.cache.mark_dirty(page_id);
-
-        Ok(page)
-    }
-
-    /// Reserve a contiguous extent of vector pages.
-    pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<super::ExtentId, PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-        if n_pages == 0 {
-            return Err(PagerError::InvalidDatabase(
-                "contiguous extent must reserve at least one page".to_string(),
-            ));
-        }
-
-        let start_page = {
-            let mut header = self.header_write()?;
-            let start = header.page_count;
-            header.page_count = header.page_count.checked_add(n_pages).ok_or_else(|| {
-                PagerError::InvalidDatabase("contiguous extent page count overflow".to_string())
-            })?;
-            *self.header_dirty_lock()? = true;
-            start
-        };
-
-        for page_id in start_page..start_page + n_pages {
-            let mut page = Page::new(PageType::Vector, page_id);
-            page.update_checksum();
-            if let Some(dirty_page) = self.cache.insert(page_id, page) {
-                let evicted_id = dirty_page.page_id();
-                self.write_page_raw(evicted_id, &dirty_page)?;
-            }
-            self.cache.mark_dirty(page_id);
-        }
-
-        Ok(super::ExtentId {
-            start_page,
-            n_pages,
-        })
-    }
-
-    /// Free a page (return to freelist)
-    pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        // Remove from cache
-        self.cache.remove(page_id);
-
-        // Add to freelist
-        let mut freelist = self.freelist_write()?;
-        freelist.free(page_id);
-
-        *self.header_dirty_lock()? = true;
-
-        Ok(())
-    }
-
-    /// Get database header
-    pub fn header(&self) -> Result<DatabaseHeader, PagerError> {
-        Ok(self.header_read()?.clone())
-    }
-
-    pub fn physical_header(&self) -> Result<PhysicalFileHeader, PagerError> {
-        Ok(self.header_read()?.physical)
-    }
-
-    pub fn update_physical_header(&self, physical: PhysicalFileHeader) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Err(PagerError::ReadOnly);
-        }
-
-        let mut header = self.header_write()?;
-        header.physical = physical;
-        *self.header_dirty_lock()? = true;
-        Ok(())
-    }
-
-    /// Get page count
-    pub fn page_count(&self) -> Result<u32, PagerError> {
-        Ok(self.header_read()?.page_count)
-    }
-
     /// Attach a WAL writer to enforce WAL-first flush ordering.
     ///
     /// After this call, [`Pager::flush`] computes the maximum
@@ -936,377 +455,123 @@ impl Pager {
     /// keep their previous behaviour (no LSN check) — wiring is
     /// strictly opt-in.
     pub fn set_wal_writer(&self, wal: Arc<Mutex<crate::storage::wal::writer::WalWriter>>) {
-        let mut slot = self.wal.write().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .0
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
         *slot = Some(wal);
     }
 
     /// Detach the WAL writer (test / shutdown path).
     pub fn clear_wal_writer(&self) {
-        let mut slot = self.wal.write().unwrap_or_else(|p| p.into_inner());
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .0
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
         *slot = None;
     }
 
     /// Has a WAL writer been attached?
     pub fn has_wal_writer(&self) -> bool {
-        self.wal.read().map(|s| s.is_some()).unwrap_or(false)
+        self.core
+            .wal_barrier()
+            .0
+            .read()
+            .map(|s| s.is_some())
+            .unwrap_or(false)
     }
 
-    /// Flush all dirty pages to disk
-    pub fn flush(&self) -> Result<(), PagerError> {
-        if self.config.read_only {
-            return Ok(());
-        }
-
-        // Persist freelist to trunk pages when dirty
-        let trunks = {
-            let mut freelist = self.freelist_write()?;
-            if freelist.is_dirty() {
-                let mut header = self.header_write()?;
-                let trunks = freelist.flush_to_trunks(0, || {
-                    let id = header.page_count;
-                    header.page_count += 1;
-                    id
-                });
-                header.freelist_head = freelist.trunk_head();
-                *self.header_dirty_lock()? = true;
-                freelist.mark_clean();
-                trunks
-            } else {
-                Vec::new()
-            }
-        };
-
-        for trunk in trunks {
-            let page_id = trunk.page_id();
-            self.cache.insert(page_id, trunk);
-            self.cache.mark_dirty(page_id);
-        }
-
-        // Flush dirty pages from cache (through DWB if enabled)
-        let dirty_pages = self.cache.flush_dirty();
-        if !dirty_pages.is_empty() {
-            // WAL-FIRST: ensure every WAL record describing a dirty
-            // page is durable BEFORE the page itself reaches disk.
-            // Pages with `lsn == 0` are exempt (freelist trunks, header
-            // shadow pages, anything not produced by a WAL append).
-            let max_lsn = dirty_pages
-                .iter()
-                .filter_map(|(_, page)| page.header().ok().map(|h| h.lsn))
-                .max()
-                .unwrap_or(0);
-            if max_lsn > 0 {
-                if let Ok(slot) = self.wal.read() {
-                    if let Some(wal) = slot.as_ref() {
-                        let wal = Arc::clone(wal);
-                        // Drop the read lock before taking the WAL
-                        // mutex so an unrelated reader cannot block
-                        // the flush path.
-                        drop(slot);
-                        let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
-                        wal_guard.flush_until(max_lsn).map_err(PagerError::Io)?;
-                    }
-                }
-            }
-            self.write_pages_through_dwb(&dirty_pages)?;
-        }
-
-        // Write header if dirty
-        if *self.header_dirty_lock()? {
-            self.write_header()?;
-        }
-
-        Ok(())
-    }
-
-    /// Sync file to disk (fsync)
-    pub fn sync(&self) -> Result<(), PagerError> {
-        self.flush()?;
-
-        let file = self.file_lock()?;
-        file.sync_all()?;
-
-        Ok(())
-    }
-
-    /// Get cache statistics
-    pub fn cache_stats(&self) -> crate::storage::engine::page_cache::CacheStats {
-        self.cache.stats()
-    }
-
-    /// Pages currently resident in the page cache. Slots are fixed size, so
-    /// this times the page size is the cache's memory footprint (ADR 0073 §2).
-    pub fn cache_len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Preallocated page-cache slots — the sizing this process derived from
-    /// its page-cache budget share.
-    pub fn cache_capacity(&self) -> usize {
-        self.cache.capacity()
-    }
-
-    /// Count dirty pages currently in the page cache.
-    pub fn dirty_page_count(&self) -> usize {
-        self.cache.dirty_count()
-    }
-
-    /// Estimated fraction of the page cache holding dirty pages.
-    /// Returned in `[0, 1]`. Used by the background writer to
-    /// decide when to kick in aggressive flushing.
-    pub fn dirty_fraction(&self) -> f64 {
-        let capacity = self.cache.capacity().max(1) as f64;
-        self.cache.dirty_count() as f64 / capacity
-    }
-
-    /// Flush up to `max` dirty pages from the cache. Returns the
-    /// number actually written. Background-writer entry point —
-    /// reuses the same persistence path as `flush()` but bounded.
-    pub fn flush_some_dirty(&self, max: usize) -> Result<usize, PagerError> {
-        if self.config.read_only || max == 0 {
-            return Ok(0);
-        }
-        let dirty_pages = self.cache.flush_some_dirty(max);
-        if dirty_pages.is_empty() {
-            return Ok(0);
-        }
-        let count = dirty_pages.len();
-        // WAL-first: every cached dirty page carries an LSN that the
-        // WAL must have already persisted. The full `flush()` path
-        // enforces this with `wal.flush(max_lsn)`; here we simply
-        // write through the pager — safe because callers only reach
-        // this path via the bgwriter, which runs asynchronously
-        // alongside normal commits that already respect WAL-first.
-        for (page_id, page) in dirty_pages {
-            self.write_page(page_id, page)?;
-        }
-        Ok(count)
-    }
-
-    /// Get database file path
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Check if database is read-only
-    pub fn is_read_only(&self) -> bool {
-        self.config.read_only
-    }
-
-    /// Get file size in bytes
-    pub fn file_size(&self) -> Result<u64, PagerError> {
-        let file = self.file_lock()?;
-        Ok(file.metadata()?.len())
-    }
-
-    /// Issue an OS-level read-ahead hint for `page_id`.
-    ///
-    /// A6 prefetch wire: called from `BTreeCursor::next` when the
-    /// cursor passes 50% of the current leaf, so the kernel fetches
-    /// the next leaf page while CPU processes the remaining half of
-    /// the current one. Failures are silent — a missed prefetch is a
-    /// performance miss, never a correctness bug.
-    pub fn prefetch_hint(&self, page_id: u32) {
-        if let Ok(file) = self.file_lock() {
-            let _ = super::super::prefetch::prefetch_page(&file, page_id as u64, PAGE_SIZE as u32);
-        }
-    }
-
-    // ── Corruption defense helpers ──────────────────────────────────
-
-    /// Path for the double-write buffer file
-    fn dwb_path(db_path: &Path) -> PathBuf {
-        reddb_file::layout::pager_dwb_shadow_path(db_path)
-    }
-
-    fn dwb_zone_offset() -> u64 {
-        DWB_ZONE_START_PAGE as u64 * PAGE_SIZE as u64
-    }
-
-    fn write_dwb_zone_frame(&self, buf: &[u8]) -> Result<(), PagerError> {
-        if buf.len() > DWB_ZONE_BYTES {
-            return Err(PagerError::InvalidDatabase(
-                "DWB frame exceeds the reserved in-file zone".to_string(),
+    /// Install an ownership recorder while all other mutators are fenced.
+    #[allow(dead_code)] // Used when ownership recovery is activated.
+    pub(crate) fn install_ownership_recorder(
+        &self,
+        recorder: Arc<dyn super::PageOwnershipRecorder>,
+    ) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.is_some() {
+            return Err(std::io::Error::other(
+                "ownership recorder already installed",
             ));
         }
-        let mut file = self.file_lock()?;
-        file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
-        file.write_all(buf)?;
-        file.sync_all()?;
+        *slot = Some(recorder);
         Ok(())
     }
 
-    /// Clear the in-file DWB zone with valid reserved pages.
-    fn clear_dwb_zone(&self) -> Result<(), PagerError> {
-        let mut file = self.file_lock()?;
-        for page_id in DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE {
-            let mut page = Page::new(PageType::Header, page_id);
-            page.update_checksum();
-            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
-            file.write_all(page.as_bytes())?;
+    /// Remove the recorder after allocator copies and journal completion are
+    /// durable, while other mutators remain fenced.
+    pub(crate) fn clear_ownership_recorder(&self) -> std::io::Result<()> {
+        let mut slot = self
+            .core
+            .wal_barrier()
+            .1
+            .write()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?;
+        if slot.take().is_none() {
+            return Err(std::io::Error::other("ownership recorder is not installed"));
         }
-        file.sync_all()?;
         Ok(())
     }
 
-    fn dwb_zone_is_clear(buf: &[u8]) -> bool {
-        if buf.len() != DWB_ZONE_BYTES {
-            return false;
-        }
-        for (idx, chunk) in buf.chunks_exact(PAGE_SIZE).enumerate() {
-            let Ok(page) = Page::from_slice(chunk) else {
-                return false;
-            };
-            if page.verify_checksum().is_err() {
-                return false;
-            }
-            if page.page_id() != DWB_ZONE_START_PAGE + idx as u32 {
-                return false;
-            }
-            if page.page_type().ok() != Some(PageType::Header) {
-                return false;
-            }
-        }
-        true
+    /// Issue a best-effort OS read-ahead hint under the page-I/O lock.
+    pub fn prefetch_hint(&self, page_id: u32) {
+        let _ = self.core.with_file(|file| {
+            super::super::prefetch::prefetch_page(&file.0, u64::from(page_id), PAGE_SIZE as u32)
+        });
     }
 
-    /// Read the internal manifest page (page 1), the zone the superblock roots.
-    ///
-    /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
-    /// zone — it never falls back to a sidecar and never returns garbage.
-    pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
-        self.read_page(1)
-            .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
-    }
-
-    /// Write pages through the double-write buffer for torn page protection.
-    ///
-    /// 1. Write pages to the in-file DWB zone with a header (magic + count + checksum)
-    /// 2. fsync the DWB zone
-    /// 3. Write all pages to their final locations in the .rdb file
-    /// 4. Clear the DWB zone (marks as consumed)
-    fn write_pages_through_dwb(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
-        if self.dwb_enabled {
-            for chunk in pages.chunks(DWB_MAX_PAGES_PER_FRAME.max(1)) {
-                let buf = reddb_file::encode_paged_dwb_frame(
-                    chunk
-                        .iter()
-                        .map(|(page_id, page)| (*page_id, page.as_bytes())),
-                );
-
-                // Write DWB zone and fsync
-                self.write_dwb_zone_frame(&buf)?;
-
-                // Now write pages to their final locations
-                for (page_id, page) in chunk {
-                    self.write_page_raw(*page_id, page)?;
-                }
-                {
-                    let file = self.file_lock()?;
-                    file.sync_all()?;
-                }
-
-                // Reset the zone to its inactive page images.
-                self.clear_dwb_zone()?;
-            }
-
-            Ok(())
-        } else {
-            // DWB disabled — write directly
-            for (page_id, page) in pages {
-                self.write_page_raw(*page_id, page)?;
-            }
-            Ok(())
-        }
-    }
-
-    /// Recover from double-write buffer after a crash.
-    ///
-    /// If the DWB zone contains valid pages, they were written before the crash
-    /// interrupted writing to their home locations. Re-apply them.
-    fn recover_from_dwb(&self) -> Result<(), PagerError> {
-        let len = {
-            let file = self.file_lock()?;
-            file.metadata()?.len()
-        };
-        let zone_end = Self::dwb_zone_offset() + DWB_ZONE_BYTES as u64;
-        if len < zone_end {
-            return Ok(());
-        }
-
-        let mut buf = vec![0u8; DWB_ZONE_BYTES];
-        {
-            let mut file = self.file_lock()?;
-            file.seek(SeekFrom::Start(Self::dwb_zone_offset()))?;
-            file.read_exact(&mut buf)?;
-        }
-        if buf.get(0..4) != Some(reddb_file::DWB_MAGIC.as_slice()) {
-            if Self::dwb_zone_is_clear(&buf) {
-                return Ok(());
-            }
-            self.clear_dwb_zone()?;
-            return Ok(());
-        }
-
-        let entries = match reddb_file::decode_paged_dwb_frame(&buf) {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.clear_dwb_zone()?;
-                return Ok(());
-            }
-        };
-
-        // DWB is valid — re-apply pages to main file
-        for entry in entries {
-            let page = Page::from_bytes(entry.page);
-            self.write_page_raw(entry.page_id, &page)?;
-        }
-
-        // Sync and clean up
-        {
-            let file = self.file_lock()?;
-            file.sync_all()?;
-        }
-
-        self.clear_dwb_zone()
-    }
-
-    /// Write header and sync to disk (public for checkpointer).
-    pub fn write_header_and_sync(&self) -> Result<(), PagerError> {
-        self.write_header()?;
-        let file = self.file_lock()?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    /// Set the checkpoint_in_progress flag in the header.
-    pub fn set_checkpoint_in_progress(
-        &self,
-        in_progress: bool,
-        target_lsn: u64,
-    ) -> Result<(), PagerError> {
-        let mut header = self.header_write()?;
-        header.checkpoint_in_progress = in_progress;
-        header.checkpoint_target_lsn = target_lsn;
-        *self.header_dirty_lock()? = true;
-        drop(header);
-        self.write_header_and_sync()
-    }
-
-    /// Update the checkpoint LSN and clear the in-progress flag.
-    pub fn complete_checkpoint(&self, lsn: u64) -> Result<(), PagerError> {
-        let mut header = self.header_write()?;
-        header.checkpoint_lsn = lsn;
-        header.checkpoint_in_progress = false;
-        header.checkpoint_target_lsn = 0;
-        *self.header_dirty_lock()? = true;
-        drop(header);
-        self.write_header_and_sync()
+    #[cfg(test)]
+    fn dwb_path(path: &Path) -> PathBuf {
+        reddb_file::layout::pager_dwb_shadow_path(path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_scope_serializes_other_allocators_and_fences_errors() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pager = Arc::new(
+            Pager::open(directory.path().join("data.rdb"), Default::default()).expect("pager"),
+        );
+        let scope = pager.lock_ownership_mutations();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other_pager = Arc::clone(&pager);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal worker started");
+            let page = other_pager.allocate_page(PageType::BTreeLeaf);
+            done_tx
+                .send(page.map(|page| page.page_id()))
+                .expect("signal allocation");
+        });
+        started_rx.recv().expect("worker started");
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        let own = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("reentrant allocation");
+        drop(scope);
+        let other = done_rx
+            .recv()
+            .expect("worker result")
+            .expect("other allocation");
+        worker.join().expect("worker");
+        assert_ne!(own.page_id(), other);
+        pager.fence_interrupted_ownership();
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+    }
 
     fn temp_db_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1456,6 +721,143 @@ mod tests {
         );
 
         drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failed_trunk_fence_is_completed_before_retrying_allocation() {
+        let path = temp_db_path("retry-trunk-fence");
+        let pager = Pager::open_default(&path).expect("pager");
+        // An empty trunk is itself reusable, so consuming its last page must
+        // still fence both superblocks even outside an ownership epoch.
+        let page = pager.allocate_page(PageType::BTreeLeaf).unwrap().page_id();
+        pager.sync().unwrap();
+        pager.free_page(page).unwrap();
+        pager.sync().unwrap();
+        let trunk = pager.header().unwrap().freelist_head;
+        assert_ne!(trunk, 0);
+
+        // A real write error after the trunk has been read must not turn a
+        // subsequent allocation into an unfenced fast-path reuse.
+        let writable = pager
+            .core
+            .with_file(|file| std::mem::replace(&mut file.0, File::open(&path).unwrap()))
+            .unwrap();
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        pager.core.with_file(|file| file.0 = writable).unwrap();
+        pager.allocate_page(PageType::BTreeLeaf).unwrap();
+
+        let zone = read_zone(&path);
+        for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * SUPERBLOCK_SLOT_SIZE;
+            let header =
+                reddb_file::decode_database_header(&zone[start..start + SUPERBLOCK_SLOT_SIZE])
+                    .unwrap();
+            assert_ne!(
+                header.freelist_head, trunk,
+                "copy {copy} still owns consumed trunk"
+            );
+        }
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failed_unjournaled_trunk_write_requires_reopen_and_preserves_free_pages() {
+        let path = temp_db_path("failed-trunk-rewrite");
+        let pager = Pager::open_default(&path).expect("pager");
+        let mut pages = std::collections::HashSet::new();
+        for _ in 0..8 {
+            pages.insert(
+                pager
+                    .allocate_page(PageType::BTreeLeaf)
+                    .expect("seed page")
+                    .page_id(),
+            );
+        }
+        pager.sync().expect("persist seed");
+        for &id in &pages {
+            pager.free_page(id).expect("free seed page");
+        }
+        pager.sync().expect("persist free list");
+        let baseline = pager.page_count().expect("page count");
+        let writable = pager
+            .core
+            .with_file(|file| std::mem::replace(&mut file.0, File::open(&path).expect("read only")))
+            .expect("inject write failure");
+        assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        pager
+            .core
+            .with_file(|file| file.0 = writable)
+            .expect("restore file");
+        let error = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect_err("writeback must stay fenced");
+        assert!(error.to_string().contains("reopen"), "{error}");
+        drop(pager);
+
+        let recovered = Pager::open_default(&path).expect("recover protected write");
+        let mut reused = std::collections::HashSet::new();
+        for _ in 0..pages.len() {
+            let id = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("reuse after recovery")
+                .page_id();
+            if id >= baseline {
+                break;
+            }
+            assert!(pages.contains(&id), "unexpected free page {id}");
+            assert!(reused.insert(id), "duplicate reuse {id}");
+        }
+        // Only the single uncertain reservation may have been removed. The
+        // protected write must never detach and lose the rest of the trunk.
+        assert!(reused.len() >= pages.len() - 1, "lost free-page remainder");
+        drop(recovered);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn sibling_superblock_recovery_does_not_reallocate_live_reused_pages() {
+        let path = temp_db_path("reused-allocator-pair");
+        let pager = Pager::open_default(&path).expect("pager");
+        let mut pages = Vec::new();
+        for _ in 0..32 {
+            pages.push(
+                pager
+                    .allocate_page(PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id(),
+            );
+        }
+        pager.sync().expect("seed");
+        for id in pages {
+            pager.free_page(id).expect("free");
+        }
+        pager.sync().expect("publish free list");
+        let mut live = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let page = pager.allocate_page(PageType::BTreeLeaf).expect("reuse");
+            live.insert(page.page_id());
+            pager
+                .write_page(page.page_id(), page)
+                .expect("write valid page");
+        }
+        pager.sync().expect("publish reused ownership");
+        drop(pager);
+        let selection = reddb_file::select_paged_superblock(&read_zone(&path)).expect("superblock");
+        poke_slot(&path, selection.copy_index, &[0; SUPERBLOCK_SLOT_SIZE]);
+        let recovered = Pager::open_default(&path).expect("sibling recovery");
+        for _ in 0..64 {
+            let id = recovered
+                .allocate_page(PageType::BTreeLeaf)
+                .expect("allocate after recovery")
+                .page_id();
+            assert!(
+                !live.contains(&id),
+                "sibling allocator still considers live page {id} free"
+            );
+        }
+        drop(recovered);
         cleanup(&path);
     }
 

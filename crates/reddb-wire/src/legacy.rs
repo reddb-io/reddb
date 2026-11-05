@@ -134,6 +134,37 @@ pub fn build_legacy_result_frame(payload: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_RESULT, payload)
 }
 
+/// Encode a result payload directly into its final frame allocation. The
+/// callback must append after the reserved header without modifying it.
+/// Capacity is a hint, not an admission limit.
+pub fn build_legacy_result_frame_with(
+    payload_capacity: usize,
+    encode: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload_capacity.saturating_add(5));
+    write_frame_header(&mut out, MSG_RESULT, 0);
+    encode(&mut out);
+    assert!(
+        out.len() >= 5,
+        "encoder must preserve the legacy frame header"
+    );
+    let total = u32::try_from(out.len() - 4).expect("legacy frame length fits u32");
+    out[..4].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
+/// Finish a result in caller-owned, already admitted capacity. The first five
+/// bytes are reserved for the legacy envelope; no payload copy or growth occurs.
+pub fn build_legacy_result_frame_in_place(out: &mut [u8]) -> Result<(), &'static str> {
+    if out.len() < 5 {
+        return Err("truncated legacy result buffer");
+    }
+    let total = u32::try_from(out.len() - 4).map_err(|_| "legacy result exceeds frame length")?;
+    out[..4].copy_from_slice(&total.to_le_bytes());
+    out[4] = MSG_RESULT;
+    Ok(())
+}
+
 pub fn build_legacy_error_frame(message: &[u8]) -> Vec<u8> {
     build_legacy_frame(MSG_ERROR, message)
 }
@@ -184,6 +215,36 @@ pub fn encode_value(buf: &mut Vec<u8>, value: &WireValue) {
             buf.push(VAL_BOOL);
             buf.push(*b as u8);
         }
+    }
+}
+
+/// Encode borrowed engine values without constructing owned WireValue text/blob
+/// copies. Unsupported variants (including Blob) retain the legacy Null tag.
+#[inline]
+pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Text(text) => {
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            buf.extend_from_slice(text.as_bytes());
+        }
+        Value::Integer(value) => encode_value(buf, &WireValue::I64(*value)),
+        Value::UnsignedInteger(value) => encode_value(buf, &WireValue::U64(*value)),
+        Value::Float(value) => encode_value(buf, &WireValue::F64(*value)),
+        Value::Boolean(value) => encode_value(buf, &WireValue::Bool(*value)),
+        Value::Timestamp(value) => encode_value(buf, &WireValue::Timestamp(*value as u64)),
+        _ => buf.push(VAL_NULL),
+    }
+}
+
+/// Exact encoded length without allocating or traversing text contents.
+#[inline]
+pub fn native_value_encoded_len(value: &Value) -> usize {
+    match value {
+        Value::Text(text) => 5 + text.len(),
+        Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) | Value::Timestamp(_) => 9,
+        Value::Boolean(_) => 2,
+        _ => 1,
     }
 }
 
@@ -300,6 +361,47 @@ pub fn set_result_payload_row_count(
 mod tests {
     use super::*;
 
+    #[test]
+    fn admitted_in_place_result_matches_canonical_envelope() {
+        for payload in [b"".as_slice(), b"hello", &[0, 255, 1, 2]] {
+            let expected = build_legacy_result_frame(payload);
+            let mut actual = vec![0; 5 + payload.len()];
+            actual[5..].copy_from_slice(payload);
+            build_legacy_result_frame_in_place(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+        }
+        for length in 0..5 {
+            let mut truncated = vec![0; length];
+            assert!(build_legacy_result_frame_in_place(&mut truncated).is_err());
+        }
+    }
+
+    #[test]
+    fn borrowed_native_encoding_matches_owned_conversion_and_exact_length() {
+        let values = [
+            Value::Null,
+            Value::Integer(i64::MIN),
+            Value::UnsignedInteger(u64::MAX),
+            Value::Float(-1.25),
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Timestamp(-1),
+            Value::text(""),
+            Value::text("quotes\"雪\n"),
+            Value::text("x".repeat(192 * 1024)),
+            Value::Blob(vec![1; 192 * 1024]),
+        ];
+        for value in values {
+            let mut expected = Vec::new();
+            encode_value(&mut expected, &WireValue::from(&value));
+            let mut actual = Vec::with_capacity(native_value_encoded_len(&value));
+            encode_native_value(&mut actual, &value);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.len(), native_value_encoded_len(&value));
+            assert_eq!(actual.len(), actual.capacity());
+        }
+    }
+
     // Pins the WireValue<->Value field mapping re-homed here from
     // reddb-server's wire::protocol (ADR 0052, #1061). The conversion is a
     // byte-faithful relocation, so this round-trips every losslessly-mapped
@@ -371,6 +473,18 @@ mod tests {
             build_legacy_cursor_batch_frame(b"b"),
             [2, 0, 0, 0, MSG_CURSOR_BATCH, b'b']
         );
+    }
+
+    #[test]
+    fn direct_result_frame_encoder_matches_legacy_bytes_across_growth() {
+        for size in [0, 1, 255, 1024, 192 * 1024] {
+            let payload = vec![0x71; size];
+            let frame = build_legacy_result_frame_with(8, |out| {
+                out.extend_from_slice(&payload[..size / 2]);
+                out.extend_from_slice(&payload[size / 2..]);
+            });
+            assert_eq!(frame, build_legacy_result_frame(&payload));
+        }
     }
 
     #[test]

@@ -1,0 +1,33 @@
+{
+  "schema": "reddb.query-allocation-diagnostic.v1",
+  "classification": "thread-local allocation counts; not timings or capacity estimates",
+  "platform": "Windows x86_64, native Rust 1.99.0",
+  "result_cache_enabled": false,
+  "test": "rql_projection_allocation_diagnostic",
+  "command": "cargo test -p reddb-io-server --lib rql_projection_allocation_diagnostic -- --ignored --nocapture --test-threads=1",
+  "fixture": "one projected KV item, warmed cache; optionally 128 nested unreturned array elements; presentation measured separately",
+  "versions": [
+    {
+      "revision": "5ad0766eda49f7472bf85ee91524a17b3ec10673",
+      "description": "REST key-index baseline plus identical diagnostic test",
+      "rql_execution_allocations": {"extra_elements_0": 482, "extra_elements_128": 611},
+      "json_presentation_allocations": 167,
+      "unfiltered_selection_allocations": {"rows_1": 3, "rows_100": 201, "rows_1000": 2001}
+    },
+    {
+      "revision": "00bb6996ad6addfe8beffd95756b83398af3d92f",
+      "description": "stored-row projection and borrowed response selection",
+      "rql_execution_allocations": {"extra_elements_0": 477, "extra_elements_128": 477},
+      "json_presentation_allocations": 164,
+      "unfiltered_selection_allocations": {"rows_1": 0, "rows_100": 0, "rows_1000": 0}
+    },
+    {
+      "revision": "8eb7f554bf6e537755cc3341872dac278f8391e7",
+      "description": "projection plus direct declared-model validation; subsequent test error-prefix correction does not change runtime",
+      "rql_execution_allocations": {"extra_elements_0": 85, "extra_elements_128": 85},
+      "json_presentation_allocations": 164,
+      "unfiltered_selection_allocations": {"rows_1": 0, "rows_100": 0, "rows_1000": 0},
+      "declared_model_validation_allocations": {"unrelated_collections_0": 0, "unrelated_collections_64": 0}
+    }
+  ]
+}

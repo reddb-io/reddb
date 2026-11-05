@@ -26,7 +26,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Search)?;
 
         // Collection name
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
 
         // SIMILAR TO clause
         self.expect(Token::Similar)?;
@@ -141,7 +141,7 @@ impl<'a> Parser<'a> {
                     Ok(VectorSource::Subquery(Box::new(expr)))
                 } else {
                     // Reference: (collection, vector_id)
-                    let collection = self.expect_ident()?;
+                    let collection = self.parse_collection_name()?;
                     self.expect(Token::Comma)?;
                     let vector_id = self.parse_integer()? as u64;
                     self.expect(Token::RParen)?;
@@ -152,8 +152,8 @@ impl<'a> Parser<'a> {
                 }
             }
             // Reference by name: embedding_name
-            Token::Ident(_) => {
-                let name = self.expect_ident()?;
+            Token::Ident(_) | Token::QuotedIdent(_) => {
+                let name = self.parse_collection_name()?;
                 // Check for (collection, id) format
                 if self.consume(&Token::LParen)? {
                     let vector_id = self.parse_integer()? as u64;

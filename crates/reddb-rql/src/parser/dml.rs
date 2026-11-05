@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        let table = self.expect_ident()?;
+        let table = self.parse_collection_name()?;
 
         // Check for entity type keyword
         let entity_type = match self.peek().clone() {
@@ -362,7 +362,10 @@ impl<'a> Parser<'a> {
                 // it via the embeddings task pointer (ADR-0068 §5). Only an
                 // explicit `USING` names a provider here.
                 let provider = if self.consume(&Token::Using)? {
-                    self.expect_ident()?
+                    match self.peek() {
+                        Token::String(_) => self.parse_string()?,
+                        _ => self.expect_ident()?,
+                    }
                 } else {
                     String::new()
                 };
@@ -452,7 +455,7 @@ impl<'a> Parser<'a> {
     /// Parse: UPDATE table SET col1=val1, col2=val2 [WHERE filter] [WITH TTL|EXPIRES AT|METADATA]
     pub fn parse_update_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Update)?;
-        let table = self.expect_ident()?;
+        let table = self.parse_collection_name()?;
         let target = self.parse_update_target()?;
         self.expect(Token::Set)?;
 
@@ -647,7 +650,7 @@ impl<'a> Parser<'a> {
     pub fn parse_delete_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Delete)?;
         self.expect(Token::From)?;
-        let table = self.expect_ident()?;
+        let table = self.parse_collection_name()?;
 
         let filter = if self.consume(&Token::Where)? {
             Some(self.parse_filter()?)

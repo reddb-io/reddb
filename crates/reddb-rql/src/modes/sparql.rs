@@ -277,7 +277,11 @@ impl<'a> SparqlParser<'a> {
             }
 
             // Parse triple pattern
+            let start = self.pos;
             if let Ok(pattern) = self.parse_triple_pattern() {
+                if self.pos == start {
+                    break; // consumed nothing: stop rather than loop forever
+                }
                 query.where_patterns.push(pattern);
 
                 // Optional dot separator
@@ -300,7 +304,11 @@ impl<'a> SparqlParser<'a> {
                 break;
             }
 
+            let start = self.pos;
             if let Ok(pattern) = self.parse_triple_pattern() {
+                if self.pos == start {
+                    break; // consumed nothing: stop rather than loop forever
+                }
                 patterns.push(pattern);
                 self.skip_whitespace();
                 self.consume_if(".");
@@ -402,7 +410,13 @@ impl<'a> SparqlParser<'a> {
             return Ok(SparqlTerm::PrefixedName(prefix, local));
         }
 
-        // Just a local name with empty prefix
+        // Just a local name with empty prefix. An empty token (`;`, `!`, an emoji,
+        // anything no branch above recognises) is not a term: returning success
+        // without consuming input made the pattern loops spin forever, pushing
+        // empty patterns until memory ran out.
+        if prefix.is_empty() {
+            return Err(self.error("Expected term"));
+        }
         Ok(SparqlTerm::PrefixedName(String::new(), prefix))
     }
 
@@ -531,11 +545,11 @@ impl<'a> SparqlParser<'a> {
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else if c == '#' {
                 // Skip comment
                 while let Some(c) = self.peek() {
-                    self.pos += 1;
+                    self.pos += c.len_utf8();
                     if c == '\n' {
                         break;
                     }
@@ -547,7 +561,7 @@ impl<'a> SparqlParser<'a> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
+        self.input.get(self.pos..)?.chars().next()
     }
 
     fn is_at_end(&self) -> bool {
@@ -567,7 +581,7 @@ impl<'a> SparqlParser<'a> {
     fn expect(&mut self, c: char) -> Result<(), SparqlError> {
         self.skip_whitespace();
         if self.peek() == Some(c) {
-            self.pos += 1;
+            self.pos += c.len_utf8();
             Ok(())
         } else {
             Err(self.error(&format!("Expected '{}', found {:?}", c, self.peek())))
@@ -576,16 +590,16 @@ impl<'a> SparqlParser<'a> {
 
     fn peek_keyword(&self, keyword: &str) -> bool {
         let remaining = &self.input[self.pos..].trim_start();
-        if remaining.len() >= keyword.len() {
-            let word = &remaining[..keyword.len()];
-            word.eq_ignore_ascii_case(keyword)
-                && remaining
-                    .chars()
-                    .nth(keyword.len())
-                    .map(|c| !c.is_alphanumeric())
-                    .unwrap_or(true)
-        } else {
-            false
+        match remaining.get(..keyword.len()) {
+            Some(word) => {
+                word.eq_ignore_ascii_case(keyword)
+                    && remaining
+                        .chars()
+                        .nth(keyword.len())
+                        .map(|c| !c.is_alphanumeric())
+                        .unwrap_or(true)
+            }
+            None => false,
         }
     }
 
@@ -603,7 +617,7 @@ impl<'a> SparqlParser<'a> {
     fn skip_identifier(&mut self) {
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -620,7 +634,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -634,7 +648,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' || c == '-' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -646,7 +660,7 @@ impl<'a> SparqlParser<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                self.pos += 1;
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -664,7 +678,7 @@ impl<'a> SparqlParser<'a> {
                 self.pos += 1;
                 return Ok(iri);
             }
-            self.pos += 1;
+            self.pos += c.len_utf8();
         }
         Err(self.error("Unterminated IRI"))
     }
@@ -684,10 +698,11 @@ impl<'a> SparqlParser<'a> {
                 self.pos += 1;
                 return Ok(s);
             }
+            self.pos += c.len_utf8();
             if c == '\\' {
-                self.pos += 2;
-            } else {
-                self.pos += 1;
+                if let Some(escaped) = self.peek() {
+                    self.pos += escaped.len_utf8();
+                }
             }
         }
         Err(self.error("Unterminated string"))
@@ -943,6 +958,54 @@ fn convert_sparql_filter(filter: &SparqlFilter) -> Option<Filter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multibyte_input_never_panics_the_keyword_matcher() {
+        // `peek_keyword` compared `remaining[..keyword.len()]`, a byte-index
+        // slice that panics when that offset lands inside a multi-byte char.
+        for pad in 0..24 {
+            for wide in ["é", "日", "😀"] {
+                let input = format!("{}{wide}llo", "a".repeat(pad));
+                let _ = SparqlParser::parse(&input);
+                let input = format!("SELECT ?x WHERE {{ ?x :{}{wide} ?y }}", "p".repeat(pad));
+                let _ = SparqlParser::parse(&input);
+            }
+        }
+    }
+
+    #[test]
+    fn a_character_no_branch_recognises_is_not_a_term() {
+        // Direct and bounded: parse_term used to return an empty "success".
+        for junk in [";", "!", ",", "(", ")", "😀", "\u{00A0}x;"] {
+            let mut p = SparqlParser {
+                input: junk,
+                pos: 0,
+            };
+            let before = p.pos;
+            let term = p.parse_term();
+            assert!(
+                term.is_err() || p.pos > before,
+                "parse_term({junk:?}) succeeded without consuming input: {term:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognised_characters_end_the_pattern_list_instead_of_spinning() {
+        // Each used to loop forever pushing empty patterns until memory ran out.
+        for junk in [";", "!", ",", "😀"] {
+            let q = format!("SELECT ?x WHERE {{ ?x :p ?y . {junk} }}");
+            let _ = SparqlParser::parse(&q); // must return (Ok or Err), not hang
+            let q = format!("SELECT ?x WHERE {{ OPTIONAL {{ ?x :p ?y . {junk} }} }}");
+            let _ = SparqlParser::parse(&q);
+        }
+    }
+
+    #[test]
+    fn keywords_still_match_case_insensitively_before_multibyte_text() {
+        let q = SparqlParser::parse("select ?x where { ?x :p \"héllo\" }").unwrap();
+        assert_eq!(q.select, vec!["x"]);
+    }
 
     #[test]
     fn test_parse_simple_select() {

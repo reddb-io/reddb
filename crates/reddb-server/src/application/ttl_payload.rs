@@ -3,27 +3,15 @@ use crate::json::Value as JsonValue;
 use crate::storage::unified::MetadataValue;
 use crate::{RedDBError, RedDBResult};
 
-pub(crate) const INTERNAL_TTL_SECONDS_KEY: &str = "_ttl";
-pub(crate) const INTERNAL_TTL_MILLIS_KEY: &str = "_ttl_ms";
-pub(crate) const INTERNAL_EXPIRES_AT_KEY: &str = "_expires_at";
-pub(crate) const INTERNAL_TTL_METADATA_KEYS: [&str; 3] = [
+pub(crate) use reddb_engine::catalog::enforcement::{
+    has_internal_ttl_metadata, INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY,
     INTERNAL_TTL_SECONDS_KEY,
-    INTERNAL_TTL_MILLIS_KEY,
-    INTERNAL_EXPIRES_AT_KEY,
-];
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TtlFieldKind {
     Duration,
     ExpiresAt,
-}
-
-pub(crate) fn has_internal_ttl_metadata(metadata: &[(String, MetadataValue)]) -> bool {
-    metadata.iter().any(|(key, _)| {
-        INTERNAL_TTL_METADATA_KEYS
-            .iter()
-            .any(|reserved| reserved == &key.as_str())
-    })
 }
 
 pub(crate) fn parse_collection_default_ttl_ms(payload: &JsonValue) -> RedDBResult<Option<u64>> {

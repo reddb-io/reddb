@@ -1,0 +1,81 @@
+{
+  "capability": "table",
+  "descriptor": {
+    "columns": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "number"
+      },
+      {
+        "name": "item",
+        "nullable": false,
+        "type": "string"
+      }
+    ],
+    "counts_by_kind": {
+      "edges": 0,
+      "nodes": 0,
+      "paths": 0,
+      "rows": 1,
+      "vector_matches": 0
+    },
+    "has_graph": false,
+    "has_metrics": false,
+    "has_queue": false,
+    "has_table": true,
+    "has_timeseries": false,
+    "has_vector": false,
+    "models_present": [
+      "table"
+    ],
+    "renderer_hints": [
+      "table"
+    ],
+    "result_kind": "table"
+  },
+  "engine": "runtime-table",
+  "mode": "sql",
+  "ok": true,
+  "query": "SELECT seq, item FROM query_perf WHERE seq = 42",
+  "record_count": 1,
+  "result": {
+    "columns": [
+      "seq",
+      "item"
+    ],
+    "records": [
+      {
+        "edges": {},
+        "meta": {
+          "collection": "query_perf",
+          "created_at": 1792521785,
+          "kind": "row",
+          "rid": 19085,
+          "tenant": null,
+          "updated_at": 1792521785
+        },
+        "nodes": {},
+        "paths": [],
+        "values": {
+          "item": "bcc839a22b4a9c325233a62faf3d42c4ae9e619fb8004afed881db383c392448bcc839a22b4a9c325233a62faf3d42c4ae9e",
+          "seq": 42
+        },
+        "vector_results": []
+      }
+    ],
+    "stats": {
+      "edges_scanned": 0,
+      "exec_time_us": 0,
+      "nodes_scanned": 0,
+      "rows_scanned": 0,
+      "segments_pruned": 0,
+      "segments_scanned": 1,
+      "segments_total": 1
+    }
+  },
+  "selection": {
+    "scope": "any"
+  },
+  "statement": "table"
+}

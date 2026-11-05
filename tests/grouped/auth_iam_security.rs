@@ -54,20 +54,14 @@ mod e2e_tenant_auto_index;
 #[path = "runtime_persistence/e2e_vault_sealed_storage.rs"]
 mod e2e_vault_sealed_storage;
 
-#[path = "http_grpc_auth/grpc_oauth_smoke.rs"]
-mod grpc_oauth_smoke;
-
-#[path = "http_grpc_auth/grpc_tls_smoke.rs"]
-mod grpc_tls_smoke;
-
-#[path = "http_grpc_auth/http_oauth_smoke.rs"]
-mod http_oauth_smoke;
-
 #[path = "../http_tls_limiter.rs"]
 mod http_tls_limiter;
 
-#[path = "http_grpc_auth/http_tls_smoke.rs"]
-mod http_tls_smoke;
+#[path = "../cluster_bootstrap_authority.rs"]
+mod cluster_bootstrap_authority;
+
+#[path = "../docs_cluster_bootstrap_authority.rs"]
+mod docs_cluster_bootstrap_authority;
 
 #[path = "auth_security/iam_grant_compat.rs"]
 mod iam_grant_compat;
@@ -104,9 +98,6 @@ mod iam_policy_runtime;
 
 #[path = "auth_security/iam_policy_sql.rs"]
 mod iam_policy_sql;
-
-#[path = "http_grpc_auth/oauth_jwks_server.rs"]
-mod oauth_jwks_server;
 
 #[path = "redwire_protocol/redwire_oauth_e2e.rs"]
 mod redwire_oauth_e2e;

@@ -318,6 +318,9 @@ mod tests {
         let backend = Arc::new(LocalBackend);
         let mut options = RedDBOptions::persistent(data_path)
             .with_replication(ReplicationConfig::replica("http://primary:5050"))
+            // The handler fixture owns replication state; a background pull
+            // loop can race its configured replica identity and applied LSN.
+            .with_replica_loop_enabled(false)
             .with_atomic_remote_backend(backend);
         options.remote_key = Some(database_key.to_string());
         let runtime = RedDBRuntime::with_options(options).expect("runtime boots");
@@ -342,7 +345,7 @@ mod tests {
         let server = RedDBServer::new(runtime.clone());
 
         let response = server.handle_admin_failover_promote(promote_request());
-        let body = String::from_utf8(response.body).expect("response body");
+        let body = String::from_utf8(response.body.to_vec()).expect("response body");
 
         assert_eq!(response.status, 200, "{body}");
         assert!(body.contains(r#""timeline":2"#), "{body}");

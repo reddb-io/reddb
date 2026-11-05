@@ -10,9 +10,9 @@ SELECT "text value" FROM "select" WHERE "key name" = 1;
 
 An identifier may name a table, column, alias, or constraint. Double an embedded
 quote: `"a""b"` names the column `a"b`. Ordinary unquoted identifiers continue to
-work. Paths keep their dots outside the quotes, for example
-`"profile name"."city"`. Literal dots inside a single quoted identifier are
-currently rejected because the query AST cannot distinguish them from paths.
+work. Field paths keep their dots outside the quotes, for example
+`"profile name"."city"`. Literal dots inside a quoted column or alias are rejected
+because the query AST cannot distinguish them from field paths.
 Quoted keywords such as `"CASE"` and `"current_user"` are column names,
 not expressions with special behavior.
 
@@ -51,3 +51,29 @@ VALUES (1, {"title":"hello","tags":["one","two"]});
 
 Do not replace double quotes inside JSON request bodies, stored JSON values, or
 inline JSON literals. They delimit JSON keys and text, not SQL identifiers.
+
+## Dots in collection names
+
+Collection names may contain dots. `app.audit.events`, `"app"."audit"."events"`,
+and `"app.audit.events"` all refer to the same collection. Dots are part of its
+catalog name; creating or dropping it does not create or drop a collection
+named `app`. The `red` namespace, including names starting with `red.`, remains
+reserved for the system. Empty segments and wildcard segments are not valid
+collection names (the existing `DROP COLLECTION app.*` wildcard is a separate
+operation).
+
+```sql
+CREATE TABLE app.audit.events (id INT PRIMARY KEY, message TEXT);
+INSERT INTO "app.audit.events" (id, message) VALUES (1, 'created');
+SELECT e.message FROM app.audit.events e WHERE e.id = 1;
+```
+
+Use a table alias to qualify fields in queries. For KV commands whose dot also
+separates the collection from its key, quote the entire collection name:
+
+```sql
+CREATE KV app.audit.cache;
+KV PUT "app.audit.cache".theme = 'dark';
+KV GET "app.audit.cache".theme;
+KV LIST app.audit.cache;
+```

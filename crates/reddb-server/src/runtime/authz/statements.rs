@@ -3,7 +3,9 @@
 //! move: these methods consume the policy-column helpers that live in
 //! [`super::policy_columns`]. The central dispatch in
 //! [`super::super::impl_core`] calls the (unchanged) `pub(crate)` methods.
-use super::super::execution_context::{current_auth_identity, current_tenant};
+use super::super::execution_context::{
+    current_auth_identity, current_auth_principal, current_tenant,
+};
 use super::super::*;
 use super::policy_columns::*;
 
@@ -209,7 +211,7 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
 
-        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+        let (_, grole) = current_auth_identity().ok_or_else(|| {
             RedDBError::Query("CREATE USER requires an authenticated principal".to_string())
         })?;
         if grole != crate::auth::Role::Admin {
@@ -220,6 +222,15 @@ impl RedDBRuntime {
 
         let role = crate::auth::Role::from_str(&stmt.role)
             .ok_or_else(|| RedDBError::Query(format!("invalid role `{}`", stmt.role)))?;
+        let actor = current_auth_principal().ok_or_else(|| {
+            RedDBError::Query("CREATE USER requires a credential principal".to_string())
+        })?;
+        let target = crate::auth::UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+        if !auth_store.check_user_lifecycle_authz(&actor, grole, "user:create", &target) {
+            return Err(RedDBError::Query(format!(
+                "CREATE USER denied by IAM policy: action `user:create` resource `user:{target}`"
+            )));
+        }
         let user = auth_store
             .create_user_in_tenant(stmt.tenant.as_deref(), &stmt.username, &stmt.password, role)
             .map_err(|e| RedDBError::Query(e.to_string()))?;
@@ -258,7 +269,7 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
 
-        let (gname, grole) = current_auth_identity().ok_or_else(|| {
+        let (_, grole) = current_auth_identity().ok_or_else(|| {
             RedDBError::Query("ALTER USER requires an authenticated principal".to_string())
         })?;
         if grole != crate::auth::Role::Admin {
@@ -268,15 +279,16 @@ impl RedDBRuntime {
         }
 
         let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
-        let actor_tenant = current_tenant();
-        let actor = UserId::from_parts(actor_tenant.as_deref(), &gname);
+        let actor = current_auth_principal().ok_or_else(|| {
+            RedDBError::Query("ALTER USER requires a credential principal".to_string())
+        })?;
         for attr in &stmt.attributes {
             let action = match attr {
                 AlterUserAttribute::Disable => "user:disable",
                 AlterUserAttribute::Password(_) => "user:password:change",
                 _ => "user:update",
             };
-            if auth_store.has_explicit_user_lifecycle_deny(&actor, grole, action, &target) {
+            if !auth_store.check_user_lifecycle_authz(&actor, grole, action, &target) {
                 return Err(RedDBError::Query(format!(
                     "ALTER USER denied by IAM policy: action `{action}` resource `user:{target}`"
                 )));
@@ -401,6 +413,17 @@ impl RedDBRuntime {
         }
         let pid = policy.id.clone();
         let tenant = current_tenant();
+        if let Some(tenant) = &tenant {
+            if auth_store
+                .get_policy(&pid)
+                .is_some_and(|existing| existing.tenant.as_ref() != Some(tenant))
+            {
+                return Err(RedDBError::Query(
+                    "cannot overwrite a policy owned by another tenant or the platform".into(),
+                ));
+            }
+            policy.tenant = Some(tenant.clone());
+        }
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
@@ -455,6 +478,16 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
         let tenant = current_tenant();
+        if let Some(tenant) = &tenant {
+            if auth_store
+                .get_policy(id)
+                .is_some_and(|policy| policy.tenant.as_ref() != Some(tenant))
+            {
+                return Err(RedDBError::Query(
+                    "cannot drop a policy owned by another tenant or the platform".into(),
+                ));
+            }
+        }
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
@@ -514,13 +547,32 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
         let p = match principal {
-            PolicyPrincipalRef::User(u) => {
-                PrincipalRef::User(UserId::from_parts(u.tenant.as_deref(), &u.username))
-            }
+            PolicyPrincipalRef::User(u) => PrincipalRef::User(UserId::from_parts(
+                u.tenant.as_deref().or(current_tenant().as_deref()),
+                &u.username,
+            )),
             PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
         };
-        let pretty_target = principal_label(principal);
         let tenant = current_tenant();
+        if let (Some(actor_tenant), PrincipalRef::User(user)) = (&tenant, &p) {
+            if user.tenant.as_ref() != Some(actor_tenant) {
+                return Err(RedDBError::Query(
+                    "tenant policy administrators cannot attach or detach policies across tenants"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(tenant) = &tenant {
+            if auth_store
+                .get_policy(policy_id)
+                .is_some_and(|policy| policy.tenant.as_ref() != Some(tenant))
+            {
+                return Err(RedDBError::Query(
+                    "tenant administrators can attach or detach only tenant-owned policies".into(),
+                ));
+            }
+        }
+        let pretty_target = principal_label(principal);
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
@@ -581,13 +633,32 @@ impl RedDBRuntime {
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
         let p = match principal {
-            PolicyPrincipalRef::User(u) => {
-                PrincipalRef::User(UserId::from_parts(u.tenant.as_deref(), &u.username))
-            }
+            PolicyPrincipalRef::User(u) => PrincipalRef::User(UserId::from_parts(
+                u.tenant.as_deref().or(current_tenant().as_deref()),
+                &u.username,
+            )),
             PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
         };
-        let pretty_target = principal_label(principal);
         let tenant = current_tenant();
+        if let (Some(actor_tenant), PrincipalRef::User(user)) = (&tenant, &p) {
+            if user.tenant.as_ref() != Some(actor_tenant) {
+                return Err(RedDBError::Query(
+                    "tenant policy administrators cannot attach or detach policies across tenants"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(tenant) = &tenant {
+            if auth_store
+                .get_policy(policy_id)
+                .is_some_and(|policy| policy.tenant.as_ref() != Some(tenant))
+            {
+                return Err(RedDBError::Query(
+                    "tenant administrators can attach or detach only tenant-owned policies".into(),
+                ));
+            }
+        }
+        let pretty_target = principal_label(principal);
         let (actor_name, actor_role) = current_auth_identity()
             .unwrap_or_else(|| ("anonymous".to_string(), crate::auth::Role::Read));
         let actor = crate::auth::UserId::from_parts(tenant.as_deref(), &actor_name);
@@ -652,7 +723,10 @@ impl RedDBRuntime {
         let pols = match filter {
             None => auth_store.list_policies(),
             Some(PolicyPrincipalRef::User(u)) => {
-                let id = UserId::from_parts(u.tenant.as_deref(), &u.username);
+                let id = UserId::from_parts(
+                    u.tenant.as_deref().or(current_tenant().as_deref()),
+                    &u.username,
+                );
                 auth_store.effective_policies(&id)
             }
             Some(PolicyPrincipalRef::Group(g)) => auth_store.group_policies(g),
@@ -729,7 +803,10 @@ impl RedDBRuntime {
             .read()
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
-        let id = UserId::from_parts(user.tenant.as_deref(), &user.username);
+        let id = UserId::from_parts(
+            user.tenant.as_deref().or(current_tenant().as_deref()),
+            &user.username,
+        );
         let pols = auth_store.effective_policies(&id);
 
         // Show one row per (policy, statement) tuple, plus any
@@ -1078,7 +1155,10 @@ impl RedDBRuntime {
             .read()
             .clone()
             .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
-        let id = UserId::from_parts(user.tenant.as_deref(), &user.username);
+        let id = UserId::from_parts(
+            user.tenant.as_deref().or(current_tenant().as_deref()),
+            &user.username,
+        );
         let r = ResourceRef::new(resource.kind.clone(), resource.name.clone());
         let outcome = auth_store.simulate(&id, action, &r, SimCtx::default());
 

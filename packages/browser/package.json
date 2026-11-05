@@ -1,0 +1,46 @@
+{
+  "name": "@reddb-io/browser",
+  "version": "0.8.0",
+  "private": false,
+  "type": "module",
+  "description": "RedDB local browser table SQL, transactions and offline OPFS persistence through a shared Rust/WASM engine.",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./worker": "./src/worker.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs test/session.test.mjs test/local-vault.test.mjs",
+    "prepack": "node scripts/verify-dist.mjs",
+    "test:distribution": "node --test test/distribution.test.mjs",
+    "build:interop": "node scripts/build-interop.mjs",
+    "test:interop": "node --test test/interop.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1",
+    "vite": "8.3.5",
+    "typescript": "7.0.2"
+  },
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reddb-io/reddb.git",
+    "directory": "packages/browser"
+  },
+  "homepage": "https://github.com/reddb-io/reddb/tree/main/packages/browser",
+  "types": "./src/index.d.ts",
+  "files": [
+    "src/",
+    "scripts/verify-dist.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  }
+}

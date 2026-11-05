@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::storage::RedDB;
@@ -38,32 +37,9 @@ impl QueryPlan {
     }
 }
 
-/// Canonical logical plan used for explain/introspection during the planner transition.
-#[derive(Debug, Clone, Default)]
-pub struct CanonicalLogicalPlan {
-    pub root: CanonicalLogicalNode,
-}
+pub use reddb_engine::query::logical_plan::{CanonicalLogicalNode, CanonicalLogicalPlan};
 
-/// Canonical logical operator node.
-#[derive(Debug, Clone, Default)]
-pub struct CanonicalLogicalNode {
-    pub operator: String,
-    pub source: Option<String>,
-    pub details: BTreeMap<String, String>,
-    pub estimated_rows: f64,
-    pub estimated_selectivity: f64,
-    pub estimated_confidence: f64,
-    pub operator_cost: f64,
-    pub children: Vec<CanonicalLogicalNode>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AccessPathDecision {
-    pub path: &'static str,
-    pub index_hint: Option<String>,
-    pub reason: String,
-    pub warning: Option<String>,
-}
+pub use reddb_engine::query::logical_plan::AccessPathDecision;
 
 /// Query planner that combines rewriting, caching, and cost estimation
 pub struct QueryPlanner {

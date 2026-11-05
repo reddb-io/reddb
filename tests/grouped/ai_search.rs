@@ -9,9 +9,6 @@
 #[path = "ai_search/support.rs"]
 mod support;
 
-#[path = "surface_contracts/compile_fail.rs"]
-mod compile_fail;
-
 #[path = "ai_search/e2e_ask_planner_core.rs"]
 mod e2e_ask_planner_core;
 
@@ -20,9 +17,6 @@ mod e2e_ask_search_conformance;
 
 #[path = "ai_search/e2e_comment_clustering.rs"]
 mod e2e_comment_clustering;
-
-#[path = "sql_window/e2e_explain.rs"]
-mod e2e_explain;
 
 #[path = "ai_search/e2e_issue_557_ask_context_retrieval.rs"]
 mod e2e_issue_557_ask_context_retrieval;
@@ -68,9 +62,6 @@ mod integration_vector_query_text_local;
 
 #[path = "ai_search/mock_ai_provider.rs"]
 mod mock_ai_provider;
-
-#[path = "surface_contracts/smoke_embedded.rs"]
-mod smoke_embedded;
 
 #[path = "ai_local_vector/e2e_vector_execution_observability.rs"]
 mod e2e_vector_execution_observability;

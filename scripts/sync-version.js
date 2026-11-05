@@ -26,6 +26,8 @@
  *   - drivers/js-client/package.json  (@reddb-io/client npm — optional, Lane T #136)
  *   - drivers/bun/package.json        (@reddb-io/client-bun npm)
  *   - packages/internal-*.package.json (private npm workspace support packages)
+ *   - drivers/node/Cargo.toml         (reddb-io-node addon)
+ *   - drivers/node/Cargo.lock         (path package versions)
  *   - drivers/python/Cargo.toml       (reddb-io-python internal name)
  *   - drivers/python/Cargo.lock       (path package versions)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
@@ -63,6 +65,16 @@ const targets = [
   // umbrella reddb crate so the release workflow can publish them in
   // dependency order without version drift.
   {
+    label: 'crates/reddb-tonic/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-tonic', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-tonic-prost/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-tonic-prost', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
     label: 'crates/reddb-types/Cargo.toml',
     file: path.join(root, 'crates', 'reddb-types', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -75,6 +87,11 @@ const targets = [
   {
     label: 'crates/reddb-file/Cargo.toml',
     file: path.join(root, 'crates', 'reddb-file', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
+    label: 'crates/reddb-engine/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-engine', 'Cargo.toml'),
     type: 'cargo-toml',
   },
   {
@@ -123,11 +140,6 @@ const targets = [
     type: 'package-json',
   },
   {
-    label: 'packages/internal-version-compare/package.json',
-    file: path.join(root, 'packages', 'internal-version-compare', 'package.json'),
-    type: 'package-json',
-  },
-  {
     label: 'packages/mcp/package.json (@reddb-io/mcp)',
     file: path.join(root, 'packages', 'mcp', 'package.json'),
     type: 'package-json',
@@ -155,6 +167,11 @@ const targets = [
     label: 'drivers/bun/package.json',
     file: path.join(root, 'drivers', 'bun', 'package.json'),
     type: 'package-json',
+  },
+  {
+    label: 'drivers/node/Cargo.toml',
+    file: path.join(root, 'drivers', 'node', 'Cargo.toml'),
+    type: 'cargo-toml',
   },
   {
     label: 'drivers/python/Cargo.toml',
@@ -205,11 +222,29 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-crypto',
   'reddb-io-file',
   'reddb-io-rql',
+  'reddb-io-engine',
   'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
   'reddb-io-client-connector',
+])
+syncCargoLock(path.join(root, 'drivers', 'node', 'Cargo.lock'), [
+  'reddb-io',
+  'reddb-io-types',
+  'reddb-io-crypto',
+  'reddb-io-file',
+  'reddb-io-rql',
+  'reddb-io-engine',
+  'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
+  'reddb-io-grpc-proto',
+  'reddb-io-server',
+  'reddb-io-client',
+  'reddb-io-node',
 ])
 syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io',
@@ -217,7 +252,10 @@ syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io-crypto',
   'reddb-io-file',
   'reddb-io-rql',
+  'reddb-io-engine',
   'reddb-io-wire',
+  'reddb-io-tonic',
+  'reddb-io-tonic-prost',
   'reddb-io-grpc-proto',
   'reddb-io-server',
   'reddb-io-client',
@@ -235,7 +273,10 @@ const stageList = [
   'crates/reddb-crypto/Cargo.toml',
   'crates/reddb-file/Cargo.toml',
   'crates/reddb-rql/Cargo.toml',
+  'crates/reddb-engine/Cargo.toml',
   'crates/reddb-wire/Cargo.toml',
+  'crates/reddb-tonic/Cargo.toml',
+  'crates/reddb-tonic-prost/Cargo.toml',
   'crates/reddb-grpc-proto/Cargo.toml',
   'crates/reddb-server/Cargo.toml',
   'crates/reddb-client/Cargo.toml',
@@ -243,13 +284,14 @@ const stageList = [
   'drivers/js/package.json',
   'packages/internal-asset-fetcher/package.json',
   'packages/internal-bin-resolver/package.json',
-  'packages/internal-version-compare/package.json',
   'packages/mcp/package.json',
   'charts/reddb/Chart.yaml',
   // drivers/js-client/package.json comes from Lane T (#136); the
   // .filter() below drops it from the stage list when absent.
   'drivers/js-client/package.json',
   'drivers/bun/package.json',
+  'drivers/node/Cargo.toml',
+  'drivers/node/Cargo.lock',
   'drivers/python/Cargo.toml',
   'drivers/python/Cargo.lock',
   'drivers/python/pyproject.toml',

@@ -28,8 +28,9 @@ mod vector;
 // not just super-path).
 pub(crate) use filter_compiled::{CompiledEntityFilter, CompiledEntityFilterDecision};
 pub(crate) use helpers::{
-    evaluate_entity_filter, evaluate_entity_filter_with_db, extract_entity_id_from_filter,
-    extract_select_column_names, extract_zone_predicates, try_hash_eq_lookup,
+    evaluate_entity_filter, evaluate_entity_filter_result_with_db, evaluate_entity_filter_with_db,
+    extract_entity_id_from_filter, extract_select_column_names, extract_zone_predicates,
+    try_hash_eq_lookup,
 };
 pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(crate) use indexed_scan::try_sorted_index_lookup;
@@ -45,21 +46,7 @@ use table::{
     take_last_segment_scan_stats, RuntimeTableExecutionContext,
 };
 
-/// Convert values accepted by `SUM` and `AVG` into their accumulator form.
-///
-/// Both aggregate execution routes use this function so their accepted types
-/// and IEEE 754 behavior cannot drift apart.
-fn aggregate_value_to_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Integer(value) => Some(*value as f64),
-        Value::UnsignedInteger(value) => Some(*value as f64),
-        Value::BigInt(value) => Some(*value as f64),
-        Value::Float(value) => Some(*value),
-        Value::Decimal(value) => Some(reddb_types::types::decimal_to_f64(*value)),
-        Value::Boolean(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
-}
+use reddb_engine::query::runtime::aggregation::aggregate_value_to_f64;
 
 pub(crate) use row_stream::{RowBufferArena, RowStream, DEFAULT_HIGH_WATER_MARK};
 
@@ -310,37 +297,7 @@ fn resolve_table_row_by_logical_id(
         .resolve_logical_id(&store, table, logical_id)
 }
 
-pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
-    let has_capability = record
-        .get("red_capabilities")
-        .and_then(|value| match value {
-            reddb_types::Value::Text(value) => Some(value),
-            _ => None,
-        })
-        .map(|capabilities| {
-            capabilities
-                .split(',')
-                .any(|capability| capability.trim() == "document")
-        })
-        .unwrap_or(false);
-    if has_capability {
-        return true;
-    }
-    // Fallback: rows produced by `set_public_row_envelope` skip the
-    // `red_capabilities` summary and only carry `kind`. Issue #551 —
-    // `WHERE body.field` routes through the `document_path_filter`
-    // operator which gates on document capability, so without this
-    // fallback every document row gets dropped before the filter
-    // ever runs.
-    record
-        .get("kind")
-        .and_then(|value| match value {
-            reddb_types::Value::Text(value) => Some(value),
-            _ => None,
-        })
-        .map(|kind| kind.as_ref() == "document")
-        .unwrap_or(false)
-}
+pub(super) use reddb_engine::query::runtime::field_resolution::runtime_record_has_document_capability;
 
 /// A source-free scalar SELECT (no `FROM`) parses to the synthetic `any`
 /// table with only source-free scalar projections (literals, session
@@ -441,10 +398,11 @@ fn project_scalar_via_evaluator(
             continue;
         };
         let col_name = super::join_filter::projection_name(proj);
+        let sensitive = super::join_filter::expression_uses_secret(expr, source, None, None);
         let value = if let Some(value) = session_context_scalar_value(expr) {
             value
         } else {
-            match evaluator::evaluate(expr, empty_row) {
+            match super::expr_eval::evaluate_typed_expr_with_secret_literals(expr, empty_row) {
                 Ok(v) => v,
                 // Fall back for CONFIG, KV, ML_* and any other special-cased
                 // functions the evaluator does not cover yet.
@@ -462,8 +420,26 @@ fn project_scalar_via_evaluator(
                     .cloned()
                     .unwrap_or(Value::Null)
                 }
-                Err(err) => return Err(RedDBError::Query(err.to_string())),
+                Err(err) => {
+                    return Err(RedDBError::Query(
+                        if sensitive
+                            && !matches!(
+                                &err,
+                                crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                            )
+                        {
+                            "secret expression evaluation failed".into()
+                        } else {
+                            err.to_string()
+                        },
+                    ))
+                }
             }
+        };
+        let value = if sensitive {
+            super::execution_context::secret_query_output(value)?
+        } else {
+            value
         };
         record.set(&col_name, value);
     }

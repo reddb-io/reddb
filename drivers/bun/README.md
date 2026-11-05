@@ -28,6 +28,27 @@ Run the shared SDK smoke test and this package's actual TCP-client regression:
 REDDB_BINARY_PATH=/absolute/path/to/red bun run test
 ```
 
+The receive path queues fragments and copies each completed payload into an owned
+buffer. A terminal framing/socket failure or connection close rejects pending and
+future queries. A server query error rejects its own query while the connection
+remains usable. The existing 16 MiB frame limit and query return shapes apply.
+
+From this directory in a repository checkout, compare receive processing against
+a baseline checkout using the installed Bun runtime:
+
+```sh
+REDDB_BENCH_BASELINE=/path/to/baseline REDDB_BENCH_OUTPUT=bun-receive.json \
+  bun run bench-receive.ts
+bun ../js-client/bench/summarize.mjs bun-receive.json
+```
+
+The benchmark alternates 20 paired samples of at least 20 ms. Scripted sockets
+exercise production query encoding, receive parsing, UTF-8 and Promise delivery.
+Input construction and exact response comparisons are outside timing. Separate
+copy probes count top-level Buffer operations without double counting. Network,
+database execution, the unchanged TCP callback ownership copy and total process
+memory are outside these measurements. Timings never gate CI.
+
 <!-- contract-matrix:begin -->
 ## Public-surface support
 

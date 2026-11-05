@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-types"
-version = "1.23.4"
+version = "1.28.10"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB logical type system: the neutral keystone vocabulary — Value, DataType, SqlTypeName, TypeModifier, TypeCategory, ValueError, Row — depended on by every authority crate and depending on none."
@@ -20,7 +20,7 @@ name = "measure_value_layout"
 path = "src/bin/measure_value_layout.rs"
 
 [dependencies]
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [dev-dependencies]
 proptest = "1"

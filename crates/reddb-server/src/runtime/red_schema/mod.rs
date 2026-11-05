@@ -856,11 +856,13 @@ pub(super) fn red_query(
         frame.visible_collections()
     };
     let db = runtime.db();
+    let mut _event_snapshot = None;
+    let control_events = matches!(virtual_kind, VirtualTableKind::ControlEvents);
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => {
-            catalog_views::collections_snapshot(runtime, tenant, visible_collections)
+            catalog_views::collections_snapshot(runtime, tenant, visible_collections)?
         }
-        VirtualTableKind::Columns => catalog_views::columns_snapshot(runtime, visible_collections),
+        VirtualTableKind::Columns => catalog_views::columns_snapshot(runtime, visible_collections)?,
         VirtualTableKind::Describe => {
             catalog_views::describe_snapshot(runtime, visible_collections, query)?
         }
@@ -868,25 +870,25 @@ pub(super) fn red_query(
             catalog_views::show_create_snapshot(runtime, visible_collections, query)?
         }
         VirtualTableKind::ShowIndexes => {
-            catalog_views::show_indexes_snapshot(runtime, visible_collections)
+            catalog_views::show_indexes_snapshot(runtime, visible_collections)?
         }
-        VirtualTableKind::Indices => catalog_views::indices_snapshot(runtime, visible_collections),
+        VirtualTableKind::Indices => catalog_views::indices_snapshot(runtime, visible_collections)?,
         VirtualTableKind::Policies => {
             governance_views::policies_snapshot(runtime, tenant, visible_collections)
         }
         VirtualTableKind::Stats => {
-            catalog_views::stats_snapshot(runtime, visible_collections, query)
+            catalog_views::stats_snapshot(runtime, visible_collections, query)?
         }
         VirtualTableKind::Subscriptions => {
-            ops_views::subscriptions_snapshot(runtime, visible_collections)
+            ops_views::subscriptions_snapshot(runtime, visible_collections)?
         }
-        VirtualTableKind::Retention => ops_views::retention_snapshot(runtime, visible_collections),
+        VirtualTableKind::Retention => ops_views::retention_snapshot(runtime, visible_collections)?,
         VirtualTableKind::MaterializedViews => ops_views::materialized_views_snapshot(runtime),
         VirtualTableKind::QueuePending => {
-            ops_views::queue_pending_snapshot(runtime, visible_collections)
+            ops_views::queue_pending_snapshot(runtime, visible_collections)?
         }
         VirtualTableKind::Queues => {
-            ops_views::queues_snapshot(runtime, tenant, visible_collections)
+            ops_views::queues_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Forks => ops_views::forks_snapshot(runtime)?,
         VirtualTableKind::AnalyticsMetrics => ops_views::analytics_metrics_snapshot(runtime),
@@ -903,27 +905,30 @@ pub(super) fn red_query(
         }
         VirtualTableKind::ManagedPolicies => governance_views::managed_policies_snapshot(runtime),
         VirtualTableKind::ControlEvents => {
-            governance_views::control_events_snapshot(runtime, tenant)
+            let mut snapshot = control_event_reads::read(runtime, tenant, query)?;
+            let records = std::mem::take(&mut snapshot.records);
+            _event_snapshot = Some(snapshot);
+            records
         }
         VirtualTableKind::Users => governance_views::users_snapshot(runtime, tenant),
         VirtualTableKind::ApiKeys => governance_views::api_keys_snapshot(runtime, tenant),
         VirtualTableKind::ControlCapabilities => governance_views::control_capabilities_snapshot(),
         VirtualTableKind::PolicyActions => governance_views::policy_actions_snapshot(),
         VirtualTableKind::Tables => {
-            model_views::tables_snapshot(runtime, tenant, visible_collections)
+            model_views::tables_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Documents => {
-            model_views::documents_snapshot(runtime, tenant, visible_collections)
+            model_views::documents_snapshot(runtime, tenant, visible_collections)?
         }
-        VirtualTableKind::Kv => model_views::kv_snapshot(runtime, tenant, visible_collections),
+        VirtualTableKind::Kv => model_views::kv_snapshot(runtime, tenant, visible_collections)?,
         VirtualTableKind::Vectors => {
-            model_views::vectors_snapshot(runtime, tenant, visible_collections)
+            model_views::vectors_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Graphs => {
-            model_views::graphs_snapshot(runtime, tenant, visible_collections)
+            model_views::graphs_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Timeseries => {
-            model_views::timeseries_snapshot(runtime, tenant, visible_collections)
+            model_views::timeseries_snapshot(runtime, tenant, visible_collections)?
         }
         VirtualTableKind::Metrics => {
             model_views::metrics_snapshot(runtime, tenant, visible_collections)
@@ -946,7 +951,7 @@ pub(super) fn red_query(
     let table_alias = query.alias.as_deref();
     if !matches!(
         virtual_kind,
-        VirtualTableKind::Describe | VirtualTableKind::ShowCreate
+        VirtualTableKind::Describe | VirtualTableKind::ShowCreate | VirtualTableKind::ControlEvents
     ) {
         if let Some(filter) = effective_table_filter(query) {
             records.retain(|record| {
@@ -961,19 +966,19 @@ pub(super) fn red_query(
         }
     }
 
-    if !query.order_by.is_empty() {
+    if !control_events && !query.order_by.is_empty() {
         // Issue #769 — cap the materialized sort buffer.
         crate::runtime::materialization_limit::guard(db.as_ref(), "sort", records.len())?;
-        super::join_filter::sort_records_by_order_by_with_db(
+        super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db.as_ref()),
             &mut records,
             &query.order_by,
             Some(table_name),
             table_alias,
-        );
+        )?;
     }
 
-    if let Some(offset) = query.offset {
+    if let Some(offset) = query.offset.filter(|_| !control_events) {
         let offset = offset as usize;
         if offset >= records.len() {
             records.clear();
@@ -981,7 +986,7 @@ pub(super) fn red_query(
             records.drain(..offset);
         }
     }
-    if let Some(limit) = query.limit {
+    if let Some(limit) = query.limit.filter(|_| !control_events) {
         records.truncate(limit as usize);
     }
 
@@ -1328,6 +1333,7 @@ fn virtual_table_kind(name: &str) -> RedDBResult<VirtualTableKind> {
 }
 
 mod catalog_views;
+mod control_event_reads;
 mod governance_views;
 mod helpers;
 mod model_views;
@@ -1466,7 +1472,7 @@ mod tests {
         );
         assert_eq!(
             deprecated.get("replacement"),
-            Some(&Value::text("vault:read_metadata"))
+            Some(&Value::text("vault:reveal_history"))
         );
         assert_eq!(deprecated.get("since_version"), Some(&Value::text("0.5.0")));
     }

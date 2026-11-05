@@ -15,8 +15,34 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+const TEST_VAULT_PASSPHRASE: &str = "integration-test-vault-passphrase";
+
 fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
+}
+
+#[test]
+fn official_dockerfiles_default_to_durable_authenticated_bootstrap() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "Dockerfile",
+        "docker/Dockerfile.release",
+        "docker/Dockerfile.musl",
+    ] {
+        let contents = std::fs::read_to_string(root.join(relative)).expect("read Dockerfile");
+        assert!(
+            contents.contains("ENV REDDB_VAULT=true"),
+            "{relative} must persist authentication in the vault"
+        );
+        assert!(
+            contents.contains("ENV REDDB_BOOTSTRAP_PRESET=production"),
+            "{relative} must fail closed until bootstrap credentials are supplied"
+        );
+        assert!(
+            !contents.contains("ENV REDDB_VAULT=false"),
+            "{relative} must not reopen bootstrap after restart"
+        );
+    }
 }
 
 /// Grab an OS-assigned free TCP port, then release it so the child can
@@ -63,6 +89,8 @@ fn spawn_server(args: &[&str], stderr_path: &Path) -> ServerChild {
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .stdin(Stdio::null())
@@ -94,6 +122,8 @@ fn spawn_server_with_cert_file(args: &[&str], stderr_path: &Path, cert_file: &Pa
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .stdin(Stdio::null())
@@ -125,23 +155,23 @@ fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -
     false
 }
 
-/// Poll until `path` exists (the spawned server is still alive), or the
-/// process exits / the timeout elapses. Returns `true` only when the file
-/// appeared while the server was running. More robust than a bare TCP
+/// Poll until `path` contains data (the spawned server is still alive), or
+/// the process exits / the timeout elapses. Returns `true` only when the file
+/// was written while the server was running. More robust than a bare TCP
 /// probe: it ties the wait to the artifact under test and cannot be fooled
 /// by a stale listener on the same ephemeral port.
 fn wait_for_file(server: &mut ServerChild, path: &Path, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if path.exists() {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
             return true;
         }
         if let Ok(Some(_status)) = server.child.try_wait() {
-            return path.exists(); // exited — accept only if the file landed
+            return std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    path.exists()
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
 }
 
 /// Poll the server's stderr until it contains `needle` (proof the boot
@@ -247,9 +277,10 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
     // Sanity: the database does not exist yet.
     assert!(!db_path.exists(), "fresh volume precondition");
 
-    let mut server = spawn_server(
+    let mut server = spawn_server_with_envs(
         &cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s),
         &stderr_path,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
@@ -262,6 +293,8 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         !stderr.contains("vault requires a paged database"),
         "first boot must NOT abort at the vault gate.\nstderr:\n{stderr}"
     );
+    // Stop and reap so Windows releases and flushes the DB file.
+    drop(server);
     // The paged vault was created in place (operational-directory layout).
     assert!(
         wait_for_paged_vault(&db_path),
@@ -269,17 +302,16 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         db_path.display()
     );
 
-    drop(server); // kill + reap
-
     // ---- Idempotent re-boot against the now-existing paged vault. ----
     // If the preset were re-applied, re-creating the head/customer admins
     // would fail ("already exists") and boot would abort — so a clean
     // second serve is itself proof that the bootstrap-completed marker
     // short-circuited preset re-application (no re-bootstrap, no new cert).
     let stderr_path2 = dir.join("server2.stderr");
-    let mut server2 = spawn_server(
+    let mut server2 = spawn_server_with_envs(
         &cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s),
         &stderr_path2,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
     let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
@@ -341,8 +373,8 @@ fn no_intent_fresh_path_keeps_vault_gate_error() {
 }
 
 /// Issue #1589 — first boot with `--bootstrap-cert-out <path>` writes the
-/// freshly minted unseal certificate to `<path>` (in addition to the
-/// stdout/stderr emission). The written file is consumable via
+/// freshly minted unseal certificate to `<path>` without emitting it to
+/// stdout/stderr. The written file is consumable via
 /// `REDDB_CERTIFICATE_FILE` to unseal on a subsequent boot, and a re-boot
 /// against the existing vault does not rewrite/churn the file.
 #[test]
@@ -384,10 +416,15 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
     );
     assert!(
+        wait_until_serving(&mut server, &http_addr, Duration::from_secs(30)),
+        "first boot did not reach its listener.\nstderr:\n{}",
+        server.stderr()
+    );
+    drop(server); // kill + reap so Windows releases and flushes the DB file
+    assert!(
         wait_for_paged_vault(&db_path),
         "first boot must create the paged vault in place.\nstderr:\n{stderr}"
     );
-    drop(server); // kill + reap
 
     // The certificate holds a usable 32-byte (64 hex chars) unseal cert.
     let cert_first = std::fs::read_to_string(&cert_out).expect("read cert-out");
@@ -407,50 +444,19 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         .and_then(|m| m.modified())
         .expect("cert-out mtime");
 
-    // ---- Round-trip: a fresh boot with NO bootstrap intent unseals the
-    // existing vault from the written file via REDDB_CERTIFICATE_FILE. The
-    // bootstrapped operational-directory vault requires the certificate on
-    // every subsequent boot, so a clean serve here proves the file we wrote
-    // is a usable unseal certificate. ----
+    // ---- Round-trip + no churn: the saved certificate unseals the existing
+    // vault while the unchanged bootstrap intent is ignored. Re-passing
+    // --bootstrap-cert-out proves the completion marker prevents both preset
+    // re-application and certificate replacement. ----
     let stderr_path2 = dir.join("server2.stderr");
-    let mut server2 = spawn_server_with_cert_file(
-        &[
-            "server",
-            "--path",
-            &db_path_str,
-            "--vault",
-            "true",
-            "--http",
-            "--http-bind",
-            &http_addr,
-        ],
-        &stderr_path2,
-        &cert_out,
-    );
-    let serving2 =
-        wait_for_stderr_contains(&mut server2, "listener online", Duration::from_secs(30));
+    let mut server2 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path2, &cert_out);
+    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
-        "the written certificate must unseal via REDDB_CERTIFICATE_FILE on a subsequent boot.\nstderr:\n{stderr2}"
+        "the written certificate must unseal without reapplying bootstrap.\nstderr:\n{stderr2}"
     );
     drop(server2);
-
-    // ---- No churn: a re-boot against the existing vault — even with the
-    // bootstrap intent and `--bootstrap-cert-out` re-passed — must NOT
-    // rewrite the certificate file. The completion marker short-circuits
-    // preset re-application before any cert is minted or written. The cert
-    // env unseals the existing vault so the boot reaches that point. ----
-    let stderr_path3 = dir.join("server3.stderr");
-    let mut server3 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path3, &cert_out);
-    let rebooted =
-        wait_for_stderr_contains(&mut server3, "listener online", Duration::from_secs(30));
-    let stderr3 = server3.stderr();
-    assert!(
-        rebooted,
-        "re-boot against the existing vault must serve.\nstderr:\n{stderr3}"
-    );
-    drop(server3);
 
     let cert_second = std::fs::read_to_string(&cert_out).expect("read cert-out after reboot");
     assert_eq!(
@@ -516,6 +522,8 @@ fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .env_remove("REDDB_WIRE_BIND_ADDR");
@@ -531,6 +539,150 @@ fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str
     ServerChild {
         child,
         stderr_path: stderr_path.to_path_buf(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_password_bootstrap_rejects_sealed_and_wrong_password_restarts() {
+    password_bootstrap_restart_contract(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_disk_residency_server_authenticates_and_recovers_after_restart() {
+    password_bootstrap_restart_contract(true).await;
+}
+
+async fn password_bootstrap_restart_contract(bounded_disk_residency: bool) {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+    use reddb_client::ValueOut;
+
+    let directory = tempfile::tempdir().expect("server directory");
+    let path = directory.path().join("password.rdb");
+    let path = path.to_str().expect("database path");
+    let login_file = directory.path().join("login.pw");
+    std::fs::write(&login_file, "synthetic-login-password").expect("login password file");
+    let http = format!("127.0.0.1:{}", free_port());
+    let wire_port = free_port();
+    let wire = format!("127.0.0.1:{wire_port}");
+    let password = "minha senha arbitrária ' com espaços";
+    for (phase, credential, should_serve) in [
+        (0, password, true),
+        (1, "wrong-password", false),
+        (2, "", false),
+        (3, password, true),
+    ] {
+        let mut args = vec![
+            "server",
+            "--path",
+            path,
+            "--vault",
+            "true",
+            "--http",
+            "--http-bind",
+            &http,
+            "--wire-bind",
+            &wire,
+        ];
+        if bounded_disk_residency {
+            args.push("--bounded-disk-residency");
+        }
+        if phase == 0 {
+            args.extend_from_slice(&[
+                "--bootstrap-preset",
+                "production",
+                "--bootstrap-admin",
+                "admin",
+                "--bootstrap-admin-password-file",
+                login_file.to_str().expect("password path"),
+            ]);
+        }
+        let mut server = spawn_server_with_envs(
+            &args,
+            &directory.path().join(format!("phase-{phase}.stderr")),
+            &[
+                ("REDDB_AUTH", "true"),
+                ("REDDB_MEMORY_BUDGET", "64MiB"),
+                ("REDDB_VAULT_PASSPHRASE", credential),
+                ("REDDB_VAULT_PASSPHRASE_FILE", ""),
+            ],
+        );
+        let serving = wait_until_serving(&mut server, &wire, Duration::from_secs(30));
+        assert_eq!(serving, should_serve, "phase {phase}: {}", server.stderr());
+        if !should_serve {
+            assert!(!server
+                .child
+                .try_wait()
+                .expect("failed startup status")
+                .expect("startup must exit")
+                .success());
+            assert!(
+                server.stderr().contains("vault"),
+                "phase {phase}: {}",
+                server.stderr()
+            );
+            continue;
+        }
+        let mut client = tokio::time::timeout(
+            Duration::from_secs(10),
+            RedWireClient::connect(ConnectOptions::new("127.0.0.1", wire_port).with_auth(
+                Auth::Basic {
+                    user: "admin".into(),
+                    pass: "synthetic-login-password".into(),
+                },
+            )),
+        )
+        .await
+        .expect("login deadline")
+        .expect("real server login");
+        let (sql, expected) = if phase == 0 {
+            client
+                .query("CREATE VAULT app")
+                .await
+                .expect("server vault");
+            client
+                .query("VAULT PUT app.token = 'synthetic-persisted-value'")
+                .await
+                .expect("server secret write");
+            ("SELECT $secrets.app.token AS value", "***")
+        } else {
+            ("VAULT REVEAL app.token", "synthetic-persisted-value")
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), client.query(sql))
+            .await
+            .expect("query deadline")
+            .expect("server secret query");
+        assert_eq!(
+            result.rows[0]
+                .iter()
+                .find(|(name, _)| name == "value")
+                .map(|(_, value)| value),
+            Some(&ValueOut::String(expected.into()))
+        );
+        if bounded_disk_residency {
+            if phase == 0 {
+                client
+                    .query("CREATE TABLE durable_rows (id INT)")
+                    .await
+                    .expect("create disk-backed table");
+                client
+                    .query("INSERT INTO durable_rows (id) VALUES (42)")
+                    .await
+                    .expect("acknowledged write");
+            }
+            let rows = client
+                .query("SELECT id FROM durable_rows")
+                .await
+                .expect("read after authentication");
+            assert_eq!(rows.rows.len(), 1);
+            assert_eq!(
+                rows.rows[0]
+                    .iter()
+                    .find(|(name, _)| name == "id")
+                    .map(|(_, value)| value),
+                Some(&ValueOut::Integer(42))
+            );
+        }
+        client.close().await.expect("close server client");
     }
 }
 
@@ -645,9 +797,10 @@ fn wire_tls_flag_owns_port_over_env_plaintext_default() {
         &[
             ("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str()),
             ("RED_WIRE_TLS_DEV", "1"),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
         ],
     );
-    let tls_online = wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
+    let tls_online = wait_until_serving(&mut server, &wire_tls_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         tls_online,
@@ -702,7 +855,14 @@ fn explicit_wire_tls_bind_failure_is_fatal() {
     let stderr_path = dir.join("server.stderr");
     // Opt into self-signed dev certs so TLS config resolves and the boot
     // reaches the bind — the stage this test targets.
-    let mut server = spawn_server_with_envs(&args, &stderr_path, &[("RED_WIRE_TLS_DEV", "1")]);
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[
+            ("RED_WIRE_TLS_DEV", "1"),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
+        ],
+    );
     let exit = wait_for_exit(&mut server, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
@@ -744,7 +904,10 @@ fn http_only_env_plaintext_wire_listener_accepts_connections() {
     let mut server = spawn_server_with_envs(
         &args,
         &stderr_path,
-        &[("REDDB_WIRE_BIND_ADDR", wire_addr.as_str())],
+        &[
+            ("REDDB_WIRE_BIND_ADDR", wire_addr.as_str()),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
+        ],
     );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
@@ -791,7 +954,11 @@ fn http_only_reports_wire_transport_ready_on_health() {
     let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
     args.extend_from_slice(&["--wire-bind", &wire_addr]);
     let stderr_path = dir.join("server.stderr");
-    let mut server = spawn_server_with_envs(&args, &stderr_path, &[]);
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
+    );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();

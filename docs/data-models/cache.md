@@ -3,7 +3,7 @@
 RedDB can support cache workloads in two different ways:
 
 - **Key-Value** stores queryable JSON-compatible values as collection records.
-- **Blob Cache** is the proposed native cache module for arbitrary bytes, rich
+- **Blob Cache** is the native cache module for arbitrary bytes, rich
   TTL, fast existence checks, and explicit invalidation.
 
 Use Blob Cache when the value is primarily a cached artifact, not a record you
@@ -15,7 +15,7 @@ want to query with SQL.
 |:---------|:-----------|
 | Feature flags, config, small JSON session state | Key-Value |
 | Cached HTTP responses, rendered pages, model outputs, binary blobs | Blob Cache |
-| SQL `SELECT` result reuse | Runtime result cache, eventually backed by Blob Cache |
+| SQL `SELECT` result reuse | Runtime result cache with optional Blob Cache backend |
 | Embedding-similarity answer reuse | Semantic cache |
 | Durable job flow | Queues |
 
@@ -41,9 +41,9 @@ Blob Cache Interface
               durable metadata + blob bytes
 ```
 
-L1 is process-local and optimized for hot hits. L2 is stored in the RedDB
-database file so cached blobs can survive restart and can be managed by the same
-backup, replication, and observability story as the rest of the engine.
+L1 is process-local and optimized for hot hits. When configured, L2 uses native
+cache storage beside the database. Cache state and invalidation are node-local;
+the HTTP API does not add replication or cluster-wide cache coherence.
 
 ## TTL Policy
 
@@ -63,6 +63,11 @@ seconds" setting.
 
 Hard expiry is authoritative. A caller only receives stale data when it asks for
 stale serving and the entry is still inside the stale window.
+
+This table describes native engine policy. The remote HTTP contract exposes
+hard TTL, absolute expiry, admission, priority and version controls; it does not
+expose idle TTL, stale serving, jitter or dependency registration. See
+[Remote Blob Cache](/api/cache.md) for the exact application contract.
 
 ## Existence Checks
 
@@ -114,6 +119,8 @@ to avoid running a separate Redis instance for exact-key cached artifacts.
 
 ## Current Status
 
-Blob Cache is a proposed module, tracked by
-[ADR 0006](/adr/0006-tiered-blob-cache.md). The current shipped cache layers are
-documented in [SIEVE Cache](/engine/cache.md).
+The native module is accessible through HTTP `/cache/ns/*` and `db.cache.*`
+using the remote JavaScript client's HTTP transport. It is a supporting module,
+not a SQL `CREATE CACHE` collection. See [Remote Blob Cache](/api/cache.md)
+for usage, including a ten-minute TTL example for BigQuery results.
+Other engine cache layers are documented in [SIEVE Cache](/engine/cache.md).

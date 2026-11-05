@@ -1,0 +1,38 @@
+/* Published by @reddb-io/assets from reddb-io/brand Assets 2026.10. */
+/* DO NOT EDIT — regenerate with `pnpm --filter @reddb-io/assets build`. */
+/* The Brand's typefaces. Link this to make --reddb-font-family-* resolve */
+/* to the Brand's faces instead of falling through to the system stack. */
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("./fonts/space-grotesk-variable.woff2") format("woff2-variations");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./fonts/jetbrains-mono-variable.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Space Grotesk Fallback";
+  src: local("Arial"), local("ArialMT"), local("Liberation Sans"), local("Arimo");
+  size-adjust: 109.51%;
+  ascent-override: 89.85%;
+  descent-override: 26.66%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "JetBrains Mono Fallback";
+  src: local("Courier New"), local("CourierNewPSMT"), local("Liberation Mono"), local("Cousine");
+  size-adjust: 99.98%;
+  ascent-override: 102.02%;
+  descent-override: 30%;
+  line-gap-override: 0%;
+}

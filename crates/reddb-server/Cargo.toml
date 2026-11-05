@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-server"
-version = "1.23.4"
+version = "1.28.10"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
@@ -17,6 +17,7 @@ name = "reddb_server"
 path = "src/lib.rs"
 
 [dependencies]
+reddb-engine = { workspace = true }
 # Neutral keystone: the logical type vocabulary (Value/DataType/...) re-homed
 # from storage::schema (#1061, ADR 0052). storage::schema keeps a re-export shim.
 reddb-types = { workspace = true }
@@ -32,6 +33,7 @@ reddb-file = { workspace = true }
 reddb-crypto = { workspace = true }
 aes-gcm = "0.11"
 blake3 = "1"
+base64 = "0.22"
 # SIMD/PCLMULQDQ CRC32 (IEEE 802.3 polynomial) for WAL/page record
 # checksums (issue #883 / PRD #882). Runtime CPU feature detection
 # selects the pclmulqdq path with a table-based scalar fallback —
@@ -41,7 +43,7 @@ blake3 = "1"
 crc32fast = "1.5"
 hmac = "0.13"
 itoa = "1"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 sha2 = "0.11"
 hex = "0.4"
@@ -50,9 +52,9 @@ hex = "0.4"
 # JWT and the refresh JWT with this vetted library (RedDB is both issuer
 # and verifier, so the symmetric HS256 path is sufficient — the
 # asymmetric RS256/JWKS machinery of `auth::oauth` exists to trust a
-# *foreign* IdP). `rust_crypto` keeps the backend pure-Rust, matching the
-# dev-dependency the OAuth e2e test already pins.
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# *foreign* IdP). AWS-LC avoids RustCrypto's affected crypto-bigint
+# dependency (RUSTSEC-2026-0387); OAuth tests use the same backend.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 # Ed25519 signature verification for Signed Writes (issue #520 / #522).
 # Used by `storage::signed_writes` to validate that an INSERT's
 # `signature` column was produced by a key in the collection's
@@ -61,10 +63,9 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # 2.x line that the rest of the workspace's transitive graph
 # already resolved to in Cargo.lock.
 ed25519-dalek = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
-tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
-tonic-prost = "0.14"
+tonic = { workspace = true, features = ["transport", "codegen", "router", "gzip", "zstd", "tls-ring"] }
 prost = "0.14"
 snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
@@ -75,7 +76,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 flate2 = "1"
 tar = "0.4"
 roaring = "0.11"
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 # crossbeam-queue::SegQueue powers the lock-free WAL append path
 # (Roadmap #2 / issue #157). Writers atomically reserve an LSN via
 # next_lsn.fetch_add and push their encoded bytes onto the queue —
@@ -129,7 +130,6 @@ http = "1"
 # tokio-tungstenite, which terminates the WS protocol; the binary data
 # channel is bridged into the transport-agnostic RedWire session (#932).
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = "1"
 strsim = "0.11"
@@ -197,6 +197,7 @@ name = "timeseries_ingest_bench"
 harness = false
 
 [dev-dependencies]
+http-body-util = "0.1"
 # Criterion benchmark harness for blob_cache_bench (#190).
 criterion = { version = "0.8", features = ["html_reports"] }
 # tempfile: L2-backed scenarios need a temp directory per bench group.

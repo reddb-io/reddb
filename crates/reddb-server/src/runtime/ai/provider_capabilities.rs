@@ -237,8 +237,8 @@ impl Modalities {
     ///   (abab multimodal models); no moderation endpoint.
     /// - **together / ollama**: chat, embeddings, and vision-capable
     ///   open models; no moderation.
-    /// - **groq / openrouter / venice**: chat + vision, no first-party
-    ///   embeddings, no moderation.
+    /// - **openrouter / venice**: embeddings + chat + vision, no moderation.
+    /// - **groq**: chat + vision, no embeddings or moderation.
     /// - **deepseek**: chat only.
     /// - **huggingface**: raw inference for embeddings + generation; no
     ///   uniform vision/moderation surface.
@@ -259,13 +259,13 @@ impl Modalities {
                 vision: true,
                 moderate: false,
             },
-            "minimax" | "together" | "ollama" => Self {
+            "minimax" | "together" | "ollama" | "openrouter" | "venice" => Self {
                 embed: true,
                 generate: true,
                 vision: true,
                 moderate: false,
             },
-            "groq" | "openrouter" | "venice" => Self {
+            "groq" => Self {
                 embed: false,
                 generate: true,
                 vision: true,

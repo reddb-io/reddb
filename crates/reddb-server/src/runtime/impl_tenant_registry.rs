@@ -163,6 +163,7 @@ impl RedDBRuntime {
                 continue;
             };
             manager.set_column_schema_if_empty(columns);
+            manager.compact_recovered_rows();
         }
     }
 

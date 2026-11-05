@@ -10,6 +10,9 @@
 use super::*;
 
 impl RedDBRuntime {
+    pub(crate) fn query_budget_scope(&self) -> crate::RedDBResult<super::query_budget::Scope<'_>> {
+        super::query_budget::Scope::enter(self.resource_limits(), &self.inner.query_budget_slots)
+    }
     /// Emit a CDC change event and replicate to WAL buffer.
     /// Create a `MutationEngine` bound to this runtime.
     ///
@@ -315,6 +318,13 @@ impl RedDBRuntime {
             started_at_ms: started_ms,
             ..Default::default()
         };
+
+        // Periodic maintenance can checkpoint too. Drain it before the final
+        // flush so no worker can append a fresh ownership epoch after this
+        // method has reported a closed, checkpointed source to its caller.
+        if let Some(background_tasks) = &self.background_tasks {
+            background_tasks.shutdown();
+        }
 
         // Flush WAL + run any pending checkpoint. Local fsync is
         // unconditional — even a lease-lost replica needs its WAL on

@@ -29,15 +29,15 @@ const REDWIRE_DISPATCH_KINDS: [MessageKind; 19] = [
     MessageKind::Ping,
     MessageKind::Query,
     MessageKind::QueryWithParams,
+    MessageKind::QueryBinary,
+    MessageKind::ExecutePrepared,
     MessageKind::BulkInsert,
     MessageKind::BulkInsertBinary,
     MessageKind::BulkInsertPrevalidated,
-    MessageKind::QueryBinary,
     MessageKind::BulkStreamStart,
     MessageKind::BulkStreamRows,
     MessageKind::BulkStreamCommit,
     MessageKind::Prepare,
-    MessageKind::ExecutePrepared,
     MessageKind::Get,
     MessageKind::Delete,
     MessageKind::OpenStream,
@@ -86,9 +86,10 @@ fn redwire_frame_kinds() -> Vec<&'static str> {
         "\n            other => {",
     )
     .lines()
-    .filter_map(|line| line.strip_prefix("            MessageKind::"))
-    .filter_map(|rest| rest.split_once(" => "))
-    .map(|(kind, _)| kind)
+    .filter_map(|line| line.strip_prefix("            "))
+    .map(|rest| rest.strip_prefix("| ").unwrap_or(rest))
+    .filter_map(|rest| rest.strip_prefix("MessageKind::"))
+    .filter_map(|rest| rest.split_whitespace().next())
     .collect()
 }
 

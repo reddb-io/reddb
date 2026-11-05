@@ -30,12 +30,24 @@ impl RedDBRuntime {
         let Some(tenant_col) = self.tenant_column(&query.table) else {
             return Ok(None);
         };
-        // User already named the column (literal match) — trust them.
-        if query
+        if let Some(index) = query
             .columns
             .iter()
-            .any(|c| c.eq_ignore_ascii_case(&tenant_col))
+            .position(|c| c.eq_ignore_ascii_case(&tenant_col))
         {
+            if let Some(active_tenant) = crate::runtime::impl_core::current_tenant() {
+                for row in &query.values {
+                    match row.get(index) {
+                        Some(Value::Text(value)) if value.as_ref() == active_tenant.as_str() => {}
+                        _ => {
+                            return Err(RedDBError::Query(format!(
+                                "INSERT tenant discriminator '{}' must match active tenant '{}'",
+                                tenant_col, active_tenant
+                            )))
+                        }
+                    }
+                }
+            }
             return Ok(None);
         }
 
@@ -106,6 +118,15 @@ impl RedDBRuntime {
                     continue;
                 };
                 if dotted_tail_already_set(slot, tail) {
+                    if let Some(active_tenant) = active_tenant.as_deref() {
+                        let explicit = dotted_tenant_text(slot, tail)?;
+                        if explicit.as_deref() != Some(active_tenant) {
+                            return Err(RedDBError::Query(format!(
+                                "INSERT tenant discriminator '{}.{}' must match active tenant '{}'",
+                                root, tail, active_tenant
+                            )));
+                        }
+                    }
                     continue;
                 }
                 let Some(tenant_id) = &active_tenant else {

@@ -353,6 +353,20 @@ fn mcp_uri_allows_bearer(uri: &str) -> bool {
     )
 }
 
+fn mcp_redwire_connect_options(
+    host: String,
+    port: u16,
+    tls: bool,
+    auth: reddb_client::redwire::Auth,
+) -> reddb_client::redwire::ConnectOptions {
+    let options = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+    if tls {
+        options.with_tls(reddb_client::redwire::TlsConfig::new())
+    } else {
+        options
+    }
+}
+
 fn run_mcp_remote(mut options: McpClientOptions) -> i32 {
     if let Err(err) = validate_mcp_remote_connect(&mut options) {
         eprintln!("red mcp: {err}");
@@ -379,16 +393,17 @@ fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), Str
             })?;
             Ok(())
         }
-        reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+        reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
             let host = host.clone();
             let port = *port;
+            let tls = *tls;
             let auth = redwire_auth_from_connection_auth(&options.auth)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| format!("build runtime: {err}"))?;
             rt.block_on(async {
-                let opts = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                let opts = mcp_redwire_connect_options(host, port, tls, auth);
                 tokio::time::timeout(
                     options.timeout,
                     reddb_client::redwire::RedWireClient::connect(opts),
@@ -739,17 +754,17 @@ impl RemoteMcpServer {
                 reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
                     .map_err(|err| format!("{err}"))
             }
-            reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+            reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
                 let host = host.clone();
                 let port = *port;
+                let tls = *tls;
                 let auth = redwire_auth_from_connection_auth(&self.options.auth)?;
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|err| format!("build runtime: {err}"))?;
                 rt.block_on(async {
-                    let opts =
-                        reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                    let opts = mcp_redwire_connect_options(host, port, tls, auth);
                     let mut client = tokio::time::timeout(
                         self.options.timeout,
                         reddb_client::redwire::RedWireClient::connect(opts),
@@ -795,6 +810,7 @@ fn mcp_tool_text_result(id: Option<&reddb::json::Value>, result: Result<String, 
 
 fn has_cli_vault_key() -> bool {
     reddb::utils::env_with_file_fallback("REDDB_CERTIFICATE").is_some()
+        || reddb::utils::env_with_file_fallback("REDDB_VAULT_PASSPHRASE").is_some()
 }
 
 fn attach_cli_vault(
@@ -814,7 +830,7 @@ fn attach_cli_vault(
     if !has_cli_vault_key() {
         if required || has_saved_vault {
             return Err(
-                "vault export/import requires REDDB_CERTIFICATE or REDDB_CERTIFICATE_FILE"
+                "vault export/import requires REDDB_CERTIFICATE or REDDB_VAULT_PASSPHRASE (or their _FILE variants)"
                     .to_string(),
             );
         }
@@ -1342,9 +1358,13 @@ fn main() {
     // copied into the process environment, where they showed up in
     // `/proc/<pid>/environ` and in every child process. A secret given
     // both ways is still a refusal, not a silent precedence.
-    if let Some(name) = reddb::utils::conflicting_secret_env() {
-        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
-        std::process::exit(2);
+    // The private local provider receives its credential only over its stdin
+    // bootstrap; a user's server credential environment does not configure it.
+    if std::env::args().nth(1).as_deref() != Some("workspace-store") {
+        if let Some(name) = reddb::utils::conflicting_secret_env() {
+            eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
+            std::process::exit(2);
+        }
     }
 
     // Owner-only permissions for everything created from here on: the .rdb,
@@ -1355,6 +1375,19 @@ fn main() {
     reddb::utils::file_mode::restrict_new_file_permissions();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Private desktop persistence service: fixed loopback binding, authenticated
+    // IPC-owned endpoint, and no user SQL/remote connection surface.
+    if args
+        .first()
+        .is_some_and(|argument| argument == "workspace-store")
+    {
+        if let Err(error) = reddb_engine::query::local_database::service::run(&args[1..]) {
+            eprintln!("workspace-store: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Handle empty args early.
     if args.is_empty() {
@@ -1604,10 +1637,17 @@ fn main() {
             if let Some(connect) = flag_string(&result.flags, "connect") {
                 if !connect.is_empty() {
                     let token = flag_string(&result.flags, "token").filter(|s| !s.is_empty());
-                    let endpoint = connect
-                        .strip_prefix("grpc://")
-                        .map(|rest| format!("http://{rest}"))
-                        .unwrap_or_else(|| connect.clone());
+                    let endpoint = match reddb_wire::parse(&connect) {
+                        Ok(reddb_wire::ConnectionTarget::Grpc { endpoint }) => endpoint,
+                        Ok(_) => {
+                            eprintln!("rpc: --connect requires grpc:// or grpcs://");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("rpc: invalid --connect URI: {err}");
+                            std::process::exit(1);
+                        }
+                    };
                     let code = reddb::rpc_stdio::run_remote(&endpoint, token);
                     std::process::exit(code);
                 }
@@ -1718,6 +1758,10 @@ fn main() {
 
         "migrate-pager-zone" => {
             std::process::exit(run_migrate_pager_zone_command(&result.flags));
+        }
+
+        "compact" => {
+            std::process::exit(run_compact_command(&result.flags));
         }
 
         "salvage" => {
@@ -2043,44 +2087,16 @@ fn main() {
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
             targets.retain(|name| {
-                name != "red" && !name.starts_with("red.") && !name.starts_with("__red_schema_")
+                name == "red.vault"
+                    || (name != "red"
+                        && !name.starts_with("red.")
+                        && !name.starts_with("__red_schema_"))
             });
             let output_path = flag_string(&result.flags, "output");
 
             let mut buf = String::new();
             let mut total_rows = 0usize;
             let mut secret_keys = 0usize;
-            for collection in &targets {
-                let manager = match store.get_collection(collection) {
-                    Some(m) => m,
-                    None => continue,
-                };
-                // Config resolves repeated keys by newest entity id. Preserve
-                // that insertion order when restore assigns fresh entity ids.
-                let mut entities = manager.query_all(|_| true);
-                entities.sort_unstable_by_key(|entity| entity.id.raw());
-                for entity in entities {
-                    let mut row_obj = reddb::json::Map::new();
-                    if let reddb::storage::EntityData::Row(ref row) = entity.data {
-                        if let Some(named) = &row.named {
-                            for (k, v) in named {
-                                row_obj.insert(k.clone(), v.to_json());
-                            }
-                        }
-                    }
-                    let mut wrapper = reddb::json::Map::new();
-                    wrapper.insert(
-                        "collection".to_string(),
-                        reddb::json::Value::String(collection.clone()),
-                    );
-                    wrapper.insert("fields".to_string(), reddb::json::Value::Object(row_obj));
-                    let line = reddb::json::Value::Object(wrapper).to_string_compact();
-                    buf.push_str(&line);
-                    buf.push('\n');
-                    total_rows += 1;
-                }
-            }
-
             if let Some(auth_store) = auth_store.as_ref() {
                 match auth_store.vault_kv_export_encrypted() {
                     Ok(Some(blob)) => {
@@ -2110,6 +2126,85 @@ fn main() {
                         eprintln!("dump error: {err}");
                         std::process::exit(1);
                     }
+                }
+            }
+
+            for collection in &targets {
+                let manager = match store.get_collection(collection) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if rt
+                    .db()
+                    .collection_contract(collection)
+                    .is_some_and(|contract| {
+                        contract.declared_model == reddb::catalog::CollectionModel::Vault
+                    })
+                {
+                    let records = rt
+                        .export_vault_collection_records(collection)
+                        .unwrap_or_else(|error| {
+                            eprintln!("dump error: {error}");
+                            std::process::exit(1);
+                        });
+                    // A newly opened database declares an empty red.vault even
+                    // when no vault pager exists. There is no secret to seal.
+                    if records.is_empty() {
+                        continue;
+                    }
+                    total_rows += records.len();
+                    let exported = (|| -> Result<String, String> {
+                        let pager = store
+                            .pager()
+                            .ok_or("vault dump requires persistent storage")?;
+                        let vault = reddb::auth::vault::Vault::open(pager)
+                            .map_err(|error| error.to_string())?;
+                        let state = reddb::auth::vault::VaultState {
+                            kv: std::collections::HashMap::from([
+                                ("collection".into(), collection.clone()),
+                                ("format_version".into(), store.format_version().to_string()),
+                                ("records".into(), reddb::json!(records).to_string_compact()),
+                            ]),
+                            ..Default::default()
+                        };
+                        vault
+                            .seal_logical_export(&state)
+                            .map_err(|error| error.to_string())
+                    })()
+                    .unwrap_or_else(|error| {
+                        eprintln!("dump error: {error}");
+                        std::process::exit(1);
+                    });
+                    let wrapper = reddb::json!({
+                        "kind": "reddb.vault_entries.v1",
+                        "encrypted": true,
+                        "blob": exported,
+                    });
+                    buf.push_str(&wrapper.to_string_compact());
+                    buf.push('\n');
+                    continue;
+                }
+                // Config resolves repeated keys by newest entity id. Preserve
+                // that insertion order when restore assigns fresh entity ids.
+                let mut entities = manager.query_all(|_| true);
+                entities.sort_unstable_by_key(|entity| entity.id.raw());
+                for entity in entities {
+                    let mut row_obj = reddb::json::Map::new();
+                    if let reddb::storage::EntityData::Row(ref row) = entity.data {
+                        for (name, value) in row.iter_fields() {
+                            row_obj.insert(name.to_string(), value.to_json());
+                        }
+                    }
+                    let mut wrapper = reddb::json::Map::new();
+                    wrapper.insert(
+                        "collection".to_string(),
+                        reddb::json::Value::String(collection.clone()),
+                    );
+                    wrapper.insert("fields".to_string(), reddb::json::Value::Object(row_obj));
+                    let line = reddb::json::Value::Object(wrapper).to_string_compact();
+                    buf.push_str(&line);
+                    buf.push('\n');
+                    total_rows += 1;
                 }
             }
 
@@ -2215,6 +2310,72 @@ fn main() {
                     }
                 };
                 if let reddb::json::Value::Object(map) = &parsed {
+                    if map.get("kind").and_then(|value| value.as_str())
+                        == Some("reddb.vault_entries.v1")
+                    {
+                        let imported = (|| -> Result<usize, String> {
+                            if auth_store.is_none() {
+                                auth_store = attach_cli_vault(&rt, true)?;
+                            }
+                            let blob = map
+                                .get("blob")
+                                .and_then(|value| value.as_str())
+                                .ok_or("vault dump requires an encrypted blob")?;
+                            // Authenticate the complete native records before passing them to
+                            // the storage decoder, which expects trusted physical snapshots.
+                            let state = reddb::auth::vault::Vault::unseal_logical_export(blob)
+                                .map_err(|error| error.to_string())?;
+                            let collection = state
+                                .kv
+                                .get("collection")
+                                .ok_or("vault dump requires a collection")?;
+                            if !restore_identifier_is_safe(collection) {
+                                return Err("invalid vault collection identifier".into());
+                            }
+                            if override_collection
+                                .as_deref()
+                                .is_some_and(|name| name != collection)
+                            {
+                                return Err(
+                                    "encrypted vault collections cannot be renamed during restore"
+                                        .into(),
+                                );
+                            }
+                            let format_version = state
+                                .kv
+                                .get("format_version")
+                                .and_then(|version| version.parse::<u32>().ok())
+                                .ok_or("invalid vault dump format version")?;
+                            let records: reddb::json::Value = reddb::json::from_str(
+                                state
+                                    .kv
+                                    .get("records")
+                                    .ok_or("vault dump requires native records")?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let records = records
+                                .as_array()
+                                .ok_or("vault dump requires native records")?
+                                .iter()
+                                .map(|value| {
+                                    value
+                                        .as_str()
+                                        .map(str::to_owned)
+                                        .ok_or("invalid vault dump record")
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            rt.import_vault_collection_records(collection, &records, format_version)
+                                .map_err(|error| error.to_string())
+                        })();
+                        match imported {
+                            Ok(count) => restored += count,
+                            Err(error) => {
+                                errors += 1;
+                                eprintln!("line {}: vault import failed: {error}", line_no + 1);
+                            }
+                        }
+                        continue;
+                    }
                     if map.get("kind").and_then(|v| v.as_str()) == Some("reddb.vault_kv.v1") {
                         let keys: Vec<String> = map
                             .get("keys")
@@ -3078,6 +3239,41 @@ fn run_migrate_from_redis_command(flags: &HashMap<String, FlagValue>) -> i32 {
     0
 }
 
+fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::compact_paged(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("compact", &report.machine_json());
+            } else {
+                println!("Compacted {} -> {} bytes; verified {} records across {} trees. Source preserved.",
+                    report.source_bytes, report.destination_bytes, report.records, report.trees);
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("compact", &error.to_string());
+            } else {
+                eprintln!("compact: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -3707,6 +3903,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
+        ("compact".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),
@@ -3949,6 +4146,7 @@ fn build_server_config(
         wire_tls_key,
         pg_bind_addr,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
+        bounded_disk_residency: flag_bool(flags, "bounded-disk-residency"),
         read_only: flag_bool(flags, "read-only"),
         role,
         primary_addr: flag_string(flags, "primary-addr")
@@ -4124,16 +4322,16 @@ fn operational_bootstrap_input(
     }
 }
 
-/// Read the three slice-5 HTTP limiter knobs from CLI flags and env
-/// vars, validate each, and pack them into a `HttpLimitsCliInput` for
+/// Read the HTTP admission/execution knobs from CLI flags and env vars,
+/// validate each, and pack them into a `HttpLimitsCliInput` for
 /// the resolver. Validation failures abort boot with a clear message
 /// (acceptance: "Invalid input fails fast with a clear error").
 fn build_http_limits_cli_input(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<reddb::server::HttpLimitsCliInput, String> {
     use reddb::server::http_limits::{
-        validate_handler_timeout_ms, validate_max_handlers, validate_max_inflight_per_principal,
-        validate_retry_after_secs,
+        validate_execution_workers, validate_handler_timeout_ms, validate_max_handlers,
+        validate_max_inflight_per_principal, validate_retry_after_secs,
     };
 
     fn parse_usize_validated<V>(
@@ -4185,6 +4383,17 @@ fn build_http_limits_cli_input(
         validate_max_handlers,
     )?;
 
+    let execution_workers_flag = parse_usize_validated(
+        "--http-execution-workers",
+        flag_string(flags, "http-execution-workers").filter(|value| !value.is_empty()),
+        validate_execution_workers,
+    )?;
+    let execution_workers_env = parse_usize_validated(
+        "REDDB_HTTP_EXECUTION_WORKERS",
+        env_string("REDDB_HTTP_EXECUTION_WORKERS"),
+        validate_execution_workers,
+    )?;
+
     let handler_timeout_ms_flag = parse_u64_validated(
         "--http-handler-timeout-ms",
         flag_string(flags, "http-handler-timeout-ms").filter(|v| !v.is_empty()),
@@ -4221,6 +4430,8 @@ fn build_http_limits_cli_input(
     Ok(reddb::server::HttpLimitsCliInput {
         max_handlers_flag,
         max_handlers_env,
+        execution_workers_flag,
+        execution_workers_env,
         handler_timeout_ms_flag,
         handler_timeout_ms_env,
         retry_after_secs_flag,
@@ -5892,6 +6103,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
+    fn mcp_redwire_connect_options_honor_secure_scheme() {
+        let secure = mcp_redwire_connect_options(
+            "db.example".to_string(),
+            5050,
+            true,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(secure.tls.is_some(), "reds:// must install a TLS config");
+
+        let cleartext = mcp_redwire_connect_options(
+            "localhost".to_string(),
+            5050,
+            false,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(
+            cleartext.tls.is_none(),
+            "red:// must remain explicit plaintext"
+        );
+    }
+
+    #[test]
     fn mcp_remote_uri_requires_credentials() {
         let flags = HashMap::from([("url".to_string(), str_flag("https://db.example"))]);
 
@@ -6122,19 +6355,23 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_HTTP_MAX_HANDLERS", "99"),
+            ("REDDB_HTTP_EXECUTION_WORKERS", "12"),
             ("REDDB_HTTP_HANDLER_TIMEOUT_MS", "7000"),
             ("REDDB_HTTP_RETRY_AFTER_SECS", "9"),
         ]);
         let flags = HashMap::from([
             ("http-max-handlers".to_string(), str_flag("16")),
+            ("http-execution-workers".to_string(), str_flag("4")),
             ("http-handler-timeout-ms".to_string(), str_flag("5000")),
             ("http-retry-after-secs".to_string(), str_flag("3")),
         ]);
         let limits = build_http_limits_cli_input(&flags).unwrap();
         assert_eq!(limits.max_handlers_flag, Some(16));
+        assert_eq!(limits.execution_workers_flag, Some(4));
         assert_eq!(limits.handler_timeout_ms_flag, Some(5_000));
         assert_eq!(limits.retry_after_secs_flag, Some(3));
         assert_eq!(limits.max_handlers_env, Some(99));
+        assert_eq!(limits.execution_workers_env, Some(12));
         assert_eq!(limits.handler_timeout_ms_env, Some(7_000));
         assert_eq!(limits.retry_after_secs_env, Some(9));
     }
@@ -6146,6 +6383,16 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let flags = HashMap::from([("http-max-handlers".to_string(), str_flag("0"))]);
         let err = build_http_limits_cli_input(&flags).unwrap_err();
         assert!(err.contains("--http-max-handlers"), "got: {err}");
+        assert!(err.contains(">= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_zero_execution_workers_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_EXECUTION_WORKERS"]);
+        let flags = HashMap::from([("http-execution-workers".to_string(), str_flag("0"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("--http-execution-workers"), "got: {err}");
         assert!(err.contains(">= 1"), "got: {err}");
     }
 
@@ -6799,6 +7046,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 .expect("telemetry config")
                 .log_file_disabled
         );
+    }
+
+    #[test]
+    fn parser_threads_explicit_disk_residency_into_server_config() {
+        let _lock = env_lock().lock().unwrap();
+        for enabled in [false, true] {
+            let mut args = vec!["server".to_string()];
+            if enabled {
+                args.push("--bounded-disk-residency".to_string());
+            }
+            let tokens = cli::token::tokenize(&args);
+            let parser =
+                cli::schema::SchemaParser::new(cli::commands::flags_for_command(Some("server")));
+            let result = parser.parse(&tokens);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(
+                build_server_config(&result.flags, None)
+                    .unwrap()
+                    .bounded_disk_residency,
+                enabled
+            );
+        }
     }
 
     #[test]

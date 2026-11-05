@@ -1,0 +1,5 @@
+{"case": "sql-point", "round": 0, "queries": 2745, "seconds": 2.0222287109936588, "queries_s": 1357.4132268407932, "p50_us": 19128.945, "p95_us": 52674.261, "p99_us": 68133.022, "errors": 0}
+{"case": "sql-point", "round": 1, "queries": 2724, "seconds": 2.017238796048332, "queries_s": 1350.3607036193123, "p50_us": 19861.945, "p95_us": 51656.122, "p99_us": 65949.986, "errors": 0}
+{"case": "sql-point", "round": 2, "queries": 2659, "seconds": 2.0138247060240246, "queries_s": 1320.3731149220882, "p50_us": 20165.171, "p95_us": 53836.766, "p99_us": 72866.079, "errors": 0}
+{"case": "sql-point", "round": 3, "queries": 2706, "seconds": 2.01412160001928, "queries_s": 1343.5137183247016, "p50_us": 19646.298, "p95_us": 53609.207, "p99_us": 70904.849, "errors": 0}
+{"case": "sql-point", "round": 4, "queries": 2720, "seconds": 2.015993937035091, "queries_s": 1349.2104068528529, "p50_us": 19114.426, "p95_us": 55742.509, "p99_us": 77910.7, "errors": 0}

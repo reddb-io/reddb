@@ -24,6 +24,24 @@ other (which would form a dependency cycle).
   every generated type at the crate root.
 - `RedDBClient` — authenticated thin client over the generated tonic stub.
 
+## Runtime types and compatibility
+
+The generated stubs use the RedDB compatibility distributions of Tonic/Prost
+0.14.6, with zstd 0.14.3. Rust sources and MIT licensing remain upstream; the
+gRPC protocol, protobuf messages and compression formats are unchanged.
+
+Import runtime types through the stub crate so they always share its identity:
+
+```rust
+use reddb_grpc_proto::tonic::{Request, Status, transport::Channel};
+```
+
+Existing low-level Rust integrations that separately depend on upstream
+`tonic = "0.14"` must migrate these imports or alias `reddb-io-tonic` as `tonic`.
+Keeping the same library name does not make the two packages' Rust types equal.
+The high-level RedDB client and non-Rust gRPC consumers keep their existing wire
+interfaces. See [runtime provenance](../reddb-tonic/UPSTREAM.md).
+
 ## References
 
 - [Connection strings][conn-strings] — gRPC vs RedWire vs HTTP transports

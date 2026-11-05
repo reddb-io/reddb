@@ -78,8 +78,7 @@ pub struct RedDB {
     /// `collection_contract(name)` lookup — which happens 3× per insert
     /// (ensure_model, enforce_uniqueness, normalize_fields) and dominated
     /// the insert hot path at ~30%.
-    pub(crate) collection_contract_cache:
-        RwLock<Option<Arc<HashMap<String, Arc<crate::physical::CollectionContract>>>>>,
+    collection_contract_cache: contract_cache::CollectionContractCache,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Optional CAS-capable handle for backends that implement
@@ -255,6 +254,7 @@ impl Drop for RedDB {
             && !self.options.read_only
         {
             if let Some(path) = &self.path {
+                let _vault_guard = self.store.vault_publication_lock.lock();
                 let snapshot = self.store.to_binary_dump_bytes();
                 let _ = crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot);
             }
@@ -367,6 +367,7 @@ pub struct NativeVectorArtifactBatchInspection {
     pub failures: Vec<(String, String, String)>,
 }
 
+mod contract_cache;
 mod impl_access;
 mod impl_core_a;
 mod impl_core_b;
@@ -457,6 +458,18 @@ fn fnv1a_hash_bytes(hash: &mut u64, bytes: &[u8]) {
 }
 
 fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
-    let rendered = format!("{value:?}");
-    fnv1a_hash_bytes(hash, rendered.as_bytes());
+    use std::fmt::Write;
+
+    struct HashWriter<'a>(&'a mut u64);
+
+    impl std::fmt::Write for HashWriter<'_> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            fnv1a_hash_bytes(self.0, text.as_bytes());
+            Ok(())
+        }
+    }
+
+    // Preserve the legacy Debug byte stream without a payload-sized String.
+    write!(HashWriter(hash), "{value:?}")
+        .expect("Debug must format into an infallible hash writer");
 }

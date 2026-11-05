@@ -21,7 +21,54 @@
 use super::execution_context::current_connection_id;
 use super::*;
 
+/// An unwinding DML callback must not leave a thread-local capture installed.
+struct DmlWalCapture(bool);
+
+impl DmlWalCapture {
+    fn begin() -> Self {
+        assert!(
+            !UnifiedStore::deferred_store_wal_capture_active(),
+            "DML WAL captures cannot nest"
+        );
+        UnifiedStore::begin_deferred_store_wal_capture();
+        Self(true)
+    }
+
+    fn finish(mut self) -> crate::storage::unified::DeferredStoreWalActions {
+        self.0 = false;
+        UnifiedStore::take_deferred_store_wal_capture()
+    }
+}
+
+impl Drop for DmlWalCapture {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = UnifiedStore::take_deferred_store_wal_capture();
+        }
+    }
+}
+
 impl RedDBRuntime {
+    pub(crate) fn rollback_connection(
+        &self,
+        connection_id: u64,
+    ) -> RedDBResult<Option<crate::storage::transaction::snapshot::TxnContext>> {
+        // Keep writer XIDs active until undo has consumed their row fields.
+        // Otherwise GC can reclaim an aborted version while undo waits for
+        // index backfill, leaving the version's secondary-index entries behind.
+        let undo = self.revive_pending_versioned_updates(connection_id);
+        self.revive_pending_tombstones(connection_id);
+        let context = self.inner.transaction_state.rollback(connection_id);
+        self.discard_pending_queue_dedup(connection_id);
+        self.discard_pending_kv_watch_events(connection_id);
+        self.discard_pending_queue_wakes(connection_id);
+        self.discard_pending_store_wal_actions(connection_id);
+        self.release_pending_claim_locks(connection_id);
+        self.discard_pending_vault_writes(connection_id)?;
+        undo?;
+        Ok(context)
+    }
+
     /// Record that the running transaction has marked `id` in `collection`
     /// for deletion (Phase 2.3.2b MVCC tombstones). `stamper_xid` is the
     /// xid that was written into `xmax` — either the parent txn xid or
@@ -90,9 +137,9 @@ impl RedDBRuntime {
             return f();
         }
 
-        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let capture = DmlWalCapture::begin();
         let result = f();
-        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
+        let captured = capture.finish();
         match result {
             Ok(value) => {
                 self.record_pending_store_wal_actions(conn_id, captured);
@@ -111,18 +158,25 @@ impl RedDBRuntime {
         if self.inner.transaction_state.in_transaction(conn_id) {
             return self.with_deferred_store_wal_if_transaction(f);
         }
+        self.drain_committed_writes_under_pressure(0)?;
         if !capture_autocommit_events {
             return f();
         }
 
-        crate::storage::UnifiedStore::begin_deferred_store_wal_capture();
+        let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let capture = DmlWalCapture::begin();
         let result = f();
-        let captured = crate::storage::UnifiedStore::take_deferred_store_wal_capture();
-        self.inner
-            .db
-            .store()
-            .append_deferred_store_wal_actions(captured)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let captured = capture.finish();
+        if result.is_err() && deletions.has_pending() {
+            return result;
+        }
+        deletions.publish(self, || {
+            self.inner
+                .db
+                .store()
+                .append_deferred_store_wal_actions(captured)
+                .map_err(|err| RedDBError::Internal(err.to_string()))
+        })?;
         result
     }
 
@@ -165,7 +219,7 @@ impl RedDBRuntime {
         })
     }
 
-    fn record_pending_store_wal_actions(
+    pub(crate) fn record_pending_store_wal_actions(
         &self,
         conn_id: u64,
         actions: crate::storage::unified::DeferredStoreWalActions,
@@ -221,7 +275,7 @@ impl RedDBRuntime {
             && (xid > snapshot.xid || snapshot.in_progress.contains(&xid))
     }
 
-    fn conflict_error(
+    pub(super) fn conflict_error(
         collection: &str,
         logical_id: crate::storage::unified::entity::EntityId,
         xid: crate::storage::transaction::snapshot::Xid,
@@ -470,6 +524,11 @@ impl RedDBRuntime {
         // Undo newest versions first so repeated writes restore the original chain.
         for (collection, old_id, new_id, xid, previous_xmax) in pending.into_iter().rev() {
             let topology_lock = self.index_store_ref().collection_topology_lock(&collection);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &collection,
+                super::index_store::MutationTestPhase::BeforeUndoTopology,
+            );
             self.revive_versioned_update(
                 &collection,
                 old_id,
@@ -617,7 +676,7 @@ impl RedDBRuntime {
         let Some(pending) = self.inner.pending_kv_watch_events.write().remove(&conn_id) else {
             return;
         };
-        for event in pending {
+        for (_, event) in pending {
             self.cdc_emit_kv(
                 event.op,
                 &event.collection,
@@ -760,11 +819,8 @@ impl RedDBRuntime {
         let manager = self.inner.transaction_state.snapshot_manager();
         let next_xid = manager.peek_next_xid();
         let mut cutoff = next_xid;
-        if let Some(oldest_active) = manager.oldest_active_xid() {
-            cutoff = cutoff.min(oldest_active);
-        }
-        if let Some(oldest_pinned) = manager.oldest_pinned_xid() {
-            cutoff = cutoff.min(oldest_pinned);
+        if let Some(oldest_required) = manager.oldest_required_xid() {
+            cutoff = cutoff.min(oldest_required);
         }
         let retention_xids = self.config_u64("runtime.mvcc.vacuum_retention_xids", 0);
         if retention_xids > 0 {

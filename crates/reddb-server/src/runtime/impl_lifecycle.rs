@@ -181,6 +181,18 @@ impl RedDBRuntime {
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
     ) -> RedDBResult<Self> {
+        Self::with_pool_and_limits(
+            options,
+            pool_config,
+            super::resource_limits::ResourceLimits::from_env(),
+        )
+    }
+
+    pub(super) fn with_pool_and_limits(
+        options: RedDBOptions,
+        pool_config: ConnectionPoolConfig,
+        resource_limits: super::resource_limits::ResourceLimits,
+    ) -> RedDBResult<Self> {
         options
             .replication
             .validate_failover_profile()
@@ -246,6 +258,7 @@ impl RedDBRuntime {
 
         let no_auth_boot = crate::service_cli::no_auth_active(&options);
         let runtime = Self {
+            background_tasks: Some(Arc::new(background_tasks::RuntimeBackgroundTasks::default())),
             inner: Arc::new(RuntimeInner {
                 functions: parking_lot::RwLock::new(
                     super::function_catalog::FunctionCatalog::load(&db)?,
@@ -263,12 +276,17 @@ impl RedDBRuntime {
                 memory_reservations: parking_lot::Mutex::new(
                     super::memory_admission::MemoryReservations::default(),
                 ),
+                mvcc_maintenance: parking_lot::Mutex::new(Default::default()),
                 indices: IndexCatalog::register_default_vector_graph(
                     options.has_capability(crate::api::Capability::Table),
                     options.has_capability(crate::api::Capability::Graph),
                 ),
                 pool_config,
                 pool: Mutex::new(PoolState::default()),
+                execution_admission: parking_lot::RwLock::new(
+                    crate::transport::execution_admission::ExecutionAdmission::for_host(),
+                ),
+                execution_queue_timeout_ms: AtomicU64::new(30_000),
                 started_at_unix_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -351,6 +369,7 @@ impl RedDBRuntime {
                 pending_versioned_updates: parking_lot::RwLock::new(HashMap::new()),
                 pending_queue_dedup: parking_lot::RwLock::new(HashMap::new()),
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
+                pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(
@@ -363,7 +382,8 @@ impl RedDBRuntime {
                     &options,
                 )),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
-                resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
+                resource_limits,
+                query_budget_slots: AtomicU64::new(0),
                 audit_log: {
                     // Default audit-log path for the in-memory case
                     // sits in the system temp dir; persistent runs
@@ -519,6 +539,8 @@ impl RedDBRuntime {
             }),
         };
 
+        runtime.install_hash_candidate_admission();
+
         // Issue #205 — install the process-wide OperatorEvent sink so
         // emit sites buried in storage / replication / signal handlers
         // can record without threading an `&AuditLogger` through every
@@ -573,7 +595,7 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
-        runtime.rehydrate_snapshot_xid_floor();
+        runtime.rehydrate_snapshot_xid_floor()?;
         assert!(
             runtime
                 .inner
@@ -588,7 +610,24 @@ impl RedDBRuntime {
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
+        runtime.prepare_paged_counts()?;
+        // Registry restoration can checkpoint missing projections on any
+        // collection. Register every internal projector before that epoch.
+        super::control_event_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
+        if runtime
+            .db()
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_some()
+        {
+            runtime
+                .db()
+                .store()
+                .checkpoint_missing_secondary_indices()?;
+        }
+        runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()
             .map_err(|err| RedDBError::Internal(format!("load probabilistic state: {err}")))?;
@@ -876,11 +915,10 @@ impl RedDBRuntime {
 
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
-        // so dropping the last `RedDBRuntime` handle actually releases
-        // the underlying Arc<Pager> (and its file lock). Polling at
-        // 200ms means shutdown latency is bounded; the real 60-second
-        // work cadence is tracked independently via a `last_work`
-        // timestamp.
+        // to avoid an ownership cycle. The last foreground owner unparks
+        // and joins the worker before releasing its inner reference, so
+        // an active weak upgrade cannot retain the pager lock after close.
+        // The 60-second work cadence is tracked via `last_work`.
         //
         // The previous version captured `rt = runtime.clone()` by
         // strong reference and ran an unterminated `loop`, which held
@@ -890,26 +928,41 @@ impl RedDBRuntime {
         // `finding_1_select_after_bulk_insert_persistent_reopen`.
         {
             let weak = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-maintenance".into())
-                .spawn(move || {
-                    let tick = std::time::Duration::from_millis(200);
-                    let work_interval = std::time::Duration::from_secs(60);
-                    let mut last_work = std::time::Instant::now();
-                    loop {
-                        std::thread::sleep(tick);
-                        let Some(inner) = weak.upgrade() else {
-                            // All strong references dropped — the
-                            // runtime is gone, exit cleanly.
-                            break;
-                        };
-                        if last_work.elapsed() >= work_interval {
-                            let _stats = inner.db.store().context_index().stats();
-                            last_work = std::time::Instant::now();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-maintenance".into()),
+                    move |stopped| {
+                        let tick = std::time::Duration::from_millis(200);
+                        let work_interval = std::time::Duration::from_secs(60);
+                        let mut last_work = std::time::Instant::now();
+                        let mut allocator_pressure =
+                            super::allocator_pressure::AllocatorPressure::default();
+                        loop {
+                            std::thread::park_timeout(tick);
+                            if stopped.load(AtomicOrdering::Acquire) {
+                                break;
+                            }
+                            let Some(inner) = weak.upgrade() else {
+                                // All strong references dropped — the
+                                // runtime is gone, exit cleanly.
+                                break;
+                            };
+                            if last_work.elapsed() >= work_interval {
+                                let _stats = inner.db.store().context_index().stats();
+                                last_work = std::time::Instant::now();
+                            }
+                            let rt = RedDBRuntime {
+                                background_tasks: None,
+                                inner,
+                            };
+                            rt.try_reclaim_history_tick();
+                            allocator_pressure.tick();
                         }
-                    }
-                })
-                .ok();
+                    },
+                );
         }
 
         // Start backup scheduler if enabled via red_config
@@ -986,55 +1039,76 @@ impl RedDBRuntime {
         // Issue #583 slice 10 — ContinuousMaterializedView scheduler.
         // Low-priority background ticker that drains the cache's
         // `claim_due_at` set every ~50ms. Holds only a Weak<RuntimeInner>
-        // so the thread exits cleanly when the runtime drops (≤50ms
-        // latency between drop and exit). Materialized views without
+        // to avoid an ownership cycle; foreground close unparks and drains
+        // an active refresh before releasing storage. Materialized views without
         // a `REFRESH EVERY` clause stay on the manual-refresh path
         // and are skipped by `claim_due_at`, so the loop is a no-op
         // when no scheduled views exist.
         {
             let weak_inner = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-mv-scheduler".into())
-                // Rust's default for spawned threads is 2 MiB, which is too
-                // small for the query-execution path that refresh_due_materialized_views
-                // runs (StatementExecutionFrame + guards per view). Match the
-                // 8 MiB that the OS gives the main thread.
-                .stack_size(8 * 1024 * 1024)
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    let Some(inner) = weak_inner.upgrade() else {
-                        break;
-                    };
-                    let rt = RedDBRuntime { inner };
-                    rt.refresh_due_materialized_views();
-                })
-                .ok();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new()
+                        .name("reddb-mv-scheduler".into())
+                        // Rust's default for spawned threads is 2 MiB, which is too
+                        // small for the query-execution path that refresh_due_materialized_views
+                        // runs (StatementExecutionFrame + guards per view). Match the
+                        // 8 MiB that the OS gives the main thread.
+                        .stack_size(8 * 1024 * 1024),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(50));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
+                        };
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.refresh_due_materialized_views();
+                    },
+                );
         }
 
         // Issue #584 slice 12 — DeclarativeRetention background sweeper.
         // Low-priority ticker that physically reclaims rows whose
         // timestamp has fallen beyond the retention window. Holds a
-        // `Weak<RuntimeInner>` so the thread exits within one tick of
-        // the runtime drop (graceful shutdown leaves storage consistent
+        // `Weak<RuntimeInner>`; foreground close drains an active tick
+        // before releasing storage (shutdown leaves storage consistent
         // because each tick goes through the standard DELETE path —
         // there is no half-finished mutation state to clean up). The
         // tick interval is intentionally longer than the MV scheduler
         // (500ms) because retention is order-of-seconds at minimum.
         if !runtime.write_gate().is_read_only() {
             let weak_inner = Arc::downgrade(&runtime.inner);
-            std::thread::Builder::new()
-                .name("reddb-retention-sweeper".into())
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let Some(inner) = weak_inner.upgrade() else {
-                        break;
-                    };
-                    let rt = RedDBRuntime { inner };
-                    rt.sweep_retention_tick(
-                        crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
-                    );
-                })
-                .ok();
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-retention-sweeper".into()),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(500));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
+                        };
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.sweep_retention_tick(
+                            crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
+                        );
+                    },
+                );
         }
 
         // Anonymous access is the most consequential posture an operator can
@@ -1072,18 +1146,38 @@ impl RedDBRuntime {
         Ok(runtime)
     }
 
-    fn rehydrate_snapshot_xid_floor(&self) {
+    fn rehydrate_snapshot_xid_floor(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
+        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+        let base_high_water_mark = store.startup_xid_high_water_mark();
+        if let Some(high_water_mark) = base_high_water_mark {
+            snapshot_manager.observe_committed_xid(high_water_mark);
+        }
         for collection in store.list_collections() {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
-            for entity in manager.query_all(|_| true) {
-                let snapshot_manager = self.inner.transaction_state.snapshot_manager();
+            let observe = |entity: &crate::storage::UnifiedEntity| {
                 snapshot_manager.observe_committed_xid(entity.xmin);
                 snapshot_manager.observe_committed_xid(entity.xmax);
+                true
+            };
+            if base_high_water_mark.is_some() {
+                // The catalog covers the exact immutable roots. Committed WAL
+                // replay remains resident and must still advance the floor.
+                manager.for_each_entity(observe);
+            } else {
+                // Older or unproven generations require complete physical
+                // validation, one bounded record at a time, before filtering.
+                manager.try_for_each_entity(usize::MAX, observe)?;
             }
         }
+        if base_high_water_mark.is_none() {
+            store.remember_startup_xid_high_water_mark(
+                snapshot_manager.peek_next_xid().saturating_sub(1),
+            );
+        }
+        Ok(())
     }
 
     /// Provision an empty Table-shaped collection that backs a
@@ -1266,5 +1360,182 @@ impl RedDBRuntime {
         &self,
     ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
         self.inner.browser_token_authority.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod xid_resume_tests {
+    use super::*;
+    use reddb_engine::storage::collection_read::{CollectionCursor, CollectionRead, EncodedRecord};
+
+    struct Unreadable;
+
+    fn unavailable() -> crate::storage::StoreError {
+        crate::storage::StoreError::Io(std::io::Error::other("XID bootstrap read a base payload"))
+    }
+
+    impl CollectionRead for Unreadable {
+        fn get_record(
+            &self,
+            id: crate::storage::EntityId,
+            _: usize,
+        ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
+            if id.raw() == 999 {
+                Ok(None)
+            } else {
+                Err(unavailable())
+            }
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
+            Err(unavailable())
+        }
+        fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
+            Err(unavailable())
+        }
+    }
+
+    #[test]
+    fn xid_resume_survives_pending_checkpoint_process_exit() {
+        const FIXTURE: &str = "REDDB_XID_RESUME_CRASH_FIXTURE";
+        let open = |path: std::path::PathBuf| {
+            let options = RedDBOptions::persistent(path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_storage_profile(
+                    crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                )
+                .expect("profile");
+            crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options)
+            })
+            .expect("crash recovery runtime")
+        };
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = std::path::PathBuf::from(root);
+            assert_eq!(
+                std::fs::read_to_string(root.join("owned-fixture")).expect("owned fixture"),
+                "xid-resume-crash-v1"
+            );
+            let runtime = open(root.join("crash.rdb"));
+            for sql in [
+                "CREATE TABLE crash_rows (id INTEGER, payload TEXT)",
+                "INSERT INTO crash_rows (id, payload) VALUES (1, 'committed')",
+                "BEGIN",
+                "UPDATE crash_rows SET payload = 'pending' WHERE id = 1",
+                "INSERT INTO crash_rows (id, payload) VALUES (2, 'pending')",
+            ] {
+                runtime.execute_query(sql).expect("crash fixture statement");
+            }
+            runtime
+                .flush()
+                .expect("checkpoint with pending transaction");
+            std::fs::write(
+                root.join("checkpoint-complete"),
+                "pending transaction remains open",
+            )
+            .expect("acknowledged fixture checkpoint");
+            // Deliberately skip all runtime destructors and rollback. The
+            // parent must recover the committed preimage from the native file.
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().expect("owned crash fixture");
+        std::fs::write(
+            directory.path().join("owned-fixture"),
+            "xid-resume-crash-v1",
+        )
+        .expect("ownership marker");
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "runtime::impl_lifecycle::xid_resume_tests::xid_resume_survives_pending_checkpoint_process_exit",
+                "--test-threads=1",
+            ])
+            .env(FIXTURE, directory.path())
+            .output()
+            .expect("crashing owned child");
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(directory.path().join("checkpoint-complete").is_file());
+        let path = directory.path().join("crash.rdb");
+        assert!(path.is_file());
+        let runtime = open(path.clone());
+        let result = runtime
+            .execute_query("SELECT id, payload FROM crash_rows ORDER BY id")
+            .expect("committed preimage");
+        assert_eq!(
+            result.result.records.len(),
+            1,
+            "pending insert must stay invisible"
+        );
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(
+            result.result.records[0].get("payload"),
+            Some(&Value::text("committed"))
+        );
+        runtime
+            .execute_query("INSERT INTO crash_rows (id, payload) VALUES (3, 'after')")
+            .expect("new writer after recovery");
+        runtime.flush().expect("recovered checkpoint");
+        drop(runtime);
+        let reopened = open(path);
+        let result = reopened
+            .execute_query("SELECT id FROM crash_rows ORDER BY id")
+            .expect("second recovery");
+        assert_eq!(result.result.records.len(), 2);
+        assert_eq!(result.result.records[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(result.result.records[1].get("id"), Some(&Value::Integer(3)));
+    }
+
+    #[test]
+    fn xid_resume_skips_known_base_payloads_but_rejects_an_unproven_root() {
+        let directory = tempfile::tempdir().expect("resume fixture");
+        let options = RedDBOptions::persistent(directory.path().join("resume.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE resume_rows (id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO resume_rows (id) VALUES (1)")
+            .expect("row");
+        runtime.flush().expect("publish complete XID summary");
+        let store = runtime.db().store();
+        assert!(store.startup_xid_high_water_mark().is_some());
+        let root = store
+            .collection_root_page("resume_rows")
+            .expect("published root");
+        let manager = store.get_collection("resume_rows").expect("manager");
+        for (candidate, proven) in [(root, true), (root + 1, false)] {
+            manager.install_backing(
+                Arc::new(Unreadable),
+                candidate,
+                store.format_version(),
+                4096,
+                1,
+            );
+            let mut overlay = crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(999),
+                "resume_rows",
+                999,
+                vec![Value::Integer(2)],
+            );
+            overlay.xmin = 500_000;
+            overlay.xmax = 600_000;
+            manager.insert(overlay).expect("resident WAL overlay");
+            let result = runtime.rehydrate_snapshot_xid_floor();
+            assert_eq!(result.is_ok(), proven, "root={candidate}: {result:?}");
+            if proven {
+                assert!(runtime.snapshot_manager().peek_next_xid() > 600_000);
+            }
+        }
     }
 }

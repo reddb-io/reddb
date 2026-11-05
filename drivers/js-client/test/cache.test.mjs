@@ -206,11 +206,11 @@ test('cache.invalidatePrefix sends DELETE with prefix query param', async () => 
   }
 })
 
-test('cache.invalidateTags sends DELETE with tags body', async () => {
+test('cache.invalidateTags sends POST without reserving a cache key', async () => {
   let captured = null
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock' }),
-    'DELETE /cache/ns/ns1/tags': (body) => {
+    'POST /cache/ns/ns1/invalidate-tags': (body) => {
       captured = body
       return { removed: 5 }
     },
@@ -225,11 +225,11 @@ test('cache.invalidateTags sends DELETE with tags body', async () => {
   }
 })
 
-test('cache.flushNamespace POSTs to /admin/blob_cache/flush_namespace', async () => {
+test('cache.flushNamespace uses the caller-scoped namespace endpoint', async () => {
   let captured = null
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock' }),
-    'POST /admin/blob_cache/flush_namespace': (body) => {
+    'POST /cache/ns/ns1/flush': (body) => {
       captured = body
       return { ok: true }
     },
@@ -237,7 +237,7 @@ test('cache.flushNamespace POSTs to /admin/blob_cache/flush_namespace', async ()
   try {
     const db = await connect(stub.baseUrl)
     await db.cache.flushNamespace('ns1')
-    assert.equal(captured.namespace, 'ns1')
+    assert.deepEqual(captured, {})
   } finally {
     await stub.close()
   }

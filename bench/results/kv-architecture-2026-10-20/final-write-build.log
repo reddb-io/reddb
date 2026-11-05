@@ -1,0 +1,5 @@
+   Compiling reddb-io-file v1.24.15 (/work/src/crates/reddb-file)
+   Compiling reddb-io-server v1.24.15 (/work/src/crates/reddb-server)
+   Compiling reddb-io-client v1.24.15 (/work/src/crates/reddb-client)
+   Compiling reddb-io v1.24.15 (/work/src)
+    Finished `release` profile [optimized] target(s) in 2m 50s

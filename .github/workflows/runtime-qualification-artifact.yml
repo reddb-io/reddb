@@ -1,0 +1,57 @@
+name: Runtime Qualification Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/runtime-qualification-artifact.yml'
+      - 'scripts/prepare-runtime-qualification-artifact.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-qualification-artifact-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  CARGO_TARGET_DIR: target
+
+jobs:
+  build:
+    name: Build optimized historical-runtime qualifier
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e
+        with:
+          toolchain: '1.95.0'
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: runtime-qualification-release-rust-1.95.0
+          cache-on-failure: 'true'
+      - name: Build the release-profile library test executable
+        run: |
+          cargo +1.95.0 test --locked --release -p reddb-io-server --lib \
+            --no-run --message-format=json > "$RUNNER_TEMP/runtime-qualification-cargo.jsonl"
+      - name: Validate and package the exact optimized executable
+        run: |
+          python3 scripts/prepare-runtime-qualification-artifact.py \
+            --cargo-messages "$RUNNER_TEMP/runtime-qualification-cargo.jsonl" \
+            --destination "$RUNNER_TEMP/runtime-qualification"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runtime-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-qualification/
+          if-no-files-found: error
+          retention-days: 7

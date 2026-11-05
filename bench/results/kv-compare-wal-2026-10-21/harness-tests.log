@@ -1,0 +1,18 @@
+test_torn_root_is_rejected_and_only_checksummed_generation_is_selected (test_compare.ArtifactStateTests) ... ok
+test_acknowledged_but_discarded_writes_invalidate_saved_run (test_compare.CompareTests) ... ok
+test_duration_mode_is_not_truncated_to_the_operation_quota (test_compare.CompareTests) ... ok
+test_failed_partial_samples_cannot_be_aggregated_as_success (test_compare.CompareTests) ... ok
+test_fenced_write_requires_local_fsync_confirmation (test_compare.CompareTests) ... ok
+test_http_errors_and_connection_closure_are_failures (test_compare.CompareTests) ... ok
+test_parallel_verification_checks_every_key_once (test_compare.CompareTests) ... ok
+test_query_reads_use_the_actual_record_envelope (test_compare.CompareTests) ... ok
+test_resource_samples_accept_windows_docker_cursor_escapes (test_compare.CompareTests) ... ok
+test_resp_errors_and_eof_are_failures (test_compare.CompareTests) ... ok
+test_uneven_worker_and_pipeline_quotas_count_actual_operations (test_compare.CompareTests) ... ok
+test_wrong_read_value_is_not_a_success (test_compare.CompareTests) ... ok
+test_zero_only_cpu_telemetry_does_not_claim_zero_cpu_under_load (test_compare.CompareTests) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.471s
+
+OK

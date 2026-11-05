@@ -1,0 +1,74 @@
+{
+  "schema": "reddb.query-read-paths.v1",
+  "status": "valid-diagnostic",
+  "rounds": [
+    {
+      "queries": 6492,
+      "seconds": 2.002575437014457,
+      "queries_s": 3241.8254413819286,
+      "p50_us": 2280.315,
+      "p95_us": 4473.632,
+      "p99_us": 5846.361,
+      "errors": 0
+    },
+    {
+      "queries": 6520,
+      "seconds": 2.002054077980574,
+      "queries_s": 3256.655288041257,
+      "p50_us": 2261.037,
+      "p95_us": 4445.146,
+      "p99_us": 5620.182,
+      "errors": 0
+    },
+    {
+      "queries": 6575,
+      "seconds": 2.0022767379996367,
+      "queries_s": 3283.761867287494,
+      "p50_us": 2255.157,
+      "p95_us": 4411.322,
+      "p99_us": 5700.039,
+      "errors": 0
+    },
+    {
+      "queries": 6535,
+      "seconds": 2.002156927017495,
+      "queries_s": 3263.979916766483,
+      "p50_us": 2262.831,
+      "p95_us": 4432.284,
+      "p99_us": 5542.312,
+      "errors": 0
+    },
+    {
+      "queries": 6478,
+      "seconds": 2.0020834539900534,
+      "queries_s": 3235.629357552337,
+      "p50_us": 2273.373,
+      "p95_us": 4446.962,
+      "p99_us": 5727.031,
+      "errors": 0
+    }
+  ],
+  "config": {
+    "host": "reddb-architecture-after-20261020",
+    "port": 5000,
+    "kv_collection": "kv_diag_10000",
+    "keys": 10000,
+    "value_bytes": 100,
+    "workers": 8,
+    "seconds": 2,
+    "rounds": 5,
+    "case": "sql-point",
+    "setup": false,
+    "verify_only": false,
+    "out": "/results/after-2/sql-point-c8.json"
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36"
+  },
+  "started_unix_ms": 1792536691392,
+  "classification": "shared-host diagnostic; fixed duration; every response checked; result cache off",
+  "median_queries_s": 3256.655288041257,
+  "median_p99_us": 5700.039,
+  "finished_unix_ms": 1792536701566
+}

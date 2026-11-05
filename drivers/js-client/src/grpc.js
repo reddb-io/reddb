@@ -10,6 +10,7 @@ import { connect as connectHttp2 } from 'node:http2'
 import { Buffer } from 'node:buffer'
 
 import { RedDBError } from './protocol.js'
+import { normalizeQueryResult } from './core/result.js'
 import { normalizeExactNumbers, serializeJsonValue } from './core/serialization.js'
 
 const SERVICE = '/reddb.v1.RedDb'
@@ -155,12 +156,14 @@ function normalizeQueryReply(reply) {
       throw new RedDBError('QUERY_ERROR', `bad gRPC query JSON: ${err.message}`)
     }
   }
-  const rows = normalizeExactNumbers(parsed.rows ?? parsed.records ?? [])
+  // `records` are `{ values, meta }` objects; the caller wants the `values`.
+  const canonical = normalizeQueryResult(parsed)
+  const rows = normalizeExactNumbers(Array.isArray(canonical?.rows) ? canonical.rows : [])
   return {
     ok: reply.ok,
-    statement: parsed.statement ?? reply.statement ?? '',
-    affected: parsed.affected ?? parsed.affected_rows ?? 0,
-    columns: parsed.columns ?? reply.columns ?? [],
+    statement: canonical?.statement || reply.statement || '',
+    affected: canonical?.affected ?? 0,
+    columns: canonical?.columns?.length ? canonical.columns : (reply.columns ?? []),
     rows,
   }
 }

@@ -190,30 +190,15 @@ impl RedDB {
     ) -> std::sync::Arc<
         std::collections::HashMap<String, std::sync::Arc<crate::physical::CollectionContract>>,
     > {
-        if let Ok(guard) = self.collection_contract_cache.read() {
-            if let Some(map) = guard.as_ref() {
-                return std::sync::Arc::clone(map);
-            }
-        }
-        let contracts: Vec<crate::physical::CollectionContract> = self
-            .physical_metadata()
-            .map(|metadata| metadata.collection_contracts)
-            .unwrap_or_default();
-        let map: std::collections::HashMap<_, _> = contracts
-            .into_iter()
-            .map(|contract| (contract.name.clone(), std::sync::Arc::new(contract)))
-            .collect();
-        let arc = std::sync::Arc::new(map);
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = Some(std::sync::Arc::clone(&arc));
-        }
-        arc
+        self.collection_contract_cache.get_or_load(|| {
+            self.physical_metadata()
+                .map(|metadata| metadata.collection_contracts)
+                .unwrap_or_default()
+        })
     }
 
     pub(crate) fn invalidate_collection_contract_cache(&self) {
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = None;
-        }
+        self.collection_contract_cache.invalidate();
     }
 
     /// Single-file artifact only: mirror the current contract set into the
@@ -223,10 +208,11 @@ impl RedDB {
     /// it from the stored entities and a KV collection would come back as a
     /// table. No-op for other profiles, which persist contracts via the
     /// metadata sidecar.
-    pub(crate) fn sync_single_file_contract_blob(&self) {
+    pub(crate) fn sync_single_file_contract_blob(&self) -> Result<(), Box<dyn std::error::Error>> {
         let contracts = self.collection_contracts();
         let bytes = crate::physical::serialize_collection_contracts(&contracts);
-        self.store().set_aux_metadata(bytes);
+        self.store().persist_aux_metadata(bytes)?;
+        Ok(())
     }
 
     /// Seed the in-memory contract cache from the store's auxiliary-metadata
@@ -256,16 +242,48 @@ impl RedDB {
                 }
             }
         }
-        if let Ok(mut guard) = self.collection_contract_cache.write() {
-            *guard = Some(std::sync::Arc::new(map));
-        }
+        self.collection_contract_cache.replace(map);
         Ok(())
+    }
+
+    fn update_collection_contract_metadata<T, F>(
+        &self,
+        mutator: F,
+    ) -> Result<T, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut PhysicalMetadataFile) -> T,
+    {
+        if !self.paged_mode
+            || self.options.storage_profile.deploy_profile
+                != crate::storage::DeployProfile::Embedded
+            || self.options.storage_profile.packaging
+                != crate::storage::StoragePackaging::SingleFile
+        {
+            return self.update_physical_metadata(mutator);
+        }
+        if self.options.read_only {
+            return Err("physical metadata operations are not allowed in read-only mode".into());
+        }
+        let Some(path) = self.path() else {
+            return Err("database path is not available".into());
+        };
+
+        // Legacy paged files keep contracts in the durable metadata sidecar,
+        // not the embedded dump's auxiliary blob or native artifact summaries.
+        // A definition edit must not rebuild every collection's search indexes.
+        // Retain publication serialization and the canonical atomic writer.
+        let _publication = self.store.vault_publication_lock.lock();
+        let mut metadata = self.load_or_bootstrap_physical_metadata(false)?;
+        let result = mutator(&mut metadata);
+        metadata.save_for_data_path(path)?;
+        Ok(result)
     }
 
     pub fn save_collection_contract(
         &self,
         contract: crate::physical::CollectionContract,
     ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
+        let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             if let Some(ttl_ms) = contract.default_ttl_ms {
                 defaults.insert(contract.name.clone(), ttl_ms);
@@ -286,25 +304,21 @@ impl RedDB {
             manager.set_column_schema_if_empty(columns);
         }
 
+        // Existing paged files can be opened with embedded options. Their
+        // checkpoints do not encode the binary dump's auxiliary contract blob.
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
-            if let Ok(mut guard) = self.collection_contract_cache.write() {
-                let mut contracts = guard
-                    .as_ref()
-                    .map(|existing| existing.as_ref().clone())
-                    .unwrap_or_default();
-                contracts.insert(contract.name.clone(), std::sync::Arc::new(contract.clone()));
-                *guard = Some(std::sync::Arc::new(contracts));
-            }
-            self.sync_single_file_contract_blob();
+            self.collection_contract_cache.insert(contract.clone());
+            self.sync_single_file_contract_blob()?;
             return Ok(contract);
         }
 
         self.invalidate_collection_contract_cache();
 
-        let saved = self.update_physical_metadata(|metadata| {
+        let saved = self.update_collection_contract_metadata(|metadata| {
             if let Some(existing) = metadata
                 .collection_contracts
                 .iter_mut()
@@ -336,6 +350,7 @@ impl RedDB {
         &self,
         collection: &str,
     ) -> Result<Option<crate::physical::CollectionContract>, Box<dyn std::error::Error>> {
+        let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             defaults.remove(collection);
         }
@@ -347,25 +362,61 @@ impl RedDB {
         if self.options.storage_profile.deploy_profile == crate::storage::DeployProfile::Embedded
             && self.options.storage_profile.packaging
                 == crate::storage::StoragePackaging::SingleFile
+            && !self.paged_mode
         {
-            let mut removed = None;
-            if let Ok(mut guard) = self.collection_contract_cache.write() {
-                let mut contracts = guard
-                    .as_ref()
-                    .map(|existing| existing.as_ref().clone())
-                    .unwrap_or_default();
-                removed = contracts
-                    .remove(collection)
-                    .map(|contract| (*contract).clone());
-                *guard = Some(std::sync::Arc::new(contracts));
-            }
-            self.sync_single_file_contract_blob();
+            let removed = self.collection_contract_cache.remove(collection);
+            self.sync_single_file_contract_blob()?;
             return Ok(removed);
         }
 
         self.invalidate_collection_contract_cache();
 
-        let removed = self.update_physical_metadata(|metadata| {
+        if self.paged_mode {
+            let Some(path) = self.path() else {
+                return Err("database path is not available".into());
+            };
+            // DROP already published the native collection registry before it
+            // reaches this contract edit.  Rebuild only the small physical
+            // metadata catalogue from its last durable roots, removing the
+            // dropped root and descriptors explicitly.  Calling the generic
+            // metadata updater here used to fingerprint every row in changed
+            // internal collections (notably append-heavy red_config) while
+            // holding the publication lock, turning a tiny DROP after cold
+            // boot into work proportional to the database's history.
+            //
+            // Other collection fingerprints describe their last checkpoint,
+            // just as they do between ordinary DML and the next checkpoint;
+            // the canonical checkpoint path remains responsible for
+            // recomputing changed fingerprints.
+            let previous = self.load_or_bootstrap_physical_metadata(false)?;
+            let mut roots = previous.superblock.collection_roots.clone();
+            roots.remove(collection);
+            let indexes = previous
+                .indexes
+                .iter()
+                .filter(|index| index.collection.as_deref() != Some(collection))
+                .cloned()
+                .collect();
+            let mut metadata = PhysicalMetadataFile::from_state(
+                self.options.clone(),
+                self.catalog_snapshot(),
+                roots,
+                indexes,
+                Some(&previous),
+            );
+            let removed = metadata
+                .collection_contracts
+                .iter()
+                .position(|contract| contract.name == collection)
+                .map(|index| metadata.collection_contracts.remove(index));
+            metadata.collection_ttl_defaults_ms.remove(collection);
+            metadata.save_for_data_path(path)?;
+            self.persist_native_physical_header(&metadata)?;
+            self.invalidate_collection_contract_cache();
+            return Ok(removed);
+        }
+
+        let removed = self.update_collection_contract_metadata(|metadata| {
             let removed = metadata
                 .collection_contracts
                 .iter()
@@ -520,10 +571,9 @@ impl RedDB {
             .map(|path| PhysicalMetadataFile::metadata_path_for(path))
     }
 
-    /// Load the current physical metadata view, bootstrapping from native state when needed.
+    /// Inspect the current physical metadata view without publishing repairs.
     pub fn physical_metadata(&self) -> Option<PhysicalMetadataFile> {
-        self.load_or_bootstrap_physical_metadata(!self.options.read_only)
-            .ok()
+        self.load_or_bootstrap_physical_metadata(false).ok()
     }
 
     /// Physical index registry derived for the current database state.
@@ -531,6 +581,15 @@ impl RedDB {
         let indexes = self
             .physical_metadata()
             .map(|metadata| metadata.indexes)
+            .unwrap_or_default();
+        self.physical_indexes_from_declarations(indexes)
+    }
+
+    pub(crate) fn physical_indexes_from_declarations(
+        &self,
+        indexes: Vec<PhysicalIndexState>,
+    ) -> Vec<PhysicalIndexState> {
+        let indexes = Some(indexes)
             .filter(|indexes| !indexes.is_empty())
             .or_else(|| {
                 self.native_physical_state()
@@ -1140,6 +1199,7 @@ impl RedDB {
 
         self.flush()?;
 
+        let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = match self.load_or_bootstrap_physical_metadata(true) {
             Ok(metadata) => metadata,
             Err(_)

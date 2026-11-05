@@ -2,7 +2,9 @@
 //! #1619): [`RedDBRuntime::check_query_privilege`] and the per-domain
 //! privilege gates it dispatches to. Behaviour-preserving move; the free
 //! IAM/policy-column helpers these consume live in [`super::policy_columns`].
-use super::super::execution_context::{current_auth_identity, current_tenant};
+use super::super::execution_context::{
+    current_auth_identity, current_auth_principal, current_tenant,
+};
 use super::super::*;
 use super::policy_columns::*;
 
@@ -186,6 +188,146 @@ fn statement_family(expr: &reddb_rql::ast::QueryExpr) -> &'static str {
 }
 
 impl RedDBRuntime {
+    pub(crate) fn check_collection_privilege(
+        &self,
+        action: reddb_rql::ast::PolicyAction,
+        collection: &str,
+    ) -> RedDBResult<()> {
+        let Some((username, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let (action_name, allowed_by_role) = match action {
+            reddb_rql::ast::PolicyAction::Select => ("select", role.can_read()),
+            reddb_rql::ast::PolicyAction::Insert => ("insert", role.can_write()),
+            reddb_rql::ast::PolicyAction::Update => ("update", role.can_write()),
+            reddb_rql::ast::PolicyAction::Delete => ("delete", role.can_write()),
+        };
+        if !allowed_by_role {
+            return Err(RedDBError::Query(format!(
+                "principal=`{username}` role=`{role:?}` cannot {action_name} collection `{collection}`"
+            )));
+        }
+
+        self.check_collection_iam_privilege(action_name, collection, &username, role)
+    }
+
+    #[inline(never)]
+    fn check_collection_iam_privilege(
+        &self,
+        action_name: &str,
+        collection: &str,
+        username: &str,
+        role: crate::auth::Role,
+    ) -> RedDBResult<()> {
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        if !auth_store.iam_authorization_enabled() {
+            return Ok(());
+        }
+
+        let tenant = current_tenant();
+        let principal = crate::auth::UserId::from_parts(tenant.as_deref(), username);
+        let mut resource = crate::auth::policies::ResourceRef::new("collection", collection);
+        if let Some(tenant) = tenant.as_deref() {
+            resource = resource.with_tenant(tenant);
+        }
+        let context = runtime_iam_context(role, tenant.as_deref());
+        let policies = auth_store.effective_policies(&principal);
+        let policy_refs: Vec<&crate::auth::policies::Policy> =
+            policies.iter().map(AsRef::as_ref).collect();
+        let mut decisions = vec![crate::auth::policies::evaluate(
+            &policy_refs,
+            action_name,
+            &resource,
+            &context,
+        )];
+        let is_table = self
+            .db()
+            .collection_contract_arc(collection)
+            .is_some_and(|contract| {
+                matches!(
+                    contract.declared_model,
+                    crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+                )
+            });
+        if is_table {
+            let mut table = crate::auth::policies::ResourceRef::new("table", collection);
+            if let Some(tenant) = tenant.as_deref() {
+                table = table.with_tenant(tenant);
+            }
+            decisions.push(crate::auth::policies::evaluate(
+                &policy_refs,
+                action_name,
+                &table,
+                &context,
+            ));
+        }
+        if decisions
+            .iter()
+            .any(|decision| matches!(decision, crate::auth::policies::Decision::Deny { .. }))
+        {
+            return Err(RedDBError::Query(format!(
+                "principal=`{principal}` action=`{action_name}` resource=`collection:{collection}` denied by IAM policy"
+            )));
+        }
+        if decisions.iter().any(|decision| {
+            matches!(
+                decision,
+                crate::auth::policies::Decision::Allow { .. }
+                    | crate::auth::policies::Decision::AdminBypass
+            )
+        }) || auth_store.check_policy_authz_with_role(
+            &principal,
+            action_name,
+            &resource,
+            &context,
+            role,
+        ) {
+            Ok(())
+        } else {
+            Err(RedDBError::Query(format!(
+                "principal=`{principal}` action=`{action_name}` resource=`collection:{collection}` denied by IAM policy"
+            )))
+        }
+    }
+
+    pub(in crate::runtime) fn validate_vault_table_access(
+        &self,
+        expr: &reddb_rql::ast::QueryExpr,
+    ) -> RedDBResult<()> {
+        use reddb_rql::ast::QueryExpr;
+        let mut tables = Vec::new();
+        collect_nested_read_tables(expr, &mut tables);
+        if matches!(
+            expr,
+            QueryExpr::Table(_)
+                | QueryExpr::Join(_)
+                | QueryExpr::Hybrid(_)
+                | QueryExpr::Vector(_)
+                | QueryExpr::Graph(_)
+                | QueryExpr::Path(_)
+                | QueryExpr::Insert(_)
+                | QueryExpr::Update(_)
+                | QueryExpr::Delete(_)
+        ) {
+            tables.extend(crate::runtime::impl_core::collect_table_refs(expr));
+        }
+        if tables.iter().any(|table| {
+            self.inner
+                .db
+                .collection_contract(table)
+                .is_some_and(|contract| {
+                    contract.declared_model == crate::catalog::CollectionModel::Vault
+                })
+        }) {
+            return Err(RedDBError::Query(
+                "access vault entries through $secrets or VAULT commands".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Project a `QueryExpr` to the (action, resource) pair the
     /// privilege engine cares about. Returns `Ok(())` for statements
     /// that don't touch user data (transaction control, SHOW, SET, etc.).
@@ -542,7 +684,7 @@ impl RedDBRuntime {
                 let self_only = matches!(
                     filter,
                     Some(reddb_rql::ast::PolicyPrincipalRef::User(u))
-                        if u.username == username && u.tenant.as_deref() == tenant.as_deref()
+                        if u.username == username && u.tenant.as_deref().or(tenant.as_deref()) == tenant.as_deref()
                 );
                 if self_only {
                     return Ok(());
@@ -563,7 +705,9 @@ impl RedDBRuntime {
                 if role == crate::auth::Role::Admin {
                     return Ok(());
                 }
-                if user.username == username && user.tenant.as_deref() == tenant.as_deref() {
+                if user.username == username
+                    && user.tenant.as_deref().or(tenant.as_deref()) == tenant.as_deref()
+                {
                     return Ok(());
                 }
                 return self.check_policy_management_privilege(
@@ -1134,8 +1278,7 @@ impl RedDBRuntime {
             | QueryExpr::EventsBackfill { .. }
             | QueryExpr::ForkStore { .. }
             | QueryExpr::PromoteFork { .. }
-            | QueryExpr::DropFork { .. }
-            | QueryExpr::ShowSecrets { .. } => {
+            | QueryExpr::DropFork { .. } => {
                 return require_role_tier(
                     &username,
                     role,
@@ -1189,7 +1332,6 @@ impl RedDBRuntime {
                     cmd,
                     KvCommand::Put { .. }
                         | KvCommand::InvalidateTags { .. }
-                        | KvCommand::Unseal { .. }
                         | KvCommand::Rotate { .. }
                 );
                 return if mutation {
@@ -1223,6 +1365,7 @@ impl RedDBRuntime {
             | QueryExpr::ShowConfig { .. }
             | QueryExpr::SetSecret { .. }
             | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetKv { .. }
             | QueryExpr::DeleteKv { .. }
             | QueryExpr::SetTenant { .. }
@@ -1716,21 +1859,108 @@ impl RedDBRuntime {
     /// through the victim tenant's RLS predicates. Platform-scoped
     /// principals (no tenant) and embedded callers keep the old behaviour.
     pub(crate) fn check_set_tenant_privilege(&self, target: Option<&str>) -> RedDBResult<()> {
-        if self.inner.auth_store.read().is_none() {
+        self.check_scope_tenant_privilege(target)
+    }
+
+    /// Authorize a routing-scope mutation against the immutable credential
+    /// principal, never against a tenant already projected by SQL.
+    pub(crate) fn check_scope_override_privilege(
+        &self,
+        scope: &crate::runtime::within_clause::ScopeOverride,
+    ) -> RedDBResult<()> {
+        use crate::runtime::within_clause::FieldOverride;
+
+        if let FieldOverride::Set(target) = &scope.tenant {
+            self.check_scope_tenant_privilege(Some(target))?;
+        } else if matches!(scope.tenant, FieldOverride::Clear) {
+            self.check_scope_tenant_privilege(None)?;
+        }
+
+        let Some((_, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let Some(principal) = current_auth_principal() else {
+            return Ok(());
+        };
+        let user_changes = match &scope.user {
+            FieldOverride::Inherit => false,
+            FieldOverride::Set(user) => user != &principal.username,
+            FieldOverride::Clear => true,
+        };
+        let role_changes = match &scope.role {
+            FieldOverride::Inherit => false,
+            FieldOverride::Set(candidate) => {
+                crate::auth::Role::from_str(candidate).is_none_or(|candidate| candidate != role)
+            }
+            FieldOverride::Clear => true,
+        };
+        if !user_changes && !role_changes {
             return Ok(());
         }
-        let Some((username, role)) = current_auth_identity() else {
+        if principal.tenant.is_some() {
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{principal}` cannot override credential user or role"
+            )));
+        }
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
             return Ok(());
         };
-        let Some(own_tenant) = current_tenant() else {
-            return Ok(());
+        let target = match &scope.user {
+            FieldOverride::Set(user) => user.as_str(),
+            _ => principal.username.as_str(),
         };
-        if target == Some(own_tenant.as_str()) {
+        let resource = crate::auth::policies::ResourceRef::new("user", target);
+        let ctx = runtime_iam_context(role, principal.tenant.as_deref());
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "identity:assume",
+            &resource,
+            &ctx,
+            role,
+        ) {
             return Ok(());
         }
         Err(RedDBError::Query(format!(
-            "permission denied: principal=`{}` role=`{:?}` is scoped to tenant `{}` and cannot switch tenant",
-            username, role, own_tenant
+            "permission denied: principal=`{principal}` action=`identity:assume` resource=`user:{target}` denied by IAM policy"
+        )))
+    }
+
+    pub(crate) fn check_scope_tenant_privilege(&self, target: Option<&str>) -> RedDBResult<()> {
+        if self.inner.auth_store.read().is_none() {
+            return Ok(());
+        }
+        let Some((_, role)) = current_auth_identity() else {
+            return Ok(());
+        };
+        let Some(principal) = current_auth_principal() else {
+            return Ok(());
+        };
+        if let Some(own_tenant) = principal.tenant.as_deref() {
+            if target == Some(own_tenant) {
+                return Ok(());
+            }
+            return Err(RedDBError::Query(format!(
+                "permission denied: principal=`{principal}` role=`{role:?}` is scoped to tenant `{own_tenant}` and cannot switch tenant"
+            )));
+        }
+        let Some(auth_store) = self.inner.auth_store.read().clone() else {
+            return Ok(());
+        };
+        let resource =
+            crate::auth::policies::ResourceRef::new("tenant", target.unwrap_or("platform"));
+        let ctx = runtime_iam_context(role, None);
+        if auth_store.check_policy_authz_with_role(
+            &principal,
+            "tenant:assume",
+            &resource,
+            &ctx,
+            role,
+        ) {
+            return Ok(());
+        }
+        Err(RedDBError::Query(format!(
+            "permission denied: principal=`{principal}` action=`tenant:assume` resource=`tenant:{}` denied by IAM policy",
+            target.unwrap_or("platform")
         )))
     }
 
@@ -2009,5 +2239,92 @@ impl RedDBRuntime {
                 username, action, resource_kind, resource_name
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod collection_boundary_tests {
+    use super::*;
+    use crate::application::ports::RuntimeEntityPort;
+    use crate::auth::policies::Policy;
+    use crate::auth::store::PrincipalRef;
+    use crate::auth::{AuthConfig, AuthStore, Role, UserId};
+    use crate::runtime::execution_context::{with_snapshot_bundle, SnapshotBundle};
+    use reddb_types::Value;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_collection_boundary_enforces_role_and_tenant_aware_iam() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE secret_rows (id INT, value TEXT)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO secret_rows (id, value) VALUES (1, 'seed')")
+            .expect("seed");
+
+        let store = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        let principal = UserId::from_parts(Some("acme"), "alice");
+        store
+            .create_user_in_tenant(Some("acme"), "alice", "password", Role::Write)
+            .expect("tenant writer");
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{"id":"deny_secret_rows","version":1,"statements":[{"effect":"deny","actions":["select","insert"],"resources":["collection:tenant/acme/secret_rows"]}]}"#,
+                )
+                .expect("policy"),
+            )
+            .expect("put policy");
+        store
+            .attach_policy(PrincipalRef::User(principal), "deny_secret_rows")
+            .expect("attach policy");
+        runtime.set_auth_store(Arc::clone(&store));
+
+        let writer = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("alice".to_string(), Role::Write)),
+            auth_principal: Some(crate::auth::UserId::scoped("acme", "alice")),
+            tenant: Some("acme".to_string()),
+        };
+        with_snapshot_bundle(&writer, || {
+            assert!(runtime.scan_collection("secret_rows", None, 10).is_err());
+            assert!(runtime
+                .create_rows_batch_prevalidated_columnar(
+                    "secret_rows".to_string(),
+                    Arc::new(vec!["id".to_string(), "value".to_string()]),
+                    vec![vec![Value::Integer(2), Value::text("blocked")]],
+                )
+                .is_err());
+        });
+
+        let reader = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("reader".to_string(), Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
+            tenant: None,
+        };
+        with_snapshot_bundle(&reader, || {
+            let error = runtime
+                .create_rows_batch_prevalidated_columnar(
+                    "role_floor".to_string(),
+                    Arc::new(vec!["id".to_string()]),
+                    vec![vec![Value::Integer(1)]],
+                )
+                .expect_err("read role must not bulk insert");
+            assert!(error.to_string().contains("cannot insert"), "{error}");
+        });
+
+        assert_eq!(
+            runtime
+                .scan_collection("secret_rows", None, 10)
+                .expect("platform scan")
+                .total,
+            1
+        );
     }
 }

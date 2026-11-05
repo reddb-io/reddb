@@ -196,14 +196,29 @@ fn cross_model_numeric_comparison_and_index_order_are_equivalent() {
     );
 
     for sql in [
+        "SELECT name FROM issue1782_rows WHERE n = 10",
+        "SELECT key FROM issue1782_kv WHERE value = 10",
+        "SELECT body.name AS name FROM issue1782_docs WHERE body.n = 10",
+        "SELECT name FROM issue1782_rows WHERE n BETWEEN 9 AND 11",
+        "SELECT key FROM issue1782_kv WHERE value BETWEEN 9 AND 11",
+        "SELECT body.name AS name FROM issue1782_docs WHERE body.n BETWEEN 9 AND 11",
+    ] {
+        let ops = explain_ops(&rt, sql);
+        assert!(
+            ops.contains("index_seek"),
+            "same-family numeric predicate should plan through an index for `{sql}`; ops={ops}"
+        );
+    }
+
+    for sql in [
         "SELECT name FROM issue1782_rows WHERE n = 10.0",
         "SELECT key FROM issue1782_kv WHERE value = 10.0",
         "SELECT body.name AS name FROM issue1782_docs WHERE body.n = 10.0",
     ] {
         let ops = explain_ops(&rt, sql);
         assert!(
-            ops.contains("index_seek"),
-            "numeric equality should plan through an index for `{sql}`; ops={ops}"
+            ops.contains("table_scan") && !ops.contains("index_seek"),
+            "cross-family numeric equality must retain its scan fallback for `{sql}`; ops={ops}"
         );
     }
 }

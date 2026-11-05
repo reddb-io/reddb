@@ -1,6 +1,31 @@
 use super::*;
 
 impl UnifiedStore {
+    /// Vault versions are WAL-backed in memory until a committed checkpoint.
+    /// Preparing a commit must not dirty pager pages: eviction or an auth
+    /// flush could otherwise persist a version before its WAL batch exists.
+    pub(crate) fn insert_vault_version(
+        &self,
+        collection: &str,
+        entity: UnifiedEntity,
+        metadata: Metadata,
+    ) -> Result<(), StoreError> {
+        assert!(matches!(entity.data, EntityData::Row(_)));
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.into()))?;
+        self.pending_vault_versions.write().insert(entity.id);
+        let id = manager.insert(entity)?;
+        self.register_entity_id(id);
+        if !metadata.fields.is_empty() {
+            manager.set_metadata(id, metadata)?;
+        }
+        let entity = manager
+            .get(id)
+            .expect("inserted vault version remains in memory");
+        self.persist_entities_to_pager_wal_only(collection, &[entity])
+    }
+
     pub(crate) fn persist_entities_to_pager(
         &self,
         collection: &str,
@@ -36,6 +61,7 @@ impl UnifiedStore {
         entities: &[&UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -58,7 +84,10 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -83,10 +112,13 @@ impl UnifiedStore {
             }
         }
         let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            skip_btree,
+        )?;
         Ok(())
     }
 
@@ -115,6 +147,7 @@ impl UnifiedStore {
         entities: &[UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
@@ -140,7 +173,10 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -178,10 +214,13 @@ impl UnifiedStore {
         // replay reapplies the upsert to the B-tree, so durability
         // is unchanged.
         let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            skip_btree,
+        )?;
 
         Ok(())
     }
@@ -193,21 +232,14 @@ impl UnifiedStore {
         label: &str,
         entity_id: EntityId,
     ) {
-        let key = (collection.to_string(), label.to_string());
-        let mut idx = self.graph_label_index.write();
-        idx.entry(key).or_default().push(entity_id);
+        self.resident
+            .update_graph_label_index(collection, label, entity_id)
     }
 
     /// Remove a specific entity_id from the graph label index (called on delete).
     pub(crate) fn remove_from_graph_label_index(&self, collection: &str, entity_id: EntityId) {
-        let mut idx = self.graph_label_index.write();
-        for ((col, _), ids) in idx.iter_mut() {
-            if col == collection {
-                ids.retain(|&id| id != entity_id);
-            }
-        }
-        // Prune empty entries to keep the index compact
-        idx.retain(|_, ids| !ids.is_empty());
+        self.resident
+            .remove_from_graph_label_index(collection, entity_id)
     }
 
     pub(crate) fn remove_from_graph_label_index_batch(
@@ -215,39 +247,24 @@ impl UnifiedStore {
         collection: &str,
         entity_ids: &[EntityId],
     ) {
-        if entity_ids.is_empty() {
-            return;
-        }
-        let id_set: std::collections::HashSet<EntityId> = entity_ids.iter().copied().collect();
-        let mut idx = self.graph_label_index.write();
-        for ((col, _), ids) in idx.iter_mut() {
-            if col == collection {
-                ids.retain(|id| !id_set.contains(id));
-            }
-        }
-        idx.retain(|_, ids| !ids.is_empty());
+        self.resident
+            .remove_from_graph_label_index_batch(collection, entity_ids)
     }
 
     /// Look up entity IDs for a graph node label across all collections.
     pub fn lookup_graph_nodes_by_label(&self, label: &str) -> Vec<EntityId> {
-        let idx = self.graph_label_index.read();
-        idx.iter()
-            .filter(|((_, l), _)| l == label)
-            .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+        self.resident.lookup_graph_nodes_by_label(label)
     }
 
     /// Look up entity IDs for a graph node label scoped to a single collection.
     pub fn lookup_graph_nodes_by_label_in(&self, collection: &str, label: &str) -> Vec<EntityId> {
-        let idx = self.graph_label_index.read();
-        idx.get(&(collection.to_string(), label.to_string()))
-            .cloned()
-            .unwrap_or_default()
+        self.resident
+            .lookup_graph_nodes_by_label_in(collection, label)
     }
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = name.into();
-        let mut collections = self.collections.write();
+        let mut collections = self.resident.collections.write();
 
         if collections.contains_key(&name) {
             return Err(StoreError::CollectionExists(name));
@@ -260,14 +277,14 @@ impl UnifiedStore {
         let create = match self.prepare_operational_collection_create(&name) {
             Ok(create) => create,
             Err(err) => {
-                let mut collections = self.collections.write();
+                let mut collections = self.resident.collections.write();
                 collections.remove(&name);
                 return Err(err);
             }
         };
         if let Some(create) = create {
             if let Err(err) = create.publish().map_err(StoreError::Io) {
-                let mut collections = self.collections.write();
+                let mut collections = self.resident.collections.write();
                 collections.remove(&name);
                 return Err(err);
             }
@@ -281,37 +298,18 @@ impl UnifiedStore {
 
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
-        let name = name.into();
-        // Fast path: shared read lock — zero contention for existing collections
-        {
-            let collections = self.collections.read();
-            if let Some(manager) = collections.get(&name) {
-                return Arc::clone(manager);
-            }
-        }
-        // Slow path: exclusive write lock — only when collection is missing
-        let mut collections = self.collections.write();
-        // Double-check after acquiring write lock (another thread may have created it)
-        if let Some(manager) = collections.get(&name) {
-            return Arc::clone(manager);
-        }
-        let manager = Arc::new(SegmentManager::with_config(
-            &name,
-            self.config.manager_config.clone(),
-        ));
-        collections.insert(name, Arc::clone(&manager));
-        self.mark_paged_registry_dirty();
-        manager
+        self.resident
+            .get_or_create_collection(name, &self.config.manager_config)
     }
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.collections.read().get(name).map(Arc::clone)
+        self.resident.get_collection(name)
     }
 
     /// Get the context index for cross-structure search.
     pub fn context_index(&self) -> &ContextIndex {
-        &self.context_index
+        self.resident.context_index()
     }
 
     /// Drain WAL-replayed `VectorInsert` records for `collection`
@@ -336,6 +334,17 @@ impl UnifiedStore {
     /// key's earlier rows. Appending instead grew the store on every boot,
     /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
+        // Historical best-effort adapter. Authoritative callers propagate the
+        // result of try_set_config_tree instead of ignoring failed persistence.
+        self.try_set_config_tree(prefix, json).unwrap_or_default()
+    }
+
+    pub fn try_set_config_tree(
+        &self,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection("red_config");
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
@@ -344,17 +353,22 @@ impl UnifiedStore {
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
-        for entity in manager.query_all(|_| true) {
+        let mut capture = |entity: &UnifiedEntity| {
             if let EntityData::Row(row) = &entity.data {
-                let Some(named) = row.named.as_ref() else {
-                    continue;
-                };
-                if let Some(reddb_types::Value::Text(key)) = named.get("key") {
+                if let Some(reddb_types::Value::Text(key)) = row.get_field("key") {
                     if let Some(rows) = previous.get_mut(key.as_ref()) {
-                        rows.push((entity.id, named.get("value").cloned()));
+                        rows.push((entity.id, row.get_field("value").cloned()));
                     }
                 }
             }
+            true
+        };
+        if manager.has_backing() {
+            for (key, _) in &pairs {
+                manager.try_for_each_key_entity(key, &mut capture)?;
+            }
+        } else {
+            manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
         let mut saved = 0;
         for (key, value) in pairs {
@@ -391,41 +405,44 @@ impl UnifiedStore {
                     schema: None,
                 }),
             );
-            if self.insert_auto("red_config", entity).is_ok() {
-                saved += 1;
-                if !stale.is_empty() {
-                    let _ = self.delete_batch("red_config", &stale);
-                }
+            self.insert_auto("red_config", entity)?;
+            saved += 1;
+            if !stale.is_empty() {
+                self.delete_batch("red_config", &stale)?;
             }
         }
-        saved
+        Ok(saved)
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
     /// When a key has several rows the newest one wins, like every other
     /// `red_config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
-        let manager = self.get_collection("red_config")?;
+        // Historical best-effort adapter; bootstrap and authoritative runtime
+        // callers use try_get_config so a fault cannot become a default value.
+        self.try_get_config(key).ok().flatten()
+    }
+
+    pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
+        let Some(manager) = self.get_collection("red_config") else {
+            return Ok(None);
+        };
+        let _publication = manager
+            .has_backing()
+            .then(|| self.vault_publication_lock.lock());
         let mut latest: Option<(u64, reddb_types::Value)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_key_entity(key, |entity| {
             if let EntityData::Row(row) = &entity.data {
-                if let Some(named) = &row.named {
-                    let key_matches = named
-                        .get("key")
-                        .and_then(|v| match v {
-                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                    if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
-                        if let Some(value) = named.get("value") {
-                            latest = Some((entity.id.raw(), value.clone()));
-                        }
+                let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
+                if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
+                    if let Some(value) = row.get_field("value") {
+                        latest = Some((entity.id.raw(), value.clone()));
                     }
                 }
             }
-        }
-        latest.map(|(_, value)| value)
+            true
+        })?;
+        Ok(latest.map(|(_, value)| value))
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted
@@ -433,24 +450,36 @@ impl UnifiedStore {
     /// field. RedDB uses it to carry collection contracts through the
     /// single-file artifact.
     pub fn set_aux_metadata(&self, bytes: Vec<u8>) {
-        *self.aux_metadata.write() = bytes;
+        self.resident.set_aux_metadata(bytes)
+    }
+
+    /// Persist single-file contracts through the same commit fence as rows.
+    /// Memory-only stores retain the same auxiliary snapshot behavior.
+    pub(crate) fn persist_aux_metadata(&self, bytes: Vec<u8>) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        self.finish_paged_write([StoreWalAction::SetAuxMetadata {
+            bytes: bytes.clone(),
+        }])?;
+        self.resident.set_aux_metadata(bytes);
+        Ok(())
     }
 
     /// Read the opaque store-level auxiliary metadata blob. Empty when unset.
     pub fn aux_metadata(&self) -> Vec<u8> {
-        self.aux_metadata.read().clone()
+        self.resident.aux_metadata()
     }
 
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
-        self.collections.read().keys().cloned().collect()
+        self.resident.list_collections()
     }
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        let _vault_guard = self.vault_publication_lock.lock();
         let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
-            let mut collections = self.collections.write();
+            let mut collections = self.resident.collections.write();
 
             collections
                 .remove(name)
@@ -461,29 +490,42 @@ impl UnifiedStore {
         let entity_ids: Vec<EntityId> = entities.iter().map(|entity| entity.id).collect();
 
         for entity_id in &entity_ids {
-            self.context_index.remove_entity(*entity_id);
+            self.resident.context_index.remove_entity(*entity_id);
             let _ = self.unindex_cross_refs(*entity_id);
         }
 
-        self.btree_indices.write().remove(name);
+        if let Some(tree) = self.btree_indices.write().remove(name) {
+            self.retire_btree(tree);
+        }
+        if let Some(index) = self.key_indices.write().remove(name) {
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
+        }
+        self.secondary_index_specs.write().remove(name);
 
-        self.entity_cache.retain(|entity_id, (collection, _)| {
-            collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
-        });
+        self.resident
+            .entity_cache
+            .retain(|entity_id, (collection, _)| {
+                collection != name && !entity_ids.iter().any(|id| id.raw() == entity_id)
+            });
 
-        self.cross_refs.write().retain(|source_id, refs| {
+        self.resident.cross_refs.write().retain(|source_id, refs| {
             refs.retain(|(target_id, _, target_collection)| {
                 target_collection != name && !entity_ids.iter().any(|id| id == target_id)
             });
             !entity_ids.iter().any(|id| id == source_id)
         });
 
-        self.reverse_refs.write().retain(|target_id, refs| {
-            refs.retain(|(source_id, _, source_collection)| {
-                source_collection != name && !entity_ids.iter().any(|id| id == source_id)
+        self.resident
+            .reverse_refs
+            .write()
+            .retain(|target_id, refs| {
+                refs.retain(|(source_id, _, source_collection)| {
+                    source_collection != name && !entity_ids.iter().any(|id| id == source_id)
+                });
+                !entity_ids.iter().any(|id| id == target_id)
             });
-            !entity_ids.iter().any(|id| id == target_id)
-        });
 
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::DropCollection {
@@ -533,9 +575,13 @@ impl UnifiedStore {
             self.update_graph_label_index(collection, label, id);
         }
 
-        // Also insert into B-tree index if pager is active
+        // Captured transactions stay WAL-only until commit; pager flushes must
+        // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = &self.pager {
+        if let Some(pager) = self.pager.as_ref().filter(|_| {
+            !Self::deferred_store_wal_capture_active()
+                && self.config.resident_memory_bytes_max.is_none()
+        }) {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -597,6 +643,9 @@ impl UnifiedStore {
         collection: &str,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
+        // A transaction can begin after checkpoint visibility is frozen.
+        // Fence the entire row batch, including its captured or committed WAL.
+        let _publication = self.vault_publication_lock.lock();
         // REDDB_BULK_TIMING=1 prints a per-call breakdown of the bulk
         // insert path to stderr. Off by default — used by the reddb
         // benchmark harness to locate ingest bottlenecks.
@@ -667,7 +716,16 @@ impl UnifiedStore {
             })
             .collect();
 
-        // Pre-serialize for B-tree while we still have references.
+        // Move entities into segment before serializing their canonical image:
+        // bulk insertion assigns sequence identities used by checkpoint proofs.
+        let t0 = std::time::Instant::now();
+        let ids = manager.bulk_insert(entities)?;
+        let t_manager = t0.elapsed();
+        for id in &ids {
+            self.register_entity_id(*id);
+        }
+
+        // Serialize for B-tree and WAL from the installed segment rows.
         // `serialize_entity_record` is pure; with `n >= 1024` the
         // rayon dispatch cost is amortised and the 16-core serialize
         // fan-out becomes the biggest single win on insert_bulk. For
@@ -677,35 +735,31 @@ impl UnifiedStore {
         let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> =
             if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
                 let fv = self.format_version();
-                let serial_map = |e: &UnifiedEntity| {
-                    (
-                        e.id.raw().to_be_bytes().to_vec(),
-                        Self::serialize_entity_record(e, None, fv),
-                    )
+                let serial_map = |id: &EntityId| {
+                    manager
+                        .get_with(*id, |entity| {
+                            (
+                                id.raw().to_be_bytes().to_vec(),
+                                Self::serialize_entity_record(entity, None, fv),
+                            )
+                        })
+                        .expect("bulk-inserted entity must remain in the fenced segment")
                 };
                 // Gate chosen to match the bench's `BULK_BATCH_SIZE=1000`.
                 // Rayon's dispatch overhead is ~30µs/batch — on a 15-col
                 // row serializing for ~40µs the break-even is around
                 // 200-300 rows on a 16-core host. Keep a safety margin
                 // at 512.
-                if entities.len() >= 512 {
+                if ids.len() >= 512 {
                     use rayon::prelude::*;
-                    Some(entities.par_iter().map(serial_map).collect())
+                    Some(ids.par_iter().map(serial_map).collect())
                 } else {
-                    Some(entities.iter().map(serial_map).collect())
+                    Some(ids.iter().map(serial_map).collect())
                 }
             } else {
                 None
             };
         let t_serialize = t0.elapsed();
-
-        // Move entities into segment
-        let t0 = std::time::Instant::now();
-        let ids = manager.bulk_insert(entities)?;
-        let t_manager = t0.elapsed();
-        for id in &ids {
-            self.register_entity_id(*id);
-        }
 
         // Update graph label index for bulk-inserted GraphNode entities
         for (label, entity_id) in graph_labels.iter().flatten() {
@@ -756,7 +810,10 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -820,6 +877,8 @@ impl UnifiedStore {
         collection: &str,
         entity: UnifiedEntity,
     ) -> Result<EntityId, StoreError> {
+        // Include the WAL append in the checkpoint publication fence.
+        let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
         if entity.id.raw() == 0 {
@@ -845,39 +904,49 @@ impl UnifiedStore {
             None
         };
         // Index into context index before consuming the entity
-        self.context_index.index_entity(collection, &entity);
+        self.resident
+            .context_index
+            .index_entity(collection, &entity);
 
-        // Pre-serialize the entity record (B-tree image == WAL action body)
-        // and index cross-refs while we still own the entity. Mirrors the
-        // bulk_insert path (see line 559-580 above): segment.insert assigns
-        // a fresh `sequence_id`, but the bulk path already accepts a
-        // sequence_id=0 on-disk image (replay calls manager.insert which
-        // re-assigns sequence_id from the segment's allocator), so the
-        // single-row path can do the same. Fresh inserts never carry
-        // metadata — set_metadata is a separate call — so we pass None,
-        // matching how the bulk path serializes records.
-        //
-        // Eliminates the post-insert `manager.get(id)` clone of the just-
-        // inserted UnifiedEntity (HashMap<String, Value> + per-field
-        // Strings). Per `docs/perf/insert_sequential-2026-05-05.md` P2 this
-        // was the dominant clone in the insert_sequential hot path.
-        let id_for_serialize = entity.id;
-        let serialized_record: Option<Vec<u8>> =
-            if self.pager.is_some() || self.config.embedded_wal_path.is_some() {
-                Some(Self::serialize_entity_record(
-                    &entity,
-                    None,
-                    self.format_version(),
-                ))
-            } else {
-                None
-            };
+        // Serialize the canonical segment image after insertion: the segment
+        // assigns its sequence identity. Borrow it instead of cloning payloads.
+        let persist_record = self.pager.is_some() || self.config.embedded_wal_path.is_some();
         if self.config.auto_index_refs {
             self.index_cross_refs(&entity, collection)?;
         }
 
+        // #2376: `persist()` rebuilds every collection B-tree from the
+        // manager under `btree_indices.write()`. Hold the read side from the
+        // manager insert through the B-tree insert so a rebuild observes
+        // both or neither. Otherwise the rebuild re-inserts this row from the
+        // manager and one of the two B-tree inserts fails on a duplicate key,
+        // or lands mid-rebuild and tears the tree.
+        let paged_btree = if persist_record
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
+            self.get_or_create_btree(collection)
+        } else {
+            None
+        };
+        let persist_fence = paged_btree
+            .as_ref()
+            .map(|_| self.btree_indices.read_recursive());
+        let before = paged_btree.as_ref().map(|_| manager.checkpoint_revisions());
+        let unversioned = entity.xmin == 0 && entity.xmax == 0;
+
         let id = manager.insert(entity)?;
-        debug_assert_eq!(id, id_for_serialize);
+        let serialized_record = if persist_record {
+            Some(
+                manager
+                    .get_with(id, |entity| {
+                        Self::serialize_entity_record(entity, None, self.format_version())
+                    })
+                    .ok_or(StoreError::EntityNotFound(id))?,
+            )
+        } else {
+            None
+        };
         // `register_entity_id` already advances the atomic counter on
         // the allocation path above (`self.next_entity_id()`), so the
         // second call here is a no-op CAS loop on the hot path. Only
@@ -890,19 +959,18 @@ impl UnifiedStore {
         }
 
         let mut registry_dirty = false;
-        if let (Some(_pager), Some(record)) = (&self.pager, serialized_record.as_ref()) {
-            if let Some(btree) = self.get_or_create_btree(collection) {
-                let root_before = btree.root_page_id();
+        if let (Some(btree), Some(record)) = (paged_btree.as_ref(), serialized_record.as_ref()) {
+            let root_before = btree.root_page_id();
 
-                let key = id.raw().to_be_bytes();
-                btree.insert(&key, record).map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree insert error while inserting '{collection}'/{id}: {e}"
-                    )))
-                })?;
-                registry_dirty = root_before != btree.root_page_id();
-            }
+            let key = id.raw().to_be_bytes();
+            btree.insert(&key, record).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "B-tree insert error while inserting '{collection}'/{id}: {e}"
+                )))
+            })?;
+            registry_dirty = root_before != btree.root_page_id();
         }
+        drop(persist_fence);
 
         // Perf: pagerless → skip WAL-action construction (saves a
         // third manager.get + entity serialize per insert). For
@@ -919,7 +987,17 @@ impl UnifiedStore {
             if registry_dirty {
                 self.mark_paged_registry_dirty();
             }
-            self.finish_paged_write(actions)?;
+            if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+                drop(_publication);
+                self.complete_grouped_actions(&pending, &actions)?;
+            } else {
+                self.finish_paged_write(actions)?;
+            }
+        }
+        if unversioned && !Self::deferred_store_wal_capture_active() {
+            if let Some(before) = before {
+                self.note_paged_insert(collection, &manager, &before, id);
+            }
         }
         Ok(id)
     }
@@ -930,30 +1008,21 @@ impl UnifiedStore {
     /// the current in-memory state even when the paged B-tree image has not been
     /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Prefer the live manager state to avoid stale reads after manager.update().
-        if let Some(entity) = self
-            .get_collection(collection)
-            .and_then(|manager| manager.get(id))
-        {
-            return Some(entity);
-        }
+        // Historical best-effort adapter. Authoritative host reads use try_get
+        // so a failed cold read cannot become a successful "missing" result.
+        self.try_get(collection, id, usize::MAX).ok().flatten()
+    }
 
-        // Fall back to the paged B-tree image if the manager does not currently hold the row.
-        if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let key = id.raw().to_be_bytes();
-                if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok((entity, _)) =
-                        Self::deserialize_entity_record(&value, self.format_version())
-                    {
-                        return Some(entity);
-                    }
-                }
-            }
-        }
-
-        None
+    pub fn try_get(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get(id, limit_bytes)
     }
 
     /// Resolve a table row by stable logical identity.
@@ -991,14 +1060,51 @@ impl UnifiedStore {
         collection: &str,
         logical_id: EntityId,
     ) -> Vec<UnifiedEntity> {
-        self.get_collection(collection)
-            .map(|manager| {
-                manager.query_all(|entity| {
-                    matches!(entity.kind, EntityKind::TableRow { .. })
-                        && entity.logical_id() == logical_id
-                })
-            })
-            .unwrap_or_default()
+        self.resident
+            .table_row_versions_by_logical_id(collection, logical_id)
+    }
+
+    pub(crate) fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(());
+        };
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            !matches!(entity.kind, EntityKind::TableRow { .. })
+                || entity.logical_id() != logical_id
+                || visit(entity)
+        })
+    }
+
+    pub(crate) fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        if let Some(entity) = manager.try_get(logical_id, usize::MAX)? {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+                && entity.xmax == 0
+            {
+                return Ok(Some(entity));
+            }
+        }
+        // Preserve the current-row policy: first live version, otherwise the
+        // last matching physical version. Retain only one owned candidate.
+        let mut selected = None;
+        self.try_for_each_table_row_version(collection, logical_id, |entity| {
+            selected = Some(entity.clone());
+            entity.xmax != 0
+        })?;
+        manager.restore_owned_row_schemas(selected.iter_mut());
+        Ok(selected)
     }
 
     pub fn vacuum_mvcc_history(
@@ -1009,22 +1115,24 @@ impl UnifiedStore {
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-        let entities =
-            manager.query_all(|entity| matches!(entity.kind, EntityKind::TableRow { .. }));
         let mut logical = HashMap::<EntityId, (bool, u64)>::new();
-        for entity in &entities {
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                return true;
+            }
             let entry = logical.entry(entity.logical_id()).or_insert((false, 0));
             if entity.xmax == 0 {
                 entry.0 = true;
             }
             entry.1 = entry.1.max(entity.xmin);
-        }
+            true
+        });
 
         let mut stats = MvccVacuumStats::default();
         let mut reclaim_ids = Vec::new();
-        for entity in entities {
-            if entity.xmax == 0 {
-                continue;
+        manager.for_each_entity(|entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) || entity.xmax == 0 {
+                return true;
             }
             stats.scanned_versions += 1;
             let (has_live_version, max_xmin) = logical
@@ -1048,7 +1156,8 @@ impl UnifiedStore {
                     stats.retained_history_versions += 1;
                 }
             }
-        }
+            true
+        });
 
         if !reclaim_ids.is_empty() {
             self.delete_batch(collection, &reclaim_ids)?;
@@ -1071,10 +1180,10 @@ impl UnifiedStore {
         let new_id = new_version.id;
         let inherited_metadata = metadata.cloned().or_else(|| manager.get_metadata(old_id));
 
-        self.entity_cache.remove(old_id.raw());
-        self.entity_cache.remove(new_id.raw());
+        self.resident.entity_cache.remove(old_id.raw());
+        self.resident.entity_cache.remove(new_id.raw());
         manager.update(old_version.clone())?;
-        self.context_index.remove_entity(old_id);
+        self.resident.context_index.remove_entity(old_id);
 
         self.register_entity_id(new_version.id);
         if let EntityKind::TableRow { ref mut row_id, .. } = new_version.kind {
@@ -1089,7 +1198,9 @@ impl UnifiedStore {
         if let Some(metadata) = inherited_metadata {
             manager.set_metadata(new_id, metadata)?;
         }
-        self.context_index.index_entity(collection, &new_version);
+        self.resident
+            .context_index
+            .index_entity(collection, &new_version);
         if self.config.auto_index_refs {
             self.index_cross_refs(&new_version, collection)?;
         }
@@ -1097,14 +1208,27 @@ impl UnifiedStore {
         let old_metadata = manager.get_metadata(old_id);
         let new_metadata = manager.get_metadata(new_id);
         let fv = self.format_version();
+        // The inserted segment assigns the sequence identity. Persist that
+        // canonical image, rather than the caller's pre-insertion clone.
         let records = vec![
-            Self::serialize_entity_record(&old_version, old_metadata.as_ref(), fv),
-            Self::serialize_entity_record(&new_version, new_metadata.as_ref(), fv),
+            manager
+                .get_with(old_id, |entity| {
+                    Self::serialize_entity_record(entity, old_metadata.as_ref(), fv)
+                })
+                .ok_or(StoreError::EntityNotFound(old_id))?,
+            manager
+                .get_with(new_id, |entity| {
+                    Self::serialize_entity_record(entity, new_metadata.as_ref(), fv)
+                })
+                .ok_or(StoreError::EntityNotFound(new_id))?,
         ];
-        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
-            collection: collection.to_string(),
-            records,
-        }])?;
+        self.finish_paged_write_for_projection(
+            [StoreWalAction::BulkUpsertEntityRecords {
+                collection: collection.to_string(),
+                records,
+            }],
+            true,
+        )?;
 
         Ok(())
     }
@@ -1121,29 +1245,22 @@ impl UnifiedStore {
         }
     }
 
+    /// Preserve I/O failures when fetching indexed query candidates.
+    pub fn try_get_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match self.get_collection(collection) {
+            Some(manager) => manager.try_get_many(ids, read_bytes_max),
+            None => Ok(vec![None; ids.len()]),
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
-        // Sharded LRU probe: hits / misses are counted by `EntityCache::get`,
-        // so external observers can read `entity_cache_hit_rate()` without
-        // any extra wiring on the call site.
-        if let Some(cached) = self.entity_cache.get(id.raw()) {
-            return Some(cached);
-        }
-
-        // Cache miss — fall back to the full collection scan, then memoise.
-        let collections = self.collections.read();
-        for (name, manager) in collections.iter() {
-            if let Some(entity) = manager.get(id) {
-                let result = (name.clone(), entity);
-                // Drop the collections read guard before taking any cache
-                // lock — the cache shards are independent, but releasing
-                // here keeps `collections` contention low.
-                drop(collections);
-                self.entity_cache.insert(id.raw(), result.clone());
-                return Some(result);
-            }
-        }
-        None
+        self.resident.get_any(id)
     }
 
     /// Hit rate of the store's entity cache (`get_any` lookups).
@@ -1152,18 +1269,19 @@ impl UnifiedStore {
     /// Exposed for observability — e.g. dashboards distinguishing graph
     /// workloads (high hit rate) from OLTP DML (≈ 0 % hit rate).
     pub fn entity_cache_hit_rate(&self) -> Option<f64> {
-        self.entity_cache.hit_rate()
+        self.resident.entity_cache_hit_rate()
     }
 
     /// Snapshot of cache hit / miss / eviction counters and current size.
     pub fn entity_cache_stats(&self) -> super::super::entity_cache::EntityCacheStats {
-        self.entity_cache.stats()
+        self.resident.entity_cache_stats()
     }
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
+        let publication = self.vault_publication_lock.lock();
         // Invalidate entity cache (read-lock probe; no write lock when cold).
-        self.entity_cache.remove(id.raw());
+        self.resident.entity_cache.remove(id.raw());
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
@@ -1175,7 +1293,7 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some() {
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1194,10 +1312,16 @@ impl UnifiedStore {
         if registry_dirty {
             self.mark_paged_registry_dirty();
         }
-        self.finish_paged_write([StoreWalAction::DeleteEntityRecord {
+        let actions = [StoreWalAction::DeleteEntityRecord {
             collection: collection.to_string(),
             entity_id: id.raw(),
-        }])?;
+        }];
+        if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+            drop(publication);
+            self.complete_grouped_actions(&pending, &actions)?;
+        } else {
+            self.finish_paged_write(actions)?;
+        }
 
         Ok(true)
     }
@@ -1210,30 +1334,40 @@ impl UnifiedStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        // Physical reclamation must publish its mutation and WAL record under
+        // the same fence as checkpoint snapshots and WAL truncation.
+        let _publication = self.vault_publication_lock.lock();
 
         // Sharded invalidation. The bounded LRU's shard write lock is
         // only acquired when the shard actually carries one of these ids,
         // so the bench-typical zero-hit `delete_sequential` workload never
         // takes a write lock here at all.
-        self.entity_cache.remove_many(ids.iter().map(|id| id.raw()));
+        self.resident
+            .entity_cache
+            .remove_many(ids.iter().map(|id| id.raw()));
 
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
+        let before = self.pager.as_ref().map(|_| manager.checkpoint_revisions());
         let deleted_ids = manager.delete_batch(ids)?;
         if deleted_ids.is_empty() {
             return Ok(deleted_ids);
         }
 
         let mut registry_dirty = false;
-        if self.pager.is_some() {
+        let mut updated_tree = false;
+        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
+                updated_tree = true;
                 let root_before = btree.root_page_id();
                 for id in &deleted_ids {
                     let key = id.raw().to_be_bytes();
-                    let _ = btree.delete(&key);
+                    // An aborted, never-published row is already absent. Its
+                    // durable physical removal also leaves the tree in sync.
+                    updated_tree &= btree.delete(&key).is_ok();
                 }
                 registry_dirty = root_before != btree.root_page_id();
             }
@@ -1253,6 +1387,16 @@ impl UnifiedStore {
             .collect::<Vec<_>>();
         self.finish_paged_write(actions)?;
 
+        if updated_tree {
+            if let Some(before) = before {
+                self.note_paged_delete(collection, &manager, &before, &deleted_ids);
+            }
+            // Paced GC must also pace publication: otherwise grouped WAL
+            // workloads can retain detached pages until a distant checkpoint.
+            // Publish roots and the deferred-page ledger without re-encoding
+            // unchanged row payloads.
+            self.flush_paged_registry()?;
+        }
         Ok(deleted_ids)
     }
 
@@ -1279,6 +1423,19 @@ impl UnifiedStore {
         self.get_collection(collection)?.get_metadata(id)
     }
 
+    /// Fallible metadata access for authoritative reads and mutation preimages.
+    pub fn try_get_metadata(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<Metadata>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get_metadata(id, limit_bytes)
+    }
+
     /// Add a cross-reference between entities
     pub fn add_cross_ref(
         &self,
@@ -1289,105 +1446,37 @@ impl UnifiedStore {
         ref_type: RefType,
         weight: f32,
     ) -> Result<(), StoreError> {
-        // Check source exists
-        let source_manager = self
-            .get_collection(source_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(source_collection.to_string()))?;
-
-        if source_manager.get(source_id).is_none() {
-            return Err(StoreError::EntityNotFound(source_id));
-        }
-
-        // Check target exists
-        let target_manager = self
-            .get_collection(target_collection)
-            .ok_or_else(|| StoreError::CollectionNotFound(target_collection.to_string()))?;
-
-        if target_manager.get(target_id).is_none() {
-            return Err(StoreError::EntityNotFound(target_id));
-        }
-
-        // Check limits
-        let current_refs = self
-            .cross_refs
-            .read()
-            .get(&source_id)
-            .map_or(0, |v| v.len());
-
-        if current_refs >= self.config.max_cross_refs {
-            return Err(StoreError::TooManyRefs(source_id));
-        }
-
-        let mut registry_dirty = false;
-        {
-            let mut forward = self.cross_refs.write();
-            let refs = forward.entry(source_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == target_id && *kind == ref_type && coll == target_collection
-            });
-            if inserted {
-                refs.push((target_id, ref_type, target_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        {
-            let mut reverse = self.reverse_refs.write();
-            let refs = reverse.entry(target_id).or_default();
-            let inserted = !refs.iter().any(|(id, kind, coll)| {
-                *id == source_id && *kind == ref_type && coll == source_collection
-            });
-            if inserted {
-                refs.push((source_id, ref_type, source_collection.to_string()));
-                registry_dirty = true;
-            }
-        }
-
-        if let Some(mut entity) = source_manager.get(source_id) {
-            if !entity.cross_refs().iter().any(|xref| {
-                xref.target == target_id
-                    && xref.ref_type == ref_type
-                    && xref.target_collection == target_collection
-            }) {
-                let cross_ref = CrossRef::with_weight(
-                    source_id,
-                    target_id,
-                    target_collection,
-                    ref_type,
-                    weight,
-                );
-                entity.add_cross_ref(cross_ref);
-                let _ = source_manager.update(entity.clone());
-                registry_dirty = true;
-                self.persist_entities_to_pager(source_collection, std::slice::from_ref(&entity))?;
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-            if matches!(
+        let registry_dirty = self.resident.add_cross_ref_in_memory(
+            source_collection,
+            source_id,
+            target_collection,
+            target_id,
+            ref_type,
+            weight,
+            self.config.max_cross_refs,
+            |entity| {
+                self.persist_entities_to_pager(source_collection, std::slice::from_ref(entity))
+            },
+        )?;
+        if registry_dirty
+            && matches!(
                 self.config.durability_mode,
                 crate::api::DurabilityMode::Strict
-            ) {
-                self.flush_paged_state()?;
-            }
+            )
+        {
+            self.flush_paged_state()?;
         }
-
         Ok(())
     }
 
     /// Get cross-references from an entity
     pub fn get_refs_from(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
-        self.cross_refs.read().get(&id).cloned().unwrap_or_default()
+        self.resident.get_refs_from(id)
     }
 
     /// Get cross-references to an entity
     pub fn get_refs_to(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
-        self.reverse_refs
-            .read()
-            .get(&id)
-            .cloned()
-            .unwrap_or_default()
+        self.resident.get_refs_to(id)
     }
 
     /// Expand cross-references to get related entities
@@ -1454,129 +1543,23 @@ impl UnifiedStore {
         entity: &UnifiedEntity,
         collection: &str,
     ) -> Result<(), StoreError> {
-        let mut registry_dirty = false;
-        for cross_ref in entity.cross_refs() {
-            if cross_ref.target_collection.is_empty() {
-                continue;
-            }
-            {
-                let mut forward = self.cross_refs.write();
-                let refs = forward.entry(cross_ref.source).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.target
-                        && *kind == cross_ref.ref_type
-                        && coll == &cross_ref.target_collection
-                });
-                if inserted {
-                    refs.push((
-                        cross_ref.target,
-                        cross_ref.ref_type,
-                        cross_ref.target_collection.clone(),
-                    ));
-                    registry_dirty = true;
-                }
-            }
-
-            {
-                let mut reverse = self.reverse_refs.write();
-                let refs = reverse.entry(cross_ref.target).or_default();
-                let inserted = !refs.iter().any(|(id, kind, coll)| {
-                    *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
-                });
-                if inserted {
-                    refs.push((cross_ref.source, cross_ref.ref_type, collection.to_string()));
-                    registry_dirty = true;
-                }
-            }
-        }
-
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
-        }
-
-        Ok(())
+        self.resident.index_cross_refs(entity, collection)
     }
 
     /// Remove cross-references for an entity
     pub(crate) fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
-        // Remove forward refs
-        self.cross_refs.write().remove(&id);
-
-        // Remove from reverse refs (scan all)
-        let mut reverse = self.reverse_refs.write();
-        for refs in reverse.values_mut() {
-            refs.retain(|(source, _, _)| *source != id);
-        }
-        reverse.remove(&id);
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs(id)
     }
 
     pub(crate) fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_set: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
-
-        // Read-only probe: under steady-state delete workloads most rows have
-        // no cross-refs at all, so both maps are entirely cold for the batch.
-        // Acquiring the write lock to scan `reverse_refs.values_mut()` over an
-        // unrelated dictionary was the dominant cost in #85's `delete_sequential`
-        // profile. The read-lock probe below is O(|ids|) hashmap lookups against
-        // each map, vs. O(|reverse_refs|) for the write-path scan it replaces.
-        //
-        // Decision: skip the write path iff
-        //   - no deleted id is a key in `cross_refs`  (no outbound refs to drop,
-        //     and so no `(deleted_id, _, _)` source entry exists anywhere in
-        //     `reverse_refs.values()` either — the two maps are kept in sync by
-        //     `add_cross_ref`), AND
-        //   - no deleted id is a key in `reverse_refs` (no inbound refs to drop).
-        let needs_forward_cleanup = {
-            let forward = self.cross_refs.read();
-            id_set.iter().any(|id| forward.contains_key(id))
-        };
-        let needs_reverse_cleanup = {
-            let reverse = self.reverse_refs.read();
-            id_set.iter().any(|id| reverse.contains_key(id))
-        };
-
-        if !needs_forward_cleanup && !needs_reverse_cleanup {
-            self.unindex_cross_refs_fast_path
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-
-        if needs_forward_cleanup {
-            let mut forward = self.cross_refs.write();
-            for id in &id_set {
-                forward.remove(id);
-            }
-        }
-
-        if needs_reverse_cleanup || needs_forward_cleanup {
-            // The inner `values_mut()` scan is only needed when at least one
-            // deleted id was a *source* somewhere — which, by the invariant
-            // above, can only happen when it had outbound forward refs.
-            let mut reverse = self.reverse_refs.write();
-            if needs_forward_cleanup {
-                for refs in reverse.values_mut() {
-                    refs.retain(|(source, _, _)| !id_set.contains(source));
-                }
-            }
-            reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
-        }
-        self.mark_paged_registry_dirty();
-
-        Ok(())
+        self.resident.unindex_cross_refs_batch(ids)
     }
 
     /// Test/observability hook: number of times `unindex_cross_refs_batch`
     /// took the read-only fast path. Used to pin the early-exit in tests
     /// and as a cheap signal in delete-heavy benchmarks.
     pub fn unindex_cross_refs_fast_path_hits(&self) -> u64 {
-        self.unindex_cross_refs_fast_path.load(Ordering::Relaxed)
+        self.resident.unindex_cross_refs_fast_path_hits()
     }
 
     /// Query across all collections with a filter
@@ -1584,59 +1567,7 @@ impl UnifiedStore {
     where
         F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
-        // Issue #815 — snapshot the (name, manager) handles under a brief
-        // read lock, then release the `collections` lock *before* the
-        // potentially long per-collection scan. Holding `collections.read()`
-        // across a full-store scan let a large `/catalog` snapshot block (and
-        // be blocked by) the replica apply loop's collection-creation writes:
-        // under parking_lot a writer waiting behind the long read parks every
-        // subsequent reader, so `/catalog` and readiness wedged during a big
-        // WAL re-apply. The managers are `Arc`-shared with their own internal
-        // locks, so scanning them off the map lock is safe and keeps the HTTP
-        // surface responsive.
-        let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
-            collections
-                .iter()
-                .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
-                .collect()
-        };
-
-        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
-        if !use_parallel {
-            // Single collection — no parallelism overhead
-            return pairs
-                .into_iter()
-                .flat_map(|(name, mgr)| {
-                    mgr.query_all(filter.clone())
-                        .into_iter()
-                        .map(move |e| (name.clone(), e))
-                })
-                .collect();
-        }
-
-        // Multiple collections — scan in parallel
-        let filter_ref = &filter;
-        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|s| {
-            pairs
-                .iter()
-                .map(|(name, manager)| {
-                    let name = (*name).clone();
-                    s.spawn(move || {
-                        manager
-                            .query_all(|e| filter_ref(e))
-                            .into_iter()
-                            .map(|e| (name.clone(), e))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|h| h.join().unwrap_or_default())
-                .collect()
-        });
-
-        collection_results.into_iter().flatten().collect()
+        self.resident.query_all(filter)
     }
 
     /// Scan every collection under an explicit MVCC snapshot.
@@ -1648,48 +1579,7 @@ impl UnifiedStore {
     where
         F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
-        let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
-            collections
-                .iter()
-                .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
-                .collect()
-        };
-
-        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
-        if !use_parallel {
-            return pairs
-                .into_iter()
-                .flat_map(|(name, manager)| {
-                    manager
-                        .scan(snapshot, filter.clone())
-                        .into_iter()
-                        .map(move |entity| (name.clone(), entity))
-                })
-                .collect();
-        }
-
-        let filter_ref = &filter;
-        let collection_results: Vec<Vec<(String, UnifiedEntity)>> = std::thread::scope(|scope| {
-            pairs
-                .iter()
-                .map(|(name, manager)| {
-                    let name = name.clone();
-                    scope.spawn(move || {
-                        manager
-                            .scan(snapshot, |entity| filter_ref(entity))
-                            .into_iter()
-                            .map(|entity| (name.clone(), entity))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or_default())
-                .collect()
-        });
-
-        collection_results.into_iter().flatten().collect()
+        self.resident.scan(snapshot, filter)
     }
 
     /// Filter by metadata across all collections
@@ -1697,16 +1587,7 @@ impl UnifiedStore {
         &self,
         filters: &[(String, MetadataFilter)],
     ) -> Vec<(String, EntityId)> {
-        let mut results = Vec::new();
-        let collections = self.collections.read();
-
-        for (name, manager) in collections.iter() {
-            for id in manager.filter_metadata(filters) {
-                results.push((name.clone(), id));
-            }
-        }
-
-        results
+        self.resident.filter_metadata_all(filters)
     }
 
     /// Get statistics
@@ -1717,7 +1598,7 @@ impl UnifiedStore {
         // store lock across a full-store stats scan was part of the same
         // wedge that froze `/catalog` during a large replica re-apply.
         let pairs: Vec<(String, Arc<SegmentManager>)> = {
-            let collections = self.collections.read();
+            let collections = self.resident.collections.read();
             collections
                 .iter()
                 .map(|(name, mgr)| (name.clone(), Arc::clone(mgr)))
@@ -1733,15 +1614,24 @@ impl UnifiedStore {
             let manager_stats = manager.stats();
             stats.total_entities += manager_stats.total_entities;
             stats.total_memory_bytes += manager_stats.total_memory_bytes;
+            stats.total_memory_bytes += manager.checkpoint_tracking_bytes();
             stats.collections.insert(name.clone(), manager_stats);
         }
 
+        stats.total_memory_bytes += self.checkpoint_durable_rows.read().memory_bytes();
+        stats.total_memory_bytes += self
+            .checkpoint_versions
+            .read()
+            .values()
+            .filter_map(|version| version.deferred_rows.as_ref())
+            .map(|rows| rows.capacity() * std::mem::size_of::<EntityId>())
+            .sum::<usize>();
         stats
     }
 
     /// Run maintenance on all collections
     pub fn run_maintenance(&self) -> Result<(), StoreError> {
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         for manager in collections.values() {
             manager.run_maintenance()?;
         }
@@ -1750,7 +1640,7 @@ impl UnifiedStore {
 
     /// Bytes pressure consolidation could plausibly return across collections.
     pub fn reclaimable_segment_bytes(&self) -> u64 {
-        let collections = self.collections.read();
+        let collections = self.resident.collections.read();
         collections
             .values()
             .map(|manager| manager.reclaimable_bytes())
@@ -1760,7 +1650,7 @@ impl UnifiedStore {
     /// Advance pressure-triggered consolidation by one paced tick per
     /// collection. Returns true if any collection started or advanced a run.
     pub fn pressure_consolidation_tick(&self) -> bool {
-        let managers: Vec<_> = self.collections.read().values().cloned().collect();
+        let managers: Vec<_> = self.resident.collections.read().values().cloned().collect();
         // A plain loop, not `any()`: every collection must receive its tick —
         // short-circuiting on the first advanced run would starve the rest.
         let mut advanced = false;
@@ -1811,7 +1701,7 @@ fn flatten_config_json(
         crate::serde_json::Value::Null => {
             out.push((prefix.to_string(), Value::Null));
         }
-        crate::serde_json::Value::Array(arr) => {
+        crate::serde_json::Value::Array(_) => {
             let json_str = crate::serde_json::to_string(value).unwrap_or_default();
             out.push((prefix.to_string(), Value::text(json_str)));
         }

@@ -677,8 +677,17 @@ impl PrimaryReplication {
     /// the current WAL LSN for a fresh registration, or the durable slot
     /// restart point for a reconnect.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
+        self.register_replica_with_region_at(id, region, self.current_logical_lsn())
+    }
+
+    fn register_replica_with_region_at(
+        &self,
+        id: String,
+        region: Option<String>,
+        initial_lsn: u64,
+    ) -> u64 {
         let now_ms = crate::utils::now_unix_millis() as u128;
-        let resume_lsn = self.ensure_slot(&id, self.current_logical_lsn());
+        let resume_lsn = self.ensure_slot(&id, initial_lsn);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = replicas.iter_mut().find(|r| r.id == id) {
             existing.last_seen_at_unix_ms = now_ms;
@@ -738,9 +747,11 @@ impl PrimaryReplication {
     /// its `replica_id` on a pull, the primary registers it so it is no
     /// longer blind to that replica's existence; subsequent pulls are
     /// idempotent no-ops. Returns `true` when a new registration was
-    /// created. Delegates to `register_replica_with_region`, so reconnects
-    /// preserve progress and do not bump the topology epoch.
-    pub fn ensure_replica_registered(&self, id: &str) -> bool {
+    /// created. A fresh slot starts at the replica's requested cursor rather
+    /// than the primary's current LSN, so an empty replica does not skip WAL
+    /// that was written before its first pull. Reconnects preserve existing
+    /// progress and do not bump the topology epoch.
+    pub fn ensure_replica_registered(&self, id: &str, requested_since_lsn: u64) -> bool {
         let already = self
             .replicas
             .read()
@@ -750,7 +761,7 @@ impl PrimaryReplication {
         if already {
             return false;
         }
-        self.register_replica(id.to_string());
+        self.register_replica_with_region_at(id.to_string(), None, requested_since_lsn);
         true
     }
 

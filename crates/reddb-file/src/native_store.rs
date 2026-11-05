@@ -84,6 +84,190 @@ pub struct NativePagedCollectionRoot {
     pub root_page: u32,
 }
 
+/// Optional, checksummed-with-the-manifest retirement ledger. Older readers
+/// stop after cross references and can still read all live collection roots.
+const PAGED_RETIRED_TREES_MAGIC: &[u8; 4] = b"RDR1";
+
+const PAGED_DEFERRED_PAGES_MAGIC: &[u8; 4] = b"RDF1";
+
+const PAGED_OWNERSHIP_EPOCH_MAGIC: &[u8; 4] = b"RDOE";
+
+/// Append the ownership epoch committed by this catalog image.
+/// Callers must fence the mandatory file version in both superblocks before
+/// publishing a catalog that relies on this extension.
+pub fn encode_native_paged_ownership_epoch(out: &mut Vec<u8>, epoch: u64) -> RdbFileResult<()> {
+    if epoch == 0 {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid ownership epoch".into(),
+        ));
+    }
+    out.extend_from_slice(PAGED_OWNERSHIP_EPOCH_MAGIC);
+    out.extend_from_slice(&epoch.to_le_bytes());
+    Ok(())
+}
+
+/// Decode the committed epoch. Legacy catalogs may omit the extension;
+/// callers using the new mandatory format must reject a missing value.
+pub fn decode_native_paged_ownership_epoch(
+    data: &[u8],
+    pos: &mut usize,
+) -> RdbFileResult<Option<u64>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_OWNERSHIP_EPOCH_MAGIC.as_slice()) {
+        return Ok(None);
+    }
+    *pos += 4;
+    let epoch = read_native_u64(data, pos, "truncated ownership epoch")?;
+    if epoch == 0 {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid ownership epoch".into(),
+        ));
+    }
+    Ok(Some(epoch))
+}
+
+/// Optional trailing ledger of detached pages awaiting durable reclamation.
+/// Older readers stop after retired tree roots and ignore this extension.
+pub fn encode_native_paged_deferred_pages(out: &mut Vec<u8>, pages: &[u32]) -> RdbFileResult<()> {
+    if pages.contains(&0) || pages.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid deferred page list".into(),
+        ));
+    }
+    let count = u32::try_from(pages.len())
+        .map_err(|_| RdbFileError::InvalidOperation("too many deferred pages".into()))?;
+    out.extend_from_slice(PAGED_DEFERRED_PAGES_MAGIC);
+    out.extend_from_slice(&count.to_le_bytes());
+    for page in pages {
+        out.extend_from_slice(&page.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_native_paged_deferred_pages(data: &[u8], pos: &mut usize) -> RdbFileResult<Vec<u32>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_DEFERRED_PAGES_MAGIC.as_slice()) {
+        return Ok(Vec::new());
+    }
+    *pos += 4;
+    let count = read_native_u32(data, pos, "truncated deferred page count")? as usize;
+    if count > data.len().saturating_sub(*pos) / 4 {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated deferred pages".into(),
+        ));
+    }
+    let mut pages = Vec::with_capacity(count);
+    for _ in 0..count {
+        let page = read_native_u32(data, pos, "truncated deferred page")?;
+        if page == 0 || pages.last().is_some_and(|previous| *previous >= page) {
+            return Err(RdbFileError::InvalidOperation(
+                "invalid deferred page order".into(),
+            ));
+        }
+        pages.push(page);
+    }
+    Ok(pages)
+}
+
+pub fn encode_native_paged_retired_trees(out: &mut Vec<u8>, roots: &[u32]) -> RdbFileResult<()> {
+    let count = u32::try_from(roots.len())
+        .map_err(|_| RdbFileError::InvalidOperation("too many retired trees".into()))?;
+    out.extend_from_slice(PAGED_RETIRED_TREES_MAGIC);
+    out.extend_from_slice(&count.to_le_bytes());
+    for root in roots {
+        if *root == 0 {
+            return Err(RdbFileError::InvalidOperation(
+                "zero retired tree root".into(),
+            ));
+        }
+        out.extend_from_slice(&root.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_native_paged_retired_trees(data: &[u8], pos: &mut usize) -> RdbFileResult<Vec<u32>> {
+    if data.get(*pos..pos.saturating_add(4)) != Some(PAGED_RETIRED_TREES_MAGIC.as_slice()) {
+        return Ok(Vec::new());
+    }
+    *pos += 4;
+    let count = read_native_u32(data, pos, "truncated retired tree count")? as usize;
+    if count > data.len().saturating_sub(*pos) / 4 {
+        return Err(RdbFileError::InvalidOperation(
+            "truncated retired tree roots".into(),
+        ));
+    }
+    let mut roots = Vec::with_capacity(count);
+    let mut seen = std::collections::HashSet::with_capacity(count);
+    for _ in 0..count {
+        let root = read_native_u32(data, pos, "truncated retired tree root")?;
+        if root == 0 || !seen.insert(root) {
+            return Err(RdbFileError::InvalidOperation(
+                "invalid retired tree root".into(),
+            ));
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+#[cfg(test)]
+mod paged_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn ownership_epoch_is_optional_for_legacy_and_strict_when_present() {
+        let mut legacy_pos = 0;
+        assert_eq!(
+            decode_native_paged_ownership_epoch(&[0; 16], &mut legacy_pos).unwrap(),
+            None
+        );
+        assert_eq!(legacy_pos, 0);
+        let mut bytes = Vec::new();
+        encode_native_paged_ownership_epoch(&mut bytes, 42).unwrap();
+        let mut pos = 0;
+        assert_eq!(
+            decode_native_paged_ownership_epoch(&bytes, &mut pos).unwrap(),
+            Some(42)
+        );
+        assert_eq!(pos, bytes.len());
+        for length in 4..bytes.len() {
+            assert!(decode_native_paged_ownership_epoch(&bytes[..length], &mut 0).is_err());
+        }
+        assert!(encode_native_paged_ownership_epoch(&mut Vec::new(), 0).is_err());
+        bytes[4..].fill(0);
+        assert!(decode_native_paged_ownership_epoch(&bytes, &mut 0).is_err());
+    }
+
+    #[test]
+    fn retirement_extension_accepts_legacy_padding_and_roundtrips() {
+        let mut pos = 0;
+        assert!(decode_native_paged_retired_trees(&[0; 32], &mut pos)
+            .expect("legacy")
+            .is_empty());
+        assert_eq!(pos, 0);
+        let mut bytes = Vec::new();
+        encode_native_paged_retired_trees(&mut bytes, &[70, 90]).expect("encode");
+        bytes.resize(32, 0);
+        assert_eq!(
+            decode_native_paged_retired_trees(&bytes, &mut pos).expect("decode"),
+            [70, 90]
+        );
+        assert_eq!(pos, 16);
+    }
+
+    #[test]
+    fn retirement_extension_rejects_truncation_duplicates_and_zero_roots() {
+        let mut valid = Vec::new();
+        encode_native_paged_retired_trees(&mut valid, &[70, 90]).expect("encode");
+        for length in 4..valid.len() {
+            assert!(decode_native_paged_retired_trees(&valid[..length], &mut 0).is_err());
+        }
+        let mut duplicate = Vec::new();
+        encode_native_paged_retired_trees(&mut duplicate, &[70, 70]).expect("encode duplicate");
+        assert!(decode_native_paged_retired_trees(&duplicate, &mut 0).is_err());
+        valid[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_native_paged_retired_trees(&valid, &mut 0).is_err());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativePagedCrossRef {
     pub source_id: u64,
@@ -251,6 +435,32 @@ pub fn decode_native_paged_metadata_header(
         format_version: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
         collection_count: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
     }))
+}
+
+/// Read the publication epoch without following any collection's tree. Undo
+/// recovery must determine this boundary before loading possibly changed pages.
+pub fn decode_native_paged_catalog_ownership_epoch(data: &[u8]) -> RdbFileResult<Option<u64>> {
+    let mut position = 0;
+    let collections = match decode_native_paged_metadata_header(data)? {
+        Some(header) => {
+            position = METADATA_HEADER_BYTES;
+            header.collection_count
+        }
+        None => read_native_u32(data, &mut position, "truncated collection count")?,
+    };
+    for _ in 0..collections {
+        decode_native_paged_collection_root(data, &mut position)?;
+    }
+    if position == data.len() {
+        return Ok(None);
+    }
+    let cross_refs = read_native_u32(data, &mut position, "truncated cross reference count")?;
+    for _ in 0..cross_refs {
+        decode_native_paged_cross_ref(data, &mut position)?;
+    }
+    decode_native_paged_retired_trees(data, &mut position)?;
+    decode_native_paged_deferred_pages(data, &mut position)?;
+    decode_native_paged_ownership_epoch(data, &mut position)
 }
 
 pub fn encode_native_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -464,8 +674,15 @@ pub fn append_native_store_crc32_footer(bytes: &mut Vec<u8>) {
 }
 
 pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> RdbFileResult<()> {
+    let payload_len = native_store_payload(bytes, version)?.len();
+    bytes.truncate(payload_len);
+    Ok(())
+}
+
+/// Verify the native dump checksum and borrow its payload without copying it.
+pub fn native_store_payload(bytes: &[u8], version: u32) -> RdbFileResult<&[u8]> {
     if version < STORE_VERSION_V3 {
-        return Ok(());
+        return Ok(bytes);
     }
     if bytes.len() < 12 {
         return Err(RdbFileError::InvalidOperation(
@@ -485,8 +702,7 @@ pub fn verify_native_store_crc32_footer(bytes: &mut Vec<u8>, version: u32) -> Rd
             "Binary store CRC32 mismatch — file corrupted".to_string(),
         ));
     }
-    bytes.truncate(footer_at);
-    Ok(())
+    Ok(&bytes[..footer_at])
 }
 
 fn native_store_dump_crc32(bytes: &[u8]) -> u32 {
@@ -531,7 +747,7 @@ fn read_native_u8(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileRes
     Ok(bytes[0])
 }
 
-fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
+pub fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
         value >>= 7;
@@ -539,7 +755,7 @@ fn write_native_varu32(out: &mut Vec<u8>, mut value: u32) {
     out.push(value as u8);
 }
 
-fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
+pub fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
         value >>= 7;
@@ -547,7 +763,11 @@ fn write_native_varu64(out: &mut Vec<u8>, mut value: u64) {
     out.push(value as u8);
 }
 
-fn read_native_varu32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u32> {
+pub(crate) fn read_native_varu32(
+    data: &[u8],
+    pos: &mut usize,
+    err: &'static str,
+) -> RdbFileResult<u32> {
     let mut result = 0u32;
     let mut shift = 0u32;
     for _ in 0..5 {
@@ -563,7 +783,11 @@ fn read_native_varu32(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFil
     ))
 }
 
-fn read_native_varu64(data: &[u8], pos: &mut usize, err: &'static str) -> RdbFileResult<u64> {
+pub(crate) fn read_native_varu64(
+    data: &[u8],
+    pos: &mut usize,
+    err: &'static str,
+) -> RdbFileResult<u64> {
     let mut result = 0u64;
     let mut shift = 0u32;
     for _ in 0..10 {

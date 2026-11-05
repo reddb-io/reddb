@@ -13,7 +13,7 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::mpsc;
 
 use crate::application::{OperationContext, OperationContextFactory, OperationContextInput};
 use crate::auth::store::AuthStore;
@@ -45,12 +45,47 @@ use reddb_wire::redwire::{
     rewrap_length_prefixed_handler_response, Frame, MessageDirection, MessageKind, REDWIRE_MAGIC,
 };
 
-#[derive(Debug)]
+enum QueryResponse {
+    Frame(Frame),
+    Legacy(crate::wire::listener::LegacyQueryResponse, u64),
+}
+
 struct AuthedSession {
     username: String,
     role: Role,
     tenant: Option<String>,
     session_id: String,
+    _lease: Option<crate::auth::store::ConnectionLease>,
+}
+
+fn acquire_local_connection_lease(
+    auth_store: Option<&Arc<AuthStore>>,
+    tenant: Option<&str>,
+    username: &str,
+) -> Result<Option<crate::auth::store::ConnectionLease>, String> {
+    let Some(store) = auth_store else {
+        return Ok(None);
+    };
+    let principal = crate::auth::UserId::from_parts(tenant, username);
+    if store.get_user(tenant, username).is_none() {
+        return Ok(None);
+    }
+    store
+        .acquire_connection_lease(&principal)
+        .map(Some)
+        .map_err(|_| "authentication refused".to_string())
+}
+
+async fn send_auth_refusal<S>(stream: &mut S, correlation_id: u64, reason: &str) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let frame = encode_frame(&reply_frame_or_io_error(
+        correlation_id,
+        MessageKind::AuthFail,
+        build_auth_fail_payload(reason),
+    )?);
+    stream.write_all(&frame).await
 }
 
 struct RedWireAuthenticatedSessionPolicy;
@@ -70,9 +105,14 @@ impl crate::server::route_catalog::CommandPolicyEngine for RedWireAuthenticatedS
     }
 }
 
-fn redwire_operation_context(session: &AuthedSession, correlation_id: u64) -> OperationContext {
+fn redwire_operation_context(
+    session: &AuthedSession,
+    connection_id: u64,
+    correlation_id: u64,
+) -> OperationContext {
     OperationContextFactory::build(OperationContextInput {
         request_id: Some(format!("redwire-{}-{correlation_id}", session.session_id)),
+        connection_id: Some(connection_id),
         principal: Some(session.username.clone()),
         tenant: session.tenant.clone(),
         ..OperationContextInput::default()
@@ -152,14 +192,21 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str
 }
 
 struct RedWireExecutionContextGuard {
+    previous_connection_id: u64,
     previous_tenant: Option<String>,
     previous_identity: Option<(String, Role)>,
+    previous_principal: Option<crate::auth::UserId>,
 }
 
 impl RedWireExecutionContextGuard {
     fn install(ctx: &OperationContext, role: Role) -> Self {
+        let previous_connection_id = crate::runtime::execution_context::current_connection_id();
+        if let Some(connection_id) = ctx.connection_id {
+            crate::runtime::execution_context::set_current_connection_id(connection_id);
+        }
         let previous_tenant = crate::runtime::execution_context::current_tenant();
         let previous_identity = crate::runtime::execution_context::current_auth_identity();
+        let previous_principal = crate::runtime::execution_context::current_auth_principal();
         match &ctx.tenant {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
             None => crate::runtime::execution_context::clear_current_tenant(),
@@ -172,25 +219,31 @@ impl RedWireExecutionContextGuard {
         if ctx.audit_principal == "anonymous" {
             crate::runtime::execution_context::clear_current_auth_identity();
         } else {
-            crate::runtime::execution_context::set_current_auth_identity(
-                ctx.audit_principal.clone(),
+            crate::runtime::execution_context::set_current_auth_principal(
+                crate::auth::UserId::from_parts(ctx.tenant.as_deref(), &ctx.audit_principal),
                 role,
             );
         }
         Self {
+            previous_connection_id,
             previous_tenant,
             previous_identity,
+            previous_principal,
         }
     }
 }
 
 impl Drop for RedWireExecutionContextGuard {
     fn drop(&mut self) {
-        match self.previous_identity.take() {
-            Some((username, role)) => {
-                crate::runtime::execution_context::set_current_auth_identity(username, role)
+        crate::runtime::execution_context::set_current_connection_id(self.previous_connection_id);
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => {
+                crate::runtime::execution_context::set_current_auth_principal(principal, role)
             }
-            None => crate::runtime::execution_context::clear_current_auth_identity(),
+            _ => crate::runtime::execution_context::clear_current_auth_identity(),
         }
         match self.previous_tenant.take() {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant),
@@ -208,6 +261,107 @@ pub(super) fn execute_with_redwire_context<T>(
     execute()
 }
 
+#[derive(Debug)]
+pub(super) enum RedWireExecutionError {
+    QueueFull,
+    QueueTimeout,
+    Closed,
+    Task(tokio::task::JoinError),
+}
+
+impl RedWireExecutionError {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::QueueFull => "execution_queue_full",
+            Self::QueueTimeout => "execution_queue_timeout",
+            Self::Closed => "execution_admission_closed",
+            Self::Task(_) => "execution_task_failed",
+        }
+    }
+
+    pub(super) fn client_message(&self) -> String {
+        match self {
+            Self::QueueFull => {
+                "execution_queue_full: engine execution queue is full; retryable=true".to_string()
+            }
+            Self::QueueTimeout => {
+                "execution_queue_timeout: deadline expired while waiting to execute; retryable=true"
+                    .to_string()
+            }
+            Self::Closed => {
+                "execution_admission_closed: engine execution admission is unavailable".to_string()
+            }
+            Self::Task(error) => format!("engine execution task failed: {error}"),
+        }
+    }
+}
+
+/// Keep RedWire's thread-local identity and transaction context on the
+/// connection thread while allowing Tokio to replace this worker for other
+/// async tasks during synchronous engine work.
+fn run_redwire_blocking<T>(execute: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+
+    match Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(execute),
+        _ => execute(),
+    }
+}
+
+pub(super) async fn redwire_spawn_blocking<F, R>(
+    runtime: &RedDBRuntime,
+    execute: F,
+) -> Result<R, RedWireExecutionError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let permit = redwire_execution_permit(runtime).await?;
+    redwire_spawn_blocking_with_permit(permit, execute).await
+}
+
+async fn redwire_execution_permit(
+    runtime: &RedDBRuntime,
+) -> Result<crate::transport::execution_admission::ExecutionPermit, RedWireExecutionError> {
+    use crate::transport::execution_admission::ExecutionAdmissionError;
+
+    let admission = runtime.execution_admission();
+    match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(ExecutionAdmissionError::QueueFull)) => Err(RedWireExecutionError::QueueFull),
+        Ok(Err(ExecutionAdmissionError::Closed)) => Err(RedWireExecutionError::Closed),
+        Err(_) => Err(RedWireExecutionError::QueueTimeout),
+    }
+}
+
+async fn redwire_spawn_blocking_with_permit<F, R>(
+    permit: crate::transport::execution_admission::ExecutionPermit,
+    execute: F,
+) -> Result<R, RedWireExecutionError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        execute()
+    })
+    .await
+    .map_err(RedWireExecutionError::Task)
+}
+
+async fn send_execution_error(
+    out_tx: &super::output_stream::FrameTx,
+    correlation_id: u64,
+    error: RedWireExecutionError,
+) -> io::Result<()> {
+    queue_send(
+        out_tx,
+        build_error_frame_lossy(correlation_id, &error.client_message()),
+    )
+    .await
+}
+
 pub async fn handle_session<S>(
     mut stream: S,
     runtime: Arc<RedDBRuntime>,
@@ -223,7 +377,7 @@ where
     let session = perform_handshake(
         &mut stream,
         runtime.as_ref(),
-        auth_store.as_deref(),
+        auth_store.as_ref(),
         oauth.as_deref(),
     )
     .await?;
@@ -231,6 +385,13 @@ where
         return Ok(());
     }
     let session = session.unwrap();
+    // Own the runtime lease through EOF/Bye/error so teardown rolls back
+    // this connection's transaction before its ID can be reused.
+    let connection = Arc::new(
+        runtime
+            .acquire_wire_connection()
+            .map_err(|error| io::Error::other(error.to_string()))?,
+    );
 
     // Per-connection state for prepared statements + streaming
     // bulk inserts. Owned by the session; dropped on disconnect. The
@@ -244,25 +405,17 @@ where
     // S3) — two concurrent output-stream workers can interleave
     // their chunks back to the client without contending on the
     // reader side. All outbound bytes are routed through an
-    // unbounded mpsc; a drain task flushes them to the write half
-    // under a mutex so chunk frames stay byte-atomic on the wire.
+    // bounded, byte-admitted mpsc; one drain task writes complete frames.
     let (mut reader, writer) = tokio::io::split(stream);
-    let writer = Arc::new(TokioMutex::new(writer));
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_FRAMES);
-    let writer_drain = Arc::clone(&writer);
-    tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            let mut w = writer_drain.lock().await;
-            if w.write_all(&bytes).await.is_err() {
-                return;
-            }
-        }
-    });
+    let (out_tx, out_rx) = mpsc::channel::<bytes::Bytes>(OUTBOUND_QUEUE_FRAMES);
+    let out_tx = super::output_stream::FrameTx::new(out_tx, Arc::clone(&runtime));
+    let _writer_task = out_tx.spawn_writer(out_rx, writer);
 
     // Per-connection output-stream registry (issue #762). Tracks
     // active stream workers so a `StreamCancel` for one stream_id
     // does not disturb the rest of the connection.
     let stream_registry = Arc::new(super::output_stream::StreamRegistry::new());
+    let mut output_stream_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Per-connection input-stream registry (issue #764 / S5). Input
     // streams are driven inline from this reader loop — each
@@ -288,12 +441,17 @@ where
     let mut queue_wait_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     loop {
+        while output_stream_tasks.try_join_next().is_some() {}
         // Reap finished wait tasks so the set does not accumulate joined
         // handles over a long-lived connection. Non-blocking — only
         // already-complete tasks are drained.
         while queue_wait_tasks.try_join_next().is_some() {}
 
-        let frame = match read_frame_async(&mut reader).await {
+        let incoming = tokio::select! {
+            _ = out_tx.failed() => return Err(io::Error::other("redwire: outbound response unavailable")),
+            frame = read_frame_async(&mut reader) => frame,
+        };
+        let frame = match incoming {
             Ok(frame) => frame,
             Err(reddb_wire::redwire::RedWireIoError::Io(err))
                 if err.kind() == io::ErrorKind::UnexpectedEof =>
@@ -303,14 +461,15 @@ where
             Err(err) => return Err(redwire_io_err(err)),
         };
 
-        let operation_context = redwire_operation_context(&session, frame.correlation_id);
+        let operation_context =
+            redwire_operation_context(&session, connection.id(), frame.correlation_id);
         if let Err(error) = authorize_redwire_frame(
             &operation_context,
             frame.kind,
             &RedWireAuthenticatedSessionPolicy,
         ) {
             let err_frame = build_error_frame_lossy(frame.correlation_id, &error.to_string());
-            queue_send(&out_tx, encode_frame(&err_frame)).await?;
+            queue_send(&out_tx, err_frame).await?;
             continue;
         }
 
@@ -323,93 +482,158 @@ where
                 frame.correlation_id,
                 &format!("redwire: {:?} is server-only", frame.kind),
             );
-            queue_send(&out_tx, encode_frame(&err_frame)).await?;
+            queue_send(&out_tx, err_frame).await?;
             continue;
         }
 
         match frame.kind {
             MessageKind::Bye => {
-                let bye = encode_frame(&reply_frame_or_io_error(
-                    frame.correlation_id,
-                    MessageKind::Bye,
-                    vec![],
-                )?);
-                let _ = out_tx.send(bye).await;
+                let bye = reply_frame_or_io_error(frame.correlation_id, MessageKind::Bye, vec![])?;
+                let _ = out_tx.send_frame(bye).await;
                 return Ok(());
             }
             MessageKind::Ping => {
-                let pong = encode_frame(&reply_frame_or_io_error(
-                    frame.correlation_id,
-                    MessageKind::Pong,
-                    vec![],
-                )?);
+                let pong =
+                    reply_frame_or_io_error(frame.correlation_id, MessageKind::Pong, vec![])?;
                 queue_send(&out_tx, pong).await?;
             }
-            MessageKind::Query => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_query(&runtime, prepared_stmts.registry(), &frame)
+            MessageKind::Query
+            | MessageKind::QueryWithParams
+            | MessageKind::QueryBinary
+            | MessageKind::ExecutePrepared => {
+                // The synchronous engine can park on QUEUE READ WAIT. Keep
+                // it off Tokio's I/O workers, and install its thread-local
+                // security/transaction context on the blocking worker itself.
+                let permit = match redwire_execution_permit(runtime.as_ref()).await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        send_execution_error(&out_tx, frame.correlation_id, error).await?;
+                        continue;
+                    }
+                };
+                let task_runtime = Arc::clone(&runtime);
+                let connection = Arc::clone(&connection);
+                let statements = std::mem::take(&mut prepared_stmts);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking_with_permit(permit, move || {
+                    // A started blocking task cannot be aborted. Retain the
+                    // lease until execution ends, even if the session is dropped.
+                    let _connection = connection;
+                    let response = execute_with_redwire_context(&operation_context, role, || {
+                        match frame.kind {
+                            MessageKind::Query => QueryResponse::Frame(run_query(
+                                &task_runtime,
+                                statements.registry(),
+                                &frame,
+                            )),
+                            MessageKind::QueryWithParams => QueryResponse::Frame(
+                                run_query_with_params(&task_runtime, statements.registry(), &frame),
+                            ),
+                            MessageKind::QueryBinary => QueryResponse::Legacy(
+                                crate::wire::listener::handle_query_binary(
+                                    &task_runtime,
+                                    &frame.payload,
+                                ),
+                                frame.correlation_id,
+                            ),
+                            MessageKind::ExecutePrepared => QueryResponse::Legacy(
+                                crate::wire::listener::handle_execute_prepared(
+                                    &task_runtime,
+                                    &frame.payload,
+                                    &statements,
+                                ),
+                                frame.correlation_id,
+                            ),
+                            _ => unreachable!("only query frames enter the blocking dispatcher"),
+                        }
                     });
-                queue_send(&out_tx, encode_frame(&response)).await?;
-            }
-            MessageKind::QueryWithParams => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_query_with_params(&runtime, prepared_stmts.registry(), &frame)
-                    });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                    (response, statements)
+                })
+                .await;
+                let (response, statements) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        send_execution_error(&out_tx, correlation_id, error).await?;
+                        prepared_stmts = crate::wire::listener::PreparedStatements::default();
+                        continue;
+                    }
+                };
+                prepared_stmts = statements;
+                match response {
+                    QueryResponse::Frame(frame) => queue_send(&out_tx, frame).await?,
+                    QueryResponse::Legacy(response, correlation_id) => {
+                        out_tx
+                            .send_legacy_response(response, correlation_id)
+                            .await?
+                    }
+                }
             }
             // BulkInsert handles both single-row and bulk shapes off
             // the same frame kind: payload `payload` = single,
             // payload `payloads` = array.
             MessageKind::BulkInsert => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_insert_dispatch(&runtime, &frame)
-                    });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        run_insert_dispatch(&task_runtime, &frame)
+                    })
+                })
+                .await;
+                match result {
+                    Ok(response) => queue_send(&out_tx, response).await?,
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             MessageKind::BulkInsertBinary => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload)
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        crate::wire::listener::handle_bulk_insert_binary(
+                            &task_runtime,
+                            &frame.payload,
+                        )
+                    })
+                })
+                .await;
+                match result {
+                    Ok(raw) => {
+                        queue_send(
+                            &out_tx,
+                            rewrap_length_prefixed_handler_response(&raw, correlation_id),
+                        )
+                        .await?
+                    }
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             MessageKind::BulkInsertPrevalidated => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_bulk_insert_binary_prevalidated(
-                        &runtime,
-                        &frame.payload,
-                    )
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
-            }
-            MessageKind::QueryBinary => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_query_binary(&runtime, &frame.payload)
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        crate::wire::listener::handle_bulk_insert_binary_prevalidated(
+                            &task_runtime,
+                            &frame.payload,
+                        )
+                    })
+                })
+                .await;
+                match result {
+                    Ok(raw) => {
+                        queue_send(
+                            &out_tx,
+                            rewrap_length_prefixed_handler_response(&raw, correlation_id),
+                        )
+                        .await?
+                    }
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             // Streaming bulk insert (PG COPY equivalent).
             MessageKind::BulkStreamStart => {
@@ -417,44 +641,82 @@ where
                     crate::wire::listener::handle_stream_start(&frame.payload, &mut stream_session);
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
             MessageKind::BulkStreamRows => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_stream_rows(
-                        &runtime,
-                        &frame.payload,
-                        &mut stream_session,
-                    )
-                });
-                if !raw.is_empty() {
-                    queue_send(
-                        &out_tx,
-                        encode_frame(&rewrap_length_prefixed_handler_response(
-                            &raw,
-                            frame.correlation_id,
-                        )),
-                    )
-                    .await?;
+                let permit = match redwire_execution_permit(runtime.as_ref()).await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        send_execution_error(&out_tx, frame.correlation_id, error).await?;
+                        continue;
+                    }
+                };
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let task_session = stream_session.take();
+                let result = redwire_spawn_blocking_with_permit(permit, move || {
+                    let mut task_session = task_session;
+                    let raw = execute_with_redwire_context(&operation_context, role, || {
+                        crate::wire::listener::handle_stream_rows(
+                            &task_runtime,
+                            &frame.payload,
+                            &mut task_session,
+                        )
+                    });
+                    (raw, task_session)
+                })
+                .await;
+                match result {
+                    Ok((raw, returned_session)) => {
+                        stream_session = returned_session;
+                        if !raw.is_empty() {
+                            queue_send(
+                                &out_tx,
+                                rewrap_length_prefixed_handler_response(&raw, correlation_id),
+                            )
+                            .await?;
+                        }
+                    }
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
                 }
             }
             MessageKind::BulkStreamCommit => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session)
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
+                let permit = match redwire_execution_permit(runtime.as_ref()).await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        send_execution_error(&out_tx, frame.correlation_id, error).await?;
+                        continue;
+                    }
+                };
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let task_session = stream_session.take();
+                let result = redwire_spawn_blocking_with_permit(permit, move || {
+                    let mut task_session = task_session;
+                    let raw = execute_with_redwire_context(&operation_context, role, || {
+                        crate::wire::listener::handle_stream_commit(
+                            &task_runtime,
+                            &mut task_session,
+                        )
+                    });
+                    (raw, task_session)
+                })
+                .await;
+                match result {
+                    Ok((raw, returned_session)) => {
+                        stream_session = returned_session;
+                        queue_send(
+                            &out_tx,
+                            rewrap_length_prefixed_handler_response(&raw, correlation_id),
+                        )
+                        .await?;
+                    }
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             MessageKind::Prepare => {
                 let raw = execute_with_redwire_context(&operation_context, session.role, || {
@@ -466,43 +728,39 @@ where
                 });
                 queue_send(
                     &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
-                )
-                .await?;
-            }
-            MessageKind::ExecutePrepared => {
-                let raw = execute_with_redwire_context(&operation_context, session.role, || {
-                    crate::wire::listener::handle_execute_prepared(
-                        &runtime,
-                        &frame.payload,
-                        &prepared_stmts,
-                    )
-                });
-                queue_send(
-                    &out_tx,
-                    encode_frame(&rewrap_length_prefixed_handler_response(
-                        &raw,
-                        frame.correlation_id,
-                    )),
+                    rewrap_length_prefixed_handler_response(&raw, frame.correlation_id),
                 )
                 .await?;
             }
             MessageKind::Get => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_get(&runtime, &frame)
-                    });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        run_get(&task_runtime, &frame)
+                    })
+                })
+                .await;
+                match result {
+                    Ok(response) => queue_send(&out_tx, response).await?,
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             MessageKind::Delete => {
-                let response =
-                    execute_with_redwire_context(&operation_context, session.role, || {
-                        run_delete(&runtime, &frame)
-                    });
-                queue_send(&out_tx, encode_frame(&response)).await?;
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        run_delete(&task_runtime, &frame)
+                    })
+                })
+                .await;
+                match result {
+                    Ok(response) => queue_send(&out_tx, response).await?,
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
             }
             // Output-stream lifecycle (issue #762 / PRD #759 S3).
             //
@@ -536,12 +794,26 @@ where
                                 0,
                                 0,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            queue_send(&out_tx, err).await?;
                             continue;
                         }
                     };
-                    let in_tx = runtime.connection_in_transaction(0);
-                    let config = crate::server::output_stream::StreamConfig::load(&runtime);
+                    let in_tx = runtime.connection_in_transaction(connection.id());
+                    let config = match crate::server::output_stream::StreamConfig::load(&runtime) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            let err = is::build_input_stream_error_frame(
+                                frame_id,
+                                sid,
+                                "stream_config_unavailable",
+                                &error.to_string(),
+                                0,
+                                runtime.cdc_current_lsn(),
+                            )?;
+                            queue_send(&out_tx, err).await?;
+                            continue;
+                        }
+                    };
                     let snapshot_lsn = runtime.cdc_current_lsn();
                     let clock = crate::server::output_stream::SystemClock;
                     let lease = match is::open_input_lease(config, snapshot_lsn, in_tx, &clock) {
@@ -555,7 +827,7 @@ where
                                 0,
                                 snapshot_lsn,
                             )?;
-                            queue_send(&out_tx, encode_frame(&err)).await?;
+                            queue_send(&out_tx, err).await?;
                             continue;
                         }
                     };
@@ -571,13 +843,13 @@ where
                             0,
                             snapshot_lsn,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                     let ack =
                         os::build_open_ack_frame(frame_id, sid, lease_id, lease_snapshot, false)
                             .map_err(|e| io::Error::other(format!("build OpenAck: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&ack)).await?;
+                    queue_send(&out_tx, ack).await?;
                     continue;
                 }
 
@@ -586,7 +858,7 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
@@ -595,21 +867,25 @@ where
                     Err(e) => {
                         let err =
                             os::build_stream_error_frame(frame_id, sid, e.code(), e.message())?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
                 let runtime_ref = Arc::clone(&runtime);
                 let registry_ref = Arc::clone(&stream_registry);
-                let send = os::FrameTx::new(out_tx.clone());
-                let stream_context = operation_context.clone();
+                let send = out_tx.clone();
+                let mut stream_context = operation_context.clone();
                 let stream_role = session.role;
-                // Transactions are still managed per connection using the
-                // default connection id. The stream's authenticated tenant
-                // and principal travel separately in `stream_context` and
-                // are installed only around its synchronous query execution.
-                let in_tx = runtime.connection_in_transaction(0);
-                tokio::spawn(async move {
+                let in_tx = runtime.connection_in_transaction(connection.id());
+                // Streams execute in autocommit independently of a later BEGIN
+                // on the session. The worker owns its ID until safe teardown;
+                // the JoinSet aborts workers when the frame loop disconnects.
+                let stream_connection = runtime
+                    .acquire_wire_connection()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                stream_context.connection_id = Some(stream_connection.id());
+                output_stream_tasks.spawn(async move {
+                    let _connection = stream_connection;
                     os::run_output_stream(
                         runtime_ref,
                         frame_id,
@@ -644,7 +920,7 @@ where
                                 .map_err(|e| {
                                     io::Error::other(format!("build queue-wait error: {e}"))
                                 })?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
@@ -660,7 +936,7 @@ where
                         &msg,
                     )
                     .map_err(|e| io::Error::other(format!("build queue-wait cap error: {e}")))?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
                     continue;
                 }
                 let runtime_ref = Arc::clone(&runtime);
@@ -668,6 +944,10 @@ where
                 let queue_name = req.queue.clone();
                 let wait_ms = req.wait_ms;
                 let auth_identity = Some((session.username.clone(), session.role));
+                let auth_principal = Some(crate::auth::UserId::from_parts(
+                    session.tenant.as_deref(),
+                    &session.username,
+                ));
                 let tenant = session.tenant.clone();
                 // Owned by the connection-scoped `JoinSet` so a client
                 // disconnect (frame loop return) aborts a still-parked
@@ -682,6 +962,7 @@ where
                             req.count,
                             req.wait_ms,
                             auth_identity,
+                            auth_principal,
                             tenant,
                         )
                         .await
@@ -691,7 +972,7 @@ where
                             for message in messages {
                                 match qw::build_event_push_frame(frame_id, sid, &message) {
                                     Ok(push) => {
-                                        if queue_send(&out, encode_frame(&push)).await.is_err() {
+                                        if queue_send(&out, push).await.is_err() {
                                             return;
                                         }
                                     }
@@ -709,7 +990,7 @@ where
                                 &queue_name,
                                 wait_ms,
                             ) {
-                                let _ = queue_send(&out, encode_frame(&t)).await;
+                                let _ = queue_send(&out, t).await;
                             }
                         }
                         // Server-side cancellation: a StreamError with
@@ -722,7 +1003,7 @@ where
                                 qw::WAIT_CANCELLED_CODE,
                                 "queue wait cancelled by server",
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef)).await;
+                                let _ = queue_send(&out, ef).await;
                             }
                         }
                         // A genuine runtime failure. Server-shutdown
@@ -736,7 +1017,7 @@ where
                                 qw::WAIT_FAILED_CODE,
                                 &err.to_string(),
                             ) {
-                                let _ = queue_send(&out, encode_frame(&ef)).await;
+                                let _ = queue_send(&out, ef).await;
                             }
                         }
                     }
@@ -766,7 +1047,23 @@ where
                         0,
                         0,
                     )?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
+                    continue;
+                }
+                // BEGIN may arrive after OpenStream. Never report a chunk as
+                // committed if it would instead join the session transaction.
+                if runtime.connection_in_transaction(connection.id()) {
+                    let state = input_registry.remove(sid).expect("stream presence checked");
+                    let error = crate::server::output_stream::OpenStreamError::TransactionActive;
+                    let frame = is::build_input_stream_error_frame(
+                        frame_id,
+                        sid,
+                        error.code(),
+                        error.message(),
+                        state.chunk_count,
+                        state.committed_rid,
+                    )?;
+                    queue_send(&out_tx, frame).await?;
                     continue;
                 }
                 let chunk = match is::parse_input_chunk(&frame.payload) {
@@ -783,11 +1080,33 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
+                        continue;
+                    }
+                };
+                let execution_permit = match redwire_execution_permit(runtime.as_ref()).await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        // StreamError is terminal for an input stream. Earlier
+                        // chunks remain durable and recoverable_rid identifies
+                        // the last successful commit.
+                        let state = input_registry
+                            .remove(sid)
+                            .expect("stream presence checked above");
+                        let err = is::build_input_stream_error_frame(
+                            frame_id,
+                            sid,
+                            error.code(),
+                            &error.client_message(),
+                            state.chunk_count,
+                            state.committed_rid,
+                        )?;
+                        queue_send(&out_tx, err).await?;
                         continue;
                     }
                 };
                 let commit_result = {
+                    let _execution_permit = execution_permit;
                     let state = input_registry
                         .get_mut(sid)
                         .expect("stream presence checked above");
@@ -797,8 +1116,10 @@ where
                             "stream snapshot pin TTL elapsed".to_string(),
                         ))
                     } else {
-                        execute_with_redwire_context(&operation_context, session.role, || {
-                            state.commit_chunk(&runtime, &chunk.rows)
+                        run_redwire_blocking(|| {
+                            execute_with_redwire_context(&operation_context, session.role, || {
+                                state.commit_chunk(&runtime, &chunk.rows)
+                            })
                         })
                     }
                 };
@@ -815,7 +1136,7 @@ where
                             state.chunk_count,
                             state.committed_rid,
                         )?;
-                        queue_send(&out_tx, encode_frame(&err)).await?;
+                        queue_send(&out_tx, err).await?;
                     }
                     Ok(()) => {
                         if chunk.terminal {
@@ -831,7 +1152,7 @@ where
                                 state.snapshot_lsn,
                                 false,
                             )?;
-                            queue_send(&out_tx, encode_frame(&end)).await?;
+                            queue_send(&out_tx, end).await?;
                         }
                     }
                 }
@@ -858,7 +1179,7 @@ where
                         state.snapshot_lsn,
                         true,
                     )?;
-                    queue_send(&out_tx, encode_frame(&end)).await?;
+                    queue_send(&out_tx, end).await?;
                 } else {
                     // AC #6: protocol violation surfaces as a
                     // StreamError envelope, not a connection drop.
@@ -868,7 +1189,7 @@ where
                         "unknown_stream",
                         "no active stream for this stream_id",
                     )?;
-                    queue_send(&out_tx, encode_frame(&err)).await?;
+                    queue_send(&out_tx, err).await?;
                 }
             }
             other => {
@@ -876,7 +1197,7 @@ where
                     frame.correlation_id,
                     &format!("redwire: cannot dispatch {other:?} yet"),
                 );
-                queue_send(&out_tx, encode_frame(&err_frame)).await?;
+                queue_send(&out_tx, err_frame).await?;
             }
         }
     }
@@ -888,11 +1209,8 @@ where
 /// as fast as the socket accepts bytes.
 const OUTBOUND_QUEUE_FRAMES: usize = 256;
 
-async fn queue_send(out_tx: &mpsc::Sender<Vec<u8>>, bytes: Vec<u8>) -> io::Result<()> {
-    out_tx
-        .send(bytes)
-        .await
-        .map_err(|_| io::Error::other("redwire: write channel closed"))
+async fn queue_send(out_tx: &super::output_stream::FrameTx, frame: Frame) -> io::Result<()> {
+    out_tx.send_frame(frame).await
 }
 
 /// Run the handshake. Returns `Ok(None)` when the client disconnected
@@ -900,7 +1218,7 @@ async fn queue_send(out_tx: &mpsc::Sender<Vec<u8>>, bytes: Vec<u8>) -> io::Resul
 async fn perform_handshake<S>(
     stream: &mut S,
     runtime: &RedDBRuntime,
-    auth_store: Option<&AuthStore>,
+    auth_store: Option<&Arc<AuthStore>>,
     oauth: Option<&crate::auth::oauth::OAuthValidator>,
 ) -> io::Result<Option<AuthedSession>>
 where
@@ -1048,6 +1366,17 @@ where
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             if let Ok(identity) = authority.validate_access(&raw, now) {
+                let lease = match acquire_local_connection_lease(
+                    auth_store,
+                    identity.tenant.as_deref(),
+                    &identity.username,
+                ) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
@@ -1065,6 +1394,7 @@ where
                     role: identity.role,
                     tenant: identity.tenant,
                     session_id,
+                    _lease: lease,
                 }));
             }
         }
@@ -1086,6 +1416,17 @@ where
         };
         match super::auth::validate_oauth_jwt_full(validator, &raw) {
             Ok((tenant, username, role)) => {
+                let lease = match acquire_local_connection_lease(
+                    auth_store,
+                    tenant.as_deref(),
+                    &username,
+                ) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
                 let session_id = super::auth::new_session_id_for_scram();
                 let ok = encode_frame(&reply_frame_or_io_error(
                     resp.correlation_id,
@@ -1098,6 +1439,7 @@ where
                     role,
                     tenant,
                     session_id,
+                    _lease: lease,
                 }));
             }
             Err(reason) => {
@@ -1112,13 +1454,21 @@ where
         }
     }
 
-    match validate_auth_response(chosen, auth_payload, auth_store) {
+    match validate_auth_response(chosen, auth_payload, auth_store.map(AsRef::as_ref)) {
         AuthOutcome::Authenticated {
             username,
             role,
             tenant,
             session_id,
         } => {
+            let lease =
+                match acquire_local_connection_lease(auth_store, tenant.as_deref(), &username) {
+                    Ok(lease) => lease,
+                    Err(reason) => {
+                        send_auth_refusal(stream, resp.correlation_id, &reason).await?;
+                        return Ok(None);
+                    }
+                };
             let ok_frame = build_auth_ok_frame_from_payload(
                 resp.correlation_id,
                 build_auth_ok(&session_id, &username, role, server_features),
@@ -1131,6 +1481,7 @@ where
                 role,
                 tenant,
                 session_id,
+                _lease: lease,
             }))
         }
         AuthOutcome::Refused(reason) => {
@@ -1155,7 +1506,7 @@ where
 /// ```
 async fn perform_scram_handshake<S>(
     stream: &mut S,
-    auth_store: Option<&AuthStore>,
+    auth_store: Option<&Arc<AuthStore>>,
     initial_correlation: u64,
     server_features: u32,
 ) -> io::Result<Option<AuthedSession>>
@@ -1248,14 +1599,20 @@ where
             }
             _ => unreachable!("client-final step must authenticate or fail"),
         };
-    let user = store
-        .list_users()
-        .into_iter()
-        .find(|u| u.username == username);
+    // Bind the session to the same platform principal whose verifier was
+    // checked above; a tenant-local namesake is a different identity.
+    let user = store.get_user(None, &username);
     let role = user
         .as_ref()
         .map(|u| u.role)
         .unwrap_or(crate::auth::Role::Read);
+    let lease = match acquire_local_connection_lease(auth_store, None, &username) {
+        Ok(Some(lease)) => lease,
+        Ok(None) | Err(_) => {
+            send_auth_refusal(stream, final_correlation_id, "authentication refused").await?;
+            return Ok(None);
+        }
+    };
     let session_id = super::auth::new_session_id_for_scram();
     let ok_payload = super::auth::build_scram_auth_ok(
         &session_id,
@@ -1275,6 +1632,7 @@ where
         role,
         tenant: user.and_then(|u| u.tenant_id),
         session_id,
+        _lease: Some(lease),
     }))
 }
 
@@ -1312,7 +1670,10 @@ fn run_query(runtime: &RedDBRuntime, prepared: &PreparedRegistry, frame: &Frame)
         QueryRequestExecutor::new(runtime, prepared).execute(QueryRequest::sql(sql, Vec::new()));
     crate::presentation::query_result::summary_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1342,7 +1703,10 @@ fn run_query_with_params(
     let result = QueryRequestExecutor::new(runtime, prepared).execute(query);
     crate::presentation::query_result::envelope_frame(
         frame.correlation_id,
-        result.as_ref().map_err(crate::api::client_facing_message),
+        result
+            .as_ref()
+            .map(|result| &**result)
+            .map_err(crate::api::client_facing_message),
     )
 }
 
@@ -1657,6 +2021,30 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn redwire_execution_refuses_when_shared_runtime_queue_is_full() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime.configure_execution_admission(1, 0, 100);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let error = redwire_execution_permit(&runtime).await.unwrap_err();
+        assert_eq!(error.code(), "execution_queue_full");
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn redwire_execution_reports_queue_deadline_separately() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime.configure_execution_admission(1, 1, 1);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let error = redwire_execution_permit(&runtime).await.unwrap_err();
+        assert_eq!(error.code(), "execution_queue_timeout");
+        drop(active);
+    }
+
     #[test]
     fn every_redwire_frame_kind_resolves_to_a_catalog_command() {
         let catalog = crate::server::discovered_route_catalog();
@@ -1727,6 +2115,47 @@ mod tests {
                 command_id: "query.execute"
             }
         );
+    }
+
+    #[test]
+    fn redwire_local_admission_enforces_expiry_and_connection_limit() {
+        let store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..crate::auth::AuthConfig::default()
+        }));
+        store
+            .create_user("alice", "secret", Role::Read)
+            .expect("user");
+        let id = crate::auth::UserId::platform("alice");
+        store
+            .set_user_attributes(
+                &id,
+                crate::auth::UserAttributes {
+                    valid_until: Some(1),
+                    ..crate::auth::UserAttributes::default()
+                },
+            )
+            .expect("expired attributes");
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice").is_err());
+
+        store
+            .set_user_attributes(
+                &id,
+                crate::auth::UserAttributes {
+                    connection_limit: Some(1),
+                    ..crate::auth::UserAttributes::default()
+                },
+            )
+            .expect("limited attributes");
+        let first = acquire_local_connection_lease(Some(&store), None, "alice")
+            .expect("first admission")
+            .expect("local lease");
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice").is_err());
+        drop(first);
+        assert!(acquire_local_connection_lease(Some(&store), None, "alice")
+            .expect("slot released")
+            .is_some());
     }
 
     #[test]
@@ -2134,6 +2563,35 @@ mod tests {
                 .and_then(|values| values.get("value"))
                 .and_then(JsonValue::as_f64),
             Some(7.0)
+        );
+    }
+
+    #[test]
+    fn cancelled_redwire_query_releases_shared_query_capacity() {
+        let _lock = env_lock().lock().expect("environment lock");
+        let _env = EnvGuard::set(&[("RED_MAX_CONCURRENT_QUERIES", "1")]);
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        let query = reddb_wire::redwire::build_query_frame(100, "SELECT 1 AS healthy")
+            .expect("query frame");
+
+        let cancellation = crate::runtime::query_budget::RequestCancellation::new();
+        let request_scope = cancellation.install();
+        cancellation.cancel();
+        let cancelled = run_query(&runtime, &prepared, &query);
+        assert_eq!(cancelled.kind, MessageKind::Error);
+        assert!(
+            String::from_utf8_lossy(&cancelled.payload).contains("duration:query_cancelled"),
+            "unexpected cancellation payload: {}",
+            String::from_utf8_lossy(&cancelled.payload)
+        );
+        drop(request_scope);
+
+        let recovered = run_query(&runtime, &prepared, &query);
+        assert_eq!(
+            recovered.kind,
+            MessageKind::Result,
+            "cancelled query must release the only shared admission slot"
         );
     }
 

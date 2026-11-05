@@ -102,6 +102,111 @@ fn flip_geo_compare_op(op: CompareOp) -> CompareOp {
     }
 }
 
+fn filter_field_matches_index_column(
+    field: &reddb_rql::ast::FieldRef,
+    column: &str,
+    table: &TableQuery,
+) -> bool {
+    super::authz::policy_columns::policy_column_name_from_field_ref(
+        field,
+        &table.table,
+        table.alias.as_deref(),
+    )
+    .as_deref()
+        == Some(column)
+}
+
+fn filter_is_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    matches!(
+        filter,
+        Filter::Compare { field, op: CompareOp::Eq, value }
+            if filter_field_matches_index_column(field, column, table)
+                && matches!(value, Value::Text(_) | Value::Integer(_) | Value::UnsignedInteger(_))
+    )
+}
+
+fn filter_has_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    match filter {
+        Filter::And(left, right) => {
+            filter_has_hash_equality(left, column, table)
+                || filter_has_hash_equality(right, column, table)
+        }
+        other => filter_is_hash_equality(other, column, table),
+    }
+}
+
+fn sorted_range_family(value: &Value) -> Option<reddb_types::CanonicalKeyFamily> {
+    let family = reddb_types::value_to_canonical_key(value)?.family();
+    matches!(
+        family,
+        reddb_types::CanonicalKeyFamily::Integer
+            | reddb_types::CanonicalKeyFamily::BigInt
+            | reddb_types::CanonicalKeyFamily::UnsignedInteger
+            | reddb_types::CanonicalKeyFamily::Text
+    )
+    .then_some(family)
+}
+
+fn filter_is_sorted_range(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => {
+            matches!(
+                op,
+                CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
+            ) && filter_field_matches_index_column(field, column, table)
+                && sorted_range_family(value).is_some()
+        }
+        Filter::Between { field, low, high } => {
+            filter_field_matches_index_column(field, column, table)
+                && sorted_range_family(low).is_some()
+                && sorted_range_family(low) == sorted_range_family(high)
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_sorted_predicate(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    if filter_is_sorted_range(filter, column, table)
+        || filter_is_hash_equality(filter, column, table)
+    {
+        return true;
+    }
+    match filter {
+        Filter::In { field, values } => {
+            filter_field_matches_index_column(field, column, table)
+                && values
+                    .first()
+                    .and_then(sorted_range_family)
+                    .is_some_and(|family| {
+                        values
+                            .iter()
+                            .all(|value| sorted_range_family(value) == Some(family))
+                    })
+        }
+        Filter::And(left, right) => {
+            filter_has_sorted_predicate(left, column, table)
+                || filter_has_sorted_predicate(right, column, table)
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_composite_prefix_range(
+    filter: &Filter,
+    columns: &[String],
+    table: &TableQuery,
+) -> bool {
+    let [prefix, range] = columns else {
+        return false;
+    };
+    let Filter::And(left, right) = filter else {
+        return false;
+    };
+    (filter_is_hash_equality(left, prefix, table) && filter_is_sorted_range(right, range, table))
+        || (filter_is_hash_equality(right, prefix, table)
+            && filter_is_sorted_range(left, range, table))
+}
+
 fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> bool {
     let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
     if cell == 0 {
@@ -191,14 +296,8 @@ impl RedDBRuntime {
         let chunk_prune = self.table_filter_has_hypertable_chunk_prune(table);
         if self.table_filter_has_geo_h3_route(table) {
             mark_table_scan_as_geo_h3_index_seek(node);
-        } else if let Some(index) = self
-            .inner
-            .index_store
-            .list_indices(&table.table)
-            .into_iter()
-            .next()
-        {
-            mark_table_scan_as_index_seek(node, &index.name);
+        } else if let Some(index_name) = self.table_filter_index_name(table) {
+            mark_table_scan_as_index_seek(node, &index_name);
         }
         if let Some((total_chunks, kept_chunks)) = chunk_prune {
             wrap_plan_as_hypertable_chunk_prune(node, &table.table, total_chunks, kept_chunks);
@@ -221,6 +320,37 @@ impl RedDBRuntime {
             filter.as_ref(),
         );
         (kept.len() < chunks.len()).then_some((chunks.len(), kept.len()))
+    }
+
+    fn table_filter_index_name(&self, table: &TableQuery) -> Option<String> {
+        let filter = reddb_rql::sql_lowering::effective_table_filter(table)?;
+        let mut indices = self
+            .inner
+            .index_store
+            .list_indices(&table.table)
+            .into_iter()
+            .filter(|index| match index.method {
+                super::index_store::IndexMethodKind::Hash => {
+                    let [column] = index.columns.as_slice() else {
+                        return false;
+                    };
+                    filter_has_hash_equality(&filter, column, table)
+                }
+                super::index_store::IndexMethodKind::BTree => match index.columns.as_slice() {
+                    [column] => filter_has_sorted_predicate(&filter, column, table),
+                    columns => filter_has_composite_prefix_range(&filter, columns, table),
+                },
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            right
+                .columns
+                .len()
+                .cmp(&left.columns.len())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        indices.into_iter().next().map(|index| index.name)
     }
 
     fn table_filter_has_geo_h3_route(&self, table: &TableQuery) -> bool {
@@ -1451,7 +1581,7 @@ impl RedDBRuntime {
             &mut dyn FnMut(crate::runtime::ai::sse_frame_encoder::Frame) -> RedDBResult<()>,
         >,
     ) -> RedDBResult<RuntimeQueryResult> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
 
         // ADR 0068 / #1751: `ASK ... PLAN` returns the typed plan (routed
         // intent + candidate query) without executing the candidate and
@@ -1490,7 +1620,7 @@ impl RedDBRuntime {
         // audit event is not emitted. Failover providers are gated
         // again inside the `attempt_provider` closure below.
         {
-            let (default_provider_pre, _) = crate::ai::resolve_defaults_from_runtime(self);
+            let (default_provider_pre, _) = crate::ai::resolve_defaults_from_runtime(self)?;
             let provider_names_pre =
                 self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider_pre)?;
             if let Some(first) = provider_names_pre.first() {
@@ -1564,7 +1694,7 @@ impl RedDBRuntime {
         }
 
         // Step 3: Call LLM — use configured defaults if no provider/model specified
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let provider_refs: Vec<&str> = provider_names.iter().map(String::as_str).collect();
@@ -1649,8 +1779,8 @@ impl RedDBRuntime {
             let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
             let mut retry_count = 0_u32;
             let mut prompt_for_call = full_prompt.clone();
-            let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-            let api_base = provider.resolve_api_base();
+            let crate::ai::AiConnection { api_key, api_base } =
+                crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
             let (
                 answer,
                 answer_tokens,
@@ -1980,11 +2110,11 @@ impl RedDBRuntime {
         ask: &reddb_rql::ast::AskQuery,
         plan_only: bool,
     ) -> RedDBResult<PlannerPrepass> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
         use crate::runtime::ai::ask_planner;
 
         // Provider gate + failover order (mirrors the RAG path).
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let planner_provider_name = provider_names
@@ -2064,8 +2194,10 @@ impl RedDBRuntime {
 
         let settings = self.ask_cost_guard_settings();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
-        let planner_api_base = planner_provider.resolve_api_base();
+        let crate::ai::AiConnection {
+            api_key: planner_api_key,
+            api_base: planner_api_base,
+        } = crate::ai::resolve_connection_from_runtime(&planner_provider, None, self)?;
 
         // The closure-model seam: the planner LLM behind a `PlannerModel`.
         // Deterministic by default (temperature 0). The narrowed slice is
@@ -2364,7 +2496,7 @@ impl RedDBRuntime {
         transport: &crate::runtime::ai::transport::AiTransport,
         tenant_key: &str,
     ) -> RedDBResult<PlannerSynthesis> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
 
         let provider = parse_provider(provider_name)?;
         crate::runtime::ai::provider_gate::enforce(self, &provider)?;
@@ -2392,8 +2524,8 @@ impl RedDBRuntime {
             },
         );
 
-        let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-        let api_base = provider.resolve_api_base();
+        let crate::ai::AiConnection { api_key, api_base } =
+            crate::ai::resolve_connection_from_runtime(&provider, None, self)?;
         let mut attempt = crate::runtime::ai::strict_validator::Attempt::First;
         let mut retry_count = 0_u32;
         let mut prompt_for_call = base_prompt.to_string();
@@ -2912,10 +3044,10 @@ impl RedDBRuntime {
         ask: &reddb_rql::ast::AskQuery,
         slice: &crate::runtime::ai::ask_planner::NarrowedSlice,
     ) -> RedDBResult<crate::runtime::ai::ask_planner::PlannedRoute> {
-        use crate::ai::{parse_provider, resolve_api_key_from_runtime};
+        use crate::ai::parse_provider;
         use crate::runtime::ai::ask_planner;
 
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let planner_provider_name = provider_names
@@ -2929,8 +3061,10 @@ impl RedDBRuntime {
         let planner_model = crate::ai::resolve_ask_planner_model_from_runtime(self, &synth_model);
         let settings = self.ask_cost_guard_settings();
         let transport = crate::runtime::ai::transport::AiTransport::from_runtime(self);
-        let planner_api_key = resolve_api_key_from_runtime(&planner_provider, None, self)?;
-        let planner_api_base = planner_provider.resolve_api_base();
+        let crate::ai::AiConnection {
+            api_key: planner_api_key,
+            api_base: planner_api_base,
+        } = crate::ai::resolve_connection_from_runtime(&planner_provider, None, self)?;
 
         let planner_closure = |prompt: &str| -> RedDBResult<String> {
             let response = call_ask_llm(
@@ -2960,7 +3094,7 @@ impl RedDBRuntime {
         source_urns: &[String],
         settings: &crate::runtime::ai::cost_guard::Settings,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self)?;
         let provider_names =
             self.ask_provider_failover_names(ask.provider.as_deref(), &default_provider)?;
         let provider_name = provider_names

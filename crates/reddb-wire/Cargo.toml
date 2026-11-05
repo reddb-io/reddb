@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-wire"
-version = "1.23.4"
+version = "1.28.10"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB wire protocol vocabulary: connection-string parser, RedWire frames, payload codecs, topology, sanitizers, and replication messages."
@@ -24,9 +24,9 @@ reddb-types = { workspace = true }
 hmac = "0.13"
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", default-features = false, features = ["io-util"] }
+tokio = { version = "1.53.3", default-features = false, features = ["io-util"] }
 url = "2"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 # Issue #90: parser-hardening test suite mirrors the SQL parser
 # coverage (#87). Property tests via proptest, pinned error-message
@@ -34,7 +34,7 @@ zstd = { version = "0.13", default-features = false }
 # shared secret redactor mask secret-shaped strings before insta
 # diffs the snapshot. `regex` powers the redactor unit tests + the
 # wire-side snapshot-redaction lint (#98).
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest = "1"
 insta = { version = "1", features = ["filters"] }
 regex = "1"
@@ -43,3 +43,10 @@ reddb-grpc-proto = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = "=0.2.120"
+
+[[example]]
+name = "client_codec"
+crate-type = ["cdylib"]

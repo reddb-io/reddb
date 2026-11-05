@@ -13,6 +13,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   KV_BENCH_P99_REGRESSION_THRESHOLD: "0.20"
+  KV_BENCH_THROUGHPUT_REGRESSION_THRESHOLD: "0.20"
+  KV_BENCH_NORMALIZED_CV_MAX: "0.50"
+  KV_BENCH_MIN_SAMPLES: "3"
   KV_BENCH_WATCH_P99_TARGET_MS: "10"
 
 jobs:
@@ -43,28 +46,56 @@ jobs:
           cache-on-failure: "true"
       - name: Build benchmark binary
         run: cargo build --profile release-fast --bin red
-      - name: Start RedDB
-        run: |
-          rm -f /tmp/reddb-kv-bench.rdb
-          target/release-fast/red server --path /tmp/reddb-kv-bench.rdb --http-bind 127.0.0.1:5000 > /tmp/reddb-kv-bench.log 2>&1 &
-          echo $! > /tmp/reddb-kv-bench.pid
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:5000/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/reddb-kv-bench.log
-          exit 1
-      - name: Run KV benchmark
+      - name: Run three independent KV benchmark samples
         env:
           REDDB_URL: http://127.0.0.1:5000
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: "6379"
           KV_BENCH_OPS: "1000"
           KV_BENCH_WATCH_EVENTS: "1000"
-          KV_BENCH_OUT: bench/results/kv-latest.json
-        run: bench/kv/run.sh
+        run: |
+          set -euo pipefail
+          mkdir -p bench/results/kv-samples
+          server_pid=""
+          cleanup() {
+            if [ -n "$server_pid" ]; then
+              kill "$server_pid" 2>/dev/null || true
+              wait "$server_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          for sample in 1 2 3; do
+            database="/tmp/reddb-kv-bench-${sample}.rdb"
+            log="/tmp/reddb-kv-bench-${sample}.log"
+            rm -f "$database"
+            target/release-fast/red server --path "$database" --http-bind 127.0.0.1:5000 > "$log" 2>&1 &
+            server_pid=$!
+            ready=false
+            for _ in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:5000/health/ready >/dev/null; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then
+              cat "$log"
+              exit 1
+            fi
+
+            REDIS_DATABASE="$sample" \
+              KV_BENCH_OUT="bench/results/kv-samples/sample-${sample}.json" \
+              bench/kv/run.sh
+            cleanup
+            server_pid=""
+          done
+
+          python3 bench/kv/aggregate.py \
+            bench/results/kv-latest.json \
+            bench/results/kv-samples/sample-1.json \
+            bench/results/kv-samples/sample-2.json \
+            bench/results/kv-samples/sample-3.json
       - name: Gate p99 regression
         run: bench/kv/check-regression.py bench/results/kv-release-baseline.json bench/results/kv-latest.json
       - name: Upload benchmark result
@@ -74,10 +105,5 @@ jobs:
           name: kv-benchmark-result
           path: |
             bench/results/kv-latest.json
-            /tmp/reddb-kv-bench.log
-      - name: Stop RedDB
-        if: always()
-        run: |
-          if [ -f /tmp/reddb-kv-bench.pid ]; then
-            kill "$(cat /tmp/reddb-kv-bench.pid)" 2>/dev/null || true
-          fi
+            bench/results/kv-samples/*.json
+            /tmp/reddb-kv-bench-*.log

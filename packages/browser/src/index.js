@@ -1,0 +1,332 @@
+/** Shared Rust/WASM runtime and artifact storage. */
+import { BrowserError, RUNTIME_ABI_VERSION, VALUE_ENCODING, MAX_QUERY_PARAMETERS, MAX_DATABASE_BACKUP_BYTES } from './protocol.js'
+export { BrowserError } from './protocol.js'
+
+function createClient(suppliedWorker) {
+  if (!globalThis.Worker) throw new BrowserError('RUNTIME_UNSUPPORTED', 'RedDB requires module Workers and WebAssembly')
+  if (suppliedWorker !== undefined && !(suppliedWorker instanceof Worker)) {
+    throw new BrowserError('INVALID_ARGUMENT', 'worker must be a dedicated Worker instance')
+  }
+  const worker = suppliedWorker ?? new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })
+  const pending = new Map()
+  let sequence = 0
+  let closed = false
+  let terminated = false
+
+  function shutdown(error = new BrowserError('CLOSED', 'This runtime handle is closed')) {
+    closed = true
+    for (const request of pending.values()) request.reject(error)
+    pending.clear()
+    if (!terminated) worker.terminate()
+    terminated = true
+  }
+
+  worker.onmessage = ({ data }) => {
+    if (terminated) return
+    if (data?.abiVersion !== RUNTIME_ABI_VERSION) {
+      shutdown(new BrowserError('VERSION_MISMATCH', 'Worker runtime ABI does not match this SDK'))
+      return
+    }
+    if (!Number.isSafeInteger(data.id) || data.id < 1) {
+      shutdown(new BrowserError('WORKER_FAILED', 'Invalid runtime response identifier'))
+      return
+    }
+    const request = pending.get(data.id)
+    if (!request) return
+    pending.delete(data.id)
+    if (data.error) request.reject(new BrowserError(data.error.code, data.error.message))
+    else request.resolve(data.result)
+  }
+  worker.onerror = (event) => shutdown(new BrowserError('WORKER_FAILED', event.message || 'RedDB worker failed'))
+  worker.onmessageerror = () => shutdown(new BrowserError('WORKER_FAILED', 'Unable to decode a worker response'))
+
+  function call(method, params = {}) {
+    if (closed) return Promise.reject(new BrowserError('CLOSED', 'This runtime handle is closed'))
+    const id = ++sequence
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject })
+      try { worker.postMessage({ abiVersion: RUNTIME_ABI_VERSION, id, method, params }) }
+      catch (error) { pending.delete(id); reject(error) }
+    })
+  }
+
+  const ready = call('initialize').then(info => {
+    if (info?.abiVersion !== RUNTIME_ABI_VERSION || info.valueEncoding !== VALUE_ENCODING
+      || info.capabilities?.queryValidation !== true || info.capabilities?.scalarQueries !== true) {
+      throw new BrowserError('VERSION_MISMATCH', 'WASM runtime capabilities do not match this SDK')
+    }
+    return info
+  }).catch(error => { shutdown(error); throw error })
+  ready.catch(() => {}) // A bridge can be closed before its first invocation.
+  let closing
+  return {
+    ready, call, shutdown,
+    closeFile() {
+      if (!closing) {
+        closing = closed ? Promise.resolve() : call('close').finally(() => shutdown())
+        closed = true
+      }
+      return closing
+    },
+  }
+}
+
+function runtimeMethods(client) {
+  const query = (method, sql) => typeof sql === 'string'
+    ? client.call(method, { sql })
+    : Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
+  return {
+    info: () => client.call('info'),
+    validateQuery: sql => query('validateQuery', sql),
+    executeScalar: sql => query('executeScalar', sql),
+  }
+}
+
+/** Storage-independent Rust/WASM operations; does not open an OPFS file. */
+export async function createRuntime({ worker } = {}) {
+  const client = createClient(worker)
+  await client.ready
+  return { ...runtimeMethods(client), close() { client.shutdown(); return Promise.resolve() } }
+}
+
+/** JSON-safe boundary for Dart, .NET and other JS-interop hosts. */
+export function createInteropRuntime({ worker } = {}) {
+  let client
+  let ready
+  let closed = false
+  try {
+    client = createClient(worker)
+    ready = client.ready.then(() => runtimeMethods(client))
+  } catch (error) { ready = Promise.reject(error) }
+  ready.catch(() => {})
+  return {
+    async invoke(method, params = {}) {
+      try {
+        if (closed) throw new BrowserError('CLOSED', 'This runtime handle is closed')
+        const runtime = await ready
+        if (!params || typeof params !== 'object' || Array.isArray(params)) {
+          throw new BrowserError('INVALID_ARGUMENT', 'Expected an argument object')
+        }
+        let result
+        switch (method) {
+          case 'info': result = await runtime.info(); break
+          case 'validateQuery': result = await runtime.validateQuery(params.sql); break
+          case 'executeScalar': result = await runtime.executeScalar(params.sql); break
+          default: throw new BrowserError('INVALID_ARGUMENT', 'Unknown runtime operation')
+        }
+        return { ok: true, result: result ?? null }
+      } catch (error) {
+        return { ok: false, error: {
+          code: typeof error.code === 'string' ? error.code : 'RUNTIME_ERROR',
+          message: error.message || String(error),
+        } }
+      }
+    },
+    close() { closed = true; client?.shutdown() },
+  }
+}
+
+function requireStorage() {
+  if (!globalThis.isSecureContext || !globalThis.Worker || !globalThis.navigator?.storage?.getDirectory || !globalThis.navigator?.locks) {
+    throw new BrowserError('STORAGE_UNSUPPORTED', 'RedDB Browser requires HTTPS, module Workers, OPFS and Web Locks')
+  }
+}
+
+function validateFileOptions(name, create) {
+  if (typeof create !== 'boolean') throw new BrowserError('INVALID_ARGUMENT', 'Expected a boolean create option')
+  if (typeof name !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(name)) {
+    throw new BrowserError('INVALID_NAME', 'Artifact names must contain 1–80 letters, digits, dots, underscores or hyphens')
+  }
+  requireStorage()
+}
+
+async function openClientFile(client, name, create, backup, method) {
+  const info = await client.ready
+  const sqlDatabase = method === 'openDatabase' || method === 'restoreDatabase'
+  if (sqlDatabase && (info.capabilities.storedQueries !== true
+    || info.capabilities.storedQueryMode !== 'read-write-tables' || !info.capabilities.sqlWrites || !info.capabilities.transactions
+    || info.capabilities.queryParameters !== true)) {
+    throw new BrowserError('VERSION_MISMATCH', 'WASM runtime does not expose local table SQL, transactions and parameters')
+  }
+  if (method === 'restoreDatabase' && info.capabilities.databaseBackups !== true) {
+    throw new BrowserError('VERSION_MISMATCH', 'Worker runtime does not expose database backups')
+  }
+  await client.call(method, sqlDatabase ? { name, create, ...(backup === undefined ? {} : { backup }) } : { name })
+}
+
+async function openFile({ name, worker, create = false, backup } = {}, method = 'open') {
+  validateFileOptions(name, create)
+  const client = createClient(worker)
+  try { await openClientFile(client, name, create, backup, method) }
+  catch (error) { client.shutdown(error); throw error }
+  return client
+}
+
+/** Open an exclusively owned, canonical .rdb artifact in an OPFS worker. */
+export async function openArtifact(options) {
+  const client = await openFile(options)
+  const { call } = client
+  return {
+    ...runtimeMethods(client),
+    generation: () => call('generation'),
+    readWal: () => call('readWal'),
+    readSnapshot: () => call('readSnapshot'),
+    append: (payloads) => call('append', { payloads }),
+    checkpoint: (snapshot, minWalBytes = 0) => call('checkpoint', { snapshot, minWalBytes }),
+    close: client.closeFile,
+  }
+}
+
+/** Local table SQL and single-owner transactions over a canonical OPFS .rdb. */
+export async function openDatabase(options) {
+  return databaseMethods(await openFile(options, 'openDatabase'))
+}
+
+/** Reuse one initialized Worker across sequential, independently owned database handles. */
+export async function createDatabaseSession({ worker } = {}) {
+  requireStorage()
+  const client = createClient(worker)
+  await client.ready
+  let active = false
+  let closed = false
+  let closing
+  return {
+    async openDatabase({ name, create = false } = {}) {
+      if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      validateFileOptions(name, create)
+      if (active) throw new BrowserError('INVALID_ARGUMENT', 'Close the current database before opening another in this session')
+      active = true
+      try {
+        await openClientFile(client, name, create, undefined, 'openDatabase')
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+      } catch (error) { active = false; throw error }
+      let released = false
+      let fileClosing
+      return databaseMethods({
+        call(method, params) {
+          if (released || closed) return Promise.reject(new BrowserError('CLOSED', 'This database handle is closed'))
+          return client.call(method, params)
+        },
+        closeFile() {
+          if (!fileClosing) {
+            released = true
+            fileClosing = closed ? closing : client.call('close').then(() => { active = false }).catch(error => {
+              // A failed release cannot lend this Worker to another file owner.
+              closed = true
+              client.shutdown(error)
+              throw error
+            })
+          }
+          return fileClosing
+        },
+      })
+    },
+    close() {
+      if (!closing) {
+        closed = true
+        closing = client.closeFile()
+      }
+      return closing
+    },
+  }
+}
+
+/** JSON-safe session boundary for Dart and other JS-interop hosts. */
+export function createInteropDatabaseSession(options = {}) {
+  let ready
+  try { ready = createDatabaseSession(options) }
+  catch (error) { ready = Promise.reject(error) }
+  ready.catch(() => {})
+  let database
+  let handle = 0
+  let fileClosing
+  let closed = false
+  return {
+    async invoke(method, params = {}) {
+      try {
+        if (method === 'close' || (method === 'closeDatabase' && closed)) {
+          closed = true
+          await (await ready).close()
+          return { ok: true, result: null }
+        }
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        const session = await ready
+        if (closed) throw new BrowserError('CLOSED', 'This database session is closed')
+        if (!params || typeof params !== 'object' || Array.isArray(params)) {
+          throw new BrowserError('INVALID_ARGUMENT', 'Expected an argument object')
+        }
+        let result
+        switch (method) {
+          case 'ready': break
+          case 'openDatabase':
+            database = await session.openDatabase({ name: params.name, create: params.create ?? false })
+            fileClosing = undefined
+            result = ++handle
+            break
+          case 'closeDatabase':
+            // A repeated close of an old handle cannot release the current owner.
+            if (params.handle === handle) {
+              if (database) {
+                const releasing = database
+                database = undefined
+                fileClosing = releasing.close()
+              }
+              await fileClosing
+            }
+            break
+          case 'info':
+          case 'query':
+            if (!database || params.handle !== handle) throw new BrowserError('CLOSED', 'This database handle is closed')
+            result = method === 'info' ? await database.info() : await database.query(params.sql, params.params)
+            break
+          default: throw new BrowserError('INVALID_ARGUMENT', 'Unknown database operation')
+        }
+        return { ok: true, result: result ?? null }
+      } catch (error) {
+        return { ok: false, error: {
+          code: typeof error.code === 'string' ? error.code : 'RUNTIME_ERROR',
+          message: error.message || String(error),
+        } }
+      }
+    },
+  }
+}
+
+/** Restore a native .rdb backup to a new, exclusively owned OPFS filename. */
+export async function restoreDatabase(options) {
+  const backup = options?.backup
+  if (!(backup instanceof Uint8Array) || !backup.byteLength || backup.byteLength > MAX_DATABASE_BACKUP_BYTES) {
+    throw new BrowserError('INVALID_ARGUMENT', 'Expected a nonempty .rdb backup of at most 256 MiB as Uint8Array')
+  }
+  return databaseMethods(await openFile(options, 'restoreDatabase'))
+}
+
+function databaseMethods(client) {
+  return {
+    vault: {
+      status: () => client.call('vaultStatus'),
+      unlock: (password, { create = false } = {}) => client.call('vaultUnlock', { password, create }),
+      lock: () => client.call('vaultLock'),
+      keys: () => client.call('vaultKeys'),
+      reveal: (name) => client.call('vaultReveal', { name }),
+      put: (name, value) => client.call('vaultPut', { name, value }),
+      delete: (name) => client.call('vaultDelete', { name }),
+    },
+    ...runtimeMethods(client),
+    catalog: () => client.call('catalog'),
+    readQuery(sql, params, scopes) {
+      if (typeof sql !== 'string' || !Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS || !Array.isArray(scopes) || scopes.length > 64) return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes'))
+      return client.call('readQuery', { sql, params, scopes })
+    },
+    query(sql, params) {
+      if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
+      if (params === undefined) return client.call('query', { sql })
+      if (!Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS) {
+        return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an array of at most 65536 positional parameters'))
+      }
+      return client.call('queryWithParams', { sql, params })
+    },
+    exportBackup: () => client.call('exportBackup'),
+    close: client.closeFile,
+  }
+}
