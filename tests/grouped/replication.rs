@@ -15,6 +15,9 @@ mod chaos_replica_apply_gap;
 #[path = "../e2e_issue_596_materialized_view_replica_replay.rs"]
 mod e2e_issue_596_materialized_view_replica_replay;
 
+#[path = "../e2e_issue_835_replication_stale_term_fence.rs"]
+mod e2e_issue_835_replication_stale_term_fence;
+
 #[path = "replication/e2e_issue_813_replica_repull_idempotent.rs"]
 mod e2e_issue_813_replica_repull_idempotent;
 

@@ -34,8 +34,8 @@ use reddb::replication::lease::{LeaseError, LeaseStore, WriterLease};
 use reddb::replication::logical::{
     ApplyMode, ApplyOutcome, LogicalApplyError, LogicalChangeApplier,
 };
-use reddb_types::Value;
 use reddb::storage::{EntityData, EntityId, EntityKind, RedDB, RowData, UnifiedEntity};
+use reddb_types::Value;
 
 // ---------------------------------------------------------------------------
 // Step 1 — induce a real failover that advances the term 5 -> 6.
