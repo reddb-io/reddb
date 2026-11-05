@@ -713,15 +713,18 @@ fn eval_function(
         .collect::<Result<Vec<_>, _>>()?;
     let arg_types: Vec<DataType> = arg_values.iter().map(|v| v.data_type()).collect();
 
-    // Strict NULL propagation for built-in scalar functions: any
-    // null arg short-circuits the call to NULL. Only applies when
-    // the function name exists in the catalog so unknown functions
-    // with null args still surface as `UnknownFunction` rather than
-    // silently returning null.
+    // Strict NULL propagation applies only to non-variadic built-ins.
+    // Variadic functions such as CONCAT own their NULL semantics.
+    // Unknown functions with NULL arguments must still surface as
+    // `UnknownFunction` rather than silently returning NULL.
     if arg_values.iter().any(Value::is_null)
         && FUNCTION_CATALOG
             .iter()
-            .any(|e| e.name.eq_ignore_ascii_case(name))
+            .any(|entry| entry.name.eq_ignore_ascii_case(name))
+        && FUNCTION_CATALOG
+            .iter()
+            .filter(|entry| entry.name.eq_ignore_ascii_case(name))
+            .all(|entry| !entry.variadic)
     {
         return Ok(Value::Null);
     }
@@ -793,13 +796,16 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         "CONCAT" => {
             let mut out = String::new();
             for arg in args {
-                let Value::Text(value) = arg else {
-                    return Err(EvalError::UnknownFunction {
-                        name: name.to_string(),
-                        args: args.iter().map(Value::data_type).collect(),
-                    });
-                };
-                out.push_str(value);
+                match arg {
+                    Value::Null => {}
+                    Value::Text(value) => out.push_str(value),
+                    _ => {
+                        return Err(EvalError::UnknownFunction {
+                            name: name.to_string(),
+                            args: args.iter().map(Value::data_type).collect(),
+                        })
+                    }
+                }
             }
             Ok(Value::Text(Arc::from(out)))
         }
@@ -1522,6 +1528,21 @@ mod tests {
         };
         let v = evaluate(&expr, &empty_row()).unwrap();
         assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn variadic_concat_owns_null_semantics() {
+        let expr = Expr::FunctionCall {
+            name: "CONCAT".to_string(),
+            args: vec![
+                lit(Value::Text(Arc::from("red"))),
+                lit(Value::Null),
+                lit(Value::Text(Arc::from("db"))),
+            ],
+            span: Span::synthetic(),
+        };
+        let value = evaluate(&expr, &empty_row()).unwrap();
+        assert_eq!(value, Value::Text(Arc::from("reddb")));
     }
 
     #[test]

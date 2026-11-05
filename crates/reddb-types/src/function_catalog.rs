@@ -124,6 +124,7 @@ const ARGS_TIME_BUCKET: &[DataType] = &[DataType::Text, DataType::Timestamp];
 const ARGS_H3_INDEX: &[DataType] = &[DataType::Float, DataType::Float, DataType::Integer];
 const ARGS_H3_CELL: &[DataType] = &[DataType::UnsignedInteger];
 const ARGS_H3_RING: &[DataType] = &[DataType::UnsignedInteger, DataType::Integer];
+const ARGS_H3_POINT: &[DataType] = &[DataType::GeoPoint, DataType::Integer];
 const ARGS_VERIFY_PWD: &[DataType] = &[DataType::Password, DataType::Text];
 const ARGS_MONEY: &[DataType] = &[DataType::Money];
 const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
@@ -809,6 +810,20 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
     entry(
         "H3_INDEX",
         ARGS_H3_INDEX,
+        DataType::UnsignedInteger,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "H3_CELL",
+        ARGS_H3_POINT,
+        DataType::UnsignedInteger,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "H3_PARENT",
+        ARGS_H3_RING,
         DataType::UnsignedInteger,
         FunctionKind::Scalar,
         false,

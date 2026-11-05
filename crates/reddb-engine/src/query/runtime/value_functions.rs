@@ -142,7 +142,7 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
                         args.iter()
                             .skip(1)
                             .filter(|value| !matches!(value, Value::Null))
-                            .map(Value::display_string)
+                            .map(Value::plain_text)
                             .collect::<Vec<_>>()
                             .join(&other.display_string()),
                     ))
@@ -152,7 +152,7 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
                 args.iter()
                     .skip(1)
                     .filter(|value| !matches!(value, Value::Null))
-                    .map(Value::display_string)
+                    .map(Value::plain_text)
                     .collect::<Vec<_>>()
                     .join(separator),
             ))
