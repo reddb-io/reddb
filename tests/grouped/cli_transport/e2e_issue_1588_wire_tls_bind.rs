@@ -199,7 +199,10 @@ fn wire_tls_uses_bootstrapped_authentication() {
                 .with_tls(TlsConfig::new().with_dangerous_accept_invalid_certs(true))
         };
         let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
-        assert!(anonymous.is_err(), "anonymous client must be rejected");
+        if let Ok(mut client) = anonymous {
+            let query_succeeded = client.query("SELECT 1").await.is_ok();
+            panic!("anonymous client must be rejected; query_succeeded={query_succeeded}");
+        }
         let wrong = RedWireClient::connect(options().with_auth(Auth::Basic {
             user: "integration-user".into(),
             pass: "wrong-password".into(),
