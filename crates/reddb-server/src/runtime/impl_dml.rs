@@ -54,7 +54,7 @@ use super::impl_dml_update_target::*;
 // `impl_dml_support`'s `use super::impl_dml::{...}` keep resolving unchanged.
 pub(super) use super::impl_dml_ttl::{canonicalize_sql_ttl_metadata, resolve_sql_ttl_metadata_key};
 
-const UPDATE_APPLY_CHUNK_SIZE: usize = 2048;
+pub(super) const UPDATE_APPLY_CHUNK_SIZE: usize = 2048;
 pub(super) const TREE_CHILD_EDGE_LABEL: &str = "TREE_CHILD";
 pub(super) const TREE_METADATA_PREFIX: &str = "red.tree.";
 
@@ -2290,6 +2290,12 @@ impl RedDBRuntime {
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             for id in chunk {
+                #[cfg(test)]
+                self.index_store_ref().mutation_test_hook(
+                    &query.table,
+                    super::index_store::MutationTestPhase::DmlPostImageCandidate,
+                );
+                super::query_budget::charge(1)?;
                 let Some(entity) = manager.try_get(*id, usize::MAX)? else {
                     continue;
                 };
@@ -2308,10 +2314,16 @@ impl RedDBRuntime {
         }
         let affected = prepared.len() as u64;
         let mut published = 0;
+        let mut _durable_publication = None;
         let persistence = (|| -> RedDBResult<()> {
+            super::query_budget::charge(0)?;
             // Standalone UNIQUE keys are admitted for the whole statement
             // before any chunk is published.
             self.enforce_unique_update_post_images(&query.table, &compiled_plan, &prepared)?;
+            // This is the cancellation boundary. Once durable publication
+            // starts, finish the prepared statement rather than exposing a
+            // timeout with only a prefix of its chunks committed.
+            _durable_publication = Some(super::query_budget::begin_durable_publication()?);
             for chunk in prepared.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                 if compiled_plan.row_touches_unique_columns
                     || compiled_plan
@@ -2381,6 +2393,7 @@ impl RedDBRuntime {
         }
         let mut admitted = Vec::with_capacity(ids.len());
         for id in ids {
+            super::query_budget::charge(1)?;
             if let Some(entity) = self.inner.db.store().try_get(table, id, usize::MAX)? {
                 let key = (table.to_string(), entity.logical_id());
                 if locks.get(&key).is_none_or(|owner| *owner == conn_id) {
@@ -2426,6 +2439,7 @@ impl RedDBRuntime {
         let mut lock_entries = Vec::new();
 
         for id in ids_to_update {
+            super::query_budget::charge(1)?;
             let Some(candidate) = store.try_get(&query.table, *id, usize::MAX)? else {
                 continue;
             };
@@ -2442,6 +2456,12 @@ impl RedDBRuntime {
         let mut applied_chunk = Vec::new();
         let mut reservations = super::memory_admission::MutationMemoryReservations::new(self);
         for (_, logical_id, _) in &lock_entries {
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                &query.table,
+                super::index_store::MutationTestPhase::DmlPostImageCandidate,
+            );
+            super::query_budget::charge(1)?;
             let Some(entity) =
                 try_resolve_update_entity_by_logical_id(self, &query.table, *logical_id)?
             else {
@@ -2474,8 +2494,13 @@ impl RedDBRuntime {
 
         let affected = applied_chunk.len() as u64;
         let mut published = 0;
+        let mut _durable_publication = None;
         let persistence = (|| -> RedDBResult<()> {
+            super::query_budget::charge(0)?;
             self.enforce_unique_update_post_images(&query.table, compiled_plan, &applied_chunk)?;
+            // Final cooperative checkpoint before the first durable chunk.
+            // Cancellation after this point cannot safely abort a prefix.
+            _durable_publication = Some(super::query_budget::begin_durable_publication()?);
             for chunk in applied_chunk.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                 if compiled_plan.row_touches_unique_columns
                     || compiled_plan
@@ -2967,6 +2992,10 @@ impl RedDBRuntime {
         let needs_delete_events =
             !query.suppress_events && self.collection_has_delete_subscriptions(&query.table);
         let mut affected: u64 = 0;
+        // Final cooperative checkpoint before DELETE begins publishing its
+        // prepared target set. A later timeout must not strand a partial
+        // statement merely to stop sooner.
+        let _durable_publication = super::query_budget::begin_durable_publication()?;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             let deleted = self.delete_entities_batch(
                 &query.table,

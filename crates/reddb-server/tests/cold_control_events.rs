@@ -75,6 +75,14 @@ fn cold_fixture(rows: usize, payload_bytes: usize) -> (tempfile::TempDir, RedDBR
         .with_bounded_disk_residency(true);
     {
         let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        assert_eq!(
+            runtime.db().store().set_config_tree(
+                "runtime.mvcc.autovacuum.enabled",
+                &reddb_server::serde_json::Value::Bool(false),
+            ),
+            1,
+            "persist one fixture-only config without emitting a control event"
+        );
         for index in 0..rows {
             emit(
                 &runtime,
