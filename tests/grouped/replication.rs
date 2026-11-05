@@ -63,6 +63,9 @@ mod e2e_issue_1843_replica_authority_divergence;
 #[path = "replication/e2e_issue_2134_term_fence_apply.rs"]
 mod e2e_issue_2134_term_fence_apply;
 
+#[path = "replication/e2e_cli_primary_replica.rs"]
+mod e2e_cli_primary_replica;
+
 #[path = "replication/e2e_replica_readonly.rs"]
 mod e2e_replica_readonly;
 
