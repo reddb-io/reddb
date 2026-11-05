@@ -30,12 +30,14 @@ use reddb::auth::store::PrincipalRef;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::server::RedDBServer;
 use reddb::{RedDBOptions, RedDBRuntime};
+use serde_json::{json, Value};
 
 struct Harness {
     _dir: support::TempDataDir,
     addr: String,
     token: String,
     store: Arc<AuthStore>,
+    runtime: RedDBRuntime,
 }
 
 fn isolated_runtime(tag: &str) -> (support::TempDataDir, RedDBRuntime) {
@@ -56,7 +58,7 @@ fn spawn(tag: &str) -> Harness {
     store.create_user("alice", "p", Role::Admin).unwrap();
     let key = store.create_api_key("alice", "ci", Role::Admin).unwrap();
 
-    let server = RedDBServer::new(rt).with_auth(store.clone());
+    let server = RedDBServer::new(rt.clone()).with_auth(store.clone());
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -68,6 +70,7 @@ fn spawn(tag: &str) -> Harness {
         addr: addr.to_string(),
         token: key.key,
         store,
+        runtime: rt,
     }
 }
 
@@ -138,6 +141,102 @@ fn create_collection(addr: &str, token: &str, name: &str) {
         status == 200 || status == 201,
         "create collection {name}: status={status} body={body_text}"
     );
+}
+
+fn seed_security_journey_collections(runtime: &RedDBRuntime) {
+    for sql in [
+        "CREATE TABLE public_orders (id INT)",
+        "INSERT INTO public_orders (id) VALUES (1)",
+        "CREATE TABLE private_orders (id INT)",
+        "INSERT INTO private_orders (id) VALUES (2)",
+        "CREATE DOCUMENT public_docs",
+        "INSERT INTO public_docs DOCUMENT VALUES ({scope:'public'})",
+        "CREATE DOCUMENT private_docs",
+        "INSERT INTO private_docs DOCUMENT VALUES ({scope:'private'})",
+        "CREATE KV public_cache",
+        "KV PUT public_cache.seed = 'public'",
+        "CREATE KV private_cache",
+        "KV PUT private_cache.seed = 'private'",
+    ] {
+        runtime
+            .execute_query(sql)
+            .unwrap_or_else(|error| panic!("fixture `{sql}` failed: {error}"));
+    }
+}
+
+fn install_security_prefix_guard(store: &AuthStore) {
+    let policy = Policy::from_json_str(
+        r#"{
+            "id":"security-prefix-guard",
+            "version":1,
+            "statements":[
+                {
+                    "effect":"deny",
+                    "actions":["select","insert","update","delete"],
+                    "resources":["collection:private_*","table:private_*"]
+                },
+                {
+                    "effect":"deny",
+                    "actions":["kv:read","kv:write"],
+                    "resources":["kv:private.*"]
+                }
+            ]
+        }"#,
+    )
+    .expect("parse prefix guard");
+    store.put_policy(policy).expect("store prefix guard");
+    store
+        .attach_policy(
+            PrincipalRef::User(UserId::platform("alice")),
+            "security-prefix-guard",
+        )
+        .expect("attach prefix guard");
+}
+
+fn parse_json(body: &str) -> Value {
+    serde_json::from_str(body).unwrap_or_else(|error| panic!("invalid JSON: {error}; {body}"))
+}
+
+fn assert_no_internal_details(body: &str) {
+    let lower = body.to_ascii_lowercase();
+    for forbidden in [
+        "security-prefix-guard",
+        "alice-password",
+        "password_hash",
+        "argon2",
+        "backtrace",
+        "stack trace",
+        "reddberror",
+        "src/",
+        "src\\",
+        ".rs:",
+        "target/debug",
+        "target\\debug",
+        "c:\\users\\",
+        "/home/",
+    ] {
+        assert!(!lower.contains(forbidden), "leaked `{forbidden}`: {body}");
+    }
+}
+
+fn assert_public_policy_deny(body: &str, action: &str, collection: &str) -> Value {
+    let value = parse_json(body);
+    assert_eq!(value["ok"], false, "body={body}");
+    assert_eq!(value["error"], "forbidden", "body={body}");
+    assert_eq!(value["action"], action, "body={body}");
+    assert_eq!(value["reason"], "denied by IAM policy", "body={body}");
+    assert_eq!(value["resource"]["kind"], "collection", "body={body}");
+    assert_eq!(value["resource"]["name"], collection, "body={body}");
+
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .expect("deny envelope object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["action", "error", "ok", "reason", "resource"]);
+    value
 }
 
 // ---------------------------------------------------------------------------
@@ -357,4 +456,157 @@ fn kv_tag_invalidation_denied_when_policy_denies_delete() {
     assert_eq!(status, 403, "kv tag invalidation denied; body={body}");
     assert!(body.contains("\"action\":\"delete\""), "body={body}");
     assert!(body.contains("\"name\":\"tagged_cache\""), "body={body}");
+}
+
+#[test]
+fn security_journey_login_failures_do_not_reveal_identity_state() {
+    let h = spawn("login-enumeration");
+    h.store
+        .create_user_in_tenant(Some("acme"), "alice", "alice-password", Role::Read)
+        .expect("create acme/alice");
+
+    let login = |tenant: &str, username: &str, password: &str| {
+        let payload = json!({
+            "tenant_id": tenant,
+            "username": username,
+            "password": password,
+        })
+        .to_string();
+        http(&h.addr, "POST", "/auth/login", None, Some(&payload))
+    };
+    let failures = [
+        login("acme", "unknown-user", "alice-password"),
+        login("globex", "alice", "alice-password"),
+        login("acme", "alice", "wrong-password"),
+    ];
+
+    for (status, body) in &failures {
+        assert_eq!(*status, 401, "body={body}");
+        assert_eq!(
+            parse_json(body),
+            json!({"ok": false, "error": "invalid credentials"})
+        );
+        assert_no_internal_details(body);
+    }
+    assert_eq!(failures[0].1, failures[1].1);
+    assert_eq!(failures[1].1, failures[2].1);
+
+    let (status, body) = login("acme", "alice", "alice-password");
+    assert_eq!(status, 200, "body={body}");
+    let success = parse_json(&body);
+    assert_eq!(success["username"], "alice");
+    assert_eq!(success["tenant_id"], "acme");
+    assert!(success["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
+    assert!(!body.contains("alice-password"));
+}
+
+#[test]
+fn security_journey_prefix_policy_covers_table_document_and_kv() {
+    let h = spawn("collection-prefix");
+    seed_security_journey_collections(&h.runtime);
+    install_security_prefix_guard(&h.store);
+
+    for collection in ["public_orders", "public_docs", "public_cache"] {
+        let (status, body) = http(
+            &h.addr,
+            "GET",
+            &format!("/collections/{collection}/scan"),
+            Some(&h.token),
+            None,
+        );
+        assert_eq!(status, 200, "public collection {collection}: {body}");
+    }
+
+    for collection in ["private_orders", "private_docs", "private_cache"] {
+        let (status, body) = http(
+            &h.addr,
+            "GET",
+            &format!("/collections/{collection}/scan"),
+            Some(&h.token),
+            None,
+        );
+        assert_eq!(status, 403, "private collection {collection}: {body}");
+        assert_public_policy_deny(&body, "select", collection);
+        assert_no_internal_details(&body);
+    }
+
+    let (_, existing_body) = http(
+        &h.addr,
+        "GET",
+        "/collections/private_orders/scan",
+        Some(&h.token),
+        None,
+    );
+    let (missing_status, missing_body) = http(
+        &h.addr,
+        "GET",
+        "/collections/private_missing/scan",
+        Some(&h.token),
+        None,
+    );
+    assert_eq!(missing_status, 403);
+    let mut existing = assert_public_policy_deny(&existing_body, "select", "private_orders");
+    let mut missing = assert_public_policy_deny(&missing_body, "select", "private_missing");
+    existing["resource"]["name"] = json!("<requested>");
+    missing["resource"]["name"] = json!("<requested>");
+    assert_eq!(existing, missing, "existence leaked through deny envelope");
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/collections/private_orders/rows",
+            r#"{"fields":{"id":3}}"#,
+        ),
+        (
+            "POST",
+            "/collections/private_docs/documents",
+            r#"{"body":{"scope":"private"}}"#,
+        ),
+        (
+            "PUT",
+            "/collections/private_cache/kvs/secret",
+            r#"{"value":"hidden"}"#,
+        ),
+    ] {
+        let (status, response_body) = http(&h.addr, method, path, Some(&h.token), Some(body));
+        assert_eq!(status, 403, "{method} {path}: {response_body}");
+        assert_eq!(parse_json(&response_body)["action"], "insert");
+        assert_no_internal_details(&response_body);
+    }
+}
+
+#[test]
+fn security_journey_kv_prefix_deny_is_403_and_does_not_mutate() {
+    let h = spawn("kv-prefix");
+    install_security_prefix_guard(&h.store);
+
+    let (status, body) = http(
+        &h.addr,
+        "POST",
+        "/query",
+        Some(&h.token),
+        Some(r#"{"query":"SET KV public.setting = 'visible'"}"#),
+    );
+    assert_eq!(status, 200, "public KV write: {body}");
+    assert_eq!(
+        h.store.plain_kv_get("public.setting").as_deref(),
+        Some("visible")
+    );
+
+    let (status, body) = http(
+        &h.addr,
+        "POST",
+        "/query",
+        Some(&h.token),
+        Some(r#"{"query":"SET KV private.setting = 'hidden'"}"#),
+    );
+    assert_eq!(status, 403, "private KV write: {body}");
+    assert_eq!(h.store.plain_kv_get("private.setting"), None);
+    assert_eq!(
+        parse_json(&body),
+        json!({"ok": false, "error": "forbidden"})
+    );
+    assert_no_internal_details(&body);
 }

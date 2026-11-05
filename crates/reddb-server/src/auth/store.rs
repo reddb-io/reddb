@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::crypto::os_random;
 use crate::crypto::sha256::sha256;
@@ -2255,24 +2255,31 @@ impl AuthStore {
         username: &str,
         password: &str,
     ) -> Result<Session, AuthError> {
+        // Initialize once on the first login, regardless of whether the
+        // principal exists. Subsequent missing/disabled-account attempts use
+        // this verifier instead of returning before production-cost Argon2.
+        let dummy_hash = dummy_password_hash();
         // The synthetic platform-owner principal exists only as a
         // policy-graph anchor (see `crate::auth::self_lock_guard`); it
         // must never authenticate via any transport.
         if crate::auth::self_lock_guard::is_synthetic_principal(username) {
+            let _ = verify_password(password, dummy_hash);
             return Err(AuthError::InvalidCredentials);
         }
         let id = UserId::from_parts(tenant_id, username);
         let users = self.users.read().map_err(lock_err)?;
-        let user = users.get(&id).ok_or(AuthError::InvalidCredentials)?;
-
-        if !user.enabled {
+        let (stored_hash, account_enabled) = match users.get(&id) {
+            Some(user) => (user.password_hash.clone(), user.enabled),
+            None => (dummy_hash.to_string(), false),
+        };
+        let password_matches = verify_password(password, &stored_hash);
+        if !account_enabled || !password_matches {
             return Err(AuthError::InvalidCredentials);
         }
 
-        let stored_hash = user.password_hash.clone();
-        if !verify_password(password, &stored_hash) {
-            return Err(AuthError::InvalidCredentials);
-        }
+        let user = users
+            .get(&id)
+            .expect("an enabled account came from the user map");
 
         // Generate token: signed if keypair is available, random otherwise.
         let token = match self.keypair.read().ok().and_then(|g| {
@@ -5285,6 +5292,14 @@ const PASSWORD_T_COST: u32 = 2;
 const PASSWORD_P_COST: u32 = 1;
 const PASSWORD_TAG_LEN: usize = 32;
 
+static DUMMY_PASSWORD_HASH: OnceLock<String> = OnceLock::new();
+
+fn dummy_password_hash() -> &'static str {
+    DUMMY_PASSWORD_HASH
+        .get_or_init(|| hash_password("reddb-invalid-login-dummy"))
+        .as_str()
+}
+
 fn password_hasher() -> argon2::Argon2<'static> {
     let params = argon2::Params::new(
         PASSWORD_M_COST_KIB,
@@ -5596,6 +5611,24 @@ mod tests {
 
         let err = store.authenticate("alice", "wrong").unwrap_err();
         assert!(matches!(err, AuthError::InvalidCredentials));
+    }
+
+    #[test]
+    fn unknown_disabled_and_wrong_password_logins_share_the_public_error() {
+        let store = AuthStore::new(test_config());
+        store.create_user("alice", "secret", Role::Read).unwrap();
+        store.create_user("disabled", "secret", Role::Read).unwrap();
+        store
+            .set_user_enabled(&UserId::platform("disabled"), false)
+            .unwrap();
+
+        for result in [
+            store.authenticate("unknown", "secret"),
+            store.authenticate("alice", "wrong"),
+            store.authenticate("disabled", "secret"),
+        ] {
+            assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+        }
     }
 
     #[test]
