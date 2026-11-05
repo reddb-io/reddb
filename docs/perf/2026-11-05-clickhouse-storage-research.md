@@ -68,6 +68,63 @@ current ownership and accounting from runtime and recovery code before making
 claims about duplicate copies or choosing a storage change; these documents
 express different architectural decisions.
 
+## Does this need another collection model?
+
+Recommendation: treat analytical storage and execution as capabilities of the
+existing collection models, not as a new logical collection model. Analytics
+v0 already describes metrics over ordinary collections and does not define an
+analytics collection or a second raw-data write API
+([ontology](../data-models/analytics.md)). A log, a time-series point, and a
+business event have different logical shapes, but can share physical components
+such as column encoding, pruning and batch aggregation when their contracts
+allow it. Whether to expose workload-specific defaults is a product decision;
+it does not require changing the collection model.
+
+| Existing workload | Best fit and evidence | Work still needed |
+| --- | --- | --- |
+| TimeSeries / hypertable | The runtime materializes `(timestamp, value)` from the entity store, writes a two-column RDCC block, and records it on the chunk. The checkpoint path calls the sealer; tests exercise the read bridge. | Preserve the full series identity and attributes when extending the physical path; prove public SQL, restart, retention, snapshot and tenant behavior end to end. Avoid assuming the existing two-column block covers arbitrary hypertable fields. |
+| Logs | The public log collection path uses `LogCollection` and `UnifiedStore`; structured events can also use existing tables or documents. | Define and verify a durable, queryable event representation and select useful text and field encodings. The separate `LogPipeline` helper currently routes timestamps and retains recent `LogLine`s in a bounded in-memory buffer; it is not evidence of durable log payload storage. |
+| Analytics over tables / documents | Analytics source profiles name existing collections. `ColumnarProjection` demonstrates a derived append-only projection with snapshot concepts. | Connect and validate the real ingestion, checkpoint, planner and query path; support types and shapes needed by the chosen workload. Mutable collections additionally need update/delete and snapshot visibility handling. |
+
+Evidence: [`seal_hypertable_chunks_internal`](../../crates/reddb-server/src/runtime/impl_timeseries.rs),
+[`LogCollection`](../../crates/reddb-server/src/log/store.rs),
+[`LogPipeline`](../../crates/reddb-server/src/storage/timeseries/log_pipeline.rs),
+and [`ColumnarProjection`](../../crates/reddb-server/src/storage/columnar_projection.rs).
+The latter explicitly identifies itself as an in-process tracer and says its
+checkpoint and query-executor integration is follow-up work. At the studied
+revision, searches for `emit_at_checkpoint`, `read_bridge_points`, and
+`column_batch_from_block` found the respective implementations and tests (and
+benchmarks for batch decode), but no public SQL execution call site for those
+specific helpers. This does not prove no other SQL path exists; it does mean
+these helpers alone do not establish a production SQL columnar pipeline.
+
+The hypertable seal function reads existing entity rows to build the RDCC block
+and writes a column block page. It does not itself delete the source rows. This
+is concrete evidence that a compact block's size is not necessarily the total
+storage footprint; audit the complete lifecycle before concluding how many
+copies remain. Similarly, function implementations and module-level tests do
+not by themselves establish that every documented SQL function is wired through
+all public interfaces.
+
+A production-readiness concern deserves its own failure-injection test: in the
+public log append path, `LogCollection::flush_buffer` discards the result of
+`UnifiedStore::insert_auto`, and the HTTP handler constructs a success response
+without checking that storage result. This source-level observation suggests a
+storage error may be acknowledged as success; it has not been reproduced in
+this investigation. Verify error propagation and the precise durability/ACK
+boundary before relying on this endpoint for production logs. See
+[`LogCollection::flush_buffer`](../../crates/reddb-server/src/log/store.rs) and
+[`handle_log_append`](../../crates/reddb-server/src/server/handlers_log.rs).
+
+ClickHouse's physical sort key is an optimization key, not a uniqueness
+constraint ([ClickHouse primary-key guide](https://clickhouse.com/blog/a-simple-guide-to-clickhouse-query-optimization-part-1)).
+If RedDB introduces sorted analytical blocks, that sort order must not silently
+change the existing collection's key, duplicate, ordering, snapshot, tenant or
+row-level-security semantics. Existing append-only contracts are the safest
+first scope; a mutable model needs a separate visibility design. Compare a
+derived projection's extra disk and rebuild costs with a durable-columnar design
+before changing the source of truth or the recovery contract.
+
 ## Recommended next steps
 
 1. **Establish an end-to-end baseline before choosing a format.** Use the same
