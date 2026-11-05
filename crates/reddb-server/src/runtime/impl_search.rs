@@ -135,6 +135,18 @@ fn filter_has_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -
     }
 }
 
+fn sorted_range_family(value: &Value) -> Option<reddb_types::CanonicalKeyFamily> {
+    let family = reddb_types::value_to_canonical_key(value)?.family();
+    matches!(
+        family,
+        reddb_types::CanonicalKeyFamily::Integer
+            | reddb_types::CanonicalKeyFamily::BigInt
+            | reddb_types::CanonicalKeyFamily::UnsignedInteger
+            | reddb_types::CanonicalKeyFamily::Text
+    )
+    .then_some(family)
+}
+
 fn filter_is_sorted_range(filter: &Filter, column: &str, table: &TableQuery) -> bool {
     match filter {
         Filter::Compare { field, op, value } => {
@@ -142,12 +154,12 @@ fn filter_is_sorted_range(filter: &Filter, column: &str, table: &TableQuery) -> 
                 op,
                 CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
             ) && filter_field_matches_index_column(field, column, table)
-                && super::index_store::value_to_sorted_key(value).is_some()
+                && sorted_range_family(value).is_some()
         }
         Filter::Between { field, low, high } => {
             filter_field_matches_index_column(field, column, table)
-                && super::index_store::value_to_sorted_key(low).is_some()
-                && super::index_store::value_to_sorted_key(high).is_some()
+                && sorted_range_family(low).is_some()
+                && sorted_range_family(low) == sorted_range_family(high)
         }
         _ => false,
     }
@@ -162,10 +174,14 @@ fn filter_has_sorted_predicate(filter: &Filter, column: &str, table: &TableQuery
     match filter {
         Filter::In { field, values } => {
             filter_field_matches_index_column(field, column, table)
-                && !values.is_empty()
                 && values
-                    .iter()
-                    .all(|value| super::index_store::value_to_sorted_key(value).is_some())
+                    .first()
+                    .and_then(sorted_range_family)
+                    .is_some_and(|family| {
+                        values
+                            .iter()
+                            .all(|value| sorted_range_family(value) == Some(family))
+                    })
         }
         Filter::And(left, right) => {
             filter_has_sorted_predicate(left, column, table)
