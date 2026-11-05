@@ -194,9 +194,13 @@ fn wire_tls_uses_bootstrapped_authentication() {
     );
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async {
+        let server_cert = dir.join("wire-tls-cert.pem");
         let options = || {
-            ConnectOptions::new("127.0.0.1", port)
-                .with_tls(TlsConfig::new().with_dangerous_accept_invalid_certs(true))
+            ConnectOptions::new("127.0.0.1", port).with_tls(
+                TlsConfig::from_files(Some(&server_cert), None, None)
+                    .expect("test CA")
+                    .with_servername("localhost"),
+            )
         };
         let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
         if let Ok(mut client) = anonymous {
