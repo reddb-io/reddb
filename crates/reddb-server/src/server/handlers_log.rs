@@ -12,6 +12,14 @@ pub(crate) fn handle_log_append(
     collection: &str,
     body: Vec<u8>,
 ) -> HttpResponse {
+    handle_log_append_with_store(runtime.db().store(), collection, body)
+}
+
+fn handle_log_append_with_store(
+    store: Arc<crate::storage::unified::store::UnifiedStore>,
+    collection: &str,
+    body: Vec<u8>,
+) -> HttpResponse {
     let body: JsonValue = json_from_slice(&body).unwrap_or(JsonValue::Null);
 
     let fields = match &body {
@@ -25,8 +33,14 @@ pub(crate) fn handle_log_append(
         _ => return json_response(400, err("provide JSON object with log fields")),
     };
 
-    let log = get_or_create_log(runtime, collection);
-    let id = log.append(fields);
+    let log = LogCollection::new(store, LogCollectionConfig::new(collection));
+    let id = match log.append_checked(fields) {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(%error, "log append failed");
+            return json_response(500, err("log append failed"));
+        }
+    };
 
     let mut out = Map::new();
     out.insert("ok".to_string(), JsonValue::Bool(true));
@@ -142,4 +156,50 @@ fn err(msg: &str) -> JsonValue {
         crate::json_field::SerializedJsonField::tainted(msg),
     );
     JsonValue::Object(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::unified::store::{UnifiedStore, UnifiedStoreConfig};
+
+    #[test]
+    fn append_reports_storage_failure() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = UnifiedStoreConfig::default().with_embedded_wal_path(directory.path());
+        let store = Arc::new(UnifiedStore::with_config(config));
+
+        let response =
+            handle_log_append_with_store(store, "logs", br#"{"message":"hello"}"#.to_vec());
+
+        assert_eq!(
+            response.status, 500,
+            "failed storage must not be acknowledged"
+        );
+        assert!(String::from_utf8_lossy(&response.body).contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn append_success_recovers_after_reopen() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("logs.rdb");
+        let store = Arc::new(UnifiedStore::open(&path).expect("open store"));
+
+        let response = handle_log_append_with_store(
+            Arc::clone(&store),
+            "logs",
+            br#"{"message":"hello"}"#.to_vec(),
+        );
+        assert_eq!(response.status, 200);
+        drop(store);
+
+        let reopened = Arc::new(UnifiedStore::open(&path).expect("reopen store"));
+        let log = LogCollection::new(reopened, LogCollectionConfig::new("logs"));
+        let entries = log.recent(10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].fields.get("message"),
+            Some(&Value::text("hello"))
+        );
+    }
 }

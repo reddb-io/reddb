@@ -106,15 +106,15 @@ copies remain. Similarly, function implementations and module-level tests do
 not by themselves establish that every documented SQL function is wired through
 all public interfaces.
 
-A production-readiness concern deserves its own failure-injection test: in the
-public log append path, `LogCollection::flush_buffer` discards the result of
-`UnifiedStore::insert_auto`, and the HTTP handler constructs a success response
-without checking that storage result. This source-level observation suggests a
-storage error may be acknowledged as success; it has not been reproduced in
-this investigation. Verify error propagation and the precise durability/ACK
-boundary before relying on this endpoint for production logs. See
-[`LogCollection::flush_buffer`](../../crates/reddb-server/src/log/store.rs) and
-[`handle_log_append`](../../crates/reddb-server/src/server/handlers_log.rs).
+The HTTP log append path previously returned success when a storage write
+failed. A regression test reproduced this with an inaccessible embedded WAL;
+the handler now waits for the write result and returns an error on failure. A
+second test verifies that an acknowledged entry survives closing and reopening
+a paged store. See [`handle_log_append`](../../crates/reddb-server/src/server/handlers_log.rs).
+The older public buffered `LogCollection::append` API still discards errors in
+`flush_buffer`; it needs a separate compatibility decision before it can offer
+reliable error reporting. A failed storage operation can also have an uncertain
+outcome, so callers must not assume an error proves that no record was written.
 
 ClickHouse's physical sort key is an optimization key, not a uniqueness
 constraint ([ClickHouse primary-key guide](https://clickhouse.com/blog/a-simple-guide-to-clickhouse-query-optimization-part-1)).
