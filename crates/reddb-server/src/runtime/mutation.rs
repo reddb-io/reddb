@@ -135,6 +135,10 @@ impl<'rt> MutationEngine<'rt> {
         self.runtime
             .apply_sync_moderation_gate(&collection, &mut rows)?;
 
+        // Storage and secondary-index publication must be observed as a
+        // single generation by concurrent indexed SQL and wire readers.
+        let _indexed_mutation = super::execution_context::IndexedMutationGuard::begin();
+
         let topology_lock = self
             .runtime
             .index_store_ref()
@@ -330,6 +334,12 @@ impl<'rt> MutationEngine<'rt> {
             self.store.insert_auto(&collection, entity)
         }
         .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
+
+        #[cfg(test)]
+        self.runtime.index_store_ref().mutation_test_hook(
+            &collection,
+            super::index_store::MutationTestPhase::StoragePublished,
+        );
 
         // Keyed writes include metadata in their durable batch.
         if self.keyed_previous.is_none() && !row.metadata.is_empty() {

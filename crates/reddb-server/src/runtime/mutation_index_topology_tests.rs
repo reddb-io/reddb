@@ -1,6 +1,6 @@
 use super::index_store::MutationTestPhase;
 use crate::application::entity::{
-    CreateDocumentInput, CreateNodeInput, DeleteEntityInput, PatchEntityInput,
+    CreateDocumentInput, CreateNodeInput, CreateRowInput, DeleteEntityInput, PatchEntityInput,
     PatchEntityOperation, PatchEntityOperationType,
 };
 use crate::application::ports::RuntimeEntityPort;
@@ -13,6 +13,112 @@ use std::time::Duration;
 const COLLECTION: &str = "mutation_records";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BLOCKING_PROBE: Duration = Duration::from_millis(100);
+
+#[test]
+fn native_insert_keeps_indexed_reads_visible_during_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let (published_send, published_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let release_receive = Mutex::new(release_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            published_send.send(()).expect("storage published");
+            release_receive
+                .lock()
+                .expect("release receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("resume writer");
+        }
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            runtime.create_row(CreateRowInput {
+                collection: COLLECTION.to_string(),
+                fields: vec![("record_key".to_string(), reddb_types::Value::Integer(2))],
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            })
+        });
+        published_receive
+            .recv_timeout(TIMEOUT)
+            .expect("writer paused");
+        let observed = runtime
+            .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+            .expect("indexed query")
+            .result
+            .records
+            .len();
+        release_send.send(()).expect("resume writer");
+        writer.join().expect("writer thread").expect("insert");
+        assert_eq!(
+            observed, 1,
+            "published row must not disappear behind a stale index"
+        );
+    });
+}
+
+#[test]
+fn native_patch_keeps_indexed_reads_visible_during_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let (published_send, published_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let release_receive = Mutex::new(release_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            published_send.send(()).expect("storage published");
+            release_receive
+                .lock()
+                .expect("release receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("resume writer");
+        }
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| mutate(&runtime, "native_patch", id));
+        published_receive
+            .recv_timeout(TIMEOUT)
+            .expect("writer paused");
+        let observed = runtime
+            .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+            .expect("indexed query")
+            .result
+            .records
+            .len();
+        release_send.send(()).expect("resume writer");
+        writer.join().expect("writer thread").expect("patch");
+        assert_eq!(
+            observed, 1,
+            "published row must not disappear behind a stale index"
+        );
+    });
+}
+
+#[test]
+fn native_delete_marks_the_storage_index_publication_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            marked.store(
+                super::execution_context::indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    mutate(&runtime, "native_delete", id).expect("delete");
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "native delete publication must be guarded"
+    );
+}
 
 fn seed(runtime: &RedDBRuntime, model: &str) -> EntityId {
     match model {
