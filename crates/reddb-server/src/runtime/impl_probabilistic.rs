@@ -1406,7 +1406,7 @@ fn parse_probabilistic_read_projection(
             label: probabilistic_projection_label(projection, "freq", index),
         }));
     }
-    if function.eq_ignore_ascii_case("CONTAINS") {
+    if function.eq_ignore_ascii_case("CONTAINS") && args.len() == 1 {
         let element = projection_single_text_arg(function, args)?;
         return Ok(Some(ProbabilisticReadProjection::Contains {
             element,
