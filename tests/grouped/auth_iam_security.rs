@@ -57,6 +57,12 @@ mod e2e_vault_sealed_storage;
 #[path = "../http_tls_limiter.rs"]
 mod http_tls_limiter;
 
+#[path = "../cluster_bootstrap_authority.rs"]
+mod cluster_bootstrap_authority;
+
+#[path = "../docs_cluster_bootstrap_authority.rs"]
+mod docs_cluster_bootstrap_authority;
+
 #[path = "auth_security/iam_grant_compat.rs"]
 mod iam_grant_compat;
 

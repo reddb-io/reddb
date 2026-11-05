@@ -146,7 +146,7 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
                 if matches!(value, Value::Null) {
                     continue;
                 }
-                parts.push(value.display_string());
+                parts.push(value.plain_text());
             }
             Some(Value::text(parts.join(&separator)))
         }
@@ -172,6 +172,20 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
                 other => Some(other),
             }
         }
+        "FLOOR" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Float(f) => Some(Value::Float(f.floor())),
+                other => Some(other),
+            }
+        }
+        "CEIL" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Float(f) => Some(Value::Float(f.ceil())),
+                other => Some(other),
+            }
+        }
         "COALESCE" => {
             for (i, _) in args.iter().enumerate() {
                 if let Some(val) = resolve_scalar_arg(args, i, source) {
@@ -181,6 +195,17 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
                 }
             }
             Some(Value::Null)
+        }
+        "JSON_PARSE" | "JSON_EXTRACT" | "JSON_EXTRACT_TEXT" | "CONTAINS" | "JSON_SET"
+        | "JSON_ARRAY_LENGTH" | "JSON_TYPEOF" | "JSON_VALID" | "JSON_ARRAY" | "JSON_OBJECT" => {
+            let values = (0..args.len())
+                .map(|index| resolve_scalar_arg(args, index, source))
+                .collect::<Option<Vec<_>>>()?;
+            super::value_functions::evaluate_value_function_with_host(
+                &JsonValueFunctionHost(host),
+                func_name,
+                &values,
+            )
         }
         "MONEY" => money_from_scalar_args(host, args, source),
         "MONEY_ASSET" => match resolve_scalar_arg(args, 0, source)? {
@@ -384,5 +409,19 @@ fn money_arg_text(value: Value) -> Option<String> {
         Value::AssetCode(code) => Some(code),
         Value::Currency(code) => Some(String::from_utf8_lossy(&code).to_string()),
         other => Some(other.display_string()),
+    }
+}
+
+struct JsonValueFunctionHost<'a, H>(&'a H);
+
+impl<H: ScalarFunctionHost> super::value_functions::ValueFunctionHost
+    for JsonValueFunctionHost<'_, H>
+{
+    fn current_unix_ms(&self) -> i64 {
+        self.0.current_unix_ms()
+    }
+
+    fn fallback_function(&self, _name: &str, _arguments: &[Value]) -> Option<Value> {
+        None
     }
 }

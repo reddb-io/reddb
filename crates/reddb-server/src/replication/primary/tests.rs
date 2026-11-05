@@ -517,9 +517,13 @@ fn plan_replica_resume_partial_within_window_full_past_cap() {
 #[test]
 fn ensure_replica_registered_self_registers_then_is_a_noop() {
     let primary = PrimaryReplication::new(None);
+    for lsn in 1..=5 {
+        primary.wal_buffer.append(lsn, vec![lsn as u8]);
+    }
 
-    assert!(primary.ensure_replica_registered("r1"));
+    assert!(primary.ensure_replica_registered("r1", 0));
     assert_eq!(primary.replica_count(), 1);
+    assert_eq!(primary.slot_snapshots()[0].restart_lsn, 0);
     let epoch_after_register = primary.topology_epoch();
 
     primary.note_replica_pull("r1", 7);
@@ -532,7 +536,7 @@ fn ensure_replica_registered_self_registers_then_is_a_noop() {
         Some(7)
     );
 
-    assert!(!primary.ensure_replica_registered("r1"));
+    assert!(!primary.ensure_replica_registered("r1", 0));
     assert_eq!(primary.replica_count(), 1);
     assert_eq!(primary.topology_epoch(), epoch_after_register);
     assert_eq!(

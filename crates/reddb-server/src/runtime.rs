@@ -1657,6 +1657,8 @@ mod paged_btree_index;
 mod paged_count;
 mod paged_hash_index;
 #[cfg(test)]
+mod startup_io_budget;
+#[cfg(test)]
 pub(crate) use index_store::{IndexMethodKind as QualificationIndexMethodKind, MutationTestPhase};
 #[cfg(test)]
 mod cold_keyed_models;

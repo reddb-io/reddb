@@ -107,7 +107,7 @@ fn text_and_missing() {
                 Value::text("a"),
                 Value::text("b"),
             ],
-            Some(Value::text("'a':'b'")),
+            Some(Value::text("a:b")),
         ),
         (
             "COALESCE",

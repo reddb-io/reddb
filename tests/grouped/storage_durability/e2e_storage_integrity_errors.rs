@@ -97,6 +97,50 @@ fn data_page_checksum_failure_reports_page_id_and_collection() {
 }
 
 #[test]
+fn corrupt_paged_store_is_not_mistaken_for_a_successful_embedded_recovery() {
+    let db = support::temp_db_file("storage-integrity-recovery-boundary");
+    {
+        let rt = RedDBRuntime::with_options(persistent_operational_options(db.path()))
+            .expect("runtime opens");
+        exec(&rt, "CREATE TABLE damaged (id INT, label TEXT)");
+        exec(&rt, "CREATE TABLE intact (id INT, label TEXT)");
+        exec(
+            &rt,
+            "INSERT INTO damaged (id, label) VALUES (1, 'damaged-needle-31415')",
+        );
+        exec(
+            &rt,
+            "INSERT INTO intact (id, label) VALUES (1, 'intact-needle-27182')",
+        );
+        rt.checkpoint().expect("checkpoint fixture");
+    }
+
+    let page_id = page_containing(db.path(), b"damaged-needle-31415");
+    assert_ne!(page_id, page_containing(db.path(), b"intact-needle-27182"));
+    corrupt_page(db.path(), page_id);
+    let damaged_image = fs::read(db.path()).expect("capture corrupted source");
+
+    let err = expect_runtime_open_err(RedDBRuntime::with_options(persistent_operational_options(
+        db.path(),
+    )));
+    assert_integrity_error(err, "page", &page_id.to_string(), Some("damaged"));
+    let scrub_err = reddb_file::scrub_embedded_store(db.path(), 0, usize::MAX)
+        .expect_err("embedded scrub must reject a paged store");
+    assert!(scrub_err.to_string().contains("paged"), "{scrub_err}");
+
+    let output_dir = tempfile::tempdir().expect("recovery directory");
+    let recovered = output_dir.path().join("recovered.rdb");
+    let salvage_err = reddb_file::salvage_embedded_store(db.path(), &recovered)
+        .expect_err("embedded salvage must reject a paged store");
+    assert!(salvage_err.to_string().contains("paged"), "{salvage_err}");
+    assert!(!recovered.exists(), "no recovered file should be published");
+    assert_eq!(
+        fs::read(db.path()).expect("source after attempts"),
+        damaged_image
+    );
+}
+
+#[test]
 fn manifest_checksum_failure_reports_manifest_zone() {
     let db = support::temp_db_file("storage-integrity-manifest");
     {

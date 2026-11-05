@@ -29,7 +29,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-Linux-x86_64-unknown-linux-gnu
           save-if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -43,7 +43,7 @@ jobs:
         run: |
           sha256sum target/release/examples/operator_import_bootstrap > operator_import_bootstrap.sha256
           git rev-parse HEAD > operator_import_bootstrap.source
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: operator-bootstrap-import-linux-x86_64
           path: |
