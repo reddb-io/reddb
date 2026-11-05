@@ -1553,6 +1553,11 @@ impl IndexStore {
             .collect()
     }
 
+    /// List every operational index without consulting collection payloads.
+    pub(crate) fn list_all_indices(&self) -> Vec<RegisteredIndex> {
+        read_unpoisoned(&self.registry).values().cloned().collect()
+    }
+
     /// Standalone UNIQUE indexes enforced at admission. Both are backed by a
     /// hash-store key (`hash_lookup_name`) that admission probes.
     pub(crate) fn unique_indexes(&self, collection: &str) -> Vec<RegisteredIndex> {
