@@ -102,42 +102,50 @@ fn flip_geo_compare_op(op: CompareOp) -> CompareOp {
     }
 }
 
-fn filter_field_column(field: &reddb_rql::ast::FieldRef) -> Option<&str> {
-    match field {
-        reddb_rql::ast::FieldRef::TableColumn { column, .. } => Some(column),
-        _ => None,
-    }
+fn filter_field_matches_index_column(
+    field: &reddb_rql::ast::FieldRef,
+    column: &str,
+    table: &TableQuery,
+) -> bool {
+    super::authz::policy_columns::policy_column_name_from_field_ref(
+        field,
+        &table.table,
+        table.alias.as_deref(),
+    )
+    .as_deref()
+        == Some(column)
 }
 
-fn filter_is_hash_equality(filter: &Filter, column: &str) -> bool {
+fn filter_is_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
     matches!(
         filter,
         Filter::Compare { field, op: CompareOp::Eq, value }
-            if filter_field_column(field) == Some(column)
+            if filter_field_matches_index_column(field, column, table)
                 && matches!(value, Value::Text(_) | Value::Integer(_) | Value::UnsignedInteger(_))
     )
 }
 
-fn filter_has_hash_equality(filter: &Filter, column: &str) -> bool {
+fn filter_has_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
     match filter {
         Filter::And(left, right) => {
-            filter_has_hash_equality(left, column) || filter_has_hash_equality(right, column)
+            filter_has_hash_equality(left, column, table)
+                || filter_has_hash_equality(right, column, table)
         }
-        other => filter_is_hash_equality(other, column),
+        other => filter_is_hash_equality(other, column, table),
     }
 }
 
-fn filter_is_sorted_range(filter: &Filter, column: &str) -> bool {
+fn filter_is_sorted_range(filter: &Filter, column: &str, table: &TableQuery) -> bool {
     match filter {
         Filter::Compare { field, op, value } => {
             matches!(
                 op,
                 CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
-            ) && filter_field_column(field) == Some(column)
+            ) && filter_field_matches_index_column(field, column, table)
                 && super::index_store::value_to_sorted_key(value).is_some()
         }
         Filter::Between { field, low, high } => {
-            filter_field_column(field) == Some(column)
+            filter_field_matches_index_column(field, column, table)
                 && super::index_store::value_to_sorted_key(low).is_some()
                 && super::index_store::value_to_sorted_key(high).is_some()
         }
@@ -145,34 +153,42 @@ fn filter_is_sorted_range(filter: &Filter, column: &str) -> bool {
     }
 }
 
-fn filter_has_sorted_predicate(filter: &Filter, column: &str) -> bool {
-    if filter_is_sorted_range(filter, column) || filter_is_hash_equality(filter, column) {
+fn filter_has_sorted_predicate(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    if filter_is_sorted_range(filter, column, table)
+        || filter_is_hash_equality(filter, column, table)
+    {
         return true;
     }
     match filter {
         Filter::In { field, values } => {
-            filter_field_column(field) == Some(column)
+            filter_field_matches_index_column(field, column, table)
                 && !values.is_empty()
                 && values
                     .iter()
                     .all(|value| super::index_store::value_to_sorted_key(value).is_some())
         }
         Filter::And(left, right) => {
-            filter_has_sorted_predicate(left, column) || filter_has_sorted_predicate(right, column)
+            filter_has_sorted_predicate(left, column, table)
+                || filter_has_sorted_predicate(right, column, table)
         }
         _ => false,
     }
 }
 
-fn filter_has_composite_prefix_range(filter: &Filter, columns: &[String]) -> bool {
+fn filter_has_composite_prefix_range(
+    filter: &Filter,
+    columns: &[String],
+    table: &TableQuery,
+) -> bool {
     let [prefix, range] = columns else {
         return false;
     };
     let Filter::And(left, right) = filter else {
         return false;
     };
-    (filter_is_hash_equality(left, prefix) && filter_is_sorted_range(right, range))
-        || (filter_is_hash_equality(right, prefix) && filter_is_sorted_range(left, range))
+    (filter_is_hash_equality(left, prefix, table) && filter_is_sorted_range(right, range, table))
+        || (filter_is_hash_equality(right, prefix, table)
+            && filter_is_sorted_range(left, range, table))
 }
 
 fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> bool {
@@ -302,11 +318,11 @@ impl RedDBRuntime {
                     let [column] = index.columns.as_slice() else {
                         return false;
                     };
-                    filter_has_hash_equality(&filter, column)
+                    filter_has_hash_equality(&filter, column, table)
                 }
                 super::index_store::IndexMethodKind::BTree => match index.columns.as_slice() {
-                    [column] => filter_has_sorted_predicate(&filter, column),
-                    columns => filter_has_composite_prefix_range(&filter, columns),
+                    [column] => filter_has_sorted_predicate(&filter, column, table),
+                    columns => filter_has_composite_prefix_range(&filter, columns, table),
                 },
                 _ => false,
             })
