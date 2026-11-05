@@ -32,6 +32,18 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
 }
 
+fn explain_plan_ops(result: &reddb::runtime::RuntimeQueryResult) -> Vec<&str> {
+    result
+        .result
+        .records
+        .iter()
+        .filter_map(|record| match record.get("op") {
+            Some(Value::Text(op)) => Some(op.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn uint_value(row: &reddb::storage::query::unified::UnifiedRecord, column: &str) -> u64 {
     match row.get(column) {
         Some(Value::UnsignedInteger(value)) => *value,
@@ -301,7 +313,7 @@ fn explain_alter_still_routes_to_schema_diff() {
 }
 
 #[test]
-fn explain_indexed_select_mentions_index_or_scan_op() {
+fn explain_indexed_select_uses_named_index() {
     let rt = rt();
     exec(&rt, "CREATE TABLE users (id INT, email TEXT)");
     exec(
@@ -314,15 +326,50 @@ fn explain_indexed_select_mentions_index_or_scan_op() {
         .execute_query("EXPLAIN SELECT id FROM users WHERE email = 'a@x'")
         .expect("EXPLAIN SELECT with index");
 
-    // At least one node references the target table in `source`.
-    let has_user_source = result
-        .result
-        .records
-        .iter()
-        .any(|rec| matches!(rec.get("source"), Some(Value::Text(s)) if s.as_ref() == "users"));
+    let plan_ops = explain_plan_ops(&result);
     assert!(
-        has_user_source,
-        "plan should mention the `users` source somewhere; records={:?}",
-        result.result.records
+        plan_ops.contains(&"index_seek"),
+        "indexed predicate should use index_seek, got {plan_ops:?}"
     );
+
+    let explain = rt
+        .explain_query("SELECT id FROM users WHERE email = 'a@x'")
+        .expect("raw explain with index metadata");
+    let mut nodes = vec![&explain.logical_plan.root];
+    let mut observed = Vec::new();
+    while let Some(node) = nodes.pop() {
+        observed.push((node.operator.as_str(), node.details.get("index")));
+        if node.operator == "index_seek"
+            && node.details.get("index").map(String::as_str) == Some("idx_users_email")
+        {
+            return;
+        }
+        nodes.extend(&node.children);
+    }
+    panic!("expected idx_users_email index_seek, got {observed:?}");
+}
+
+#[test]
+fn explain_unindexed_predicate_keeps_table_scan_when_other_index_exists() {
+    let rt = rt();
+    exec(&rt, "CREATE TABLE users (id INT, email TEXT, age INT)");
+    exec(
+        &rt,
+        "INSERT INTO users (id, email, age) VALUES (1, 'a@x', 30), (2, 'b@x', 40)",
+    );
+    exec(&rt, "CREATE INDEX idx_users_email ON users (email)");
+
+    let result = rt
+        .execute_query("EXPLAIN SELECT id FROM users WHERE age > 35")
+        .expect("EXPLAIN SELECT without a matching index");
+    let plan_ops = explain_plan_ops(&result);
+    assert!(plan_ops.contains(&"table_scan"), "got {plan_ops:?}");
+    assert!(!plan_ops.contains(&"index_seek"), "got {plan_ops:?}");
+
+    let result = rt
+        .execute_query("EXPLAIN SELECT id FROM users WHERE email != 'a@x'")
+        .expect("EXPLAIN SELECT with a non-indexable predicate");
+    let plan_ops = explain_plan_ops(&result);
+    assert!(plan_ops.contains(&"table_scan"), "got {plan_ops:?}");
+    assert!(!plan_ops.contains(&"index_seek"), "got {plan_ops:?}");
 }

@@ -15,6 +15,9 @@ mod cli_bootstrap;
 #[path = "../cli_first_boot.rs"]
 mod cli_first_boot;
 
+#[path = "../cli_ui_deeplink.rs"]
+mod cli_ui_deeplink;
+
 #[path = "cli_transport/cli_migrate_from_redis.rs"]
 mod cli_migrate_from_redis;
 

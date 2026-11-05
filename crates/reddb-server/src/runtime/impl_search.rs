@@ -102,6 +102,111 @@ fn flip_geo_compare_op(op: CompareOp) -> CompareOp {
     }
 }
 
+fn filter_field_matches_index_column(
+    field: &reddb_rql::ast::FieldRef,
+    column: &str,
+    table: &TableQuery,
+) -> bool {
+    super::authz::policy_columns::policy_column_name_from_field_ref(
+        field,
+        &table.table,
+        table.alias.as_deref(),
+    )
+    .as_deref()
+        == Some(column)
+}
+
+fn filter_is_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    matches!(
+        filter,
+        Filter::Compare { field, op: CompareOp::Eq, value }
+            if filter_field_matches_index_column(field, column, table)
+                && matches!(value, Value::Text(_) | Value::Integer(_) | Value::UnsignedInteger(_))
+    )
+}
+
+fn filter_has_hash_equality(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    match filter {
+        Filter::And(left, right) => {
+            filter_has_hash_equality(left, column, table)
+                || filter_has_hash_equality(right, column, table)
+        }
+        other => filter_is_hash_equality(other, column, table),
+    }
+}
+
+fn sorted_range_family(value: &Value) -> Option<reddb_types::CanonicalKeyFamily> {
+    let family = reddb_types::value_to_canonical_key(value)?.family();
+    matches!(
+        family,
+        reddb_types::CanonicalKeyFamily::Integer
+            | reddb_types::CanonicalKeyFamily::BigInt
+            | reddb_types::CanonicalKeyFamily::UnsignedInteger
+            | reddb_types::CanonicalKeyFamily::Text
+    )
+    .then_some(family)
+}
+
+fn filter_is_sorted_range(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => {
+            matches!(
+                op,
+                CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
+            ) && filter_field_matches_index_column(field, column, table)
+                && sorted_range_family(value).is_some()
+        }
+        Filter::Between { field, low, high } => {
+            filter_field_matches_index_column(field, column, table)
+                && sorted_range_family(low).is_some()
+                && sorted_range_family(low) == sorted_range_family(high)
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_sorted_predicate(filter: &Filter, column: &str, table: &TableQuery) -> bool {
+    if filter_is_sorted_range(filter, column, table)
+        || filter_is_hash_equality(filter, column, table)
+    {
+        return true;
+    }
+    match filter {
+        Filter::In { field, values } => {
+            filter_field_matches_index_column(field, column, table)
+                && values
+                    .first()
+                    .and_then(sorted_range_family)
+                    .is_some_and(|family| {
+                        values
+                            .iter()
+                            .all(|value| sorted_range_family(value) == Some(family))
+                    })
+        }
+        Filter::And(left, right) => {
+            filter_has_sorted_predicate(left, column, table)
+                || filter_has_sorted_predicate(right, column, table)
+        }
+        _ => false,
+    }
+}
+
+fn filter_has_composite_prefix_range(
+    filter: &Filter,
+    columns: &[String],
+    table: &TableQuery,
+) -> bool {
+    let [prefix, range] = columns else {
+        return false;
+    };
+    let Filter::And(left, right) = filter else {
+        return false;
+    };
+    (filter_is_hash_equality(left, prefix, table) && filter_is_sorted_range(right, range, table))
+        || (filter_is_hash_equality(right, prefix, table)
+            && filter_is_sorted_range(left, range, table))
+}
+
 fn explain_h3_cover_is_enumerable(lat: f64, lon: f64, radius_km: f64, resolution: u8) -> bool {
     let cell = crate::geo::h3::lat_lng_to_cell(lat, lon, resolution);
     if cell == 0 {
@@ -191,14 +296,8 @@ impl RedDBRuntime {
         let chunk_prune = self.table_filter_has_hypertable_chunk_prune(table);
         if self.table_filter_has_geo_h3_route(table) {
             mark_table_scan_as_geo_h3_index_seek(node);
-        } else if let Some(index) = self
-            .inner
-            .index_store
-            .list_indices(&table.table)
-            .into_iter()
-            .next()
-        {
-            mark_table_scan_as_index_seek(node, &index.name);
+        } else if let Some(index_name) = self.table_filter_index_name(table) {
+            mark_table_scan_as_index_seek(node, &index_name);
         }
         if let Some((total_chunks, kept_chunks)) = chunk_prune {
             wrap_plan_as_hypertable_chunk_prune(node, &table.table, total_chunks, kept_chunks);
@@ -221,6 +320,37 @@ impl RedDBRuntime {
             filter.as_ref(),
         );
         (kept.len() < chunks.len()).then_some((chunks.len(), kept.len()))
+    }
+
+    fn table_filter_index_name(&self, table: &TableQuery) -> Option<String> {
+        let filter = reddb_rql::sql_lowering::effective_table_filter(table)?;
+        let mut indices = self
+            .inner
+            .index_store
+            .list_indices(&table.table)
+            .into_iter()
+            .filter(|index| match index.method {
+                super::index_store::IndexMethodKind::Hash => {
+                    let [column] = index.columns.as_slice() else {
+                        return false;
+                    };
+                    filter_has_hash_equality(&filter, column, table)
+                }
+                super::index_store::IndexMethodKind::BTree => match index.columns.as_slice() {
+                    [column] => filter_has_sorted_predicate(&filter, column, table),
+                    columns => filter_has_composite_prefix_range(&filter, columns, table),
+                },
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            right
+                .columns
+                .len()
+                .cmp(&left.columns.len())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        indices.into_iter().next().map(|index| index.name)
     }
 
     fn table_filter_has_geo_h3_route(&self, table: &TableQuery) -> bool {
