@@ -1187,6 +1187,131 @@ fn metadata_publication_memory_does_not_copy_large_unrelated_payloads() {
         "metadata publication must not copy unrelated payloads for derived search artifacts: {baseline:?} -> {measured:?}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn reopened_catalog_ddl_does_not_rewrite_unrelated_collection_pages() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    use std::os::unix::fs::MetadataExt;
+
+    fn space(path: &std::path::Path) -> (u64, u64) {
+        let metadata = std::fs::metadata(path).expect("database metadata");
+        (metadata.len(), metadata.blocks() * 512)
+    }
+
+    const COLLECTIONS: u64 = 24;
+    const ROWS_PER_COLLECTION: u64 = 512;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("ddl-reopen.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_bounded_disk_residency(true)
+        .with_memory_budget(64 * 1024 * 1024);
+
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+        for collection_index in 0..COLLECTIONS {
+            let collection = format!("existing_{collection_index}");
+            runtime
+                .execute_query(&format!(
+                    "CREATE TABLE {collection} (id INTEGER, bucket INTEGER, payload BLOB)"
+                ))
+                .expect("source collection");
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection(&collection)
+                .expect("source manager");
+            let rows = (0..ROWS_PER_COLLECTION)
+                .map(|row| {
+                    let id = collection_index * 1_000 + row + 1;
+                    let mut entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        collection.as_str(),
+                        row + 1,
+                        vec![],
+                    );
+                    let mut payload = varied_payload(1024).into_bytes();
+                    payload[..8].copy_from_slice(&id.to_le_bytes());
+                    entity.data = EntityData::Row(RowData::with_names(
+                        vec![
+                            Value::Integer(id as i64),
+                            Value::Integer((row % 32) as i64),
+                            Value::Blob(payload),
+                        ],
+                        vec!["id".into(), "bucket".into(), "payload".into()],
+                    ));
+                    entity
+                })
+                .collect();
+            manager.bulk_insert(rows).expect("source rows");
+            runtime
+                .execute_query(&format!(
+                    "CREATE INDEX idx_{collection_index}_id ON {collection} (id) USING BTREE"
+                ))
+                .expect("id index");
+            runtime
+                .execute_query(&format!(
+                    "CREATE INDEX idx_{collection_index}_bucket ON {collection} (bucket) USING BTREE"
+                ))
+                .expect("bucket index");
+        }
+        runtime.checkpoint().expect("publish source generations");
+    }
+
+    let compact_directory = directory.path().join("compact");
+    let report = crate::storage::compact::compact_paged(&path, &compact_directory)
+        .expect("offline physical rewrite");
+    let compacted_path = compact_directory.join("ddl-reopen.rdb");
+    eprintln!(
+        "compacted DDL fixture: {} -> {} bytes, records={}, trees={}",
+        report.source_bytes, report.destination_bytes, report.records, report.trees
+    );
+    let compacted_options = RedDBOptions::persistent(&compacted_path)
+        .with_bounded_disk_residency(true)
+        .with_memory_budget(64 * 1024 * 1024);
+    let before_open = space(&compacted_path);
+    let runtime = RedDBRuntime::with_options(compacted_options).expect("reopen compacted runtime");
+    let after_open = space(&compacted_path);
+    eprintln!("cold open space: {before_open:?} -> {after_open:?}");
+    let open_growth = after_open.1.saturating_sub(before_open.1);
+    assert!(
+        open_growth <= 1024 * 1024,
+        "cold open must reuse compacted secondary trees instead of rebuilding them: \
+         before={before_open:?} after={after_open:?} growth={open_growth}"
+    );
+    let before = space(&compacted_path);
+    runtime
+        .execute_query(
+            "CREATE TABLE IF NOT EXISTS database_engine_rollout_claims (\
+                id TEXT, database_id TEXT, environment TEXT, operation_id TEXT, acquired_at TEXT\
+            )",
+        )
+        .expect("small unrelated DDL");
+    runtime.checkpoint().expect("publish small unrelated DDL");
+    let after = space(&compacted_path);
+    eprintln!("reopened DDL space: {before:?} -> {after:?}");
+
+    let growth = after.1.saturating_sub(before.1);
+    assert!(
+        growth <= 1024 * 1024,
+        "a metadata-only DDL must not physically rewrite unrelated collection pages: \
+         before={before:?} after={after:?} growth={growth}"
+    );
+    for collection_index in 0..COLLECTIONS {
+        let collection = format!("existing_{collection_index}");
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection(&collection)
+                .expect("unrelated collection survives")
+                .count(),
+            ROWS_PER_COLLECTION as usize
+        );
+    }
+}
+
 #[test]
 fn native_artifact_budget_deferral_is_visible_recoverable_and_reversible() {
     let directory = tempfile::tempdir().expect("directory");
