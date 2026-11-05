@@ -1791,7 +1791,7 @@ impl RedDBRuntime {
         tenant: Option<&str>,
     ) -> RedDBResult<Value> {
         let key = self.vault_encryption_key(collection)?;
-        let plaintext = value.to_bytes();
+        let plaintext = zeroize::Zeroizing::new(value.to_bytes());
         let nonce_bytes = crate::auth::store::random_bytes(12);
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_bytes[..12]);
@@ -1877,13 +1877,15 @@ impl RedDBRuntime {
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&payload[..12]);
         let aad = vault_value_aad(collection, tenant);
-        let plaintext = crate::crypto::aes_gcm::aes256_gcm_decrypt(
-            &key,
-            &nonce,
-            aad.as_bytes(),
-            &payload[12..],
-        )
-        .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?;
+        let plaintext = zeroize::Zeroizing::new(
+            crate::crypto::aes_gcm::aes256_gcm_decrypt(
+                &key,
+                &nonce,
+                aad.as_bytes(),
+                &payload[12..],
+            )
+            .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?,
+        );
         let (value, consumed) =
             reddb_types::Value::from_bytes_with_limit(&plaintext, limit_bytes - cipher_bytes)
                 .map_err(|error| match error {
