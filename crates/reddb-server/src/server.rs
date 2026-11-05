@@ -155,6 +155,7 @@ pub mod ui_deeplink;
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
 // the SQL-escaping logic.
+mod execution_watchdog;
 pub(crate) mod handlers_query;
 mod handlers_replication;
 mod handlers_topology;
@@ -188,6 +189,7 @@ pub fn command_coverage_matrix() -> String {
     route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
 }
 
+use self::execution_watchdog::ExecutionWatchdog;
 use self::handlers_ai::*;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
@@ -303,6 +305,10 @@ pub struct RedDBServer {
     /// `http_limiter` bounds admitted requests; this gate keeps only a CPU-sized
     /// subset active and parks the remainder on a bounded async FIFO queue.
     execution_admission: ExecutionAdmission,
+    /// Fail readiness while a handler that exceeded its deadline still owns a
+    /// blocking executor worker. This is independent from normal admission:
+    /// overload alone stays ready, while work that cannot unwind does not.
+    execution_watchdog: ExecutionWatchdog,
     /// Small, independently bounded admission reserve for Kubernetes health
     /// probes. A saturated query pool must not make a healthy process fail
     /// readiness and disappear from its EndpointSlice. Only the four exact
@@ -322,12 +328,14 @@ pub struct RedDBServer {
     /// without `sleep()`. Shared via `Arc` so cloned server handles
     /// (e.g. `serve_in_background`) read the same clock.
     handler_clock: Arc<dyn MonotonicClock>,
-    /// Test-only synchronous sleep injected between route dispatch and
+    /// Test-only synchronous delay injected between route dispatch and
     /// response write so an integration test can simulate a slow
-    /// downstream tripping the deadline. Default 0 (no-op). Shared via
-    /// `Arc` so a cloned `RedDBServer` (e.g. `serve_in_background`)
-    /// observes flips from the originating handle. Production callers
-    /// have no way to set this — the setter is `#[doc(hidden)]`.
+    /// downstream tripping the deadline. `u64::MAX` holds the worker until
+    /// the value changes, providing a deterministic gate for timeout races.
+    /// Default 0 (no-op). Shared via `Arc` so a cloned `RedDBServer` (e.g.
+    /// `serve_in_background`) observes flips from the originating handle.
+    /// Production callers have no way to set this — the setter is
+    /// `#[doc(hidden)]`.
     slow_inject_ms: Arc<AtomicU64>,
     /// Prometheus metrics for the HTTP handler-thread pool (issue
     /// #573 slice 4). Records rejections (cap_exhausted /
@@ -484,6 +492,7 @@ impl RedDBServer {
             replication: None,
             http_limiter: HttpConnectionLimiter::new(http_limits.max_handlers),
             execution_admission,
+            execution_watchdog: ExecutionWatchdog::default(),
             health_limiter: HttpConnectionLimiter::new(HEALTH_HANDLER_CAP),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             handler_clock: Arc::new(SystemMonotonicClock::new()),
@@ -653,14 +662,31 @@ impl RedDBServer {
         self
     }
 
-    /// Test hook: set a synchronous sleep (in ms) inserted between
-    /// route dispatch and response write. The integration test for
-    /// slice 2 sets a value greater than `handler_timeout` to trip
-    /// the deadline, then resets to 0 to verify recovery. Shared via
+    /// Test hook: set a synchronous delay (in ms) inserted between route
+    /// dispatch and response write. `u64::MAX` blocks until this is changed,
+    /// allowing deterministic timeout/recovery assertions. Shared via
     /// `Arc<AtomicU64>` so cloned server handles see the same flip.
     #[doc(hidden)]
     pub fn set_test_slow_inject_ms(&self, ms: u64) {
-        self.slow_inject_ms.store(ms, Ordering::Relaxed);
+        self.slow_inject_ms.store(ms, Ordering::Release);
+    }
+
+    fn apply_test_slow_inject(&self) {
+        let inject_ms = self.slow_inject_ms.load(Ordering::Acquire);
+        if inject_ms == 0 {
+            return;
+        }
+        if inject_ms != u64::MAX {
+            thread::sleep(Duration::from_millis(inject_ms));
+            return;
+        }
+        while self.slow_inject_ms.load(Ordering::Acquire) == u64::MAX {
+            thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+
+    fn test_slow_inject_is_blocking_gate(&self) -> bool {
+        self.slow_inject_ms.load(Ordering::Acquire) == u64::MAX
     }
 
     /// Attach an `AuthStore` for HTTP-layer authentication.
@@ -1167,10 +1193,7 @@ impl RedDBServer {
         // Test-only injected slow downstream (issue #570 slice 2
         // integration test). Production builds set this to 0, so this
         // is a single relaxed atomic load on the hot path.
-        let inject_ms = self.slow_inject_ms.load(Ordering::Relaxed);
-        if inject_ms > 0 {
-            thread::sleep(Duration::from_millis(inject_ms));
-        }
+        self.apply_test_slow_inject();
 
         // Boundary (b): between route dispatch and response write.
         if deadline.expired() {

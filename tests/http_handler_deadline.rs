@@ -27,12 +27,38 @@ fn boot(handler_timeout: Duration) -> (support::TempDbFile, String, RedDBServer)
     (db, addr, server)
 }
 
-fn send_health(addr: &str, read_timeout: Duration) -> (String, Instant) {
+fn send_get(addr: &str, path: &str, read_timeout: Duration) -> (String, Instant) {
     let mut tcp = TcpStream::connect(addr).expect("connect");
     tcp.set_read_timeout(Some(read_timeout)).unwrap();
     tcp.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
-    tcp.write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    tcp.write_all(request.as_bytes()).unwrap();
+    tcp.flush().unwrap();
+    let mut buf = Vec::new();
+    let _ = tcp.read_to_end(&mut buf);
+    let done = Instant::now();
+    (String::from_utf8_lossy(&buf).into_owned(), done)
+}
+
+fn send_health(addr: &str, read_timeout: Duration) -> (String, Instant) {
+    send_get(addr, "/health/live", read_timeout)
+}
+
+fn send_health_ready(addr: &str, read_timeout: Duration) -> (String, Instant) {
+    send_get(addr, "/health/ready", read_timeout)
+}
+
+fn send_query(addr: &str, read_timeout: Duration) -> (String, Instant) {
+    let body = br#"{"query":"SELECT 1"}"#;
+    let request = format!(
+        "POST /query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut tcp = TcpStream::connect(addr).expect("connect");
+    tcp.set_read_timeout(Some(read_timeout)).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    tcp.write_all(request.as_bytes()).unwrap();
+    tcp.write_all(body).unwrap();
     tcp.flush().unwrap();
     let mut buf = Vec::new();
     let _ = tcp.read_to_end(&mut buf);
@@ -115,4 +141,42 @@ fn fast_request_unaffected_by_deadline() {
         resp.starts_with("HTTP/1.1 2"),
         "fast request should succeed, got: {resp:?}"
     );
+}
+
+#[test]
+fn query_deadline_makes_readiness_fail_until_query_progress_resumes() {
+    let (_db, addr, server) = boot(Duration::from_millis(200));
+
+    // Hold the blocking worker behind a deterministic test gate. Unlike a
+    // fixed sleep, this cannot finish before the readiness assertion when the
+    // host scheduler is slow.
+    server.set_test_slow_inject_ms(u64::MAX);
+    let (timed_out, _) = send_query(&addr, Duration::from_secs(5));
+    assert!(
+        timed_out.starts_with("HTTP/1.1 503"),
+        "query should exceed the handler deadline: {timed_out:?}"
+    );
+    assert!(timed_out.contains("handler_deadline_exceeded"));
+
+    // The timed-out worker is still blocked. A readiness probe must stop
+    // advertising this process instead of checking only the lifecycle phase.
+    let (unready, _) = send_health_ready(&addr, Duration::from_secs(5));
+    assert!(
+        unready.starts_with("HTTP/1.1 503"),
+        "readiness must fail after query execution stops making progress: {unready:?}"
+    );
+    assert!(unready.contains("handler_deadline_exceeded"));
+    assert!(unready.contains(r#""status":"unready""#));
+
+    // Releasing the original worker lets SELECT 1 complete. That real query
+    // progress clears the latch without a restart or a synthetic timer.
+    server.set_test_slow_inject_ms(0);
+    for _ in 0..100 {
+        let (ready, _) = send_health_ready(&addr, Duration::from_secs(5));
+        if ready.starts_with("HTTP/1.1 200") {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("readiness did not recover after query progress resumed");
 }
