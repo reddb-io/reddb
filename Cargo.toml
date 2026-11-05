@@ -172,7 +172,6 @@ path = "tests/grouped/timeseries_retention.rs"
 [dependencies]
 reddb-engine = { workspace = true }
 reddb-wire = { workspace = true }
-reddb-grpc-proto = { workspace = true }
 reddb-client = { workspace = true, features = ["http", "redwire-tls"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
@@ -193,6 +192,7 @@ otel = ["reddb-server/otel"]
 ai-ner-network = ["reddb-server/ai-ner-network"]
 local-models = ["reddb-server/local-models"]
 embedded = ["reddb-client/embedded"]
+grpc = ["reddb-client/grpc"]
 redwire = ["reddb-client/redwire"]
 
 [dev-dependencies]

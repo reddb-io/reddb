@@ -27,7 +27,7 @@ embedded = ["dep:reddb-server"]
 grpc = []
 # RedWire native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
-redwire = ["dep:zstd"]
+redwire = []
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:reqwest"]
@@ -71,10 +71,6 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 # crate, so we skip a level and reach into the workspace
 # directly.
 reddb-server = { workspace = true, optional = true }
-
-# Per-frame compression (Flags::COMPRESSED). Pulled in only by
-# the `redwire` feature so embedded-only callers don't pay it.
-zstd = { version = "0.14.3", default-features = false, optional = true }
 
 # The RedWire adapter supplies a CSPRNG nonce to reddb-wire's sans-I/O
 # SCRAM client driver.

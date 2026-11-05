@@ -66,7 +66,6 @@ ed25519-dalek = "3"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { workspace = true, features = ["transport", "codegen", "router", "gzip", "zstd", "tls-ring"] }
-tonic-prost = { workspace = true }
 prost = "0.14"
 snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
@@ -131,7 +130,6 @@ http = "1"
 # tokio-tungstenite, which terminates the WS protocol; the binary data
 # channel is bridged into the transport-agnostic RedWire session (#932).
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = "1"
 strsim = "0.11"
