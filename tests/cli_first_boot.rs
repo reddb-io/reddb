@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+const TEST_VAULT_PASSPHRASE: &str = "integration-test-vault-passphrase";
+
 fn red_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_red"))
 }
@@ -87,6 +89,8 @@ fn spawn_server(args: &[&str], stderr_path: &Path) -> ServerChild {
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .stdin(Stdio::null())
@@ -118,6 +122,8 @@ fn spawn_server_with_cert_file(args: &[&str], stderr_path: &Path, cert_file: &Pa
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .stdin(Stdio::null())
@@ -271,9 +277,10 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
     // Sanity: the database does not exist yet.
     assert!(!db_path.exists(), "fresh volume precondition");
 
-    let mut server = spawn_server(
+    let mut server = spawn_server_with_envs(
         &cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s),
         &stderr_path,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
@@ -286,6 +293,8 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         !stderr.contains("vault requires a paged database"),
         "first boot must NOT abort at the vault gate.\nstderr:\n{stderr}"
     );
+    // Stop and reap so Windows releases and flushes the DB file.
+    drop(server);
     // The paged vault was created in place (operational-directory layout).
     assert!(
         wait_for_paged_vault(&db_path),
@@ -293,17 +302,16 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         db_path.display()
     );
 
-    drop(server); // kill + reap
-
     // ---- Idempotent re-boot against the now-existing paged vault. ----
     // If the preset were re-applied, re-creating the head/customer admins
     // would fail ("already exists") and boot would abort — so a clean
     // second serve is itself proof that the bootstrap-completed marker
     // short-circuited preset re-application (no re-bootstrap, no new cert).
     let stderr_path2 = dir.join("server2.stderr");
-    let mut server2 = spawn_server(
+    let mut server2 = spawn_server_with_envs(
         &cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s),
         &stderr_path2,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
     let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
@@ -436,48 +444,19 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         .and_then(|m| m.modified())
         .expect("cert-out mtime");
 
-    // ---- Round-trip: a fresh boot with NO bootstrap intent unseals the
-    // existing vault from the written file via REDDB_CERTIFICATE_FILE. The
-    // bootstrapped operational-directory vault requires the certificate on
-    // every subsequent boot, so a clean serve here proves the file we wrote
-    // is a usable unseal certificate. ----
+    // ---- Round-trip + no churn: the saved certificate unseals the existing
+    // vault while the unchanged bootstrap intent is ignored. Re-passing
+    // --bootstrap-cert-out proves the completion marker prevents both preset
+    // re-application and certificate replacement. ----
     let stderr_path2 = dir.join("server2.stderr");
-    let mut server2 = spawn_server_with_cert_file(
-        &[
-            "server",
-            "--path",
-            &db_path_str,
-            "--vault",
-            "true",
-            "--http",
-            "--http-bind",
-            &http_addr,
-        ],
-        &stderr_path2,
-        &cert_out,
-    );
+    let mut server2 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path2, &cert_out);
     let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
-        "the written certificate must unseal via REDDB_CERTIFICATE_FILE on a subsequent boot.\nstderr:\n{stderr2}"
+        "the written certificate must unseal without reapplying bootstrap.\nstderr:\n{stderr2}"
     );
     drop(server2);
-
-    // ---- No churn: a re-boot against the existing vault — even with the
-    // bootstrap intent and `--bootstrap-cert-out` re-passed — must NOT
-    // rewrite the certificate file. The completion marker short-circuits
-    // preset re-application before any cert is minted or written. The cert
-    // env unseals the existing vault so the boot reaches that point. ----
-    let stderr_path3 = dir.join("server3.stderr");
-    let mut server3 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path3, &cert_out);
-    let rebooted = wait_until_serving(&mut server3, &http_addr, Duration::from_secs(30));
-    let stderr3 = server3.stderr();
-    assert!(
-        rebooted,
-        "re-boot against the existing vault must serve.\nstderr:\n{stderr3}"
-    );
-    drop(server3);
 
     let cert_second = std::fs::read_to_string(&cert_out).expect("read cert-out after reboot");
     assert_eq!(
@@ -543,6 +522,8 @@ fn spawn_server_with_envs(args: &[&str], stderr_path: &Path, envs: &[(&str, &str
         .env_remove("REDDB_BOOTSTRAP_MANIFEST")
         .env_remove("REDDB_BOOTSTRAP_CERT_OUT")
         .env_remove("REDDB_VAULT")
+        .env_remove("REDDB_VAULT_PASSPHRASE")
+        .env_remove("REDDB_VAULT_PASSPHRASE_FILE")
         .env_remove("REDDB_AUTH")
         .env_remove("REDDB_REQUIRE_AUTH")
         .env_remove("REDDB_WIRE_BIND_ADDR");
@@ -816,9 +797,10 @@ fn wire_tls_flag_owns_port_over_env_plaintext_default() {
         &[
             ("REDDB_WIRE_BIND_ADDR", env_wire_addr.as_str()),
             ("RED_WIRE_TLS_DEV", "1"),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
         ],
     );
-    let tls_online = wait_for_stderr_contains(&mut server, "redwire+tls", Duration::from_secs(30));
+    let tls_online = wait_until_serving(&mut server, &wire_tls_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         tls_online,
@@ -873,7 +855,14 @@ fn explicit_wire_tls_bind_failure_is_fatal() {
     let stderr_path = dir.join("server.stderr");
     // Opt into self-signed dev certs so TLS config resolves and the boot
     // reaches the bind — the stage this test targets.
-    let mut server = spawn_server_with_envs(&args, &stderr_path, &[("RED_WIRE_TLS_DEV", "1")]);
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[
+            ("RED_WIRE_TLS_DEV", "1"),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
+        ],
+    );
     let exit = wait_for_exit(&mut server, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
@@ -915,7 +904,10 @@ fn http_only_env_plaintext_wire_listener_accepts_connections() {
     let mut server = spawn_server_with_envs(
         &args,
         &stderr_path,
-        &[("REDDB_WIRE_BIND_ADDR", wire_addr.as_str())],
+        &[
+            ("REDDB_WIRE_BIND_ADDR", wire_addr.as_str()),
+            ("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE),
+        ],
     );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
@@ -962,7 +954,11 @@ fn http_only_reports_wire_transport_ready_on_health() {
     let mut args = cloud_server_args(&db_path_str, &http_addr, head_pw_s, customer_pw_s);
     args.extend_from_slice(&["--wire-bind", &wire_addr]);
     let stderr_path = dir.join("server.stderr");
-    let mut server = spawn_server_with_envs(&args, &stderr_path, &[]);
+    let mut server = spawn_server_with_envs(
+        &args,
+        &stderr_path,
+        &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
+    );
 
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();

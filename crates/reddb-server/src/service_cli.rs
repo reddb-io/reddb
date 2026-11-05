@@ -398,13 +398,21 @@ impl ServerCommandConfig {
         // "vault requires a paged database" error rather than a silently
         // created empty vault). `--no-auth` / `--dev` cleared `vault_enabled`
         // above, so the development carveout never triggers first-boot either.
+        let bootstrap_intent_present = !matches!(
+            self.bootstrap.auth_bootstrap_input(),
+            crate::cluster::AuthBootstrapInput::None
+        );
         let path_absent = self.path.as_ref().is_some_and(|path| !path.exists());
         // Mirrors `embedded_single_file_selected`: only this profile lacks a
         // pager, so it is the only one that needs promotion to create a vault.
         let embedded_single_file = options.storage_profile.deploy_profile
             == crate::storage::DeployProfile::Embedded
             && options.storage_profile.packaging == crate::storage::StoragePackaging::SingleFile;
-        if options.auth.vault_enabled && path_absent && embedded_single_file {
+        if options.auth.vault_enabled
+            && bootstrap_intent_present
+            && path_absent
+            && embedded_single_file
+        {
             // Explicit disk residency already creates a native pager. Keep its
             // single-file selection instead of routing it through the legacy
             // snapshot factory's operational-directory bootstrap workaround.
@@ -415,7 +423,7 @@ impl ServerCommandConfig {
             options.create_if_missing = true;
             tracing::info!(
                 target: "reddb::bootstrap",
-                "first boot: creating paged vault in place for a fresh auth-enabled database"
+                "first-boot self-bootstrap: creating paged vault in place for a fresh database with a bootstrap intent"
             );
         }
 
@@ -2096,6 +2104,11 @@ fn apply_preset_from_config(
         }
     };
 
+    // Every preset mutation must be durable before the adjacent completion
+    // marker can make bootstrap permanently ineligible on a later restart.
+    auth_store
+        .persist_to_vault_result()
+        .map_err(|err| format!("persist bootstrap auth state: {err}"))?;
     persist_bootstrap_state(runtime, &preset, first_admin_id.as_deref())?;
     tracing::info!(preset = %preset, "bootstrap preset applied");
     Ok(())
