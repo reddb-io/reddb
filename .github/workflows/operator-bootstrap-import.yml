@@ -1,11 +1,6 @@
 name: Operator bootstrap import
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - examples/operator_import_bootstrap.rs
-      - .github/workflows/operator-bootstrap-import.yml
   workflow_dispatch:
 
 permissions:

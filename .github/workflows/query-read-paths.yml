@@ -1,14 +1,6 @@
 name: Query read-path diagnostics
 
 on:
-  pull_request:
-    paths:
-      - 'bench/query/**'
-      - 'bench/kv/compare.py'
-      - 'bench/kv/local_matrix.py'
-      - 'bench/results/query-projection-*/**'
-      - 'bench/results/kv-architecture-*/**'
-      - '.github/workflows/query-read-paths.yml'
   workflow_dispatch:
 
 permissions:

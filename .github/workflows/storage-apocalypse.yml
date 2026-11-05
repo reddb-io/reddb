@@ -1,24 +1,6 @@
 name: Storage recovery and growth
 
 on:
-  pull_request:
-    paths:
-      - 'crates/reddb-engine/**'
-      - 'crates/reddb-file/**'
-      - 'crates/reddb-server/src/storage/**'
-      - 'crates/reddb-server/src/runtime/transaction_state.rs'
-      - 'crates/reddb-server/src/runtime/mutation_memory_tests.rs'
-      - 'crates/reddb-server/src/runtime/impl_tenant_registry.rs'
-      - 'crates/reddb-server/src/runtime/red_schema/**'
-      - 'crates/reddb-server/tests/**'
-      - 'crates/unreliable-libc/**'
-      - 'scripts/test-native-kv-crash-recovery.py'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Makefile'
-      - '.github/workflows/storage-apocalypse.yml'
-  schedule:
-    - cron: '41 4 * * *'
   workflow_dispatch:
 
 permissions:

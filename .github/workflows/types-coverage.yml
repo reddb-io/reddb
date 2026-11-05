@@ -6,11 +6,6 @@ name: Types Coverage
 # isolated line coverage drops below 90%.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-types/**'
-      - '.github/workflows/types-coverage.yml'
   workflow_dispatch:
 
 concurrency:

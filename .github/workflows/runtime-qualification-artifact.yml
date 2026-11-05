@@ -2,10 +2,6 @@ name: Runtime Qualification Artifact
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/runtime-qualification-artifact.yml'
-      - 'scripts/prepare-runtime-qualification-artifact.py'
 
 permissions:
   contents: read

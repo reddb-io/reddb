@@ -1,0 +1,35 @@
+name: Quick checks
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "develop"]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quick-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick-checks:
+    name: Quick checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check changed whitespace
+        run: git diff --check HEAD^ HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate workflows, manifests and cost policy
+        run: |
+          python -m pip install --disable-pip-version-check PyYAML==6.0.3
+          python .github/scripts/quick-check.py

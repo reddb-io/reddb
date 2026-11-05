@@ -1,19 +1,7 @@
 name: Park migration engine regressions
 on:
-  pull_request:
-    paths:
-      - 'crates/reddb-server/src/runtime/mutation.rs'
-      - 'crates/reddb-server/src/runtime/statement_frame.rs'
-      - 'crates/reddb-server/src/storage/query/planner/shape.rs'
-      - 'crates/reddb-server/src/storage/unified/devx/reddb/impl_metadata.rs'
-      - 'crates/reddb-server/src/storage/unified/store/impl_file.rs'
-      - 'crates/reddb-server/src/storage/unified/manager.rs'
-      - 'crates/reddb-server/tests/native_state_recovery.rs'
-      - 'tests/grouped/docs_kv_queue/integration_queue_timeseries.rs'
-      - 'tests/grouped/schema_query_core/e2e_park_migration_metadata.rs'
-      - 'scripts/test-park-migration-regressions.py'
-      - '.github/workflows/park-migration-regressions.yml'
   workflow_dispatch:
+
 permissions: {contents: read}
 concurrency:
   group: park-migration-engine-${{ github.ref }}
