@@ -12,6 +12,7 @@ import urllib.request
 REDDB_URL = os.environ.get("REDDB_URL", "http://127.0.0.1:5000").rstrip("/")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DATABASE = int(os.environ.get("REDIS_DATABASE", "0"))
 OPS = int(os.environ.get("KV_BENCH_OPS", "1000"))
 WATCH_EVENTS = int(os.environ.get("KV_BENCH_WATCH_EVENTS", "100000"))
 
@@ -119,6 +120,7 @@ def bench_reddb():
 def bench_redis():
     with socket.create_connection((REDIS_HOST, REDIS_PORT), timeout=10) as sock:
         redis_command(sock, "PING")
+        redis_command(sock, "SELECT", REDIS_DATABASE)
         return {
             "put": measure(lambda i: redis_command(sock, "SET", f"kv_bench:put_{i}", i), OPS),
             "get": measure(lambda i: redis_command(sock, "GET", f"kv_bench:put_{i % OPS}"), OPS),
@@ -128,7 +130,7 @@ def bench_redis():
 
 def parse_sse_events(body):
     events = []
-    for block in body.split("\n\n"):
+    for block in body.replace("\r\n", "\n").split("\n\n"):
         for line in block.splitlines():
             if line.startswith("data: "):
                 events.append(json.loads(line[6:]))
@@ -136,6 +138,7 @@ def parse_sse_events(body):
 
 
 def bench_watch():
+    drops_before = http_json("GET", "/stats").get("kv", {}).get("watch_drops", 0)
     last_lsn = 0
     lags = []
     received = 0
@@ -149,17 +152,19 @@ def bench_watch():
             last_lsn = lsn
             received += 1
             lags.append(max(0.0, time.time() * 1000.0 - float(event["committed_at"])))
+    drops_after = http_json("GET", "/stats").get("kv", {}).get("watch_drops", 0)
     return {
         "events": WATCH_EVENTS,
         "received": received,
         "p50_ms": round(percentile(lags, 50), 3),
         "p99_ms": round(percentile(lags, 99), 3),
-        "drops": http_json("GET", "/stats").get("kv", {}).get("watch_drops", 0),
+        "drops": max(0, drops_after - drops_before),
     }
 
 
 def main():
     out = sys.argv[1]
+    watch = bench_watch()
     result = {
         "schema": "reddb.kv-bench.v1",
         "generated_at_unix_ms": int(time.time() * 1000),
@@ -168,14 +173,22 @@ def main():
             "watch_events": WATCH_EVENTS,
             "reddb_url": REDDB_URL,
             "redis": f"{REDIS_HOST}:{REDIS_PORT}",
+            "redis_database": REDIS_DATABASE,
         },
         "reddb": bench_reddb(),
         "redis": bench_redis(),
-        "watch_delivery_lag": bench_watch(),
+        "watch_delivery_lag": watch,
     }
     with open(out, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, sort_keys=True)
         f.write("\n")
+
+    if watch["received"] < watch["events"]:
+        raise RuntimeError(
+            f"WATCH received {watch['received']} of {watch['events']} requested events"
+        )
+    if watch["drops"] != 0:
+        raise RuntimeError(f"WATCH dropped {watch['drops']} events")
 
 
 if __name__ == "__main__":

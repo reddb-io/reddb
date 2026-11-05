@@ -1,57 +1,156 @@
 {
   "config": {
-    "ops": 10000,
-    "redis": "127.0.0.1:6379",
-    "watch_events": 100000
+    "ops": 1000,
+    "watch_events": 1000
   },
-  "generated_at_unix_ms": 1778371200000,
-  "notes": "Initial issue #253 release baseline placeholder. Replace with release-run output from bench/kv/run.sh before publishing a performance claim.",
-  "reddb": {
+  "generated_at_unix_ms": 1793839999132,
+  "normalized": {
     "get": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 4.154985,
+      "p99_ratio_cv": 0.067969,
+      "throughput_ratio": 0.218479,
+      "throughput_ratio_cv": 0.042628
     },
     "incr": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 14.809979,
+      "p99_ratio_cv": 0.155137,
+      "throughput_ratio": 0.061254,
+      "throughput_ratio_cv": 0.120715
     },
     "put": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 1000000000.0,
-      "throughput_ops_s": 0.0
+      "p99_ratio": 11.19163,
+      "p99_ratio_cv": 0.061525,
+      "throughput_ratio": 0.0756,
+      "throughput_ratio_cv": 0.096435
+    }
+  },
+  "notes": "Reviewed six-sample aggregate from workflow runs 41943315223 and 41944039203.",
+  "reddb": {
+    "get": {
+      "ops": 1000,
+      "p50_us": 387.924,
+      "p99_us": 476.059,
+      "throughput_ops_s": 2558.01,
+      "variation": {
+        "p50_us_cv": 0.00628,
+        "p50_us_max": 390.759,
+        "p50_us_min": 382.829,
+        "p99_us_cv": 0.117493,
+        "p99_us_max": 608.098,
+        "p99_us_min": 448.245,
+        "throughput_ops_s_cv": 0.014292,
+        "throughput_ops_s_max": 2588.732,
+        "throughput_ops_s_min": 2489.922
+      }
+    },
+    "incr": {
+      "ops": 1000,
+      "p50_us": 1358.274,
+      "p99_us": 1685.796,
+      "throughput_ops_s": 743.4635,
+      "variation": {
+        "p50_us_cv": 0.151395,
+        "p50_us_max": 1585.028,
+        "p50_us_min": 1140.973,
+        "p99_us_cv": 0.202371,
+        "p99_us_max": 2143.308,
+        "p99_us_min": 1356.291,
+        "throughput_ops_s_cv": 0.151836,
+        "throughput_ops_s_max": 867.81,
+        "throughput_ops_s_min": 625.148
+      }
+    },
+    "put": {
+      "ops": 1000,
+      "p50_us": 1172.8115,
+      "p99_us": 1384.32,
+      "throughput_ops_s": 860.545,
+      "variation": {
+        "p50_us_cv": 0.152701,
+        "p50_us_max": 1363.426,
+        "p50_us_min": 994.073,
+        "p99_us_cv": 0.135669,
+        "p99_us_max": 1591.087,
+        "p99_us_min": 1166.497,
+        "throughput_ops_s_cv": 0.147307,
+        "throughput_ops_s_max": 991.458,
+        "throughput_ops_s_min": 731.332
+      }
     }
   },
   "redis": {
     "get": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 84.275,
+      "p99_us": 118.6685,
+      "throughput_ops_s": 11619.488,
+      "variation": {
+        "p50_us_cv": 0.050715,
+        "p50_us_max": 94.845,
+        "p50_us_min": 81.696,
+        "p99_us_cv": 0.088953,
+        "p99_us_max": 138.916,
+        "p99_us_min": 108.916,
+        "throughput_ops_s_cv": 0.048602,
+        "throughput_ops_s_max": 12019.618,
+        "throughput_ops_s_min": 10379.54
+      }
     },
     "incr": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 83.442,
+      "p99_us": 117.604,
+      "throughput_ops_s": 11765.363,
+      "variation": {
+        "p50_us_cv": 0.057397,
+        "p50_us_max": 89.062,
+        "p50_us_min": 73.606,
+        "p99_us_cv": 0.111835,
+        "p99_us_max": 135.514,
+        "p99_us_min": 92.921,
+        "throughput_ops_s_cv": 0.062071,
+        "throughput_ops_s_max": 13285.115,
+        "throughput_ops_s_min": 10882.732
+      }
     },
     "put": {
-      "ops": 10000,
-      "p50_us": 0.0,
-      "p99_us": 0.0,
-      "throughput_ops_s": 0.0
+      "ops": 1000,
+      "p50_us": 84.3485,
+      "p99_us": 124.632,
+      "throughput_ops_s": 11406.8255,
+      "variation": {
+        "p50_us_cv": 0.097826,
+        "p50_us_max": 99.18,
+        "p50_us_min": 78.372,
+        "p99_us_cv": 0.095201,
+        "p99_us_max": 138.837,
+        "p99_us_min": 107.295,
+        "throughput_ops_s_cv": 0.084408,
+        "throughput_ops_s_max": 12525.369,
+        "throughput_ops_s_min": 10115.671
+      }
     }
   },
-  "schema": "reddb.kv-bench.v1",
+  "sample_count": 6,
+  "schema": "reddb.kv-bench.aggregate.v1",
+  "source_runs": [
+    41943315223,
+    41944039203
+  ],
   "watch_delivery_lag": {
-    "drops": 0,
-    "events": 100000,
-    "p50_ms": 0.0,
-    "p99_ms": 0.0,
-    "received": 0
+    "complete_samples": 6,
+    "drops_total": 0,
+    "events_total": 6000,
+    "p50_ms": 1.2015,
+    "p99_ms": 1.743,
+    "received_total": 11994,
+    "variation": {
+      "p50_ms_cv": 0.039076,
+      "p50_ms_max": 1.296,
+      "p50_ms_min": 1.165,
+      "p99_ms_cv": 0.040747,
+      "p99_ms_max": 1.927,
+      "p99_ms_min": 1.715
+    }
   }
 }
