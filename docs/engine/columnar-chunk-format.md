@@ -8,11 +8,11 @@ describes exactly what the writer emits so the format stays auditable and a
 reader can be implemented from this page alone.
 
 > Source of truth:
-> [`storage/unified/column_block.rs`](../../../crates/reddb-server/src/storage/unified/column_block.rs)
+> [`storage/unified/column_block.rs`](../../crates/reddb-server/src/storage/unified/column_block.rs)
 > (the envelope) and
-> [`storage/unified/segment_codec.rs`](../../../crates/reddb-server/src/storage/unified/segment_codec.rs)
+> [`storage/unified/segment_codec.rs`](../../crates/reddb-server/src/storage/unified/segment_codec.rs)
 > (the per-column codec pipeline). The chunk-level writer/reader live in
-> [`storage/timeseries/chunk.rs`](../../../crates/reddb-server/src/storage/timeseries/chunk.rs).
+> [`storage/timeseries/chunk.rs`](../../crates/reddb-server/src/storage/timeseries/chunk.rs).
 
 An `RDCC` block is **not** a parallel object alongside the chunk — the
 sealed chunk *is* the columnar segment. PRD #850 explicitly rejects a
@@ -30,7 +30,7 @@ chunk column-major lets the engine:
   float gauges compress very differently);
 - skip whole **granules** (row ranges) that cannot match a predicate,
   using a sparse min/max index for ranges and a per-granule bloom for
-  equality — without decompressing them;
+  equality — after decoding the column streams;
 - decode only the columns a query references (projection pushdown).
 
 General-purpose collections stay on the row engine, and in-scope collections
@@ -106,8 +106,8 @@ A time-series chunk writes exactly two columns:
 
 | `column_id` | meaning | `logical_type` | semantics → codec |
 |:-----------:|:--------|:---------------|:------------------|
-| `0` | timestamp (ns) | `UnsignedInteger` | `Timestamp` → DoubleDelta + ZSTD(3) |
-| `1` | value | `Float` | `Gauge` → Xor + ZSTD(3) |
+| `0` | timestamp (ns) | `UnsignedInteger` | `Timestamp` → DoubleDelta + LZ4 |
+| `1` | value | `Float` | `Gauge` → Xor + LZ4 |
 
 ## Per-column codec pipeline
 
@@ -128,17 +128,17 @@ Codec tags (one byte, stored in stream + directory headers):
 | 5 | `Dict` | low-cardinality strings / enums |
 | 6 | `Xor` | floating-point gauges (Gorilla XOR) |
 
-Semantics drive selection. Every semantic codec is chained with `ZSTD(3)`
-so the residual stream the leading codec re-shapes into mostly-zero bytes is
-actually shrunk on disk — the ClickHouse `CODEC(DoubleDelta, ZSTD)` posture:
+Semantics drive selection. The selected semantic codecs are chained with LZ4,
+which favors read speed. The self-describing streams also allow older
+ZSTD-compressed data to be read:
 
 | Column semantics | Pipeline |
 |:-----------------|:---------|
-| `Timestamp` | `DoubleDelta` → `ZSTD(3)` |
-| `Gauge` | `Xor` → `ZSTD(3)` |
-| `Counter` | `Delta` → `ZSTD(3)` |
-| `LowCardinality` | `Dict` → `ZSTD(3)` |
-| `Generic` | `ZSTD(3)` |
+| `Timestamp` | `DoubleDelta` → `LZ4` |
+| `Gauge` | `Xor` → `LZ4` |
+| `Counter` | `Delta` → `LZ4` |
+| `LowCardinality` | `Dict` → `LZ4` |
+| `Generic` | `LZ4` |
 
 The stream header records the chain so decode just runs the codecs in
 reverse. Round-trips are lossless for every codec/type pair the selector
@@ -151,8 +151,9 @@ A column's rows are tiled into fixed-size **granules** — one min/max mark
 per `granule_size` rows. The default stride is **8192 rows**
 (`DEFAULT_GRANULE_SIZE`), configurable per seal. This is the chunk's
 BRIN-style skip index made granular: the reader keeps only granules whose
-`[min, max]` interval can intersect a range predicate and materialises just
-those, leaving the rest compressed.
+`[min, max]` interval can intersect a range predicate and examines rows in
+those granules. The current range reader decodes both complete column streams
+before applying the index; it does not avoid decompressing rejected granules.
 
 ```text
 Granule index blob (per indexed column)
@@ -198,9 +199,9 @@ bloom was built from.
 
 `read_column_block_projected(bytes, want)` decodes only the columns whose
 `column_id` appears in `want`. Columns outside the set are skipped *before*
-the expensive decode / granule / bloom parse — their compressed bytes are
-never touched — so a scan that references a subset of columns pays only for
-the columns it reads. The whole-block CRC is still verified regardless.
+the expensive decode / granule / bloom parse, so a scan referencing a subset
+of columns decodes only those columns. The whole-block CRC is still verified
+regardless, so it must process the compressed bytes of all columns.
 
 ## Read path
 
