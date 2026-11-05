@@ -139,9 +139,6 @@ fn map_qse(err: QueueStoreError) -> RedDBError {
             "delivery_id '{id}' does not resolve to a live pending delivery"
         )),
         QueueStoreError::UnknownQueue(q) => RedDBError::NotFound(format!("queue '{q}' not found")),
-        QueueStoreError::ReplicaImmutable => {
-            RedDBError::Internal("replica QueueStore is immutable".to_string())
-        }
     }
 }
 
@@ -1910,7 +1907,7 @@ impl RedDBRuntime {
     /// A `CLAIM` on a queue collection is a delivery *acquisition* — select
     /// and lock pending messages — not a raw UPDATE of the underlying queue
     /// rows. Dispatching here keeps the `QueueLifecycle` state machine
-    /// (ACK/NACK, retry, DLQ, pending delivery, replica replay) the sole
+    /// (ACK/NACK, retry, DLQ, pending delivery) the sole
     /// authority for delivery state, instead of `execute_update_inner_tracked`
     /// mutating queue storage directly.
     ///

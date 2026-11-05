@@ -399,7 +399,6 @@ mod native_helpers;
 mod recovery_xid;
 pub mod secondary_index;
 
-pub use self::builder::EntityBuilder;
 pub(crate) use self::commit::DeferredStoreWalActions;
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;

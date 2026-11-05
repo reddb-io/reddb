@@ -627,9 +627,7 @@ struct HnswIndexInfo {
     entry_point: Option<EntityId>,
 }
 
-pub mod incremental;
 mod manager_impl;
-pub use incremental::{IncrementalIndexMaintainer, IndexDeltaOp, SecondaryIndexHandle};
 impl Default for IntegratedIndexManager {
     fn default() -> Self {
         Self::new()
