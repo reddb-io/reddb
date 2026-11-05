@@ -233,10 +233,16 @@ impl RedDBRuntime {
             .insert_auto(RUNTIME_INDEX_REGISTRY_COLLECTION, entity)
             .map(|_| ())
             .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
-        if index.method == super::index_store::IndexMethodKind::Hash
-            && store.config().resident_memory_bytes_max.is_some()
-        {
-            self.prepare_paged_hash(&index, self.index_store_ref())?;
+        if store.config().resident_memory_bytes_max.is_some() {
+            match index.method {
+                super::index_store::IndexMethodKind::BTree if !index.columns.is_empty() => {
+                    self.prepare_paged_btree(&index, self.index_store_ref())?;
+                }
+                super::index_store::IndexMethodKind::Hash => {
+                    self.prepare_paged_hash(&index, self.index_store_ref())?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
