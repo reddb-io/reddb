@@ -10,6 +10,7 @@
 mod support;
 
 use std::fs::File;
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -209,10 +210,15 @@ fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> Option<i32> {
 /// in-file magic is the marker that the paged vault was created in place —
 /// the `-hdr` sidecar that used to serve this role is retired.
 fn paged_vault_created(db_path: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(db_path) else {
+    let Ok(mut file) = File::open(db_path) else {
         return false;
     };
-    bytes.get(32..36) == Some(b"RDDB".as_slice()) || bytes.get(0..8) == Some(b"RDBSBLK1".as_slice())
+    let mut header = [0_u8; 36];
+    let Ok(bytes_read) = file.read(&mut header) else {
+        return false;
+    };
+    (bytes_read >= 36 && header[32..36] == *b"RDDB")
+        || (bytes_read >= 8 && header[0..8] == *b"RDBSBLK1")
 }
 
 /// Page 0 (or the superblock zone) is flushed by the engine's own cadence,
