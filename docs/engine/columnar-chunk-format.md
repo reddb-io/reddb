@@ -152,8 +152,10 @@ per `granule_size` rows. The default stride is **8192 rows**
 (`DEFAULT_GRANULE_SIZE`), configurable per seal. This is the chunk's
 BRIN-style skip index made granular: the reader keeps only granules whose
 `[min, max]` interval can intersect a range predicate and examines rows in
-those granules. If the complete timestamp index excludes all granules, the
-range reader returns without decoding either column. When any granule may
+those granules. The preliminary index check borrows min/max entries directly
+from the frame without allocating a second copy. If the complete timestamp
+index excludes all granules, the range reader returns without decoding either
+column. When any granule may
 match, it decodes both complete column streams before examining surviving rows;
 it cannot decompress individual granules independently in RDCC v1. The
 whole-block CRC and directory are validated before pruning; skipped streams
@@ -194,12 +196,13 @@ Granule bloom blob (per indexed column)
   per granule:  num_blocks u32        then num_blocks × 32 bytes of bloom words
 ```
 
-For granules with more than 64 rows, the writer counts distinct 32-bit
-hashes up to a limit of 256. If fewer than 256 hashes occur, the bloom is
-sized for those distinct hashes and each is inserted once. Otherwise it uses
-the original row-count sizing. This bounds additional work for high-cardinality
-data, preserves the no-false-negative property, and does not change the
-serialized bloom format. The actual space saving depends on the data.
+The writer builds the bloom once using row-count sizing, then tries folding
+its block count in half. Corresponding blocks are OR-merged under the reduced
+routing mask, preserving every inserted bit. A fold is accepted only while
+each merged word remains at most half full. This conservative occupancy check
+avoids saturating the filter. Compaction scans bloom blocks and never rehashes
+the column values; the serialized format stays unchanged. The actual space
+saving depends on the data.
 
 **Soundness:** a split-block bloom never reports a false negative, so a
 granule that actually holds the target always probes true and survives —

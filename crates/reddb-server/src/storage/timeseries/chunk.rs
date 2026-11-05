@@ -581,24 +581,24 @@ fn range_without_matching_granules(
             && column.logical_type == DataType::Float.to_byte()
     })?;
     let index =
-        reddb_file::decode_column_block_granule_index_blob(timestamps.granule_index?).ok()?;
+        reddb_file::decode_column_block_granule_index_view(timestamps.granule_index?).ok()?;
     let rows = usize::try_from(frame.row_count).ok()?;
-    let granule_size = index.granule_size as usize;
+    let granule_size = index.granule_size() as usize;
     if rows == 0
         || granule_size == 0
-        || index.value_width != 8
-        || index.granules.len() != rows.div_ceil(granule_size)
+        || index.value_width() != 8
+        || index.granule_count() != rows.div_ceil(granule_size)
     {
         return None;
     }
-    for granule in &index.granules {
-        let min = u64::from_le_bytes(granule.min.as_slice().try_into().ok()?);
-        let max = u64::from_le_bytes(granule.max.as_slice().try_into().ok()?);
+    for (min, max) in index.granules() {
+        let min = u64::from_le_bytes(min.try_into().ok()?);
+        let max = u64::from_le_bytes(max.try_into().ok()?);
         if min > max || (min <= end_ns && max >= start_ns) {
             return None;
         }
     }
-    Some(index.granules.len())
+    Some(index.granule_count())
 }
 
 /// Point query: all points whose **value** equals `target` in a sealed

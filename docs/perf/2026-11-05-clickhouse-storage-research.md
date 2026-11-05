@@ -141,6 +141,28 @@ The example does not measure ingestion CPU, high-cardinality compression, or
 ClickHouse. Existing blocks retain their old encoding and size until rewritten
 through a supported lifecycle operation.
 
+## Follow-up performance review
+
+The initial distinct-hash sizing added a per-row hash-set lookup and could
+rehash the full granule when the 256th distinct hash appeared late. It also
+added an owned min/max-index decode before queries that found matches. Both
+costs have been removed: the writer now builds the original bloom once and
+folds sparse blocks, and the preliminary range check borrows index entries.
+
+Isolated optimized Rust measurements on the same Ryzen 5 3600 host compared
+the builders with the original row-sized builder. With 128 unique values,
+the hash-set variant cost about 2.05x and the folding variant about 1.02x,
+with the same 256-byte bloom. With 8,192 rows whose 256th distinct value
+appeared at the end, those ratios were about 2.38x and 1.11x; folding also
+reduced the bloom payload from 16,384 to 1,024 bytes. These measurements are
+of extracted constructors, not end-to-end ingestion or SQL throughput.
+
+Allocation counting of the preliminary range check for a match in the first
+granule fell from 2,001 additional allocations to zero with 1,000 marks, and
+from 100,001 to zero with 50,000 marks. This counts only the early metadata
+check; normal column decoding still allocates when needed. The owned decoder
+and the borrowed view share the same checked parser and on-disk format.
+
 ## Recommended next steps
 
 1. **Establish an end-to-end baseline before choosing a format.** Use the same
