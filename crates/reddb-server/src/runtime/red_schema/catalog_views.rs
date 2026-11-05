@@ -64,7 +64,6 @@ pub(super) fn show_indexes_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         SHOW_INDEX_COLUMNS
             .iter()
@@ -73,32 +72,30 @@ pub(super) fn show_indexes_snapshot(
     );
     let mut rows = Vec::new();
 
-    for collection in snapshot.collections {
-        if !collection_is_visible(&collection.name, visible_collections) {
+    for index in runtime.index_store_ref().list_all_indices() {
+        if !collection_is_visible(&index.collection, visible_collections) {
             continue;
         }
-        for index in runtime.index_store_ref().list_indices(&collection.name) {
-            let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
-            rows.push(UnifiedRecord::with_schema(
-                Arc::clone(&schema),
-                vec![
-                    Value::text(index.name),
-                    Value::text(index.collection),
-                    Value::Array(
-                        index
-                            .columns
-                            .into_iter()
-                            .map(|value| Value::text(value.as_str()))
-                            .collect(),
-                    ),
-                    Value::text(render_index_method_for_ddl(index.method)),
-                    Value::Boolean(index.unique),
-                    entries_indexed
-                        .map(Value::UnsignedInteger)
-                        .unwrap_or(Value::Null),
-                ],
-            ));
-        }
+        let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
+        rows.push(UnifiedRecord::with_schema(
+            Arc::clone(&schema),
+            vec![
+                Value::text(index.name),
+                Value::text(index.collection),
+                Value::Array(
+                    index
+                        .columns
+                        .into_iter()
+                        .map(|value| Value::text(value.as_str()))
+                        .collect(),
+                ),
+                Value::text(render_index_method_for_ddl(index.method)),
+                Value::Boolean(index.unique),
+                entries_indexed
+                    .map(Value::UnsignedInteger)
+                    .unwrap_or(Value::Null),
+            ],
+        ));
     }
 
     Ok(rows)
@@ -1990,5 +1987,66 @@ mod scoped_stats_memory_tests {
         );
         assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
             "document catalog observation must not copy stored payloads: {baseline:?} -> {measured:?}");
+    }
+}
+
+#[cfg(test)]
+mod scoped_index_introspection_io_tests {
+    use super::*;
+    use crate::storage::engine::pager::measure_pager_read_bytes;
+    use crate::storage::{EntityId, UnifiedEntity};
+
+    #[test]
+    fn show_indexes_on_does_not_read_unrelated_collection_payloads() {
+        let directory = tempfile::tempdir().expect("index introspection fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join("indexes.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            runtime
+                .execute_query("CREATE TABLE target (id INT, value TEXT)")
+                .expect("target table");
+            runtime
+                .execute_query("CREATE INDEX target_value_idx ON target (value) USING HASH")
+                .expect("target index");
+            let store = runtime.db().store();
+            store
+                .create_collection("unrelated_payloads")
+                .expect("unrelated collection");
+            for id in 1..=4_096 {
+                store
+                    .insert(
+                        "unrelated_payloads",
+                        UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "unrelated_payloads",
+                            id,
+                            vec![Value::text(format!("payload-{id:08}-{}", "x".repeat(512)))],
+                        ),
+                    )
+                    .expect("unrelated payload");
+            }
+            runtime.checkpoint().expect("persist fixture");
+        }
+
+        let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query("SHOW INDEXES ON target")
+                .expect("target index introspection")
+        });
+        assert!(
+            result
+                .result
+                .records
+                .iter()
+                .any(|record| record.get("name") == Some(&Value::text("target_value_idx"))),
+            "target index remains visible"
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "SHOW INDEXES ON target read {read_bytes} bytes from unrelated payloads"
+        );
     }
 }
