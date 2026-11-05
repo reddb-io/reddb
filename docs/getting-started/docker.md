@@ -29,6 +29,7 @@ Using the prebuilt GHCR image:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -39,7 +40,7 @@ If you do not have GHCR access, build locally instead:
 
 ```bash
 docker build -t reddb .
-docker run --rm -p 5050:5050 -p 55055:55055 -p 5000:5000 reddb
+docker run --rm -e REDDB_NO_AUTH=true -p 5050:5050 -p 55055:55055 -p 5000:5000 reddb
 ```
 
 That's it. RedDB binds RedWire on `0.0.0.0:5050`, gRPC on
@@ -70,6 +71,7 @@ To persist data across container restarts, mount a volume:
 
 ```bash
 docker run --rm \
+  -e REDDB_NO_AUTH=true \
   -p 5050:5050 \
   -p 55055:55055 \
   -p 5000:5000 \
@@ -251,8 +253,9 @@ Names the secret bindings. Each named secret in this list is mounted at
       REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
 ```
 
-`REDDB_VAULT=true` enables the encrypted auth vault. Without it, the default
-container runs in local unauthenticated mode.
+The official image already sets `REDDB_VAULT=true`; this explicit value keeps
+the Compose contract visible. Supplying the mounted vault credential is
+required both on first boot and when reopening the persisted volume.
 
 ```yaml
     healthcheck:
@@ -417,8 +420,8 @@ with the shared cert.
 
 ## 6. Local dev shortcut
 
-For development on your laptop, explicitly disable auth with
-`REDDB_NO_AUTH=true`. Use this only when:
+For development on your laptop, explicitly set `REDDB_NO_AUTH=true` to bypass
+the image's fail-closed production bootstrap. Use this only when:
 
 - You're running on `127.0.0.1` only.
 - The data has no privacy implications.
@@ -445,10 +448,10 @@ docker run --rm \
   ghcr.io/reddb-io/reddb:latest
 ```
 
-The image enables the persistent auth vault by default. On first boot,
-bootstrap an admin and save the returned certificate; on every later boot,
-provide it through `REDDB_CERTIFICATE_FILE`. For a throwaway local container,
-set `REDDB_NO_AUTH=true` explicitly.
+The image defaults to `REDDB_VAULT=true` and the `production` bootstrap preset.
+`REDDB_NO_AUTH=true` is the explicit, loudly logged local-development escape
+hatch. Omit it and provide bootstrap credentials plus either a vault passphrase
+or an explicit certificate-output path for durable auth.
 
 ---
 

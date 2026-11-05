@@ -53,10 +53,13 @@ ENV REDDB_WIRE_BIND_ADDR=0.0.0.0:5050
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:55055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:5000
 ENV REDDB_VAULT=true
-# All listeners bind every interface, so the image requires authentication
-# by default: bootstrap the first admin with `POST /auth/bootstrap` (or
-# REDDB_USERNAME / REDDB_PASSWORD). Set REDDB_NO_AUTH=true to opt out for a
-# throwaway local container — never for anything reachable from a network.
+ENV REDDB_BOOTSTRAP_PRESET=production
+# All listeners bind every interface, so the image requires durable
+# authentication by default. First boot must receive REDDB_USERNAME,
+# REDDB_PASSWORD, and REDDB_VAULT_PASSPHRASE (prefer their *_FILE forms).
+# Certificate-backed bootstrap instead requires REDDB_BOOTSTRAP_CERT_OUT and
+# the resulting certificate must be supplied through REDDB_CERTIFICATE_FILE.
+# Set REDDB_NO_AUTH=true only for a throwaway, network-isolated container.
 ENV REDDB_AUTH=true
 ENV REDDB_REQUIRE_AUTH=true
 ENV RUST_MIN_STACK=8388608

@@ -635,25 +635,9 @@ impl Vault {
     }
 
     fn passphrase_key(passphrase: &str, salt: &[u8; 16]) -> Result<SecureKey, VaultError> {
-        if passphrase.is_empty() || passphrase.len() > 4096 {
-            return Err(VaultError::InvalidCredential(
-                "passphrase must contain 1 to 4096 bytes".into(),
-            ));
-        }
-        let parameters = argon2::Params::new(19 * 1024, 2, 1, Some(32))
-            .expect("invariant: vault Argon2id parameters are valid");
-        let hasher = argon2::Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            parameters,
-        );
-        let mut bytes = [0u8; 32];
-        hasher
-            .hash_password_into(passphrase.as_bytes(), salt, &mut bytes)
-            .map_err(|_| VaultError::Encryption)?;
-        let key = SecureKey::new(&bytes);
-        bytes.fill(0);
-        Ok(key)
+        let bytes = reddb_crypto::vault::passphrase_key(passphrase, salt)
+            .map_err(VaultError::InvalidCredential)?;
+        Ok(SecureKey::new(bytes.as_ref()))
     }
 
     fn check_credential_format(pager: &Pager, expected: u8) -> Result<(), VaultError> {
@@ -1385,6 +1369,103 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
+    }
+
+    #[test]
+    fn portable_vault_preserves_native_auth_payload_and_passphrase_contract() {
+        use reddb_engine::query::local_database::LocalDatabase;
+        use reddb_engine::storage::{
+            entity::{EntityId, RowData, UnifiedEntity},
+            manager::ManagerConfig,
+            resident_file::EmbeddedResidentStore,
+            store_wal::StoreWalAction,
+        };
+        use reddb_file::{OpenMode, StdVfs, Vfs};
+
+        let (pager, directory) = temp_pager();
+        let password = "native portable interop password";
+        let native = Vault::with_passphrase(&pager, password).expect("native key");
+        let mut state = sample_state();
+        state.master_secret = Some(vec![42; 32]);
+        let native_envelope = native.seal_logical_export(&state).expect("native envelope");
+        let path = directory.join("portable.rdb");
+        let mut mode = OpenMode::create_new();
+        mode.read = true;
+        let file = StdVfs.open(&path, mode).expect("private file");
+        let mut database = LocalDatabase::create(file, &path, 0).expect("portable database");
+        database
+            .vault_unlock(password, true)
+            .expect("initialize portable collection");
+        let mut store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("physical store");
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1), "red.local.vault", 1, Vec::new());
+        entity.data = reddb_engine::storage::entity::EntityData::Row(RowData::with_names(
+            vec![reddb_types::Value::Secret(
+                hex::decode(native_envelope).expect("hex"),
+            )],
+            vec!["value".into()],
+        ));
+        store
+            .publish_actions(&[StoreWalAction::upsert_entity(
+                "red.local.vault",
+                &entity,
+                None,
+                reddb_file::STORE_VERSION_CURRENT,
+            )])
+            .expect("import native envelope");
+        let mut database =
+            LocalDatabase::open(store.into_inner(), &path).expect("open imported file");
+        let key = database
+            .vault_unlock(password, false)
+            .expect("native passphrase in portable runtime");
+        database
+            .vault_put(&key, "connection:admin", Some("new credential"))
+            .expect("portable mutation");
+        let store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("read back");
+        let (entity, _) = store
+            .get("red.local.vault", EntityId::new(1))
+            .expect("record")
+            .expect("Vault exists");
+        let Some(reddb_types::Value::Secret(blob)) = entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_by_name("value"))
+        else {
+            panic!("sealed Vault")
+        };
+        let restored = Vault::unseal_logical_export_with_passphrase(&hex::encode(blob), password)
+            .expect("portable envelope in native runtime");
+        assert_eq!(restored.master_secret, state.master_secret);
+        assert_eq!(restored.bootstrapped, state.bootstrapped);
+        assert_eq!(restored.users.len(), state.users.len());
+        for (actual, expected) in restored.users.iter().zip(&state.users) {
+            assert_eq!(actual.username, expected.username);
+            assert_eq!(actual.password_hash, expected.password_hash);
+            assert_eq!(actual.tenant_id, expected.tenant_id);
+        }
+        assert_eq!(restored.api_keys.len(), state.api_keys.len());
+        assert_eq!(
+            restored.kv.get("connection:admin").map(String::as_str),
+            Some("new credential")
+        );
+        drop(store);
+        drop(native);
+        drop(pager);
+        std::fs::remove_dir_all(directory).expect("remove test files");
     }
 
     #[test]

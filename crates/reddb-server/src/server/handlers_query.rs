@@ -472,6 +472,7 @@ impl RedDBServer {
         &self,
         body: Vec<u8>,
         ctx: &crate::server::routing::StreamAuditCtx,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -642,6 +643,7 @@ impl RedDBServer {
 
             if stream_error.is_none() {
                 let exec = self.runtime.execute_query(&(query.clone()));
+                drop(execution_permit.take());
                 match exec {
                     Ok(result) => {
                         let mut records = crate::presentation::query_view::filter_query_records(
@@ -763,6 +765,7 @@ impl RedDBServer {
                     }
                 }
             }
+            drop(execution_permit.take());
 
             if let Some((code, message)) = stream_error.as_ref() {
                 let mut envelope = crate::json::Map::new();
@@ -844,6 +847,7 @@ impl RedDBServer {
         &self,
         body: Vec<u8>,
         ctx: &crate::server::routing::StreamAuditCtx,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         use crate::server::output_stream::{
@@ -1118,6 +1122,8 @@ impl RedDBServer {
                 }
             }
 
+            drop(execution_permit.take());
+
             if let Some((code, message)) = stream_error.as_ref() {
                 let mut envelope = crate::json::Map::new();
                 let mut payload = crate::json::Map::new();
@@ -1235,6 +1241,7 @@ impl RedDBServer {
     pub(crate) fn handle_query_sse_stream<W: std::io::Write>(
         &self,
         body: Vec<u8>,
+        execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         let _query_budget = match self.runtime.query_budget_scope() {
@@ -1322,6 +1329,7 @@ impl RedDBServer {
                     .map_err(reddb_error_to_io)?;
             }
         }
+        drop(execution_permit);
         Ok(())
     }
 
@@ -1383,6 +1391,7 @@ impl RedDBServer {
         body: Vec<u8>,
         principal: &str,
         tenant: &str,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
         writer: &mut W,
     ) -> io::Result<()> {
         let _query_budget = match self.runtime.query_budget_scope() {
@@ -1530,6 +1539,7 @@ impl RedDBServer {
                 return writer.flush();
             }
         };
+        drop(execution_permit.take());
 
         let records = crate::presentation::query_view::filter_query_records(
             &result.result.records,
@@ -2571,6 +2581,7 @@ mod tests {
                     principal: "fixture",
                     token: None,
                 },
+                None,
                 &mut response,
             )
             .expect("HTTP response");
@@ -2600,6 +2611,7 @@ mod tests {
                     principal: "fixture",
                     token: None,
                 },
+                None,
                 &mut response,
             )
             .expect("HTTP response");
@@ -2664,6 +2676,7 @@ mod tests {
                     principal: "fixture",
                     token: None,
                 },
+                None,
                 &mut writer,
             )
             .expect("HTTP response");
@@ -2699,6 +2712,7 @@ mod tests {
                     principal: "fixture",
                     token: None,
                 },
+                None,
                 &mut response,
             )
             .expect("HTTP response");
@@ -2734,6 +2748,7 @@ mod tests {
                     principal: "fixture",
                     token: None,
                 },
+                None,
                 &mut response,
             )
             .expect("HTTP response");

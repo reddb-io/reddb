@@ -353,6 +353,20 @@ fn mcp_uri_allows_bearer(uri: &str) -> bool {
     )
 }
 
+fn mcp_redwire_connect_options(
+    host: String,
+    port: u16,
+    tls: bool,
+    auth: reddb_client::redwire::Auth,
+) -> reddb_client::redwire::ConnectOptions {
+    let options = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+    if tls {
+        options.with_tls(reddb_client::redwire::TlsConfig::new())
+    } else {
+        options
+    }
+}
+
 fn run_mcp_remote(mut options: McpClientOptions) -> i32 {
     if let Err(err) = validate_mcp_remote_connect(&mut options) {
         eprintln!("red mcp: {err}");
@@ -379,16 +393,17 @@ fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), Str
             })?;
             Ok(())
         }
-        reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+        reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
             let host = host.clone();
             let port = *port;
+            let tls = *tls;
             let auth = redwire_auth_from_connection_auth(&options.auth)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|err| format!("build runtime: {err}"))?;
             rt.block_on(async {
-                let opts = reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                let opts = mcp_redwire_connect_options(host, port, tls, auth);
                 tokio::time::timeout(
                     options.timeout,
                     reddb_client::redwire::RedWireClient::connect(opts),
@@ -739,17 +754,17 @@ impl RemoteMcpServer {
                 reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
                     .map_err(|err| format!("{err}"))
             }
-            reddb_wire::ConnectionTarget::RedWire { host, port, .. } => {
+            reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
                 let host = host.clone();
                 let port = *port;
+                let tls = *tls;
                 let auth = redwire_auth_from_connection_auth(&self.options.auth)?;
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|err| format!("build runtime: {err}"))?;
                 rt.block_on(async {
-                    let opts =
-                        reddb_client::redwire::ConnectOptions::new(host, port).with_auth(auth);
+                    let opts = mcp_redwire_connect_options(host, port, tls, auth);
                     let mut client = tokio::time::timeout(
                         self.options.timeout,
                         reddb_client::redwire::RedWireClient::connect(opts),
@@ -1343,9 +1358,13 @@ fn main() {
     // copied into the process environment, where they showed up in
     // `/proc/<pid>/environ` and in every child process. A secret given
     // both ways is still a refusal, not a silent precedence.
-    if let Some(name) = reddb::utils::conflicting_secret_env() {
-        eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
-        std::process::exit(2);
+    // The private local provider receives its credential only over its stdin
+    // bootstrap; a user's server credential environment does not configure it.
+    if std::env::args().nth(1).as_deref() != Some("workspace-store") {
+        if let Some(name) = reddb::utils::conflicting_secret_env() {
+            eprintln!("error: {name} and {name}_FILE are both set; provide exactly one");
+            std::process::exit(2);
+        }
     }
 
     // Owner-only permissions for everything created from here on: the .rdb,
@@ -1356,6 +1375,19 @@ fn main() {
     reddb::utils::file_mode::restrict_new_file_permissions();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Private desktop persistence service: fixed loopback binding, authenticated
+    // IPC-owned endpoint, and no user SQL/remote connection surface.
+    if args
+        .first()
+        .is_some_and(|argument| argument == "workspace-store")
+    {
+        if let Err(error) = reddb_engine::query::local_database::service::run(&args[1..]) {
+            eprintln!("workspace-store: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Handle empty args early.
     if args.is_empty() {
@@ -1605,10 +1637,17 @@ fn main() {
             if let Some(connect) = flag_string(&result.flags, "connect") {
                 if !connect.is_empty() {
                     let token = flag_string(&result.flags, "token").filter(|s| !s.is_empty());
-                    let endpoint = connect
-                        .strip_prefix("grpc://")
-                        .map(|rest| format!("http://{rest}"))
-                        .unwrap_or_else(|| connect.clone());
+                    let endpoint = match reddb_wire::parse(&connect) {
+                        Ok(reddb_wire::ConnectionTarget::Grpc { endpoint }) => endpoint,
+                        Ok(_) => {
+                            eprintln!("rpc: --connect requires grpc:// or grpcs://");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("rpc: invalid --connect URI: {err}");
+                            std::process::exit(1);
+                        }
+                    };
                     let code = reddb::rpc_stdio::run_remote(&endpoint, token);
                     std::process::exit(code);
                 }
@@ -4283,16 +4322,16 @@ fn operational_bootstrap_input(
     }
 }
 
-/// Read the three slice-5 HTTP limiter knobs from CLI flags and env
-/// vars, validate each, and pack them into a `HttpLimitsCliInput` for
+/// Read the HTTP admission/execution knobs from CLI flags and env vars,
+/// validate each, and pack them into a `HttpLimitsCliInput` for
 /// the resolver. Validation failures abort boot with a clear message
 /// (acceptance: "Invalid input fails fast with a clear error").
 fn build_http_limits_cli_input(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<reddb::server::HttpLimitsCliInput, String> {
     use reddb::server::http_limits::{
-        validate_handler_timeout_ms, validate_max_handlers, validate_max_inflight_per_principal,
-        validate_retry_after_secs,
+        validate_execution_workers, validate_handler_timeout_ms, validate_max_handlers,
+        validate_max_inflight_per_principal, validate_retry_after_secs,
     };
 
     fn parse_usize_validated<V>(
@@ -4344,6 +4383,17 @@ fn build_http_limits_cli_input(
         validate_max_handlers,
     )?;
 
+    let execution_workers_flag = parse_usize_validated(
+        "--http-execution-workers",
+        flag_string(flags, "http-execution-workers").filter(|value| !value.is_empty()),
+        validate_execution_workers,
+    )?;
+    let execution_workers_env = parse_usize_validated(
+        "REDDB_HTTP_EXECUTION_WORKERS",
+        env_string("REDDB_HTTP_EXECUTION_WORKERS"),
+        validate_execution_workers,
+    )?;
+
     let handler_timeout_ms_flag = parse_u64_validated(
         "--http-handler-timeout-ms",
         flag_string(flags, "http-handler-timeout-ms").filter(|v| !v.is_empty()),
@@ -4380,6 +4430,8 @@ fn build_http_limits_cli_input(
     Ok(reddb::server::HttpLimitsCliInput {
         max_handlers_flag,
         max_handlers_env,
+        execution_workers_flag,
+        execution_workers_env,
         handler_timeout_ms_flag,
         handler_timeout_ms_env,
         retry_after_secs_flag,
@@ -6051,6 +6103,28 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
+    fn mcp_redwire_connect_options_honor_secure_scheme() {
+        let secure = mcp_redwire_connect_options(
+            "db.example".to_string(),
+            5050,
+            true,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(secure.tls.is_some(), "reds:// must install a TLS config");
+
+        let cleartext = mcp_redwire_connect_options(
+            "localhost".to_string(),
+            5050,
+            false,
+            reddb_client::redwire::Auth::Anonymous,
+        );
+        assert!(
+            cleartext.tls.is_none(),
+            "red:// must remain explicit plaintext"
+        );
+    }
+
+    #[test]
     fn mcp_remote_uri_requires_credentials() {
         let flags = HashMap::from([("url".to_string(), str_flag("https://db.example"))]);
 
@@ -6281,19 +6355,23 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(&[
             ("REDDB_HTTP_MAX_HANDLERS", "99"),
+            ("REDDB_HTTP_EXECUTION_WORKERS", "12"),
             ("REDDB_HTTP_HANDLER_TIMEOUT_MS", "7000"),
             ("REDDB_HTTP_RETRY_AFTER_SECS", "9"),
         ]);
         let flags = HashMap::from([
             ("http-max-handlers".to_string(), str_flag("16")),
+            ("http-execution-workers".to_string(), str_flag("4")),
             ("http-handler-timeout-ms".to_string(), str_flag("5000")),
             ("http-retry-after-secs".to_string(), str_flag("3")),
         ]);
         let limits = build_http_limits_cli_input(&flags).unwrap();
         assert_eq!(limits.max_handlers_flag, Some(16));
+        assert_eq!(limits.execution_workers_flag, Some(4));
         assert_eq!(limits.handler_timeout_ms_flag, Some(5_000));
         assert_eq!(limits.retry_after_secs_flag, Some(3));
         assert_eq!(limits.max_handlers_env, Some(99));
+        assert_eq!(limits.execution_workers_env, Some(12));
         assert_eq!(limits.handler_timeout_ms_env, Some(7_000));
         assert_eq!(limits.retry_after_secs_env, Some(9));
     }
@@ -6305,6 +6383,16 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         let flags = HashMap::from([("http-max-handlers".to_string(), str_flag("0"))]);
         let err = build_http_limits_cli_input(&flags).unwrap_err();
         assert!(err.contains("--http-max-handlers"), "got: {err}");
+        assert!(err.contains(">= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn build_http_limits_rejects_zero_execution_workers_flag() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&["REDDB_HTTP_EXECUTION_WORKERS"]);
+        let flags = HashMap::from([("http-execution-workers".to_string(), str_flag("0"))]);
+        let err = build_http_limits_cli_input(&flags).unwrap_err();
+        assert!(err.contains("--http-execution-workers"), "got: {err}");
         assert!(err.contains(">= 1"), "got: {err}");
     }
 

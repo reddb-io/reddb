@@ -84,6 +84,15 @@ impl RedDBServer {
         request: &HttpRequest,
         writer: &mut W,
     ) -> io::Result<bool> {
+        self.try_route_streaming_with_execution_permit(request, writer, None)
+    }
+
+    pub(crate) fn try_route_streaming_with_execution_permit<W: std::io::Write>(
+        &self,
+        request: &HttpRequest,
+        writer: &mut W,
+        mut execution_permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+    ) -> io::Result<bool> {
         let request_path = Self::route_alias_target(&request.method, &request.path)
             .unwrap_or_else(|| request.path.clone());
         // Two streaming dispatch paths share this entry:
@@ -183,10 +192,15 @@ impl RedDBServer {
                         request.body.clone(),
                         &principal,
                         &tenant,
+                        execution_permit.take(),
                         writer,
                     )?;
                 } else if is_sse {
-                    self.handle_query_sse_stream(request.body.clone(), writer)?;
+                    self.handle_query_sse_stream(
+                        request.body.clone(),
+                        execution_permit.take(),
+                        writer,
+                    )?;
                 } else if is_input_stream_post {
                     let cfg = match crate::server::output_stream::StreamConfig::load(&self.runtime)
                     {
@@ -208,6 +222,7 @@ impl RedDBServer {
                             self.handle_query_ndjson_input_stream(
                                 request.body.clone(),
                                 &audit_ctx,
+                                execution_permit.take(),
                                 writer,
                             )?;
                         }
@@ -246,6 +261,7 @@ impl RedDBServer {
                             self.handle_query_ndjson_stream(
                                 request.body.clone(),
                                 &audit_ctx,
+                                execution_permit.take(),
                                 writer,
                             )?;
                         }
@@ -289,6 +305,13 @@ impl RedDBServer {
         let is_sse = is_query_post && is_stream_ask_query_body(&request.body);
         let is_ndjson = is_query_post && wants_ndjson_response(&request.headers);
         is_sse || is_ndjson || is_input_stream_post || is_select_stream_post
+    }
+
+    /// ASK STREAM performs remote/model I/O while emitting SSE callbacks.
+    /// It remains bounded by HTTP request/principal admission rather than
+    /// holding a scarce synchronous-engine slot for a slow network consumer.
+    pub(crate) fn streaming_request_uses_execution_admission(&self, request: &HttpRequest) -> bool {
+        self.is_streaming_request(request) && !is_stream_ask_query_body(&request.body)
     }
 
     /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
@@ -519,13 +542,29 @@ impl RedDBServer {
     ) -> Option<HttpResponse> {
         if let Some(collection) = collection_kv_invalidate_tags_path(path) {
             return Some(match method {
-                "POST" => self.handle_invalidate_kv_tags(collection, body.to_vec()),
+                "POST" => {
+                    if let Some(deny) =
+                        self.check_collection_http_policy(headers, "delete", collection)
+                    {
+                        deny
+                    } else {
+                        self.handle_invalidate_kv_tags(collection, body.to_vec())
+                    }
+                }
                 _ => json_error(405, "method not allowed for KV tag invalidation endpoint"),
             });
         }
         if let Some((collection, key)) = collection_kv_watch_path(path) {
             return Some(match method {
-                "GET" => self.handle_watch_kv(&collection, &key, query),
+                "GET" => {
+                    if let Some(deny) =
+                        self.check_collection_http_policy(headers, "select", &collection)
+                    {
+                        deny
+                    } else {
+                        self.handle_watch_kv(&collection, &key, query)
+                    }
+                }
                 _ => json_error(405, "method not allowed for KV watch endpoint"),
             });
         }
@@ -830,14 +869,10 @@ impl RedDBServer {
             return true;
         }
 
-        // If no auth store is configured, all requests are permitted.
-        let auth_store = match &self.auth_store {
-            Some(store) => store,
-            None => return true,
-        };
-
-        // If auth is disabled in the config, allow everything.
-        if !auth_store.is_enabled() {
+        let auth_store = self.auth_store.as_deref();
+        let oauth_enabled = self.runtime.oauth_validator().is_some();
+        let local_auth_enabled = auth_store.is_some_and(|store| store.is_enabled());
+        if !local_auth_enabled && !oauth_enabled {
             return true;
         }
 
@@ -851,7 +886,7 @@ impl RedDBServer {
 
         match token {
             Some(tok) => {
-                let role = match resolve_bearer_role(tok, &self.runtime, auth_store.as_ref()) {
+                let role = match resolve_bearer_role(tok, &self.runtime, auth_store) {
                     BearerOutcome::Valid(role) => role,
                     BearerOutcome::Invalid => return false,
                     BearerOutcome::NoMatch => return false,
@@ -875,7 +910,10 @@ impl RedDBServer {
                 // No token: allow only if require_auth is false, and never
                 // for operator routes (those need an admin bearer when no
                 // `RED_ADMIN_TOKEN` is configured).
-                !admin_role_required && !bearer_required && !auth_store.config().require_auth
+                !admin_role_required
+                    && !bearer_required
+                    && !oauth_enabled
+                    && auth_store.is_some_and(|store| !store.config().require_auth)
             }
         }
     }
@@ -926,7 +964,7 @@ pub(crate) fn looks_like_jwt(token: &str) -> bool {
 pub(crate) fn resolve_bearer_role(
     token: &str,
     runtime: &crate::runtime::RedDBRuntime,
-    auth_store: &crate::auth::store::AuthStore,
+    auth_store: Option<&crate::auth::store::AuthStore>,
 ) -> BearerOutcome {
     let token_fp = token_fingerprint(token);
     if looks_like_jwt(token) {
@@ -962,6 +1000,9 @@ pub(crate) fn resolve_bearer_role(
         // matches the behaviour where an operator hands out long-lived
         // base64-segmented API keys that happen to look like JWTs.
     }
+    let Some(auth_store) = auth_store else {
+        return BearerOutcome::NoMatch;
+    };
     match auth_store.validate_token(token) {
         Some((_username, role)) => BearerOutcome::Valid(role),
         None => {
@@ -1516,6 +1557,16 @@ mod tests {
             br#"{"query":"SELECT 1 as n"}"#.to_vec(),
         );
         assert!(server.is_streaming_request(&output));
+        assert!(server.streaming_request_uses_execution_admission(&input));
+        assert!(server.streaming_request_uses_execution_admission(&output));
+
+        let ask_sse = request_with(
+            "POST",
+            "/query",
+            br#"{"query":"ASK 'why?' STREAM"}"#.to_vec(),
+        );
+        assert!(server.is_streaming_request(&ask_sse));
+        assert!(!server.streaming_request_uses_execution_admission(&ask_sse));
     }
 
     #[test]
@@ -3851,6 +3902,9 @@ mod tests {
 
     #[test]
     fn admin_routes_require_an_admin_bearer_when_no_admin_token_is_configured() {
+        let _guard = crate::server::RED_ADMIN_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _token = SecurityEnvGuard::unset("RED_ADMIN_TOKEN");
         let _token_file = SecurityEnvGuard::unset("RED_ADMIN_TOKEN_FILE");
         let (server, _store, admin_key, writer_key) = server_with_users();

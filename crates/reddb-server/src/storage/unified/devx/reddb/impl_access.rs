@@ -1167,6 +1167,7 @@ impl RedDB {
 
             let root = manager.cached_physical_root(root, || {
                 manager.for_each_entity_in_id_order(|entity| {
+                    record_physical_root_row_scan(&name);
                     fnv1a_hash_value(&mut root, &entity.id.raw());
                     fnv1a_hash_value(&mut root, &entity.kind);
                     fnv1a_hash_value(&mut root, &entity.created_at);
@@ -1624,6 +1625,38 @@ impl RedDB {
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
+    }
+}
+
+#[cfg(not(test))]
+fn record_physical_root_row_scan(_collection: &str) {}
+
+#[cfg(test)]
+std::thread_local! {
+    static PHYSICAL_ROOT_ROW_SCANS: std::cell::RefCell<std::collections::BTreeMap<String, u64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn record_physical_root_row_scan(collection: &str) {
+    PHYSICAL_ROOT_ROW_SCANS.with(|scans| {
+        *scans
+            .borrow_mut()
+            .entry(collection.to_string())
+            .or_default() += 1;
+    });
+}
+
+#[cfg(test)]
+impl RedDB {
+    pub(crate) fn reset_physical_root_row_scans_for_test(&self) {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow_mut().clear());
+    }
+
+    pub(crate) fn physical_root_row_scans_for_test(
+        &self,
+    ) -> std::collections::BTreeMap<String, u64> {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow().clone())
     }
 }
 

@@ -56,11 +56,12 @@ pub fn red_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
     })
 }
 
-/// `grpc://` / `grpcs://` single-host. Both forms normalise to a
-/// `Grpc { endpoint: http://host:port }` target.
+/// `grpc://` / `grpcs://` single-host. The endpoint scheme preserves
+/// whether the connection requested plaintext or TLS.
 pub fn grpc_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
     (any::<bool>(), hostname(), opt_port()).prop_map(|(tls, host, port)| {
         let scheme = if tls { "grpcs" } else { "grpc" };
+        let endpoint_scheme = if tls { "https" } else { "http" };
         let resolved = port.unwrap_or(if tls {
             DEFAULT_PORT_GRPCS
         } else {
@@ -71,7 +72,7 @@ pub fn grpc_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
             None => format!("{scheme}://{host}"),
         };
         let target = ConnectionTarget::Grpc {
-            endpoint: format!("http://{host}:{resolved}"),
+            endpoint: format!("{endpoint_scheme}://{host}:{resolved}"),
         };
         (uri, target)
     })
@@ -123,40 +124,42 @@ pub fn grpc_cluster_uri() -> impl Strategy<Value = (String, ConnectionTarget)> {
     // under those schemes is an error rather than a cluster. The rejection is
     // pinned by `red_cluster_uri_is_rejected_with_an_actionable_message`.
     let scheme_strategy = prop_oneof![
-        Just(("grpc", DEFAULT_PORT_GRPC)),
-        Just(("grpcs", DEFAULT_PORT_GRPCS)),
+        Just(("grpc", "http", DEFAULT_PORT_GRPC)),
+        Just(("grpcs", "https", DEFAULT_PORT_GRPCS)),
     ];
     (
         scheme_strategy,
         proptest::collection::vec((hostname(), opt_port()), 2..=5),
         any::<bool>(),
     )
-        .prop_map(|((scheme, default_port), hosts, force_primary)| {
-            let host_part = hosts
-                .iter()
-                .map(|(h, p)| match p {
-                    Some(p) => format!("{h}:{p}"),
-                    None => h.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut uri = format!("{scheme}://{host_part}");
-            if force_primary {
-                uri.push_str("?route=primary");
-            }
-            let mut endpoints = hosts.iter().map(|(h, p)| {
-                let port = p.unwrap_or(default_port);
-                format!("http://{h}:{port}")
-            });
-            let primary = endpoints.next().expect("at least 2 hosts");
-            let replicas: Vec<String> = endpoints.collect();
-            let target = ConnectionTarget::GrpcCluster {
-                primary,
-                replicas,
-                force_primary,
-            };
-            (uri, target)
-        })
+        .prop_map(
+            |((scheme, endpoint_scheme, default_port), hosts, force_primary)| {
+                let host_part = hosts
+                    .iter()
+                    .map(|(h, p)| match p {
+                        Some(p) => format!("{h}:{p}"),
+                        None => h.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut uri = format!("{scheme}://{host_part}");
+                if force_primary {
+                    uri.push_str("?route=primary");
+                }
+                let mut endpoints = hosts.iter().map(|(h, p)| {
+                    let port = p.unwrap_or(default_port);
+                    format!("{endpoint_scheme}://{h}:{port}")
+                });
+                let primary = endpoints.next().expect("at least 2 hosts");
+                let replicas: Vec<String> = endpoints.collect();
+                let target = ConnectionTarget::GrpcCluster {
+                    primary,
+                    replicas,
+                    force_primary,
+                };
+                (uri, target)
+            },
+        )
 }
 
 /// Any documented form. Used by the panic-safety property test

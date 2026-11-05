@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-crypto"
-version = "1.27.11"
+version = "1.28.7"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB cryptographic authority: the canonical per-page encryption-at-rest envelope (AES-256-GCM), mandatory encrypt parameters, and key parsing."
@@ -17,6 +17,9 @@ path = "src/lib.rs"
 
 [dependencies]
 aes-gcm = "0.11"
+argon2 = { version = "0.6.0", features = ["zeroize"] }
+zeroize = "1"
+getrandom = { version = "0.4.2", features = ["wasm_js"] }
 
 [dev-dependencies]
 reddb-types = { workspace = true }

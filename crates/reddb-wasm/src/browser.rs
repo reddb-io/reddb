@@ -22,6 +22,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "queryParameters": true,
             "databaseBackups": true,
             "databaseInspection": true,
+            "localVault": true,
             "sync": false,
         })
     });
@@ -181,6 +182,12 @@ pub struct BrowserDatabase {
     database: reddb_engine::query::local_database::LocalDatabase<BrowserFile>,
 }
 
+/// Opaque, zeroizing key owned by the initialized Worker session, not JS storage.
+#[wasm_bindgen]
+pub struct BrowserVaultKey {
+    key: reddb_engine::query::local_database::vault::LocalVaultKey,
+}
+
 fn local_query_error(error: reddb_engine::query::local_read::LocalReadError) -> JsValue {
     coded_error(error.code(), error)
 }
@@ -242,6 +249,57 @@ fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
 
 #[wasm_bindgen]
 impl BrowserDatabase {
+    #[wasm_bindgen(js_name = vaultInitialized)]
+    pub fn vault_initialized(&self) -> Result<bool, JsValue> {
+        self.database.vault_initialized().map_err(local_query_error)
+    }
+
+    #[wasm_bindgen(js_name = vaultUnlock)]
+    pub fn vault_unlock(
+        &mut self,
+        password: &str,
+        create: bool,
+    ) -> Result<BrowserVaultKey, JsValue> {
+        self.database
+            .vault_unlock(password, create)
+            .map(|key| BrowserVaultKey { key })
+            .map_err(local_query_error)
+    }
+
+    #[wasm_bindgen(js_name = vaultKeys)]
+    pub fn vault_keys(&self, key: &BrowserVaultKey) -> Result<Array, JsValue> {
+        Ok(self
+            .database
+            .vault_keys(&key.key)
+            .map_err(local_query_error)?
+            .iter()
+            .map(|key| JsValue::from_str(key))
+            .collect())
+    }
+
+    #[wasm_bindgen(js_name = vaultReveal)]
+    pub fn vault_reveal(
+        &self,
+        key: &BrowserVaultKey,
+        name: &str,
+    ) -> Result<Option<String>, JsValue> {
+        self.database
+            .vault_reveal(&key.key, name)
+            .map_err(local_query_error)
+    }
+
+    #[wasm_bindgen(js_name = vaultPut)]
+    pub fn vault_put(
+        &mut self,
+        key: &BrowserVaultKey,
+        name: &str,
+        value: Option<String>,
+    ) -> Result<(), JsValue> {
+        self.database
+            .vault_put(&key.key, name, value.as_deref())
+            .map_err(local_query_error)
+    }
+
     pub fn catalog(&self) -> Result<JsValue, JsValue> {
         let result = self.database.catalog().map_err(local_query_error)?;
         js_sys::JSON::parse(&result.to_json().to_string_compact())

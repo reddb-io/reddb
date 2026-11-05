@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-client"
-version = "1.27.11"
+version = "1.28.7"
 edition.workspace = true
 authors.workspace = true
 description = "Official Rust client for RedDB — embedded engine, gRPC, HTTP, and RedWire transports behind one connection-string API. Also hosts the workspace-internal connector + REPL used by the `red` and `red_client` binaries."
@@ -48,6 +48,7 @@ redwire-tls = [
 reddb-grpc-proto = { workspace = true }
 reddb-wire = { workspace = true }
 reddb-types = { workspace = true }
+tonic = { workspace = true, features = ["channel", "tls-ring", "tls-webpki-roots"] }
 # `red_client` binary spins up a current-thread tokio runtime via
 # `#[tokio::main]`. Library callers (the `red` bin) bring their
 # own runtime, so the macro feature is only needed for the bin.
@@ -89,7 +90,7 @@ webpki-roots = { version = "1", optional = true }
 # HTTP / HTTPS transport for the published `Reddb::Http` variant.
 # Pulled in only by the `http` feature. `default-features = false`
 # skips OpenSSL; we use rustls.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync"] }

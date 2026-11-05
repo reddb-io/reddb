@@ -36,6 +36,9 @@ pub enum ErrorCode {
     Engine,
     /// HTTP 404 / collection or resource missing.
     NotFound,
+    /// Server admission refused retryable work because a bounded resource
+    /// (in-flight requests, execution slots, or a principal share) is full.
+    Overloaded,
     /// Server does not advertise support for parameterized transport frames.
     ParamsUnsupported,
     /// Helper input failed local validation before contacting the server.
@@ -59,6 +62,7 @@ impl ErrorCode {
             ErrorCode::AuthRefused => "AUTH_REFUSED",
             ErrorCode::Engine => "ENGINE_ERROR",
             ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::Overloaded => "OVERLOADED",
             ErrorCode::ParamsUnsupported => "PARAMS_UNSUPPORTED",
             ErrorCode::InvalidArgument => "INVALID_ARGUMENT",
             ErrorCode::InvalidResponse => "INVALID_RESPONSE",

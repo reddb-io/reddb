@@ -1622,6 +1622,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn authenticated_binary_bulk_paths_enforce_write_role() {
+        let runtime = create_runtime();
+        let payload = build_user_payload(
+            "role_protected",
+            &[(
+                1u64,
+                "alice",
+                "alice@example.com",
+                30i64,
+                "NYC",
+                1.5f64,
+                "2026-05-04T00:00:00Z",
+            )],
+        );
+        let reader = crate::runtime::mvcc::SnapshotBundle {
+            snapshot: None,
+            auth: Some(("reader".to_string(), crate::auth::Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
+            tenant: None,
+        };
+
+        crate::runtime::mvcc::with_snapshot_bundle(&reader, || {
+            let binary = handle_bulk_insert_binary(&runtime, &payload);
+            assert!(
+                decode_error_message(&binary).contains("cannot insert"),
+                "binary bulk must enforce the role floor"
+            );
+
+            let prevalidated = handle_bulk_insert_binary_prevalidated(&runtime, &payload);
+            assert!(
+                decode_error_message(&prevalidated).contains("cannot insert"),
+                "prevalidated bulk must enforce the role floor"
+            );
+        });
+
+        match runtime.scan_collection("role_protected", None, 10) {
+            Ok(page) => assert!(page.items.is_empty()),
+            Err(crate::RedDBError::NotFound(_)) => {}
+            Err(error) => panic!("unexpected scan error: {error}"),
+        }
+    }
+
+    #[test]
+    fn authenticated_streaming_bulk_commit_enforces_write_role() {
+        let runtime = create_runtime();
+        seed_target_table(&runtime);
+        let mut session = with_test_session(0, 0);
+        let rows = stream_rows_payload(&[(1, "blocked")]);
+        assert!(handle_stream_rows(&runtime, &rows, &mut session).is_empty());
+
+        let reader = crate::runtime::mvcc::SnapshotBundle {
+            snapshot: None,
+            auth: Some(("reader".to_string(), crate::auth::Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("reader")),
+            tenant: None,
+        };
+        let response = crate::runtime::mvcc::with_snapshot_bundle(&reader, || {
+            handle_stream_commit(&runtime, &mut session)
+        });
+        assert!(
+            decode_error_message(&response).contains("cannot insert"),
+            "streaming bulk must enforce the role floor"
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM target")
+            .expect("query")
+            .result
+            .records
+            .is_empty());
+    }
+
     // ── Regression: issue #77 — RedWire binary insert for small row
     // counts must succeed and return MSG_BULK_OK with the right count.
     // The benchmark client maps `insert_one` to `bulk_insert_binary`

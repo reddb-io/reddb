@@ -96,6 +96,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.0",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2105,9 +2106,10 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "reddb-io-client",
+ "reddb-io-engine",
  "reddb-io-file",
  "reddb-io-grpc-proto",
  "reddb-io-rql",
@@ -2119,45 +2121,56 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-tonic",
  "reddb-io-types",
  "reddb-io-wire",
  "reqwest",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "ureq",
+ "webpki-roots",
+ "zstd",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "aes-gcm",
+ "argon2",
+ "getrandom 0.4.3",
+ "zeroize",
 ]
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "crc32fast",
  "hex",
  "parking_lot",
  "rayon",
+ "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
  "regex",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2174,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2186,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-python"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "prost",
  "pyo3",
@@ -2205,14 +2218,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2274,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -2299,12 +2312,13 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "bytes",
  "prost",
@@ -2313,14 +2327,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.27.11"
+version = "1.28.7"
 dependencies = [
  "hmac",
  "reddb-io-types",
@@ -2379,6 +2393,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",

@@ -478,11 +478,10 @@ impl RedDBRuntime {
         // Phase 2.5.4 table-scoped tenancy: if the target table is
         // tenant-scoped and the user didn't name the tenant column,
         // auto-inject it with the thread-local `CURRENT_TENANT()`
-        // value. When the column is named explicitly we trust the
-        // caller (useful for admin tooling that writes on behalf of
-        // specific tenants). An unbound tenant on an implicit-fill
-        // path errors up front rather than producing a row the RLS
-        // policy would silently hide.
+        // value. Explicit values must match the active transport/session
+        // tenant; an unbound platform caller may still write on behalf of a
+        // tenant. An unbound tenant on an implicit-fill path errors up front
+        // rather than producing a row the RLS policy would silently hide.
         let augmented_owned;
         let query = match self.maybe_inject_tenant_column(query)? {
             Some(new_q) => {
@@ -1730,9 +1729,11 @@ impl RedDBRuntime {
     pub(crate) fn insert_timeseries_point(
         &self,
         collection: &str,
-        fields: Vec<(String, Value)>,
+        mut fields: Vec<(String, Value)>,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<EntityId> {
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, collection)?;
+        crate::runtime::mutation::enforce_tenant_fields(self, collection, &mut fields)?;
         apply_collection_default_ttl_metadata(self, collection, &mut metadata);
 
         let (columns, values) = pairwise_columns_values(&fields);
@@ -1865,6 +1866,16 @@ impl RedDBRuntime {
                 fields: fields.into_iter().collect(),
             }),
         );
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            collection,
+            reddb_rql::ast::PolicyAction::Insert,
+            &entity,
+        ) {
+            return Err(RedDBError::Query(format!(
+                "insert into collection '{collection}' denied by row-level security"
+            )));
+        }
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
         // or an autocommit xid (allocated and committed up-front so
         // future snapshots see the row as soon as it lands).

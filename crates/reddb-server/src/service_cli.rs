@@ -20,14 +20,23 @@ pub use server_bootstrap::{bootstrap_server, run_server, transport_set, BootedNo
 
 pub const DEFAULT_ROUTER_BIND_ADDR: &str = "127.0.0.1:5050";
 
+fn suggested_worker_count(cpus: usize) -> usize {
+    match cpus {
+        0 | 1 => 1,
+        2 => 2,
+        _ => cpus - 1,
+    }
+}
+
 /// Detect available CPU cores and suggest worker thread count.
 pub fn detect_runtime_config() -> RuntimeConfig {
     let cpus = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
 
-    // Reserve 1 core for OS, use the rest for workers (minimum 1)
-    let suggested_workers = cpus.saturating_sub(1).max(1);
+    // Two-core instances need both workers to avoid a single blocked query
+    // serialising all engine work. Larger hosts still reserve one core.
+    let suggested_workers = suggested_worker_count(cpus);
 
     RuntimeConfig {
         available_cpus: cpus,
@@ -2050,7 +2059,9 @@ fn apply_preset_from_config(
         return Ok(());
     }
 
-    let mut certificate_output = if matches!(preset.as_str(), PRESET_PRODUCTION | PRESET_CLOUD) {
+    let mut certificate_output = if matches!(preset.as_str(), PRESET_PRODUCTION | PRESET_CLOUD)
+        && auth_store.bootstrap_requires_certificate_delivery()
+    {
         require_bootstrap_certificate_output(bootstrap, &preset)?;
         Some(open_bootstrap_certificate_output(bootstrap)?)
     } else {
@@ -2183,10 +2194,9 @@ fn bootstrap_with_certificate_output(
     // is no newly generated seal to deliver before activation. Mirror that
     // existing credential into the requested file after bootstrap.
     if !certificate_staged {
-        if let Some(certificate) = result.certificate.as_deref() {
-            let output = certificate_output
-                .as_mut()
-                .ok_or_else(|| "bootstrap certificate output was not prepared".to_string())?;
+        if let (Some(certificate), Some(output)) =
+            (result.certificate.as_deref(), certificate_output.as_mut())
+        {
             stage_bootstrap_certificate(output, certificate)?;
             certificate_staged = true;
         }
@@ -2768,6 +2778,7 @@ fn apply_http_limits(
     tracing::info!(
         target: "reddb::http_limits",
         max_handlers = resolved.max_handlers,
+        execution_workers = resolved.execution_workers,
         handler_timeout_ms = resolved.handler_timeout_ms,
         retry_after_secs = resolved.retry_after_secs,
         max_inflight_per_principal = resolved.max_inflight_per_principal,
@@ -2914,6 +2925,13 @@ fn resolve_http_tls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_workers_use_both_cores_on_small_instances() {
+        assert_eq!(suggested_worker_count(1), 1);
+        assert_eq!(suggested_worker_count(2), 2);
+        assert_eq!(suggested_worker_count(4), 3);
+    }
 
     #[test]
     fn render_systemd_unit_contains_expected_execstart() {
@@ -3090,6 +3108,57 @@ mod tests {
         }
         drop(output);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn configured_vault_credentials_do_not_require_certificate_output() {
+        use crate::storage::engine::pager::{Pager, PagerConfig};
+
+        let config = crate::auth::AuthConfig {
+            enabled: true,
+            require_auth: true,
+            vault_enabled: true,
+            ..crate::auth::AuthConfig::default()
+        };
+
+        let passphrase_dir = bootstrap_cert_path("passphrase-vault");
+        std::fs::create_dir_all(&passphrase_dir).expect("passphrase temp directory");
+        let passphrase_pager = Arc::new(
+            Pager::open(passphrase_dir.join("test.rdb"), PagerConfig::default())
+                .expect("passphrase pager"),
+        );
+        let passphrase_store = Arc::new(
+            AuthStore::with_vault_passphrase(
+                config.clone(),
+                Arc::clone(&passphrase_pager),
+                "test-passphrase",
+            )
+            .expect("passphrase vault"),
+        );
+        assert!(!passphrase_store.bootstrap_requires_certificate_delivery());
+        bootstrap_with_certificate_output(&passphrase_store, "admin", "secret", &mut None)
+            .expect("passphrase bootstrap without certificate output");
+        drop(passphrase_store);
+        drop(passphrase_pager);
+        let _ = std::fs::remove_dir_all(passphrase_dir);
+
+        let certificate_dir = bootstrap_cert_path("certificate-vault");
+        std::fs::create_dir_all(&certificate_dir).expect("certificate temp directory");
+        let certificate_pager = Arc::new(
+            Pager::open(certificate_dir.join("test.rdb"), PagerConfig::default())
+                .expect("certificate pager"),
+        );
+        let certificate = "11".repeat(32);
+        let certificate_store = Arc::new(
+            AuthStore::with_vault_certificate(config, Arc::clone(&certificate_pager), &certificate)
+                .expect("certificate vault"),
+        );
+        assert!(!certificate_store.bootstrap_requires_certificate_delivery());
+        bootstrap_with_certificate_output(&certificate_store, "admin", "secret", &mut None)
+            .expect("certificate bootstrap without duplicate output");
+        drop(certificate_store);
+        drop(certificate_pager);
+        let _ = std::fs::remove_dir_all(certificate_dir);
     }
 
     #[test]

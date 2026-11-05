@@ -44,11 +44,13 @@ pub enum LocalReadError {
     Query(String),
     Parameters(super::parameters::UserParamError),
     ResourceLimit,
+    Vault(&'static str),
 }
 
 impl LocalReadError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Vault(code) => code,
             Self::Storage(_) => "DATABASE_ERROR",
             Self::Catalog(_) => "CATALOG_ERROR",
             Self::Parse(_) => "QUERY_PARSE_ERROR",
@@ -63,6 +65,7 @@ impl LocalReadError {
 impl std::fmt::Display for LocalReadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Vault(code) => formatter.write_str(code),
             Self::Storage(error) => error.fmt(formatter),
             Self::Catalog(message) | Self::Query(message) => formatter.write_str(message),
             Self::Parse(error) => error.fmt(formatter),

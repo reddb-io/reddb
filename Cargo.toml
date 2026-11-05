@@ -59,7 +59,7 @@ cast_possible_truncation = "warn"
 
 [package]
 name = "reddb-io"
-version = "1.27.11"
+version = "1.28.7"
 edition.workspace = true
 # Cargo auto-discovers every top-level `tests/*.rs` file as a separate
 # integration-test binary. This crate has 269 such files; keep discovery off
@@ -170,9 +170,10 @@ name = "grouped_timeseries_retention"
 path = "tests/grouped/timeseries_retention.rs"
 
 [dependencies]
+reddb-engine = { workspace = true }
 reddb-wire = { workspace = true }
 reddb-grpc-proto = { workspace = true }
-reddb-client = { workspace = true, features = ["http"] }
+reddb-client = { workspace = true, features = ["http", "redwire-tls"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }

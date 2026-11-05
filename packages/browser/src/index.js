@@ -303,6 +303,15 @@ export async function restoreDatabase(options) {
 
 function databaseMethods(client) {
   return {
+    vault: {
+      status: () => client.call('vaultStatus'),
+      unlock: (password, { create = false } = {}) => client.call('vaultUnlock', { password, create }),
+      lock: () => client.call('vaultLock'),
+      keys: () => client.call('vaultKeys'),
+      reveal: (name) => client.call('vaultReveal', { name }),
+      put: (name, value) => client.call('vaultPut', { name, value }),
+      delete: (name) => client.call('vaultDelete', { name }),
+    },
     ...runtimeMethods(client),
     catalog: () => client.call('catalog'),
     readQuery(sql, params, scopes) {

@@ -110,14 +110,13 @@ static with:
 ldd ./red        # a static binary prints: "not a dynamic executable"
 ```
 
-ARM Linux: `red-linux-aarch64-static` (static) or `red-linux-aarch64` (glibc); 32-bit
-ARMv7: `red-linux-armv7`.
+ARM Linux: `red-linux-aarch64-static` (static) or `red-linux-aarch64` (glibc).
+For 32-bit ARM, build from source and set `REDDB_BIN` to that binary.
 
 ### macOS
 
-`red-macos-aarch64` (Apple Silicon) and `red-macos-x86_64` (Intel) depend only on system
-libraries present on every supported macOS — no extra install. The binaries target
-macOS 11+.
+`red-macos-aarch64` targets Apple Silicon and depends only on system libraries
+present on supported macOS versions. Intel Macs require a source build.
 
 ### Windows
 
@@ -186,8 +185,7 @@ If `connect()` says the binary was not found, the platform package was not insta
 
 - **Optional dependencies were skipped** (`npm install --omit=optional`, `pnpm install --no-optional`, or a
   config that sets `optional=false`). Reinstall with optional dependencies enabled.
-- **Your platform has no prebuilt package.** Supported: Linux x64/arm64 (glibc and musl), Linux armv7, macOS x64/arm64,
-  Windows x64.
+- **Your platform has no prebuilt package.** Supported: Linux x64/arm64 (glibc and musl), macOS arm64, and Windows x64.
 - **An old package manager** that ignores the `libc` field installs both Linux variants; that is harmless, the
   resolver tries the matching one first.
 

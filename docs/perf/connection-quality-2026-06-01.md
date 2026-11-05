@@ -46,11 +46,11 @@ node scripts/connection-quality.mjs --http HOST:PORT \
   the browser path’s latency/throughput, read on the same axis as TCP. Skipped
   (not fatal) when no WSS edge is reachable.
 - **connection-limiter probe** — fires `--concurrency` simultaneous fresh
-  connections × 5 rounds and reports the 200 / 503 / error split. A non-zero 503
-  count is the `HttpConnectionLimiter` load-shedding as designed (cap
-  `(2 * num_cpus).clamp(8, 256)`). The WSS line below it records the **same
-  concurrency multiplexed over one socket** — the browser path fans out by
-  `stream_id`, so there is no per-connection cap to engage.
+  connections × 5 rounds and reports the 200 / 503 / error split. The limiter
+  is request-based: idle keep-alive sockets are cheap, while a non-zero 503
+  means the admitted-request envelope is full. Buffered HTTP requests inside
+  that envelope use a separate CPU-sized execution lane and bounded FIFO queue.
+  The WSS line below it records the same concurrency multiplexed over one socket.
 
 ## Before — `Connection: close`, thread-per-connection HTTP
 
@@ -114,11 +114,12 @@ What the *after* table records, against the *before* above:
   directly against **RedWire-over-TCP**: the two share the codec and differ only
   in the byte transport, so the WSS row quantifies the browser’s overhead (WS
   framing + TLS record layer) relative to native TCP.
-- **connection-limiter probe** loses its ceiling: the `(2*num_cpus).clamp(8,256)`
-  cap is replaced by async backpressure, and the WSS concurrency line shows the
-  same in-flight query count multiplexed over **one** socket with **no
-  per-connection cap to engage** — the high-connection-count browser front-end
-  that was hostile on the `Connection: close` direct path becomes cheap.
+- **connection-limiter probe** no longer measures a connection ceiling. Idle
+  sockets are async tasks, but in-flight requests remain deliberately bounded.
+  Buffered HTTP work runs at `http_execution_workers` concurrency (CPU-sized by
+  default), with admitted excess waiting FIFO. The WSS concurrency line still
+  shows the same in-flight query count multiplexed over **one** socket with no
+  per-connection thread to consume.
 
 Capturing the live *after* numbers requires an async-edge server build with a
 TLS WSS edge configured; this repo’s prebuilt `red` 0.1.5 predates that edge, so
@@ -135,8 +136,9 @@ The connect-cost tax and the 256-connection cap measured in the *before* exist
 because the HTTP backend was thread-per-connection with `Connection: close`
 (one OS thread per in-flight request, capped at `(2*num_cpus).clamp(8,256)`).
 ADR 0036 unifies **every** transport on one async model: keep-alive becomes
-free, the cap is replaced by async backpressure, and — critically — the
+cheap, request admission stays bounded independently from synchronous engine
+execution, and — critically — the
 **100%-in-browser SPA** reaches the server over RedWire-over-WSS, the same
 multiplexed binary protocol as native drivers, so the connect tax and the cap
-both vanish from the browser path. This harness is the before/after instrument
-for exactly that claim.
+on idle connections vanish from the browser path without creating unbounded
+engine concurrency. This harness is the before/after instrument for that claim.

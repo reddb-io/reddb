@@ -45,8 +45,6 @@ export const PLATFORMS = [
   { key: 'linux-x64-musl', os: 'linux', cpu: 'x64', libc: 'musl', asset: 'red-linux-x86_64-static', required: true },
   { key: 'linux-arm64', os: 'linux', cpu: 'arm64', libc: 'glibc', asset: 'red-linux-aarch64', required: true },
   { key: 'linux-arm64-musl', os: 'linux', cpu: 'arm64', libc: 'musl', asset: 'red-linux-aarch64-static', required: true },
-  { key: 'linux-arm', os: 'linux', cpu: 'arm', libc: 'glibc', asset: 'red-linux-armv7', required: true },
-  { key: 'darwin-x64', os: 'darwin', cpu: 'x64', asset: 'red-macos-x86_64', required: false },
   { key: 'darwin-arm64', os: 'darwin', cpu: 'arm64', asset: 'red-macos-aarch64', required: false },
   { key: 'win32-x64', os: 'win32', cpu: 'x64', asset: 'red-windows-x86_64.exe', required: false },
 ]

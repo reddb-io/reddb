@@ -42,6 +42,7 @@ use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
+use crate::transport::execution_admission::ExecutionAdmission;
 use reddb_types::Value;
 
 fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
@@ -298,6 +299,16 @@ pub struct RedDBServer {
     /// `HttpConnectionLimiter` shares an `Arc` so every serve loop on
     /// the same `RedDBServer` shares one cap.
     http_limiter: HttpConnectionLimiter,
+    /// CPU-scaled execution slots for synchronous engine calls. The outer
+    /// `http_limiter` bounds admitted requests; this gate keeps only a CPU-sized
+    /// subset active and parks the remainder on a bounded async FIFO queue.
+    execution_admission: ExecutionAdmission,
+    /// Small, independently bounded admission reserve for Kubernetes health
+    /// probes. A saturated query pool must not make a healthy process fail
+    /// readiness and disappear from its EndpointSlice. Only the four exact
+    /// GET health routes use this limiter; all other work remains subject to
+    /// `http_limiter` and the per-principal cap.
+    health_limiter: HttpConnectionLimiter,
     /// Per-handler total-time deadline (issue #570 slice 2). Each
     /// clear-text handler thread arms a deadline at spawn and bails
     /// with a best-effort 503 at coarse boundaries between request
@@ -364,6 +375,10 @@ pub struct RedDBServer {
 
 /// Default per-handler total-time budget (issue #571 slice 2).
 const DEFAULT_HANDLER_TIMEOUT: Duration = Duration::from_millis(30_000);
+
+/// Health probes are cheap and infrequent, but the reserve is still bounded
+/// so probe traffic cannot create an unlimited bypass around admission.
+const HEALTH_HANDLER_CAP: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerlessWarmupScope {
@@ -454,12 +469,22 @@ impl RedDBServer {
     }
 
     pub fn with_options(runtime: RedDBRuntime, options: ServerOptions) -> Self {
+        let http_limits = HttpLimitsResolved::builtin_defaults();
+        let execution_admission = runtime.configure_execution_admission(
+            http_limits.execution_workers,
+            http_limits
+                .max_handlers
+                .saturating_sub(http_limits.execution_workers),
+            http_limits.handler_timeout_ms,
+        );
         Self {
             runtime,
             options,
             auth_store: None,
             replication: None,
-            http_limiter: HttpConnectionLimiter::with_default_cap(),
+            http_limiter: HttpConnectionLimiter::new(http_limits.max_handlers),
+            execution_admission,
+            health_limiter: HttpConnectionLimiter::new(HEALTH_HANDLER_CAP),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             handler_clock: Arc::new(SystemMonotonicClock::new()),
             slow_inject_ms: Arc::new(AtomicU64::new(0)),
@@ -467,7 +492,7 @@ impl RedDBServer {
             http_request_metrics: HttpRequestMetrics::new(),
             retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
             principal_limiter: PrincipalConnectionLimiter::new(
-                http_limits::DEFAULT_MAX_INFLIGHT_PER_PRINCIPAL,
+                http_limits.max_inflight_per_principal,
             ),
             stream_capacity: output_stream::StreamCapacityRegistry::new(),
             lease_registry: output_stream::LeaseRegistry::new(),
@@ -509,6 +534,12 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn with_http_limiter_cap(mut self, cap: usize) -> Self {
         self.http_limiter = HttpConnectionLimiter::new(cap);
+        let execution_workers = self.execution_admission.active_max().min(cap);
+        self.execution_admission = self.runtime.configure_execution_admission(
+            execution_workers,
+            cap.saturating_sub(execution_workers),
+            self.handler_timeout.as_millis().min(u64::MAX as u128) as u64,
+        );
         self
     }
 
@@ -518,6 +549,11 @@ impl RedDBServer {
     /// values are assumed validated by [`http_limits::resolve_http_limits`].
     pub fn with_http_limits(mut self, limits: HttpLimitsResolved) -> Self {
         self.http_limiter = HttpConnectionLimiter::new(limits.max_handlers);
+        self.execution_admission = self.runtime.configure_execution_admission(
+            limits.execution_workers,
+            limits.max_handlers.saturating_sub(limits.execution_workers),
+            limits.handler_timeout_ms,
+        );
         self.handler_timeout = Duration::from_millis(limits.handler_timeout_ms);
         self.retry_after_secs = limits.retry_after_secs;
         self.principal_limiter = PrincipalConnectionLimiter::new(limits.max_inflight_per_principal);
@@ -547,6 +583,51 @@ impl RedDBServer {
     #[doc(hidden)]
     pub fn http_limiter(&self) -> &HttpConnectionLimiter {
         &self.http_limiter
+    }
+
+    pub(crate) fn execution_admission(&self) -> &ExecutionAdmission {
+        &self.execution_admission
+    }
+
+    #[doc(hidden)]
+    pub fn http_execution_active(&self) -> usize {
+        self.execution_admission.active()
+    }
+
+    #[doc(hidden)]
+    pub fn http_execution_queued(&self) -> usize {
+        self.execution_admission.queued()
+    }
+
+    #[doc(hidden)]
+    pub fn http_execution_workers(&self) -> usize {
+        self.execution_admission.active_max()
+    }
+
+    /// Test-only override for deterministic single-worker queue coverage.
+    #[doc(hidden)]
+    pub fn with_http_execution_workers(mut self, workers: usize) -> Self {
+        assert!(workers > 0, "HTTP execution workers must be positive");
+        let workers = workers.min(self.http_limiter.cap());
+        self.execution_admission = self.runtime.configure_execution_admission(
+            workers,
+            self.http_limiter.cap().saturating_sub(workers),
+            self.handler_timeout.as_millis().min(u64::MAX as u128) as u64,
+        );
+        self
+    }
+
+    /// Visible for tests that prove health and query admission are isolated.
+    #[doc(hidden)]
+    pub fn health_limiter(&self) -> &HttpConnectionLimiter {
+        &self.health_limiter
+    }
+
+    /// Visible for tests. Production always uses [`HEALTH_HANDLER_CAP`].
+    #[doc(hidden)]
+    pub fn with_health_limiter_cap(mut self, cap: usize) -> Self {
+        self.health_limiter = HttpConnectionLimiter::new(cap);
+        self
     }
 
     /// Visible for tests. Override the per-handler total-time deadline

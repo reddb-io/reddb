@@ -12,6 +12,10 @@ impl GrpcRuntime {
     /// 3. Anonymous (when auth is not required).
     /// 4. Denied.
     pub(crate) fn resolve_auth(&self, metadata: &MetadataMap) -> AuthResult {
+        self.resolve_auth_with_identity(metadata).result
+    }
+
+    pub(crate) fn resolve_auth_with_identity(&self, metadata: &MetadataMap) -> ResolvedGrpcAuth {
         let token = grpc_token(metadata);
 
         // 1. OAuth/OIDC: only attempt when (a) a validator is wired up,
@@ -41,14 +45,20 @@ impl GrpcRuntime {
                             // Use AuthSource::Oauth so audit/who-am-i emits the
                             // right tag (service_impl.rs:2886).
                             let identity = crate::auth::OAuthIdentity {
-                                username,
-                                tenant,
+                                username: username.clone(),
+                                tenant: tenant.clone(),
                                 role,
                                 issuer: validator.config().issuer.clone(),
                                 subject: None,
                                 expires_at_unix_secs: None,
                             };
-                            return AuthResult::from_oauth(identity);
+                            return ResolvedGrpcAuth {
+                                result: AuthResult::from_oauth(identity),
+                                identity: Some((
+                                    crate::auth::UserId::from_parts(tenant.as_deref(), &username),
+                                    role,
+                                )),
+                            };
                         }
                         Err(reason) => {
                             // JWT-shaped + validator configured + failed
@@ -66,7 +76,10 @@ impl GrpcRuntime {
                                 reason = %reddb_wire::audit_safe_log_field(&reason),
                                 "gRPC OAuth JWT rejected"
                             );
-                            return AuthResult::Denied(format!("oauth jwt: {reason}"));
+                            return ResolvedGrpcAuth {
+                                result: AuthResult::Denied(format!("oauth jwt: {reason}")),
+                                identity: None,
+                            };
                         }
                     }
                 }
@@ -80,21 +93,44 @@ impl GrpcRuntime {
         // 2. Try AuthStore (session tokens / API keys) when auth is enabled.
         if self.auth_store.is_enabled() {
             if let Some(token) = token {
-                if let Some((principal, role)) = self.auth_store.validate_token_full(token) {
-                    return AuthResult::password_principal(principal, role);
+                if let Some((id, role)) = self.auth_store.validate_token_full(token) {
+                    return ResolvedGrpcAuth {
+                        result: AuthResult::password_principal(id.clone(), role),
+                        identity: Some((id, role)),
+                    };
                 }
                 // A presented-but-invalid credential is always a hard
                 // reject: degrading a revoked or forged token to
                 // `Anonymous` (which may read *and* write when
                 // `require_auth` is off) would let it keep working.
-                return AuthResult::Denied("invalid or expired token".into());
+                return ResolvedGrpcAuth {
+                    result: AuthResult::Denied("invalid or expired token".into()),
+                    identity: None,
+                };
             } else if self.auth_store.config().require_auth {
-                return AuthResult::Denied("authentication required".into());
+                return ResolvedGrpcAuth {
+                    result: AuthResult::Denied("authentication required".into()),
+                    identity: None,
+                };
             }
         }
 
+        if self.oauth_validator().is_some() {
+            return ResolvedGrpcAuth {
+                result: AuthResult::Denied(if token.is_some() {
+                    "invalid or unsupported bearer token".into()
+                } else {
+                    "authentication required".into()
+                }),
+                identity: None,
+            };
+        }
+
         // 3. No token or auth not enabled -> anonymous.
-        AuthResult::Anonymous
+        ResolvedGrpcAuth {
+            result: AuthResult::Anonymous,
+            identity: None,
+        }
     }
 
     /// Return the lazily-constructed gRPC OAuth validator, when one is

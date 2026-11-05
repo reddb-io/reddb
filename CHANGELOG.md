@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.28.7
+
+### Patch Changes
+
+- [#2628](https://github.com/reddb-io/reddb/pull/2628) [`11c7421`](https://github.com/reddb-io/reddb/commit/11c7421ccd4c9c575e08dcacf294611aa94584bf) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Share bounded execution admission across HTTP, RedWire, PostgreSQL wire, and gRPC, expose actionable overload reasons, and enable HTTP/2 multiplexing in the supported clients.
+
+## 1.28.6
+
+### Patch Changes
+
+- [#2625](https://github.com/reddb-io/reddb/pull/2625) [`029c792`](https://github.com/reddb-io/reddb/commit/029c7922cbf982f4c0531183e27b3bc985fe8123) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep recovered physical indexes queryable after reopen instead of misclassifying loaded registry entries as still building.
+
+## 1.28.5
+
+### Patch Changes
+
+- [#2623](https://github.com/reddb-io/reddb/pull/2623) [`8b534f9`](https://github.com/reddb-io/reddb/commit/8b534f9ef40bf40952cfadaad997eef5d95dc2f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound buffered HTTP engine execution by CPU-sized workers, queue admitted excess work FIFO, and expose execution saturation metrics.
+
+## 1.28.4
+
+### Patch Changes
+
+- [#2619](https://github.com/reddb-io/reddb/pull/2619) [`89d2076`](https://github.com/reddb-io/reddb/commit/89d2076669d73acbb8bfd87b1ee36aaba0e8bcc5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline physical compaction on read-only OCI FSS/NFS sources while still
+  excluding active writers through the database file lock.
+
+## 1.28.3
+
+### Patch Changes
+
+- [#2616](https://github.com/reddb-io/reddb/pull/2616) [`f4d6f8b`](https://github.com/reddb-io/reddb/commit/f4d6f8b04a3f363045060897f92b348c95475edf) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Cancel cooperative query execution when an HTTP request deadline expires so
+  blocking workers release their global and per-principal capacity permits.
+
+## 1.28.2
+
+### Patch Changes
+
+- [#2614](https://github.com/reddb-io/reddb/pull/2614) [`4657304`](https://github.com/reddb-io/reddb/commit/4657304941f60a45a49feecc9b89bffb9d840b02) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use both engine workers on two-core instances so one blocked query cannot
+  serialize every database request and exhaust the HTTP admission limit.
+
+## 1.28.1
+
+### Patch Changes
+
+- [#2611](https://github.com/reddb-io/reddb/pull/2611) [`9f46fe9`](https://github.com/reddb-io/reddb/commit/9f46fe9b820f68770b79815a794ac1bc1e2f056b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep health, liveness, readiness, and startup probes responsive when normal
+  HTTP query capacity is saturated by giving the exact GET probe routes a small,
+  independently bounded admission reserve.
+
+## 1.28.0
+
+### Minor Changes
+
+- [#2609](https://github.com/reddb-io/reddb/pull/2609) [`8e295e2`](https://github.com/reddb-io/reddb/commit/8e295e2dbd54fe2a9177a1d7d907510c9436467b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add a private local workspace service to the RedDB binary, backed by the shared native/WASM Vault and transaction engine. Local hosts can atomically save connection metadata and encrypted credentials, retain metadata access while locked, and use OS-keychain opening credentials without exposing the private database as a user query target.
+
+## 1.27.13
+
+### Patch Changes
+
+- [#2607](https://github.com/reddb-io/reddb/pull/2607) [`65bbcef`](https://github.com/reddb-io/reddb/commit/65bbcef282681ecb7659855c73ad220913ad7d8f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Harden TLS connection handling, credential redaction, tenant isolation, and
+  row-level authorization across HTTP, gRPC, RedWire, and KV operations.
+
+## 1.27.12
+
+### Patch Changes
+
+- [#2602](https://github.com/reddb-io/reddb/pull/2602) [`5e1c499`](https://github.com/reddb-io/reddb/commit/5e1c4990c118dc2bc02a3a392c7bdb6bd671d8a5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep cold collection drops bounded to their native registry and targeted
+  physical metadata publication. Avoid fingerprinting append-heavy internal
+  collection history before acknowledging the drop, and preserve the committed
+  absence plus unrelated collections across restart.
+
 ## 1.27.11
 
 ### Patch Changes

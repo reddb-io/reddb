@@ -116,6 +116,81 @@ fn run_runtime_blocking<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+fn pg_frame_requires_execution(frame: &FrontendMessage) -> bool {
+    matches!(
+        frame,
+        FrontendMessage::Query(_)
+            | FrontendMessage::Parse(_)
+            | FrontendMessage::Describe(_)
+            | FrontendMessage::Execute(_)
+    )
+}
+
+async fn acquire_pg_execution(
+    runtime: &RedDBRuntime,
+) -> Result<crate::transport::execution_admission::ExecutionPermit, &'static str> {
+    use crate::transport::execution_admission::ExecutionAdmissionError;
+
+    let admission = runtime.execution_admission();
+    match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+            Err("execution_queue_full: engine execution queue is full; retryable=true")
+        }
+        Ok(Err(ExecutionAdmissionError::Closed)) => {
+            Err("execution_admission_closed: engine execution admission is unavailable")
+        }
+        Err(_) => Err(
+            "execution_queue_timeout: deadline expired while waiting to execute; retryable=true",
+        ),
+    }
+}
+
+/// Holds the execution slot only until the response starts. PG handlers do
+/// all synchronous engine work before their first write; releasing at that
+/// boundary prevents a slow client from occupying engine capacity while rows
+/// drain through the socket.
+struct ExecutionResponseWriter<'a, S> {
+    inner: &'a mut S,
+    permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+}
+
+impl<'a, S> ExecutionResponseWriter<'a, S> {
+    fn new(
+        inner: &'a mut S,
+        permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+    ) -> Self {
+        Self { inner, permit }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ExecutionResponseWriter<'_, S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_shutdown(cx)
+    }
+}
+
 /// Run `f` with the authenticated PG-Wire identity installed as the
 /// thread-local execution identity, restoring the prior state afterwards.
 ///
@@ -414,13 +489,42 @@ where
             Err(e) => return Err(e),
         };
 
+        // PG sessions are serial, but every session competes for the same
+        // runtime-wide engine budget as HTTP, gRPC and RedWire. Admission is
+        // taken before any parser/planner/storage work. The response writer
+        // releases it before the first socket write, so a slow client cannot
+        // occupy engine capacity while rows drain.
+        let mut execution_permit = if pg_frame_requires_execution(&frame) {
+            match acquire_pg_execution(&runtime).await {
+                Ok(permit) => Some(permit),
+                Err(message) => {
+                    // SQLSTATE 53000 = insufficient_resources. Keep the stable
+                    // RedDB reason code in the message for clients that expose
+                    // only the PostgreSQL ErrorResponse text.
+                    send_error(&mut stream, "53000", message).await?;
+                    write_frame(
+                        &mut stream,
+                        &BackendMessage::ReadyForQuery(TransactionStatus::Idle),
+                    )
+                    .await?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         match frame {
             FrontendMessage::Query(sql) => {
-                handle_simple_query(&mut stream, &runtime, auth_context.as_ref(), &sql).await?;
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
+                handle_simple_query(&mut response, &runtime, auth_context.as_ref(), &sql).await?;
             }
             FrontendMessage::Parse(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_parse(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     &prepared_registry,
                     &mut prepared,
@@ -440,8 +544,10 @@ where
                 .await?;
             }
             FrontendMessage::Describe(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_describe(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     auth_context.as_ref(),
                     &prepared_registry,
@@ -452,8 +558,10 @@ where
                 .await?;
             }
             FrontendMessage::Execute(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_execute(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     auth_context.as_ref(),
                     &prepared_registry,
@@ -1729,6 +1837,24 @@ mod tests {
         let mut eof = [0u8; 1];
         assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_writer_releases_execution_slot_before_socket_write() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        runtime.configure_execution_admission(1, 0, 100);
+        let admission = runtime.execution_admission();
+        let permit = admission.acquire().await.expect("execution permit");
+        assert_eq!(admission.active(), 1);
+
+        let (mut server_io, mut client_io) = tokio::io::duplex(64);
+        let mut writer = ExecutionResponseWriter::new(&mut server_io, Some(permit));
+        writer.write_all(b"ok").await.unwrap();
+        assert_eq!(admission.active(), 0);
+
+        let mut received = [0_u8; 2];
+        client_io.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"ok");
     }
 
     #[tokio::test]

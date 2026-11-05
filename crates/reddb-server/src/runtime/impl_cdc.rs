@@ -343,13 +343,26 @@ impl RedDBRuntime {
         since_lsn: u64,
         max_count: usize,
     ) -> Vec<crate::replication::cdc::KvWatchEvent> {
-        self.inner
-            .cdc
-            .poll(since_lsn, max_count)
+        self.kv_watch_batch_since(collection, key, since_lsn, max_count)
+            .0
+    }
+
+    pub(crate) fn kv_watch_batch_since(
+        &self,
+        collection: &str,
+        key: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> (Vec<crate::replication::cdc::KvWatchEvent>, u64) {
+        let events = self.inner.cdc.poll(since_lsn, max_count);
+        let scanned_through = events.last().map(|event| event.lsn).unwrap_or(since_lsn);
+        let visible = events
             .into_iter()
             .filter_map(|event| event.kv)
             .filter(|event| event.collection == collection && event.key == key)
-            .collect()
+            .filter(|event| crate::runtime::rls_injection::kv_watch_event_passes_rls(self, event))
+            .collect();
+        (visible, scanned_through)
     }
 
     pub fn kv_watch_events_since_prefix(
@@ -359,13 +372,26 @@ impl RedDBRuntime {
         since_lsn: u64,
         max_count: usize,
     ) -> Vec<crate::replication::cdc::KvWatchEvent> {
-        self.inner
-            .cdc
-            .poll(since_lsn, max_count)
+        self.kv_watch_batch_since_prefix(collection, prefix, since_lsn, max_count)
+            .0
+    }
+
+    pub(crate) fn kv_watch_batch_since_prefix(
+        &self,
+        collection: &str,
+        prefix: &str,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> (Vec<crate::replication::cdc::KvWatchEvent>, u64) {
+        let events = self.inner.cdc.poll(since_lsn, max_count);
+        let scanned_through = events.last().map(|event| event.lsn).unwrap_or(since_lsn);
+        let visible = events
             .into_iter()
             .filter_map(|event| event.kv)
             .filter(|event| event.collection == collection && event.key.starts_with(prefix))
-            .collect()
+            .filter(|event| crate::runtime::rls_injection::kv_watch_event_passes_rls(self, event))
+            .collect();
+        (visible, scanned_through)
     }
 
     pub(crate) fn kv_watch_subscribe<'a>(

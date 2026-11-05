@@ -361,6 +361,12 @@ struct GrpcRuntime {
     oauth_validator: Option<Arc<crate::auth::OAuthValidator>>,
 }
 
+#[derive(Clone)]
+struct ResolvedGrpcAuth {
+    result: AuthResult,
+    identity: Option<(crate::auth::UserId, Role)>,
+}
+
 impl GrpcRuntime {
     fn admin_use_cases(&self) -> AdminUseCases<'_, RedDBRuntime> {
         AdminUseCases::new(&self.runtime)
@@ -468,22 +474,51 @@ impl Drop for GrpcIdentityGuard {
     }
 }
 
-/// Resolve the `(UserId, Role)` a gRPC request executes as, from the
-/// dispatch context the catalog interceptor attached plus the metadata
-/// bearer (for the role).
+/// Resolve the `(UserId, Role)` a gRPC request executes as from the typed
+/// dispatch context installed by the catalog interceptor.
 fn grpc_request_identity<T>(
-    runtime: &GrpcRuntime,
     request: &Request<T>,
 ) -> Option<(crate::auth::UserId, crate::auth::Role)> {
-    let principal = request
+    request
         .extensions()
         .get::<catalog_dispatch::GrpcDispatchContext>()
-        .and_then(|context| context.principal.clone())?;
-    let role = match runtime.resolve_auth(request.metadata()) {
-        crate::auth::middleware::AuthResult::Authenticated { role, .. } => role,
-        _ => return None,
-    };
-    Some((principal, role))
+        .and_then(|context| context.identity.clone())
+}
+
+async fn grpc_spawn_blocking<F, R>(runtime: &RedDBRuntime, f: F) -> Result<R, Status>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    use crate::transport::execution_admission::ExecutionAdmissionError;
+
+    let admission = runtime.execution_admission();
+    let permit =
+        match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                return Err(Status::resource_exhausted(
+                    "execution_queue_full: engine execution queue is full",
+                ))
+            }
+            Ok(Err(ExecutionAdmissionError::Closed)) => {
+                return Err(Status::unavailable(
+                    "execution_admission_closed: engine execution admission is unavailable",
+                ))
+            }
+            Err(_) => {
+                return Err(Status::deadline_exceeded(
+                    "execution_queue_timeout: deadline expired while waiting to execute",
+                ))
+            }
+        };
+    let bundle = crate::runtime::execution_context::snapshot_bundle();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::runtime::execution_context::with_snapshot_bundle(&bundle, f)
+    })
+    .await
+    .map_err(|error| Status::internal(format!("engine execution task failed: {error}")))
 }
 
 fn execute_grpc_query_request(
@@ -576,6 +611,34 @@ fn grpc_query_request_error(error: crate::api::RedDBError) -> Status {
 mod grpc_query_value_tests {
     use super::*;
     use proto::query_value::Kind;
+
+    #[tokio::test]
+    async fn grpc_execution_refuses_when_shared_runtime_queue_is_full() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.configure_execution_admission(1, 0, 100);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let status = grpc_spawn_blocking(&runtime, || ()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains("execution_queue_full"));
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn grpc_execution_reports_queue_deadline_separately() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.configure_execution_admission(1, 1, 1);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let status = grpc_spawn_blocking(&runtime, || ()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert!(status.message().contains("execution_queue_timeout"));
+        drop(active);
+    }
 
     #[test]
     fn grpc_query_value_maps_to_request_param_variants() {

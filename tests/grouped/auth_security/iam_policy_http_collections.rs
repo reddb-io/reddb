@@ -310,3 +310,51 @@ fn kv_write_denied_when_policy_denies_insert() {
     assert!(body.contains("\"action\":\"insert\""), "body={body}");
     assert!(body.contains("\"name\":\"cache\""), "body={body}");
 }
+
+#[test]
+fn kv_watch_denied_when_policy_denies_select() {
+    let h = spawn("kv_watch_deny");
+    create_collection(&h.addr, &h.token, "watch_cache");
+    install_collection_policy(
+        &h.store,
+        "p_watch_cache_deny_select",
+        "deny",
+        &["select"],
+        "watch_cache",
+    );
+
+    let (status, body) = http(
+        &h.addr,
+        "GET",
+        "/collections/watch_cache/kvs/hello/watch",
+        Some(&h.token),
+        None,
+    );
+    assert_eq!(status, 403, "kv watch denied; body={body}");
+    assert!(body.contains("\"action\":\"select\""), "body={body}");
+    assert!(body.contains("\"name\":\"watch_cache\""), "body={body}");
+}
+
+#[test]
+fn kv_tag_invalidation_denied_when_policy_denies_delete() {
+    let h = spawn("kv_invalidate_deny");
+    create_collection(&h.addr, &h.token, "tagged_cache");
+    install_collection_policy(
+        &h.store,
+        "p_tagged_cache_deny_delete",
+        "deny",
+        &["delete"],
+        "tagged_cache",
+    );
+
+    let (status, body) = http(
+        &h.addr,
+        "POST",
+        "/collections/tagged_cache/kvs/invalidate_tags",
+        Some(&h.token),
+        Some(r#"{"tags":["customer:1"]}"#),
+    );
+    assert_eq!(status, 403, "kv tag invalidation denied; body={body}");
+    assert!(body.contains("\"action\":\"delete\""), "body={body}");
+    assert!(body.contains("\"name\":\"tagged_cache\""), "body={body}");
+}

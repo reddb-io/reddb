@@ -272,3 +272,65 @@ test('Chromium: compare fresh Workers and reusable sessions for the same 300 kB 
     console.log('300 kB open / commit / close, same file history and alternating order (ms):', result)
   } finally { await browser.close() }
 })
+
+for (const name of selected) test(`${name}: native Vault transactions, file-release keys, lock and restart`, { timeout: 120_000 }, async () => {
+  const profile = await mkdtemp(resolve(temporary, 'vault-'))
+  let context
+  try {
+    context = await browsers[name].launchPersistentContext(profile, { headless: true })
+    let page = await context.newPage(); await page.goto(origin)
+    const result = await page.evaluate(async prefix => {
+      const { createDatabaseSession } = await import(prefix + 'index.js')
+      const session = await createDatabaseSession()
+      let db = await session.openDatabase({ name: 'private-vault', create: true })
+      try {
+        const initial = await db.vault.status()
+        await db.vault.unlock('local master password', { create: true })
+        await db.query('CREATE TABLE profiles (label TEXT)')
+        await db.query('BEGIN')
+        await db.query('INSERT INTO profiles VALUES ($1)', ['saved admin'])
+        await db.vault.put('connection:admin', 'private admin credential')
+        await db.query('COMMIT')
+        await db.query('BEGIN')
+        await db.vault.put('connection:admin', 'abandoned credential')
+        await db.close()
+        db = await session.openDatabase({ name: 'private-vault' })
+        const restored = await db.vault.reveal('connection:admin')
+        const unlocked = await db.vault.status()
+        const backup = await db.exportBackup()
+        const raw = new TextDecoder().decode(backup)
+        const plaintext = ['local master password', 'private admin credential', 'abandoned credential'].some(value => raw.includes(value))
+        await db.vault.lock()
+        let locked
+        try { await db.vault.reveal('connection:admin') } catch (error) { locked = error.code }
+        const rows = await db.query('SELECT label FROM profiles')
+        let wrong
+        try { await db.vault.unlock('wrong password', { create: true }) } catch (error) { wrong = error.code }
+        await db.vault.unlock('local master password')
+        await db.query('BEGIN')
+        await db.vault.delete('connection:admin')
+        await db.query('ROLLBACK')
+        return { initial, restored, unlocked, plaintext, locked, wrong, rows, keys: await db.vault.keys() }
+      } finally { await db.close(); await session.close() }
+    }, prefix)
+    assert.deepEqual(result, {
+      initial: { initialized: false, locked: true },
+      restored: 'private admin credential', unlocked: { initialized: true, locked: false },
+      plaintext: false, locked: 'VAULT_LOCKED', wrong: 'VAULT_AUTHENTICATION_FAILED',
+      rows: { columns: ['label'], rows: [['saved admin']] }, keys: ['connection:admin'],
+    })
+    await context.close()
+    context = await browsers[name].launchPersistentContext(profile, { headless: true })
+    page = await context.newPage(); await page.goto(origin)
+    const reopened = await page.evaluate(async prefix => {
+      const { openDatabase } = await import(prefix + 'index.js')
+      const db = await openDatabase({ name: 'private-vault' })
+      try {
+        const status = await db.vault.status()
+        await db.vault.unlock('local master password')
+        return { status, secret: await db.vault.reveal('connection:admin') }
+      } finally { await db.close() }
+    }, prefix)
+    assert.deepEqual(reopened, { status: { initialized: true, locked: true }, secret: 'private admin credential' })
+  } finally { await context?.close() }
+})

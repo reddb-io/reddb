@@ -128,7 +128,7 @@ mod tests {
         let target = parse("grpcs://primary.svc.cluster.local").unwrap();
         match target {
             ConnectionTarget::Grpc { endpoint } => {
-                assert_eq!(endpoint, "http://primary.svc.cluster.local:55555")
+                assert_eq!(endpoint, "https://primary.svc.cluster.local:55555")
             }
             _ => panic!("expected Grpc"),
         }

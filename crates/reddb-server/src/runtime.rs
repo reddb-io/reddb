@@ -1141,6 +1141,13 @@ struct RuntimeInner {
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
+    /// One execution budget for every network transport attached to this
+    /// runtime. HTTP, gRPC, RedWire and PG-wire must acquire from the same
+    /// object before entering synchronous engine work; embedded calls remain
+    /// direct and synchronous.
+    execution_admission:
+        parking_lot::RwLock<crate::transport::execution_admission::ExecutionAdmission>,
+    execution_queue_timeout_ms: AtomicU64,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
     index_store: index_store::IndexStore,
@@ -1482,6 +1489,37 @@ pub struct RedDBRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+impl RedDBRuntime {
+    pub(crate) fn execution_admission(
+        &self,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        self.inner.execution_admission.read().clone()
+    }
+
+    pub(crate) fn configure_execution_admission(
+        &self,
+        active_max: usize,
+        queued_max: usize,
+        queue_timeout_ms: u64,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        let admission =
+            crate::transport::execution_admission::ExecutionAdmission::new(active_max, queued_max);
+        *self.inner.execution_admission.write() = admission.clone();
+        self.inner
+            .execution_queue_timeout_ms
+            .store(queue_timeout_ms, AtomicOrdering::Release);
+        admission
+    }
+
+    pub(crate) fn execution_queue_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.inner
+                .execution_queue_timeout_ms
+                .load(AtomicOrdering::Acquire),
+        )
+    }
+}
+
 pub struct RuntimeConnection {
     id: u64,
     uses_pool_slot: bool,
@@ -1574,7 +1612,7 @@ mod impl_dml_chain;
 mod impl_dml_claim;
 mod impl_dml_crypto;
 mod impl_dml_returning;
-mod impl_dml_support;
+pub(crate) mod impl_dml_support;
 mod impl_dml_tenant;
 mod impl_dml_ttl;
 mod impl_dml_update_analysis;
@@ -1674,7 +1712,7 @@ pub mod resource_limits;
 mod result_cache_runtime;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
-mod rls_injection;
+pub(crate) mod rls_injection;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;

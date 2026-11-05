@@ -13,7 +13,7 @@
 #
 # Required assets are the cross-product of:
 #   - bins:      red, red_client
-#   - suffixes:  linux-x86_64, linux-aarch64, linux-armv7,
+#   - suffixes:  linux-x86_64, linux-aarch64,
 #                linux-x86_64-static, linux-aarch64-static,
 #                windows-x86_64.exe
 # The suffix list mirrors the required entries of `PLATFORMS` in
@@ -42,7 +42,6 @@ BINS=(red red_client)
 SUFFIXES=(
   linux-x86_64
   linux-aarch64
-  linux-armv7
   linux-x86_64-static
   linux-aarch64-static
   windows-x86_64.exe

@@ -163,11 +163,27 @@ async fn blocked_output_stream_retains_result_admission_until_cancelled() {
             })
             .await
         );
+        timeout(
+            Duration::from_secs(5),
+            std::future::poll_fn(|cx| match stream.as_mut().poll(cx) {
+                std::task::Poll::Pending if charged(&runtime) >= 16 * 8192 => {
+                    std::task::Poll::Ready(())
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(()) => {
+                    panic!("the output stream completed before its queue became blocked")
+                }
+            }),
+        )
+        .await
+        .expect("the blocking worker should materialize the stream result");
         let ack = rx.recv().await.expect("OpenAck before rows");
         assert_eq!(decode_frame(&ack).unwrap().0.kind, MessageKind::OpenAck);
         drop(ack);
-        assert!(charged(&runtime) >= 16 * 8192,
-            "the blocked producer must retain admission for all materialized rows, not just its encoded chunk");
+        assert!(
+            charged(&runtime) >= 16 * 8192,
+            "the blocked producer must retain admission for all materialized rows, not just its encoded chunk"
+        );
         // A disconnected session cancels its worker future. The retained
         // result and not-yet-queued response must both return their budget.
     }

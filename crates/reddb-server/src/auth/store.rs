@@ -819,7 +819,7 @@ impl AuthStore {
         if username.is_empty() || password.is_empty() {
             return None;
         }
-        let mut certificate_output = if self.config.vault_enabled {
+        let mut certificate_output = if self.bootstrap_requires_certificate_delivery() {
             let Some(path) = crate::utils::env_with_file_fallback("REDDB_BOOTSTRAP_CERT_OUT")
             else {
                 tracing::error!(
@@ -965,6 +965,18 @@ impl AuthStore {
                 .read()
                 .map(|guard| guard.is_some())
                 .unwrap_or(false)
+    }
+
+    /// Whether first-admin bootstrap must mint and deliver a new certificate
+    /// before the vault can be activated. Passphrase-backed and already
+    /// credentialed vaults preserve their existing seal and need no output.
+    pub fn bootstrap_requires_certificate_delivery(&self) -> bool {
+        self.pager.is_some()
+            && self
+                .vault
+                .read()
+                .map(|vault| vault.is_none())
+                .unwrap_or(true)
     }
 
     // -----------------------------------------------------------------
@@ -2589,6 +2601,15 @@ impl AuthStore {
                 Err(err)
             }
         }
+    }
+
+    /// Resolve the tenant-aware owner of an API key without exposing its record.
+    pub fn api_key_owner(&self, key: &str) -> Option<UserId> {
+        let key_id = api_key_credential_id(key);
+        self.api_key_index
+            .read()
+            .ok()
+            .and_then(|index| index.get(&key_id).map(|(id, _)| id.clone()))
     }
 
     /// Revoke (delete) an API key.

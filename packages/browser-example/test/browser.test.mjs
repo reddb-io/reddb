@@ -11,6 +11,7 @@ import { chromium, firefox } from 'playwright'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const output = resolve(root, 'dist')
+const browserVersion = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).dependencies['@reddb-io/browser']
 const prefix = '/reddb/browser/'
 let temporary
 let server
@@ -191,7 +192,7 @@ for (const [name, browser] of Object.entries({ chromium, firefox })) {
     try {
       const page = await context.newPage()
       await ready(page)
-      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: /^0\.4\.0$/ }).isVisible(), true)
+      assert.equal(await page.locator('[data-badge]:visible').filter({ hasText: browserVersion }).textContent(), browserVersion)
       const text = "O'Reilly'); DELETE FROM notes; --\0🦊"
       await execute(page, 'INSERT INTO notes (id, body) VALUES ($1, $2)', false, [1, text])
       assert.deepEqual((await execute(page, 'SELECT body FROM notes WHERE id = ?1', false, [1])).rows, [[text]])
