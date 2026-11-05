@@ -2733,7 +2733,7 @@ version = "1.28.10"
 dependencies = [
  "aes-gcm",
  "argon2",
- "getrandom 0.4.2",
+ "getrandom 0.4.3",
  "reddb-io-types",
  "zeroize",
 ]

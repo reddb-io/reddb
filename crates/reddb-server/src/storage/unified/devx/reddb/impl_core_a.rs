@@ -499,16 +499,36 @@ impl RedDB {
             Some((store, Some(path_buf.clone()), true))
         } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
+                let validation_started = std::time::Instant::now();
                 match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
                     Ok(artifact) => {
-                        let store =
-                            match crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)? {
-                                Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
-                                    &snapshot,
-                                    embedded_store_config.clone(),
-                                )?,
-                                None => UnifiedStore::with_config(embedded_store_config.clone()),
-                            };
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_snapshot_validation",
+                            validation_started,
+                        );
+                        let snapshot_read_started = std::time::Instant::now();
+                        let snapshot =
+                            crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)?;
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_snapshot_read",
+                            snapshot_read_started,
+                        );
+                        let snapshot_decode_started = std::time::Instant::now();
+                        let store = match snapshot {
+                            Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
+                                &snapshot,
+                                embedded_store_config.clone(),
+                            )?,
+                            None => UnifiedStore::with_config(embedded_store_config.clone()),
+                        };
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_snapshot_decode",
+                            snapshot_decode_started,
+                        );
+                        let wal_replay_started = std::time::Instant::now();
                         for payload in
                             crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&artifact)?
                         {
@@ -516,6 +536,11 @@ impl RedDB {
                                 .apply_encoded_store_wal_action(&payload)
                                 .map_err(|err| format!("replay embedded rdb wal action: {err}"))?;
                         }
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_wal_replay",
+                            wal_replay_started,
+                        );
                         Some((store, Some(path_buf.clone()), false))
                     }
                     Err(_) if Self::is_binary_dump(&path_buf)? => {
