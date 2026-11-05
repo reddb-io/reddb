@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "reddb-io-client",
  "reddb-io-engine",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "crc32fast",
  "hex",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-node"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "napi",
  "napi-build",
@@ -2272,14 +2272,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "bytes",
  "prost",
@@ -2379,14 +2379,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.28.11"
+version = "1.28.12"
 dependencies = [
  "hmac",
  "reddb-io-types",

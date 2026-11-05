@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.12
+
+### Patch Changes
+
+- [#2662](https://github.com/reddb-io/reddb/pull/2662) [`768275c`](https://github.com/reddb-io/reddb/commit/768275c591b832d0333441129bd1b2d5345000a4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Serve `SHOW INDEXES` from the operational index registry so introspection no longer scans unrelated collection payloads or starves query workers on large databases.
+
 ## 1.28.11
 
 ### Patch Changes
