@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.9
+
+### Patch Changes
+
+- [#2635](https://github.com/reddb-io/reddb/pull/2635) [`6ea277c`](https://github.com/reddb-io/reddb/commit/6ea277c967ec01527c4bce7906462f9ecdff7727) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Harden tenant identity propagation, user lifecycle authorization, protocol authentication, metrics scoping, and bootstrap persistence.
+
 ## 1.28.8
 
 ### Patch Changes
