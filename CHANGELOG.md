@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.28.11
+
+### Patch Changes
+
+- [#2656](https://github.com/reddb-io/reddb/pull/2656) [`9ec2441`](https://github.com/reddb-io/reddb/commit/9ec24418245e08e864b47d14dff46dcc6e707e12) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Publish disk-resident BTREE and equality roots with their index descriptor so cold startup reuses the compacted trees instead of rebuilding them and regrowing storage.
+
+- [#2639](https://github.com/reddb-io/reddb/pull/2639) [`06bc63f`](https://github.com/reddb-io/reddb/commit/06bc63f4ac83366d487af8e2fb36ff149a04bff2) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Remove retired storage scaffolding and unused direct dependencies, and expose the root gRPC client feature.
+
+- [#2644](https://github.com/reddb-io/reddb/pull/2644) [`eab4869`](https://github.com/reddb-io/reddb/commit/eab4869f68ba8f8b7a706275532ef33a8cb75341) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stop advertising readiness while a handler that exceeded its deadline is still occupying the blocking executor, and recover readiness automatically when that work unwinds.
+
 ## 1.28.10
 
 ### Patch Changes
