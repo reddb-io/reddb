@@ -41,7 +41,7 @@ permissions:
 # rather than silently checking against a different tool.
 env:
   TLA_TOOLS_VERSION: v1.8.0
-  TLA_TOOLS_SHA256: bb82311bc0493a8d30112a1baa0aece42a5f91b928866c7593930e390c14c340
+  TLA_TOOLS_SHA256: e20447644bfabd29d6bd0fc2c0eb1473fb301c1a0e4dfe1961938ce5a191edbf
 
 jobs:
   model-check:
