@@ -5,6 +5,10 @@ Date: 2026-05-16
 Implemented: 2026-06-15
 Amended: the "at-least-once with no order; FIFO users run a single consumer"
 clause is superseded for keyed messages by ADR 0072 (ordering keys).
+Amended: the planned replica-specific `QueueStore` adapter was retired after
+the generic `LogicalChangeApplier` became the replica authority. Replicas apply
+the primary's resulting storage changes below `QueueLifecycle`, consistent with
+the log-shipping boundary declared by ADR 0074 §6.
 
 ## Context
 
@@ -17,10 +21,10 @@ retry-or-DLQ? — at ACK/NACK/POP sites.
 
 `.red/CONTEXT.md` names the sub-steps (**Queue delivery**, **Queue
 retirement**, **Pending delivery**). This ADR records the contract for the
-deep `QueueLifecycle` Module that owns the full state machine. Decisions
-below are interlocking — the replica path only works because the primary owns
-decisions in the caller's transaction; the `QueueStore` adapter only earns its
-keep because the replica is a second real adapter.
+deep `QueueLifecycle` Module that owns the full state machine. Decisions below
+are interlocking — the replica path works because the primary owns decisions in
+the caller's transaction and the generic logical applier replicates the
+resulting storage changes without invoking `QueueLifecycle`.
 
 ## Decision
 
@@ -77,19 +81,19 @@ keep because the replica is a second real adapter.
 - Crash recovery honors the lock deadline persisted in WAL. Pending deliveries
   are not flushed on restart — that would thundering-herd duplicate messages
   for clients still legitimately processing across the restart.
-- **Replicas replay outcomes, never re-decide.** Decisions (which message to
-  deliver, which to DLQ, retry counts) are non-deterministic across nodes.
-  Primary `QueueLifecycle` decides; WAL carries the outcome; replica's
-  Logical change applier dumbly replays. Matches the existing replication
-  contract.
+- **Replicas replay storage changes, never re-decide.** Decisions (which
+  message to deliver, which to DLQ, retry counts) are non-deterministic across
+  nodes. Primary `QueueLifecycle` decides; WAL carries the resulting entity
+  mutations; the generic logical change applier replays them. Matches the
+  existing replication contract.
 
 ### Testing seam
 
 - `QueueLifecycle` depends on a narrow `QueueStore` trait (read pending,
   append WAL, update attempt counter, enqueue to DLQ target). Not `&Engine`.
-  The trait has two real adapters in sight — the in-engine path and the
-  replica replay path via the Logical change applier — so it passes "two
-  adapters = real seam."
+  `PrimaryQueueStore` is the production adapter and `InMemoryQueueStore` is the
+  test fake. Replica replay deliberately stays below this seam in the generic
+  logical change applier.
 
 ### Auth
 
@@ -132,15 +136,15 @@ keep because the replica is a second real adapter.
 - Per-row pending drill-down lives in a separate `red.queue_pending`
   virtual table (cold scan, different consistency tier than the hot
   catalog-snapshot fields).
-- Replay/projection is a separate read-only Module reading queue WAL
-  records; not bundled into `QueueLifecycle`.
+- Replica replay is the generic logical-applier path; queue projections read
+  the replicated storage state and are not bundled into `QueueLifecycle`.
 
 ## Consequences
 
 - The state machine concentrates in one Module with one test suite. Future
   bug fixes to transitions do not have to be applied at multiple call sites.
-- Replicas stay deterministic; primary failover preserves decisions because
-  outcomes — not inputs — are replicated.
+- Replicas preserve primary decisions because the resulting storage changes —
+  not decision inputs — are replicated.
 - `QueueStore` trait enables unit-level testing without booting the engine,
   while `PrimaryQueueStore` covers runtime/MVCC parity against the real engine.
 - Wire compatibility window: drivers have one minor release to adopt

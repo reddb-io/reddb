@@ -50,10 +50,10 @@ pub fn local_backend_atomic_upload(
         let _ = fs::remove_file(&temp);
         return Err(err);
     }
+    // POSIX-only: see `Vfs::sync_dir`. Already best-effort, but on
+    // Windows it can only ever fail, so do not pretend to try.
+    #[cfg(not(windows))]
     if let Some(parent) = dest.parent() {
-        // POSIX-only: see `Vfs::sync_dir`. Already best-effort, but on
-        // Windows it can only ever fail, so do not pretend to try.
-        #[cfg(not(windows))]
         let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
     }
     Ok(())

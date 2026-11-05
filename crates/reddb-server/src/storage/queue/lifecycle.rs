@@ -38,12 +38,6 @@ pub(crate) use super::deque::QueueSide;
 pub(crate) enum QueueStoreError {
     UnknownDelivery(DeliveryId),
     UnknownQueue(QueueId),
-    /// Mutation attempted against a replica-side `QueueStore`. Replicas
-    /// receive queue state via the logical-WAL apply path; calling a
-    /// mutation method on the replica adapter signals that
-    /// `QueueLifecycle` was wired on a replica, which violates the
-    /// determinism contract (primary owns decisions; replica replays).
-    ReplicaImmutable,
 }
 
 impl std::fmt::Display for QueueStoreError {
@@ -51,10 +45,6 @@ impl std::fmt::Display for QueueStoreError {
         match self {
             Self::UnknownDelivery(id) => write!(f, "unknown delivery {id}"),
             Self::UnknownQueue(q) => write!(f, "unknown queue {q}"),
-            Self::ReplicaImmutable => write!(
-                f,
-                "replica QueueStore is immutable — decisions live on the primary"
-            ),
         }
     }
 }

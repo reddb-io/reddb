@@ -1707,7 +1707,6 @@ pub mod quota_bucket;
 pub(crate) mod ranking_descriptor_catalog;
 mod record_search;
 mod red_schema;
-pub(crate) mod replica_queue_store;
 pub mod resource_limits;
 mod result_cache_runtime;
 pub(crate) mod retention_filter;
