@@ -30,7 +30,7 @@ chunk column-major lets the engine:
   float gauges compress very differently);
 - skip whole **granules** (row ranges) that cannot match a predicate,
   using a sparse min/max index for ranges and a per-granule bloom for
-  equality — after decoding the column streams;
+  equality; a range that excludes every granule skips column decoding;
 - decode only the columns a query references (projection pushdown).
 
 General-purpose collections stay on the row engine, and in-scope collections
@@ -152,8 +152,13 @@ per `granule_size` rows. The default stride is **8192 rows**
 (`DEFAULT_GRANULE_SIZE`), configurable per seal. This is the chunk's
 BRIN-style skip index made granular: the reader keeps only granules whose
 `[min, max]` interval can intersect a range predicate and examines rows in
-those granules. The current range reader decodes both complete column streams
-before applying the index; it does not avoid decompressing rejected granules.
+those granules. If the complete timestamp index excludes all granules, the
+range reader returns without decoding either column. When any granule may
+match, it decodes both complete column streams before examining surviving rows;
+it cannot decompress individual granules independently in RDCC v1. The
+whole-block CRC and directory are validated before pruning; skipped streams
+are not decoded, so malformed compressed data with a valid CRC is detected
+only when a query reads that stream.
 
 ```text
 Granule index blob (per indexed column)

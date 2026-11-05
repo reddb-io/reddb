@@ -42,15 +42,16 @@ General collections do not automatically acquire this layout. The
 batch routing remains planned; do not assume batch primitives imply an end-to-end
 vectorized SQL path.
 
-There is a specific gap between skip metadata and physical decode: the range
-reader calls `read_column_block` first, and that function decodes every column
-stream before the range reader examines granule metadata. Bloom equality follows
-the same pattern. The index reduces row comparisons, but does not currently
-avoid decompression of rejected granules. See
+There is a specific gap between skip metadata and physical decode. The range
+reader can now skip column decode when a complete timestamp index excludes all
+granules. If any granule survives, it decodes both full column streams before
+filtering rows; bloom equality also decodes full streams. RDCC v1 cannot
+decompress individual surviving granules independently. See
 [`query_column_block_range`](../../crates/reddb-server/src/storage/timeseries/chunk.rs)
 and [`read_column_block_filtered`](../../crates/reddb-server/src/storage/unified/column_block.rs).
 The RDCC v1 writer compresses one stream per column, and the reader verifies a
-whole-block CRC, so row-level pruning does not imply fewer bytes read from disk.
+whole-block CRC even for an empty range, so this optimization does not imply
+fewer bytes read from disk.
 
 The prior [columnar-read benchmark](2026-06-03-columnar-read.md) compares two
 decoders of the same columnar block on synthetic time-series data; it is not a

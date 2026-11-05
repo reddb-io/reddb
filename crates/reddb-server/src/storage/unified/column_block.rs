@@ -596,9 +596,17 @@ fn read_column_block_filtered(
     want: Option<&[u32]>,
 ) -> Result<DecodedColumnBlock, ColumnBlockError> {
     let frame = reddb_file::decode_column_block_frame(bytes)?;
+    read_column_block_frame_filtered(&frame, want)
+}
 
+/// Decode selected columns of a frame whose checksum and directory were
+/// already validated by `reddb_file::decode_column_block_frame`.
+pub(crate) fn read_column_block_frame_filtered(
+    frame: &reddb_file::ColumnBlockFrame<'_>,
+    want: Option<&[u32]>,
+) -> Result<DecodedColumnBlock, ColumnBlockError> {
     let mut columns = Vec::with_capacity(frame.columns.len());
-    for col in frame.columns {
+    for col in &frame.columns {
         // Projection pushdown (#856): skip columns the caller did not ask
         // for *before* the expensive `decode_bytes` / granule / bloom parse.
         // Offset bounds are still validated above so a malformed directory is
