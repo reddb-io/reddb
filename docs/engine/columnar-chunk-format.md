@@ -184,7 +184,7 @@ is observable — a selective scan reports `granules_scanned < granules_total`.
 
 Where min/max serves ranges, a **split-block bloom filter** per granule —
 tiled on the same boundaries — serves equality / point predicates. Each
-value in a granule is folded through `hash_bytes_u32` and inserted; an
+value in a granule is folded through `hash_bytes_u32` and represented; an
 equality probe keeps only granules whose bloom *may* contain the target.
 
 ```text
@@ -193,6 +193,13 @@ Granule bloom blob (per indexed column)
   granule_count        u32
   per granule:  num_blocks u32        then num_blocks × 32 bytes of bloom words
 ```
+
+For granules with more than 64 rows, the writer counts distinct 32-bit
+hashes up to a limit of 256. If fewer than 256 hashes occur, the bloom is
+sized for those distinct hashes and each is inserted once. Otherwise it uses
+the original row-count sizing. This bounds additional work for high-cardinality
+data, preserves the no-false-negative property, and does not change the
+serialized bloom format. The actual space saving depends on the data.
 
 **Soundness:** a split-block bloom never reports a false negative, so a
 granule that actually holds the target always probes true and survives —

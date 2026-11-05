@@ -126,6 +126,21 @@ first scope; a mutable model needs a separate visibility design. Compare a
 derived projection's extra disk and rebuild costs with a durable-columnar design
 before changing the source of truth or the recovery contract.
 
+## Measured low-cardinality bloom example
+
+A synthetic RDCC v1 block containing one `u64` column with 8,192 rows, four
+distinct values, and one 8,192-row granule measured 16,847 bytes before
+cardinality-aware bloom sizing and 495 bytes afterward. The serialized bloom
+itself shrank from 16,396 to 44 bytes. The test also checks that all four
+present values survive the persisted bloom filter. Reproduce with
+`cargo test -p reddb-io-server --lib low_cardinality_granule_uses_compact_bloom_without_false_negatives -- --nocapture`.
+
+These are bytes in a single synthetic column block, not the size of a database:
+other columns, page overhead, retained row data, indexes and WAL are excluded.
+The example does not measure ingestion CPU, high-cardinality compression, or
+ClickHouse. Existing blocks retain their old encoding and size until rewritten
+through a supported lifecycle operation.
+
 ## Recommended next steps
 
 1. **Establish an end-to-end baseline before choosing a format.** Use the same

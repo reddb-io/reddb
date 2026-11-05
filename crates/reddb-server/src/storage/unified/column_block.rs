@@ -70,6 +70,8 @@
 //!   magic_tail           b"RDCC"  (4)
 //! ```
 
+use std::collections::HashSet;
+
 use super::segment_codec::{
     decode_bytes, decode_bytes_to_u64, encode_bytes, select_codecs, CodecError, ColumnCodec,
     ColumnSemantics,
@@ -377,9 +379,33 @@ fn build_granule_bloom(logical_type: u8, granule_size: u32, data: &[u8]) -> Opti
     let mut start = 0usize;
     while start < n {
         let end = (start + g).min(n);
-        let mut bloom = SplitBlockBloom::with_capacity(end - start);
-        for v in data[start * 8..end * 8].chunks_exact(8) {
-            bloom.insert(hash_bytes_u32(v));
+        // Repeated values contribute the same hash and need only one bloom
+        // insertion. Bound the sample so high-cardinality columns retain the
+        // original sizing and pay at most this much extra work.
+        const DISTINCT_HASH_LIMIT: usize = 256;
+        let values = &data[start * 8..end * 8];
+        let distinct = if end - start > 64 {
+            let mut hashes = HashSet::with_capacity((end - start).min(DISTINCT_HASH_LIMIT));
+            for value in values.chunks_exact(8) {
+                hashes.insert(hash_bytes_u32(value));
+                if hashes.len() == DISTINCT_HASH_LIMIT {
+                    break;
+                }
+            }
+            (hashes.len() < DISTINCT_HASH_LIMIT).then_some(hashes)
+        } else {
+            None
+        };
+        let mut bloom =
+            SplitBlockBloom::with_capacity(distinct.as_ref().map_or(end - start, HashSet::len));
+        if let Some(hashes) = distinct {
+            for hash in hashes {
+                bloom.insert(hash);
+            }
+        } else {
+            for value in values.chunks_exact(8) {
+                bloom.insert(hash_bytes_u32(value));
+            }
         }
         blooms.push(bloom);
         start = end;
@@ -1087,6 +1113,94 @@ mod tests {
                 "key {k} at row {row} pruned from its granule {g}: {survivors:?}"
             );
         }
+    }
+
+    #[test]
+    fn low_cardinality_granule_uses_compact_bloom_without_false_negatives() {
+        let values: Vec<u64> = (0..8192).map(|i| i % 4).collect();
+        let raw = u64_stream(&values);
+        let block = write_column_block(
+            1,
+            0,
+            values.len() as u64,
+            0,
+            0,
+            8192,
+            &[ColumnInput {
+                column_id: 0,
+                logical_type: 2,
+                semantics: ColumnSemantics::Generic,
+                data: &raw,
+            }],
+        )
+        .expect("write column block");
+        let frame = reddb_file::decode_column_block_frame(&block).expect("read frame");
+        let bloom_bytes = frame.columns[0].granule_bloom.expect("bloom exists").len();
+        println!("block_bytes={}, bloom_bytes={bloom_bytes}", block.len());
+        assert!(
+            bloom_bytes <= 44,
+            "repeated values should use one bloom block"
+        );
+
+        let decoded = read_column_block(&block).expect("decode column block");
+        let bloom = decoded.columns[0].granule_bloom.as_ref().expect("bloom");
+        for value in 0u64..4 {
+            assert_eq!(bloom.surviving_granules(&value.to_le_bytes()), vec![0]);
+        }
+    }
+
+    #[test]
+    fn bloom_sizing_preserves_high_cardinality_and_each_granule() {
+        let values: Vec<u64> = (0..16_384)
+            .map(|i| if i < 8192 { i % 4 } else { i })
+            .collect();
+        let raw = u64_stream(&values);
+        let block = write_column_block(
+            1,
+            0,
+            values.len() as u64,
+            0,
+            0,
+            8192,
+            &[ColumnInput {
+                column_id: 0,
+                logical_type: 2,
+                semantics: ColumnSemantics::Generic,
+                data: &raw,
+            }],
+        )
+        .expect("write column block");
+        let decoded = read_column_block(&block).expect("decode column block");
+        let index = decoded.columns[0].granule_bloom.as_ref().expect("bloom");
+        assert_eq!(index.blooms.len(), 2);
+        assert_eq!(index.blooms[0].byte_size(), 32);
+        assert_eq!(
+            index.blooms[1].byte_size(),
+            SplitBlockBloom::with_capacity(8192).byte_size()
+        );
+        for (row, value) in values.iter().enumerate() {
+            assert!(index
+                .surviving_granules(&value.to_le_bytes())
+                .contains(&(row / 8192)));
+        }
+    }
+
+    #[test]
+    fn compact_bloom_keeps_absent_value_false_positives_bounded() {
+        let values: Vec<u64> = (0..8192).map(|i| i % 200).collect();
+        let raw = u64_stream(&values);
+        let index = build_granule_bloom(2, 8192, &raw).expect("bloom index");
+        assert_eq!(
+            index.blooms[0].byte_size(),
+            SplitBlockBloom::with_capacity(200).byte_size()
+        );
+        let false_positives = (10_000u64..20_000)
+            .filter(|value| !index.surviving_granules(&value.to_le_bytes()).is_empty())
+            .count();
+        assert!(
+            false_positives < 500,
+            "{false_positives} false positives in 10,000 absent values"
+        );
     }
 
     #[test]
