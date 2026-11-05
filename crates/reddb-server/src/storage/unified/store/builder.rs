@@ -33,7 +33,7 @@ impl EntityBuilder {
     }
 
     /// Add metadata
-    pub fn metadata(self, key: impl Into<String>, value: MetadataValue) -> Self {
+    pub fn metadata(self, _key: impl Into<String>, _value: MetadataValue) -> Self {
         // Store metadata separately via manager after insert
         self
     }

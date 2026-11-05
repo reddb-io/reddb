@@ -202,7 +202,6 @@ impl HnswIndex {
         }
 
         let entry_point = self.entry_point.unwrap();
-        let vector = self.nodes.get(&id).map(|n| n.vector.clone());
 
         // We need to insert the node first so we can access its vector
         // But we need to find neighbors first... let's clone the vector

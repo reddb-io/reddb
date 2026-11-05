@@ -370,7 +370,7 @@ impl RedDb for GrpcRuntime {
 
     async fn catalog_readiness(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let native = self.native_use_cases();
         let readiness = native.readiness();
@@ -442,7 +442,7 @@ impl RedDb for GrpcRuntime {
 
     async fn collection_readiness(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let catalog = self.runtime.catalog();
         Ok(Response::new(json_payload_reply(
@@ -454,7 +454,7 @@ impl RedDb for GrpcRuntime {
 
     async fn collection_attention(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_collection_attention_json(
@@ -465,7 +465,7 @@ impl RedDb for GrpcRuntime {
 
     async fn catalog_attention_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_attention_summary_json(
@@ -881,7 +881,7 @@ impl RedDb for GrpcRuntime {
     }
     async fn catalog_consistency(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_consistency_json(
@@ -892,7 +892,7 @@ impl RedDb for GrpcRuntime {
 
     async fn physical_metadata(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let metadata = self
             .native_use_cases()
@@ -905,7 +905,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_header(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let header = self.native_use_cases().native_header().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -915,7 +915,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_collection_roots(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let roots = self
             .native_use_cases()
@@ -928,7 +928,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_manifest_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summary = self
             .native_use_cases()
@@ -941,7 +941,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_registry_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summary = self
             .native_use_cases()
@@ -954,7 +954,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_recovery_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summary = self
             .native_use_cases()
@@ -967,7 +967,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_catalog_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summary = self
             .native_use_cases()
@@ -980,7 +980,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_metadata_state_summary(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summary = self
             .native_use_cases()
@@ -993,7 +993,7 @@ impl RedDb for GrpcRuntime {
 
     async fn physical_authority(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::ops_json::physical_authority_status_json(
@@ -1004,7 +1004,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_physical_state(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let state = self
             .native_use_cases()
@@ -1023,7 +1023,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_vector_artifacts(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let summaries = self
             .native_use_cases()
@@ -1036,7 +1036,7 @@ impl RedDb for GrpcRuntime {
 
     async fn inspect_native_vector_artifacts(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let batch = self
             .native_use_cases()
@@ -1068,7 +1068,7 @@ impl RedDb for GrpcRuntime {
 
     async fn native_header_repair_policy(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let policy = self
             .native_use_cases()
@@ -1081,7 +1081,7 @@ impl RedDb for GrpcRuntime {
 
     async fn repair_native_header(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
         let policy = self
             .native_use_cases()
@@ -1114,7 +1114,7 @@ impl RedDb for GrpcRuntime {
 
     async fn warmup_native_vector_artifacts(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let batch = self
             .native_use_cases()
@@ -1127,7 +1127,7 @@ impl RedDb for GrpcRuntime {
 
     async fn repair_native_physical_state(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
         let repaired = self
             .native_use_cases()
@@ -1145,7 +1145,7 @@ impl RedDb for GrpcRuntime {
 
     async fn rebuild_physical_metadata(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
         let rebuilt = self
             .native_use_cases()
@@ -1179,7 +1179,7 @@ impl RedDb for GrpcRuntime {
         )))
     }
 
-    async fn roots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
+    async fn roots(&self, _request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
         let roots = self
             .native_use_cases()
             .collection_roots()
@@ -1189,7 +1189,7 @@ impl RedDb for GrpcRuntime {
         )))
     }
 
-    async fn snapshots(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
+    async fn snapshots(&self, _request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
         let snapshots = self.native_use_cases().snapshots().map_err(to_status)?;
         // Round-trip through the JSON guard rather than emit raw
         // `Debug` text — the inner snapshot struct can carry user-
@@ -1200,7 +1200,7 @@ impl RedDb for GrpcRuntime {
         )))
     }
 
-    async fn exports(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
+    async fn exports(&self, _request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
         let exports = self.native_use_cases().exports().map_err(to_status)?;
         // See `snapshots` above — `exports` Debug text can carry user
         // path fragments. ADR 0010 §3 / #178.
@@ -1255,7 +1255,7 @@ impl RedDb for GrpcRuntime {
 
     async fn index_statuses(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_statuses_json(
@@ -1266,7 +1266,7 @@ impl RedDb for GrpcRuntime {
 
     async fn index_attention(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_index_attention_json(
@@ -1392,7 +1392,7 @@ impl RedDb for GrpcRuntime {
     }
     async fn graph_projections(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let projections = self.runtime
             .graph_projections()
@@ -1411,7 +1411,7 @@ impl RedDb for GrpcRuntime {
 
     async fn operational_graph_projections(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::graph_projections_json(
@@ -1422,7 +1422,7 @@ impl RedDb for GrpcRuntime {
 
     async fn graph_projection_statuses(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_statuses_json(
@@ -1433,7 +1433,7 @@ impl RedDb for GrpcRuntime {
 
     async fn graph_projection_attention(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_graph_projection_attention_json(
@@ -1640,7 +1640,7 @@ impl RedDb for GrpcRuntime {
     }
     async fn analytics_jobs(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let jobs = self.runtime
             .analytics_jobs()
@@ -1659,7 +1659,7 @@ impl RedDb for GrpcRuntime {
 
     async fn operational_analytics_jobs(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::analytics_jobs_json(
@@ -1670,7 +1670,7 @@ impl RedDb for GrpcRuntime {
 
     async fn analytics_job_statuses(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
@@ -1681,7 +1681,7 @@ impl RedDb for GrpcRuntime {
 
     async fn analytics_job_attention(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         Ok(Response::new(json_payload_reply(
             crate::presentation::catalog_json::catalog_analytics_job_attention_json(
@@ -2653,7 +2653,7 @@ impl RedDb for GrpcRuntime {
 
     async fn create_snapshot(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let snapshot = self
             .native_use_cases()
@@ -2685,7 +2685,7 @@ impl RedDb for GrpcRuntime {
 
     async fn apply_retention(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<OperationReply>, Status> {
         self.native_use_cases()
             .apply_retention_policy()
@@ -2778,7 +2778,7 @@ impl RedDb for GrpcRuntime {
 
     async fn replication_status(
         &self,
-        request: Request<Empty>,
+        _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
         let db = self.runtime.db();
         let role = &db.options().replication.role;

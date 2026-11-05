@@ -716,8 +716,6 @@ impl CostEstimator {
     // =========================================================================
 
     fn estimate_path(&self, query: &PathQuery) -> PlanCost {
-        let cardinality = self.estimate_path_cardinality(query);
-
         // BFS/DFS cost
         let max_hops = query.max_length;
         let branching_factor: f64 = 5.0; // Average edges per node
@@ -730,7 +728,7 @@ impl CostEstimator {
         PlanCost::new(cpu, io, memory)
     }
 
-    fn estimate_path_cardinality(&self, query: &PathQuery) -> CardinalityEstimate {
+    fn estimate_path_cardinality(&self, _query: &PathQuery) -> CardinalityEstimate {
         // Path queries typically return few results
         let max_paths = 10.0;
         CardinalityEstimate::new(max_paths, 0.001)
@@ -1204,8 +1202,6 @@ mod tests {
 
     #[test]
     fn test_filter_selectivity() {
-        let estimator = CostEstimator::new();
-
         let eq_filter = AstFilter::Compare {
             field: FieldRef::column("hosts", "id"),
             op: CompareOp::Eq,
@@ -1223,8 +1219,6 @@ mod tests {
 
     #[test]
     fn test_and_selectivity() {
-        let estimator = CostEstimator::new();
-
         let and_filter = AstFilter::And(
             Box::new(AstFilter::Compare {
                 field: FieldRef::column("hosts", "a"),

@@ -743,7 +743,6 @@ impl RedDBRuntime {
                 return Err(err);
             }
         };
-        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
         let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {

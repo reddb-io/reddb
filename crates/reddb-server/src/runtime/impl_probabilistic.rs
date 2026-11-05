@@ -246,7 +246,7 @@ impl RedDBRuntime {
                     bytes,
                     migrated_from_legacy_hex: false,
                 }),
-                Value::Text(data_hex) if reject_legacy_hex => {
+                Value::Text(_) if reject_legacy_hex => {
                     return Err(RedDBError::Internal(format!(
                         "legacy hex-encoded {kind} state for '{name}' is rejected after probabilistic state migrated to raw bytes"
                     )));

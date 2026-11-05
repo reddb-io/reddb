@@ -569,7 +569,7 @@ mod tests {
         let optimizer = QueryOptimizer::new();
         let query = make_table_query("hosts");
 
-        let (optimized, passes) = optimizer.optimize(query);
+        let (optimized, _) = optimizer.optimize(query);
         // Should at least attempt the passes
         assert!(matches!(optimized, QueryExpr::Table(_)));
     }

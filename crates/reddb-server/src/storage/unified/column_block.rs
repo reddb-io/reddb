@@ -498,9 +498,6 @@ pub fn write_column_block(
     columns: &[ColumnInput<'_>],
 ) -> Result<Vec<u8>, ColumnBlockError> {
     let column_count = columns.len();
-    let dir_off = HEADER_LEN;
-    let dir_len = column_count * DIR_ENTRY_LEN;
-    let streams_off = dir_off + dir_len;
 
     // Encode every column stream first so we know each length/offset.
     // The codec chain is chosen per column from its semantics; the tag we

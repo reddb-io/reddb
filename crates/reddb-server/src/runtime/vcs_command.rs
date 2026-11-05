@@ -347,7 +347,7 @@ impl RedDBRuntime {
     pub(crate) fn execute_vcs_command(
         &self,
         query: &str,
-        mode: QueryMode,
+        _mode: QueryMode,
         cmd: RuntimeVcsCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
         use crate::application::vcs::{

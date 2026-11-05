@@ -62,4 +62,11 @@ fn unreachable_storage_modules_stay_retired() {
             .exists(),
         "benchmark for the retired cache ring remains"
     );
+
+    let hot_update = std::fs::read_to_string(root.join("engine/hot_update.rs"))
+        .expect("read HOT decision helper");
+    assert!(
+        !hot_update.contains("cfg(any())"),
+        "disabled HOT test module returned"
+    );
 }

@@ -1701,7 +1701,7 @@ fn flatten_config_json(
         crate::serde_json::Value::Null => {
             out.push((prefix.to_string(), Value::Null));
         }
-        crate::serde_json::Value::Array(arr) => {
+        crate::serde_json::Value::Array(_) => {
             let json_str = crate::serde_json::to_string(value).unwrap_or_default();
             out.push((prefix.to_string(), Value::text(json_str)));
         }
