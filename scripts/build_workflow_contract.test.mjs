@@ -91,7 +91,7 @@ test("explicit compiler, job and incremental choices remain available", (t) => {
 test("fast lane reuses its target, includes engine unit tests and builds the smoke client", (t) => {
   const f = fixture(t);
   const calls = run(f, "test-fast.sh");
-  assert.equal(calls.length, 25);
+  assert.equal(calls.length, 26);
   assert(calls.every((call) => call.target === f.env.CARGO_TARGET_DIR));
   assert(calls[0].args.includes("--workspace"));
   assert(calls[0].args.includes("--lib"));
@@ -102,10 +102,11 @@ test("fast lane reuses its target, includes engine unit tests and builds the smo
     assert.match(call.args[index + 1], /^grouped_/);
     assert(call.args[index + 2]);
   }
-  assert.deepEqual(calls.slice(-8).map((call) => call.args.at(-1)), [
+  assert.deepEqual(calls.slice(-9).map((call) => call.args.at(-1)), [
     "e2e_index_replay::persistent_reopen_restores_indexed_query_results",
     "e2e_statement_execution_contract::table_command_matrix_executes_ddl_dml_index_alter_truncate_and_drop",
     "e2e_rls_universal::policy_on_messages_of_queue_gates_consumers",
+    "iam_policy_http_collections::security_journey_",
     "e2e_tenant_auto_index::alter_enable_tenancy_creates_index_over_existing_data",
     "integration_rpc_stdio::insert_then_query_round_trip",
     "e2e_backup_restore::pitr_restore_succeeds_from_clean_snapshot",
