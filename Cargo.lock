@@ -2692,7 +2692,6 @@ dependencies = [
  "reddb-io-client",
  "reddb-io-engine",
  "reddb-io-file",
- "reddb-io-grpc-proto",
  "reddb-io-rql",
  "reddb-io-server",
  "reddb-io-tonic",
@@ -2735,7 +2734,6 @@ dependencies = [
  "tokio-stream",
  "ureq",
  "webpki-roots",
- "zstd",
 ]
 
 [[package]]
@@ -2837,7 +2835,6 @@ dependencies = [
  "hmac",
  "http",
  "http-body-util",
- "hyper",
  "hyper-util",
  "indexmap",
  "insta",
@@ -2857,7 +2854,6 @@ dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-rql",
  "reddb-io-tonic",
- "reddb-io-tonic-prost",
  "reddb-io-types",
  "reddb-io-wire",
  "regex",
