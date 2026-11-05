@@ -1631,7 +1631,11 @@ impl AuthStore {
         if actor.tenant.is_some() && actor.tenant != target.tenant {
             return false;
         }
-        self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
+        if self.has_explicit_user_lifecycle_deny(actor, actor_role, action, target) {
+            return false;
+        }
+        actor_role.can_admin()
+            || self.check_policy_authz_with_role(actor, action, &resource, &ctx, actor_role)
     }
 
     /// Returns `true` only when an IAM policy explicitly denies the
@@ -5774,6 +5778,21 @@ mod tests {
             Role::Admin,
             "user:delete",
             &another_user,
+        ));
+    }
+
+    #[test]
+    fn admin_user_lifecycle_keeps_role_baseline_in_policy_only_mode() {
+        let store = AuthStore::new(test_config());
+        store.set_enforcement_mode(PolicyEnforcementMode::PolicyOnly);
+        store.create_user("admin", "pass", Role::Admin).unwrap();
+        store.create_user("alice", "pass", Role::Read).unwrap();
+
+        assert!(store.check_user_lifecycle_authz(
+            &UserId::platform("admin"),
+            Role::Admin,
+            "user:update",
+            &UserId::platform("alice"),
         ));
     }
 
