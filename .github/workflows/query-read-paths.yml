@@ -19,16 +19,18 @@ jobs:
         with:
           version: '28.3'
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Binary text decoder tests
         run: cargo test --locked -p reddb-io-server --lib pg_binary_text_parameters_validate_utf8 -- --nocapture
       - name: End-to-end extended wire test
-        run: cargo test --locked --test grouped_redwire_protocol postgres_extended_query_supports_binary_text_params_insert_and_close -- --nocapture
+        run: cargo test --locked --test grouped_cli_transport postgres_extended_query_supports_binary_text_params_insert_and_close -- --nocapture
       - name: Verify old decoder rejects the same wire request
         run: |
           git fetch --depth=1 origin main
           git show FETCH_HEAD:crates/reddb-server/src/wire/postgres/types.rs > crates/reddb-server/src/wire/postgres/types.rs
           set +e
-          cargo test --locked --test grouped_redwire_protocol postgres_extended_query_supports_binary_text_params_insert_and_close -- --nocapture > baseline.log 2>&1
+          cargo test --locked --test grouped_cli_transport postgres_extended_query_supports_binary_text_params_insert_and_close -- --nocapture > baseline.log 2>&1
           result=$?
           set -e
           tail -n 50 baseline.log
