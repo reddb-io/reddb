@@ -348,7 +348,6 @@ impl InMemoryEngine {
             Op::Minus(minus) => self.execute_minus_op(minus),
             Op::RightJoin(rj) => {
                 // Right join: swap left/right, execute as left join, swap back
-                let left = self.execute_op(&rj.left);
                 let right = self.execute_op(&rj.right);
                 // Simplified: execute right side, join with left
                 self.execute_join(right, (*rj.left).clone())

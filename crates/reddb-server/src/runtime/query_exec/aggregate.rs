@@ -322,7 +322,6 @@ pub(crate) fn execute_aggregate_query(
                 }
                 match &expr.expression {
                     Expr::Column { field, .. } => {
-                        let col_name = field_ref_name(field);
                         let kind = classify_field(field, table_name, table_alias);
                         if matches!(
                             kind,

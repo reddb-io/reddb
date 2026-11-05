@@ -512,11 +512,11 @@ impl RedDBRuntime {
 
         let db = self.db();
         let store = db.store();
-        let Some(manager) = store.get_collection(&collection) else {
+        if store.get_collection(&collection).is_none() {
             return Err(crate::RedDBError::NotFound(format!(
                 "collection not found: {collection}"
             )));
-        };
+        }
 
         let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
         let mut metadata_changed = false;

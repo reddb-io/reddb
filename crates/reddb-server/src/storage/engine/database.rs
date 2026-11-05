@@ -654,7 +654,7 @@ mod tests {
         // Create database first
         {
             let db = Database::open(&path).unwrap();
-            let page = db.allocate_page(PageType::BTreeLeaf).unwrap();
+            db.allocate_page(PageType::BTreeLeaf).unwrap();
             db.close().unwrap();
         }
 

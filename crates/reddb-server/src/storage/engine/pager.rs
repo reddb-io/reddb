@@ -582,12 +582,11 @@ mod tests {
             let page1 = pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
-            let page2 = pager
+            pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
 
             let id1 = page1.page_id();
-            let id2 = page2.page_id();
 
             // Free page 1
             pager.free_page(id1).expect("free_page() should succeed");

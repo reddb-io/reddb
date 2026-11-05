@@ -34,8 +34,6 @@ pub struct HybridExecutor {
     unified: UnifiedExecutor,
     /// Vector search executor
     vector: VectorExecutor,
-    /// Cross-reference index for linking results
-    unified_index: Option<Arc<UnifiedIndex>>,
 }
 
 impl HybridExecutor {
@@ -48,16 +46,11 @@ impl HybridExecutor {
         let unified = UnifiedExecutor::new(Arc::clone(&graph), Arc::clone(&index));
         let vector = VectorExecutor::new(vector_store);
 
-        Self {
-            unified,
-            vector,
-            unified_index: None,
-        }
+        Self { unified, vector }
     }
 
     /// Add cross-reference support
     pub fn with_unified_index(mut self, index: Arc<UnifiedIndex>) -> Self {
-        self.unified_index = Some(Arc::clone(&index));
         self.vector = self.vector.with_unified_index(index);
         self
     }
@@ -506,15 +499,6 @@ impl HybridExecutor {
                     // Convert distance to similarity (lower distance = higher similarity)
                     return 1.0 / (1.0 + distance);
                 }
-            }
-        }
-
-        // Try via cross-reference if available
-        if let Some(ref unified_index) = self.unified_index {
-            if let Some(Value::Integer(id)) = record.get("id") {
-                // Look up if this row has a linked vector
-                // This requires the unified_index to track row->vector mappings
-                // For now, return 0 if no match found
             }
         }
 

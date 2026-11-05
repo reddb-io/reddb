@@ -273,8 +273,6 @@ impl<'rt> MutationEngine<'rt> {
         row: MutationRow,
         topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<MutationResult> {
-        let db = self.runtime.db();
-
         // Build entity — same logic as BatchBuilder::add_row
         let mut entity = build_table_entity(
             self.store.as_ref(),

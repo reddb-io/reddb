@@ -138,7 +138,7 @@ impl Decorrelator {
     pub fn analyze(
         &self,
         outer_refs: &[String],
-        inner_cols: &[String],
+        _inner_cols: &[String],
         correlation_predicates: &[(String, String)], // (outer, inner) equality pairs
         subquery_type: SubqueryKind,
         has_aggregation: bool,

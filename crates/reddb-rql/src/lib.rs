@@ -19,13 +19,11 @@
 //! sqllogictest comparator sees. [`conformance`] owns that rendering.
 
 // The parser family (#1103) and the AST cluster (#1113) were re-homed
-// byte-faithfully from `reddb-server`, which carries a crate-level
-// `#![allow(dead_code, unused_imports, unused_variables)]`. Carrying the same
-// blanket here keeps the relocation a pure move — the parser's helper methods,
-// keyword-import lists, and parse-loop bindings stay exactly as authored
-// (matching the precedent set by `reddb-io-types`, ADR 0052).
+// byte-faithfully from `reddb-server`. Keep the legacy dead-code and import
+// allowances for that public surface, while requiring unused bindings to be
+// explicit (matching the precedent set by `reddb-io-types`, ADR 0052).
 #![allow(clippy::unwrap_used)]
-#![allow(dead_code, unused_imports, unused_variables)]
+#![allow(dead_code, unused_imports)]
 // The parser dispatch carries deep recursive-descent signatures the source
 // crate already opted out of linting; mirror that subset so the move stays a
 // pure relocation rather than a refactor.

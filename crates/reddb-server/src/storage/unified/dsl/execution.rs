@@ -506,7 +506,7 @@ pub fn execute_hybrid_query(
         .unwrap_or_else(|| store.list_collections());
 
     // 1. Vector search if specified
-    if let Some((ref vec, k)) = query.vector_query {
+    if let Some((ref vec, _k)) = query.vector_query {
         for col_name in &collections {
             if let Some(manager) = store.get_collection(col_name) {
                 let entities = manager.query_all(|_| true);

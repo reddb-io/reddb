@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used)]
-#![allow(dead_code, unused_imports, unused_variables)]
+#![allow(dead_code, unused_imports)]
 // Structural lints we accept for API design reasons:
 #![allow(
     clippy::too_many_arguments,   // complex DB operations legitimately need many params
