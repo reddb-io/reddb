@@ -924,67 +924,95 @@ pub(super) fn resolve_materialized_graph_endpoint<'a>(
         .map(String::as_str))
 }
 
-/// RLS may re-enter storage, so only collect IDs while holding segment locks.
-/// Filter by entity kind before cloning payloads or collecting IDs. Collections
-/// can contain mixed kinds. Ordinary queries retain the parallel scan path.
+/// RLS may re-enter storage. Hydrate only one graph batch before releasing
+/// storage locks and delivering owned entities to policy/materialization code.
 pub(super) fn visit_graph_materialization_entities(
     manager: &crate::storage::unified::manager::SegmentManager,
     snapshot: Option<&super::impl_core::SnapshotContext>,
     kind: GraphEntityKind,
     mut visit: impl FnMut(crate::storage::unified::entity::UnifiedEntity) -> RedDBResult<()>,
 ) -> RedDBResult<()> {
-    if !super::function_budget::active() {
-        for entity in manager.scan_graph_kind(snapshot, kind) {
-            visit(entity)?;
-        }
-        return Ok(());
-    }
-    let mut ids = Vec::new();
-    let mut segment_failure = None;
-    super::function_budget::scan(
-        |callback| {
-            manager.scan_graph_candidates_for_each(
-                snapshot,
-                kind,
-                || {
-                    if let Err(cause) = super::function_budget::charge(1) {
-                        segment_failure = Some(cause);
-                        return false;
-                    }
-                    true
-                },
-                callback,
-            )
-        },
-        |entity| {
-            // The scan charges every visible candidate, including rejected kinds.
-            // Only the current graph pass's payloads need to leave the segment lock.
-            if kind.matches(&entity.kind) {
-                ids.push(entity.id);
+    let mut failure = None;
+    manager.scan_graph_batches(
+        snapshot,
+        kind,
+        || super::function_budget::charge(1).is_ok(),
+        |batch| {
+            for entity in batch {
+                if let Err(cause) = super::function_budget::charge(1).and_then(|()| visit(entity)) {
+                    failure = Some(cause);
+                    return false;
+                }
             }
             true
         },
-    )?;
-    if let Some(cause) = segment_failure {
+    );
+    if let Some(cause) = failure {
         return Err(cause);
     }
-    for batch in ids.chunks(256) {
-        super::function_budget::charge(0)?;
-        for entity in manager.get_many(batch).into_iter().flatten() {
-            super::function_budget::charge(1)?;
-            // Re-check the captured MVCC view after releasing the scan lock.
-            if super::impl_core::entity_visible_with_context(snapshot, &entity) {
-                visit(entity)?;
-            }
-        }
-    }
-    Ok(())
+    // A stopped cursor leaves a sticky budget error; never return a partial graph.
+    super::function_budget::charge(0)
 }
 
 #[cfg(test)]
 mod pruning_tests {
     use super::*;
     use crate::storage::{EntityId, SegmentManager, UnifiedEntity};
+
+    #[test]
+    fn graph_materialization_bounds_temporary_payloads_and_propagates_callback_errors() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        let manager = SegmentManager::new("graph");
+        for id in 1..=1024 {
+            manager
+                .insert(UnifiedEntity::graph_node(
+                    EntityId::new(id),
+                    "graph",
+                    "node",
+                    HashMap::from([("payload".to_string(), Value::Blob(vec![7; 16 * 1024]))]),
+                ))
+                .expect("node");
+        }
+        let (_, baseline) = measure_allocations(|| {
+            for entity in manager.scan_graph_kind(None, GraphEntityKind::Node) {
+                assert!(manager.get(entity.id).is_some());
+            }
+        });
+        let mut count = 0;
+        let (result, allocations) = measure_allocations(|| {
+            visit_graph_materialization_entities(&manager, None, GraphEntityKind::Node, |entity| {
+                count += 1;
+                assert!(
+                    manager.get(entity.id).is_some(),
+                    "callback may re-enter storage"
+                );
+                Ok(())
+            })
+        });
+        result.expect("materialization");
+        assert_eq!(count, 1024);
+        assert!(
+            allocations.peak_live_bytes < 8 * 1024 * 1024,
+            "{allocations:?}"
+        );
+        assert!(allocations.peak_live_bytes * 2 < baseline.peak_live_bytes);
+        eprintln!(
+            "graph materialization temporary peak: {} -> {} bytes",
+            baseline.peak_live_bytes, allocations.peak_live_bytes
+        );
+
+        let mut count = 0;
+        let error =
+            visit_graph_materialization_entities(&manager, None, GraphEntityKind::Node, |_| {
+                count += 1;
+                Err(RedDBError::Query("injected materialization failure".into()))
+            })
+            .expect_err("callback failure must stop the scan");
+        assert_eq!(count, 1);
+        assert!(error
+            .to_string()
+            .contains("injected materialization failure"));
+    }
 
     #[test]
     fn historical_endpoint_probes_consume_call_work() {

@@ -163,6 +163,37 @@ from 100,001 to zero with 50,000 marks. This counts only the early metadata
 check; normal column decoding still allocates when needed. The owned decoder
 and the borrowed view share the same checked parser and on-disk format.
 
+## Follow-up improvements to existing collection models
+
+Document field reads now borrow RDOC v3 offset entries instead of allocating
+an owned offset table for each field. A 100-field numeric body queried 3,000
+times went from 3,000 allocations to zero in an isolated allocator probe. The
+server test `numeric_field_reads_do_not_allocate_offset_tables` pins this
+behavior. Name lookup remains linear in the fields examined, and text/compound
+values may still allocate when decoded. The public owned-header API and stored
+bytes are unchanged. Wiring the existing dictionary codec into durable writes
+is deferred because dictionary/body publication needs a recovery contract.
+
+Table push-down aggregates reuse one input vector across rows and borrow its
+slots during accumulation. A test folds 1,000 numeric rows into an existing
+group without allocations; this does not imply that group creation, text keys,
+or complete SQL execution allocate nothing. Filtered scans and canonical table
+sorts now reuse the existing fallible top-K helper for finite ordered windows,
+including OFFSET. They still retain the input records and sort keys: this is
+partial selection rather than a streaming heap with O(K) memory.
+
+Graph materialization reads at most 256 entity payloads per batch and releases
+storage locks before policy callbacks. It pins source cursors across sealing,
+hydrates current authoritative entities, and applies the existing snapshot
+predicate and per-kind RLS checks. Work budgets charge pruned sources and every
+inspected physical slot; cancellation or callback errors fail the operation.
+An allocator regression test with 1,024 nodes carrying a 16 KiB property
+measured temporary peaks of 17,445,236 bytes for the former collection read
+and 4,458,536 bytes for the batched read. Source data and the eventual graph
+result are excluded. The final topology is still fully materialized; adapting
+the search reader's local adjacency path to these APIs remains a separate
+change because selection, identity deduplication, and output order differ.
+
 ## Recommended next steps
 
 1. **Establish an end-to-end baseline before choosing a format.** Use the same
@@ -192,5 +223,5 @@ and the borrowed view share the same checked parser and on-disk format.
    existing query semantics. Generic tables/documents and MergeTree-like
    compaction require separate product and architecture decisions.
 
-This note is a source review and benchmark proposal; no comparative benchmark,
-performance gain, or storage-size claim was measured in this investigation.
+No end-to-end RedDB/ClickHouse comparison or whole-database compression ratio
+was measured in this investigation.
