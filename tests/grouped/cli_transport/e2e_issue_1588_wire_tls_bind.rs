@@ -205,7 +205,9 @@ fn wire_tls_uses_bootstrapped_authentication() {
         let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
         if let Ok(mut client) = anonymous {
             let query_succeeded = client.query("SELECT 1").await.is_ok();
-            panic!("anonymous client must be rejected; query_succeeded={query_succeeded}");
+            let create_succeeded = client.query("CREATE TABLE auth_probe (id INT)").await.is_ok();
+            let insert_succeeded = client.query("INSERT INTO auth_probe (id) VALUES (1)").await.is_ok();
+            panic!("anonymous client must be rejected; query_succeeded={query_succeeded}; create_succeeded={create_succeeded}; insert_succeeded={insert_succeeded}");
         }
         let wrong = RedWireClient::connect(options().with_auth(Auth::Basic {
             user: "integration-user".into(),
