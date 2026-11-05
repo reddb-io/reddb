@@ -188,6 +188,15 @@ impl<'a> DmlTargetScan<'a> {
                 .collect();
 
             let mut visit = |entity: &crate::storage::UnifiedEntity| {
+                #[cfg(test)]
+                self.runtime.index_store_ref().mutation_test_hook(
+                    self.table,
+                    super::index_store::MutationTestPhase::DmlTargetScanCandidate,
+                );
+                if let Err(error) = super::query_budget::charge(1) {
+                    predicate_failure = Some(error);
+                    return false;
+                }
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
                 {
@@ -214,6 +223,15 @@ impl<'a> DmlTargetScan<'a> {
             }
         } else {
             manager.try_for_each_entity(usize::MAX, |entity| {
+                #[cfg(test)]
+                self.runtime.index_store_ref().mutation_test_hook(
+                    self.table,
+                    super::index_store::MutationTestPhase::DmlTargetScanCandidate,
+                );
+                if let Err(error) = super::query_budget::charge(1) {
+                    predicate_failure = Some(error);
+                    return false;
+                }
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
                 {
@@ -278,6 +296,7 @@ impl<'a> DmlTargetScan<'a> {
         };
         let mut ids = Vec::with_capacity(entity_ids.len());
         let mut visit = |entity: crate::storage::UnifiedEntity| -> RedDBResult<bool> {
+            super::query_budget::charge(1)?;
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
                 && self.matches_filter(&entity, compiled_filter)?
@@ -320,6 +339,7 @@ impl<'a> DmlTargetScan<'a> {
     {
         let mut ids = Vec::new();
         for entity in entities {
+            super::query_budget::charge(1)?;
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
                 && self.matches_filter(&entity, compiled_filter)?

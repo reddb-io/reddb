@@ -1,5 +1,6 @@
-//! Cooperative budgets for materialized read execution. Blocking storage calls,
-//! parsing and operators without work checkpoints are not preempted by a timer.
+//! Cooperative query budgets and transport cancellation checkpoints. Blocking
+//! work without checkpoints is not preempted. DML observes cancellation while
+//! scanning and preparing, then defers it after durable publication begins.
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -24,6 +25,7 @@ thread_local! { static CURRENT: Cell<Option<Budget>> = const { Cell::new(None) }
 thread_local! {
     static REQUEST_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
+thread_local! { static DURABLE_PUBLICATION_DEPTH: Cell<u32> = const { Cell::new(0) }; }
 
 /// Cancellation shared by an asynchronous transport deadline and the
 /// synchronous query worker it spawned. The worker installs a scope before
@@ -58,6 +60,48 @@ impl RequestCancellation {
 pub(crate) struct RequestCancellationScope {
     previous: Option<Arc<AtomicBool>>,
     _thread: PhantomData<Rc<()>>,
+}
+
+/// Defers cooperative cancellation after a mutation crosses its final durable
+/// publication boundary. Returning a timeout from inside a multi-chunk publish
+/// could otherwise expose only a prefix of the statement.
+pub(crate) struct DurablePublicationScope {
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl Drop for DurablePublicationScope {
+    fn drop(&mut self) {
+        DURABLE_PUBLICATION_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("durable publication scope balanced"),
+            );
+        });
+    }
+}
+
+/// Establish the last cancellation checkpoint before durable mutation work.
+/// Once this succeeds, callers must finish publication atomically even if the
+/// transport deadline fires while storage or index maintenance is in flight.
+pub(crate) fn begin_durable_publication() -> RedDBResult<DurablePublicationScope> {
+    charge(0)?;
+    DURABLE_PUBLICATION_DEPTH.with(|depth| {
+        depth.set(
+            depth
+                .get()
+                .checked_add(1)
+                .expect("durable publication scope depth"),
+        );
+    });
+    Ok(DurablePublicationScope {
+        _thread: PhantomData,
+    })
+}
+
+fn durable_publication_active() -> bool {
+    DURABLE_PUBLICATION_DEPTH.with(|depth| depth.get() > 0)
 }
 
 impl Drop for RequestCancellationScope {
@@ -178,6 +222,9 @@ pub(crate) fn charge_output(bytes: usize) -> RedDBResult<()> {
     })
 }
 pub(crate) fn charge(work: u64) -> RedDBResult<()> {
+    if durable_publication_active() {
+        return Ok(());
+    }
     if request_cancelled() {
         return Err(RedDBError::QuotaExceeded(
             "duration:query_cancelled:request_deadline".to_string(),
@@ -270,6 +317,7 @@ fn empty_payload(result: &RuntimeQueryResult) -> crate::json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::index_store::MutationTestPhase;
 
     #[test]
     fn text_parameterized_and_prepared_reads_share_admission_and_release_it() {
@@ -475,5 +523,212 @@ mod tests {
             assert!(charge(0).is_ok());
         }
         assert!(charge(0).is_err());
+    }
+
+    fn assert_request_deadline_cancels_mutation_before_publication(
+        query: &'static str,
+        pause_phase: MutationTestPhase,
+    ) {
+        use std::sync::mpsc;
+
+        let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE cancellation_rows (id INTEGER, state TEXT)")
+            .expect("table");
+        runtime
+            .execute_query(
+                "INSERT INTO cancellation_rows (id, state) VALUES (1, 'original'), (2, 'original')",
+            )
+            .expect("rows");
+
+        let (candidate_send, candidate_receive) = mpsc::channel();
+        let (resume_send, resume_receive) = mpsc::channel();
+        let resume_receive = std::sync::Mutex::new(resume_receive);
+        let first_candidate = Arc::new(AtomicBool::new(true));
+        let hook_first_candidate = Arc::clone(&first_candidate);
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "cancellation_rows"
+                    && phase == pause_phase
+                    && hook_first_candidate.swap(false, Ordering::AcqRel)
+                {
+                    candidate_send.send(()).expect("candidate reached");
+                    resume_receive
+                        .lock()
+                        .expect("resume receiver")
+                        .recv()
+                        .expect("resume scan");
+                }
+            }));
+
+        let cancellation = RequestCancellation::new();
+        std::thread::scope(|threads| {
+            let worker_cancellation = cancellation.clone();
+            let runtime = &runtime;
+            let worker = threads.spawn(move || {
+                let _request = worker_cancellation.install();
+                runtime.execute_query(query)
+            });
+            if let Err(error) = candidate_receive.recv_timeout(Duration::from_secs(2)) {
+                let _ = resume_send.send(());
+                panic!("mutation did not reach cancellation checkpoint: {error}");
+            }
+            cancellation.cancel();
+            resume_send.send(()).expect("resume cancelled scan");
+            let error = worker
+                .join()
+                .expect("mutation worker")
+                .expect_err("cancelled mutation must not succeed");
+            assert!(
+                error.to_string().contains("query_cancelled"),
+                "unexpected cancellation error: {error}"
+            );
+        });
+
+        let result = runtime
+            .execute_query("SELECT state FROM cancellation_rows ORDER BY id")
+            .expect("read unchanged rows");
+        assert_eq!(result.result.records.len(), 2);
+        assert!(result
+            .result
+            .records
+            .iter()
+            .all(|record| { record.get("state") == Some(&reddb_types::Value::text("original")) }));
+    }
+
+    #[test]
+    fn request_deadline_cancels_update_during_target_scan_before_publication() {
+        assert_request_deadline_cancels_mutation_before_publication(
+            "UPDATE cancellation_rows SET state = 'changed'",
+            MutationTestPhase::DmlTargetScanCandidate,
+        );
+    }
+
+    #[test]
+    fn request_deadline_cancels_update_during_post_image_preparation_before_publication() {
+        assert_request_deadline_cancels_mutation_before_publication(
+            "UPDATE cancellation_rows SET state = 'changed'",
+            MutationTestPhase::DmlPostImageCandidate,
+        );
+    }
+
+    #[test]
+    fn request_deadline_cancels_delete_during_target_scan_before_publication() {
+        assert_request_deadline_cancels_mutation_before_publication(
+            "DELETE FROM cancellation_rows",
+            MutationTestPhase::DmlTargetScanCandidate,
+        );
+    }
+
+    #[test]
+    fn request_deadline_after_durable_delete_publication_finishes_statement() {
+        let runtime = super::super::RedDBRuntime::with_options(
+            crate::RedDBOptions::in_memory().with_memory_budget(128 * 1024 * 1024),
+        )
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE cancellation_rows (id INTEGER)")
+            .expect("table");
+        let count = super::super::impl_dml::UPDATE_APPLY_CHUNK_SIZE + 16;
+        for batch in (0..count).collect::<Vec<_>>().chunks(512) {
+            let values = batch
+                .iter()
+                .map(|id| format!("({id})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO cancellation_rows (id) VALUES {values}"
+                ))
+                .expect("seed rows");
+        }
+
+        let cancellation = RequestCancellation::new();
+        let hook_cancellation = cancellation.clone();
+        let first_publication = Arc::new(AtomicBool::new(true));
+        let hook_first_publication = Arc::clone(&first_publication);
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "cancellation_rows"
+                    && phase == MutationTestPhase::StoragePublished
+                    && hook_first_publication.swap(false, Ordering::AcqRel)
+                {
+                    hook_cancellation.cancel();
+                }
+            }));
+
+        let result = {
+            let _request = cancellation.install();
+            let result = runtime
+                .execute_query("DELETE FROM cancellation_rows")
+                .expect("durable publication must finish");
+            assert!(
+                charge(0).is_err(),
+                "cancellation must resume after durable publication"
+            );
+            result
+        };
+        assert_eq!(
+            result.affected_rows,
+            u64::try_from(count).expect("small fixture")
+        );
+        assert!(
+            runtime
+                .execute_query("SELECT id FROM cancellation_rows")
+                .expect("read deleted rows")
+                .result
+                .records
+                .is_empty(),
+            "deadline after publication must not leave a deleted prefix"
+        );
+    }
+
+    #[test]
+    fn request_deadline_after_durable_update_publication_finishes_maintenance() {
+        let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE cancellation_rows (id INTEGER, state TEXT)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO cancellation_rows (id, state) VALUES (1, 'original')")
+            .expect("row");
+
+        let cancellation = RequestCancellation::new();
+        let hook_cancellation = cancellation.clone();
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection != "cancellation_rows" {
+                    return;
+                }
+                if phase == MutationTestPhase::StoragePublished {
+                    hook_cancellation.cancel();
+                }
+                if phase == MutationTestPhase::BeforeEvents {
+                    assert!(
+                        charge(0).is_ok(),
+                        "index and event maintenance must remain inside durable publication"
+                    );
+                }
+            }));
+
+        {
+            let _request = cancellation.install();
+            let result = runtime
+                .execute_query("UPDATE cancellation_rows SET state = 'changed'")
+                .expect("durable publication must finish maintenance");
+            assert_eq!(result.affected_rows, 1);
+            assert!(
+                charge(0).is_err(),
+                "cancellation must resume after durable publication"
+            );
+        }
+        let result = runtime
+            .execute_query("SELECT state FROM cancellation_rows")
+            .expect("read updated row");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("state"),
+            Some(&reddb_types::Value::text("changed"))
+        );
     }
 }

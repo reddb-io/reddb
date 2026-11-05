@@ -77,11 +77,21 @@ pub(super) fn order_target_ids(
         bytes,
     )?;
     let mut ordered = Vec::with_capacity(ids.len());
+    let mut budget_failure = None;
     manager.try_for_each_id(&ids, usize::MAX, |_, entity| {
+        if let Err(error) = super::query_budget::charge(1) {
+            budget_failure = Some(error);
+            return false;
+        }
         ordered.push((super::RmwLockTable::row_key(entity.logical_id()), entity.id));
         true
     })?;
+    if let Some(error) = budget_failure {
+        return Err(error);
+    }
+    super::query_budget::charge(0)?;
     ordered.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    super::query_budget::charge(0)?;
     let retained = ordered.len();
     for (destination, (_, id)) in ids.iter_mut().zip(ordered) {
         *destination = id;
@@ -100,6 +110,7 @@ pub(super) fn lock_delete_rows(
 ) -> RedDBResult<DeleteRowLocks> {
     let mut keys = Vec::with_capacity(ids.len());
     for &id in ids {
+        super::query_budget::charge(1)?;
         if let Some(entity) = manager.try_get(id, usize::MAX)? {
             keys.push(super::RmwLockTable::row_key(entity.logical_id()));
         }
@@ -108,6 +119,7 @@ pub(super) fn lock_delete_rows(
     keys.dedup();
     let mut locks = Vec::with_capacity(keys.len());
     for key in keys {
+        super::query_budget::charge(1)?;
         let previous = DEFERRED_DELETES.with(|slot| {
             slot.borrow()
                 .as_ref()

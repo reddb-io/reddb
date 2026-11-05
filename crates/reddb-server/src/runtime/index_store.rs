@@ -1090,6 +1090,8 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MutationTestPhase {
+    DmlTargetScanCandidate,
+    DmlPostImageCandidate,
     StoragePublished,
     BeforeEvents,
     BeforeUndoTopology,
