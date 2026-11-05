@@ -1062,15 +1062,28 @@ impl RedDBServer {
             );
         }
 
-        if phase.accepts_queries() {
+        let execution_ready = self.execution_watchdog.is_ready();
+        if phase.accepts_queries() && execution_ready {
             object.insert("status".to_string(), JsonValue::String("ready".to_string()));
             json_response(200, JsonValue::Object(object))
         } else {
             object.insert(
                 "status".to_string(),
-                JsonValue::String(phase.as_str().to_string()),
+                JsonValue::String(
+                    if execution_ready {
+                        phase.as_str()
+                    } else {
+                        "unready"
+                    }
+                    .to_string(),
+                ),
             );
-            if let Some(reason) = lifecycle.not_ready_reason() {
+            if !execution_ready {
+                object.insert(
+                    "reason".to_string(),
+                    JsonValue::String("handler_deadline_exceeded".to_string()),
+                );
+            } else if let Some(reason) = lifecycle.not_ready_reason() {
                 object.insert("reason".to_string(), JsonValue::String(reason));
             } else {
                 object.insert(
