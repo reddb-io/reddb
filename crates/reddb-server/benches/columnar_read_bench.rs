@@ -14,7 +14,6 @@ use reddb_server::storage::timeseries::chunk::{
     points_from_column_block, query_column_block_range, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID,
     COLUMNAR_VALUE_COLUMN_ID,
 };
-use reddb_server::storage::unified::column_block::read_column_block;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -171,23 +170,15 @@ fn bench_range_gap(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("columnar-read/range-gap");
     group.sample_size(10);
-    group.bench_function("decode-before-pruning", |b| {
+    group.bench_function("full-decode-and-filter", |b| {
         b.iter(|| {
-            // The former range reader decoded both columns and their indexes
-            // before testing the timestamp granules.
-            let decoded = read_column_block(black_box(&block)).expect("decode");
-            let timestamps = decoded
-                .columns
-                .iter()
-                .find(|column| column.column_id == COLUMNAR_TS_COLUMN_ID)
-                .expect("timestamp column");
-            let index = timestamps.granule_index.as_ref().expect("timestamp index");
-            let survivors = index.surviving_granules(|min, max| {
-                let min = u64::from_le_bytes(min.try_into().expect("timestamp width"));
-                let max = u64::from_le_bytes(max.try_into().expect("timestamp width"));
-                min <= end && max >= start
-            });
-            black_box(survivors)
+            let points = points_from_column_block(black_box(&block)).expect("decode");
+            black_box(
+                points
+                    .into_iter()
+                    .filter(|point| point.timestamp_ns >= start && point.timestamp_ns <= end)
+                    .count(),
+            )
         });
     });
     group.bench_function("index-pruned", |b| {
