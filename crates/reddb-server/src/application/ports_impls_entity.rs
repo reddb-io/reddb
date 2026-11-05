@@ -1135,6 +1135,8 @@ impl RedDBRuntime {
             metadata_changed = true;
         }
 
+        entity.field_bloom =
+            crate::storage::unified::entity::compute_entity_field_bloom(&entity.data);
         entity.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1360,6 +1362,8 @@ impl RedDBRuntime {
             }
         }
 
+        entity.field_bloom =
+            crate::storage::unified::entity::compute_entity_field_bloom(&entity.data);
         entity.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
