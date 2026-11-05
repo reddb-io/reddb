@@ -727,6 +727,7 @@ impl RedDBRuntime {
         store
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        super::queue_storage_index::prepare_queue(self, &query.name)?;
         if let Some(ttl_ms) = query.ttl_ms {
             self.inner
                 .db
@@ -762,6 +763,7 @@ impl RedDBRuntime {
                 store
                     .create_collection(dlq)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                super::queue_storage_index::prepare_queue(self, dlq)?;
                 self.inner
                     .db
                     .save_collection_contract(queue_collection_contract(dlq, false, None))
@@ -2026,36 +2028,49 @@ pub(super) fn load_queue_config(store: &UnifiedStore, queue: &str) -> QueueRunti
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return default;
     };
-    manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_config")
-                    && row_text(row, "queue").as_deref() == Some(queue)
+    let rows = match super::queue_storage_index::subject_rows_store(
+        store,
+        "queue_config",
+        queue,
+        None,
+        None,
+    ) {
+        Ok(Some(rows)) => rows,
+        Ok(None) | Err(_) => manager
+            .query_all(|entity| {
+                entity.data.as_row().is_some_and(|row| {
+                    row_text(row, "kind").as_deref() == Some("queue_config")
+                        && row_text(row, "queue").as_deref() == Some(queue)
+                })
             })
-        })
-        .into_iter()
-        .find_map(|entity| {
-            let row = entity.data.as_row()?;
-            Some(QueueRuntimeConfig {
-                mode: row_text(row, "mode")
-                    .as_deref()
-                    .and_then(QueueMode::parse)
-                    .unwrap_or_default(),
-                priority: row_bool(row, "priority").unwrap_or(false),
-                max_size: row_u64(row, "max_size").map(|value| value as usize),
-                ttl_ms: row_u64(row, "ttl_ms"),
-                dlq: row_text(row, "dlq"),
-                max_attempts: row_u64(row, "max_attempts")
-                    .map(|value| value as u32)
-                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS),
-                lock_deadline_ms: row_u64(row, "lock_deadline_ms")
-                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
-                in_flight_cap_per_group: row_u64(row, "in_flight_cap_per_group")
-                    .map(|value| value as u32)
-                    .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
-                retry_delay_ms: row_u64(row, "retry_delay_ms").filter(|v| *v > 0),
-                dedup_window_ms: row_u64(row, "dedup_window_ms"),
+            .into_iter()
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
             })
+            .collect(),
+    };
+    rows.into_iter()
+        .next()
+        .map(|(_, row)| QueueRuntimeConfig {
+            mode: row_text(&row, "mode")
+                .as_deref()
+                .and_then(QueueMode::parse)
+                .unwrap_or_default(),
+            priority: row_bool(&row, "priority").unwrap_or(false),
+            max_size: row_u64(&row, "max_size").map(|value| value as usize),
+            ttl_ms: row_u64(&row, "ttl_ms"),
+            dlq: row_text(&row, "dlq"),
+            max_attempts: row_u64(&row, "max_attempts")
+                .map(|value| value as u32)
+                .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_MAX_ATTEMPTS),
+            lock_deadline_ms: row_u64(&row, "lock_deadline_ms")
+                .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS),
+            in_flight_cap_per_group: row_u64(&row, "in_flight_cap_per_group")
+                .map(|value| value as u32)
+                .unwrap_or(reddb_rql::ast::DEFAULT_QUEUE_IN_FLIGHT_CAP_PER_GROUP),
+            retry_delay_ms: row_u64(&row, "retry_delay_ms").filter(|v| *v > 0),
+            dedup_window_ms: row_u64(&row, "dedup_window_ms"),
         })
         .unwrap_or(default)
 }
@@ -2069,10 +2084,18 @@ fn save_queue_config(
     queue: &str,
     config: &QueueRuntimeConfig,
 ) -> RedDBResult<()> {
-    remove_meta_rows(store, |row| {
-        row_text(row, "kind").as_deref() == Some("queue_config")
-            && row_text(row, "queue").as_deref() == Some(queue)
-    });
+    match super::queue_storage_index::subject_rows_store(store, "queue_config", queue, None, None)?
+    {
+        Some(rows) => {
+            for (id, _) in rows {
+                let _ = store.delete(QUEUE_META_COLLECTION, id);
+            }
+        }
+        None => remove_meta_rows(store, |row| {
+            row_text(row, "kind").as_deref() == Some("queue_config")
+                && row_text(row, "queue").as_deref() == Some(queue)
+        }),
+    }
 
     let mut fields = HashMap::new();
     fields.insert("kind".to_string(), Value::text("queue_config".to_string()));
@@ -2189,6 +2212,19 @@ fn load_queue_groups(store: &UnifiedStore, queue: &str) -> RedDBResult<Vec<Queue
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return Ok(Vec::new());
     };
+    if let Some(rows) =
+        super::queue_storage_index::subject_rows_store(store, "queue_group", queue, None, None)?
+    {
+        return Ok(rows
+            .into_iter()
+            .filter_map(|(entity_id, row)| {
+                Some(QueueGroupEntry {
+                    entity_id,
+                    group: row_text(&row, "group")?,
+                })
+            })
+            .collect());
+    }
     let _publication = manager
         .has_backing()
         .then(|| store.vault_publication_lock.lock());
@@ -2240,53 +2276,90 @@ pub(super) fn load_pending_entries(
     let lock_deadline_ns = load_queue_config(store, queue)
         .lock_deadline_ms
         .saturating_mul(1_000_000);
-    let attempts_by_key: HashMap<(String, String, u64), u64> = manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_attempts_lc")
-                    && row_text(row, "queue").as_deref() == Some(queue)
+    let indexed_attempts = super::queue_storage_index::subject_rows_store(
+        store,
+        "queue_attempts_lc",
+        queue,
+        group,
+        message_id.map(|id| id.raw()),
+    )?;
+    let attempts = indexed_attempts.unwrap_or_else(|| {
+        manager
+            .query_all(|entity| {
+                entity.data.as_row().is_some_and(|row| {
+                    row_text(row, "kind").as_deref() == Some("queue_attempts_lc")
+                        && row_text(row, "queue").as_deref() == Some(queue)
+                })
             })
-        })
+            .into_iter()
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
+            })
+            .collect()
+    });
+    let attempts_by_key: HashMap<(String, String, u64), u64> = attempts
         .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
+        .filter_map(|(_, row)| {
             Some((
                 (
-                    row_text(row, "queue")?,
-                    row_text(row, "group")?,
-                    row_u64(row, "message_id")?,
+                    row_text(&row, "queue")?,
+                    row_text(&row, "group")?,
+                    row_u64(&row, "message_id")?,
                 ),
-                row_u64(row, "attempts").unwrap_or(1),
+                row_u64(&row, "attempts").unwrap_or(1),
             ))
         })
         .collect();
-    Ok(manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                matches!(
-                    row_text(row, "kind").as_deref(),
-                    Some("queue_pending") | Some("queue_pending_lc")
-                ) && row_text(row, "queue").as_deref() == Some(queue)
-                    && group
-                        .map(|group_name| row_text(row, "group").as_deref() == Some(group_name))
-                        .unwrap_or(true)
-                    && message_id
-                        .map(|candidate| row_u64(row, "message_id") == Some(candidate.raw()))
-                        .unwrap_or(true)
-            })
-        })
+    let mut pending = Vec::new();
+    for kind in ["queue_pending", "queue_pending_lc"] {
+        match super::queue_storage_index::subject_rows_store(
+            store,
+            kind,
+            queue,
+            group,
+            message_id.map(|id| id.raw()),
+        )? {
+            Some(rows) => pending.extend(rows),
+            None => pending.extend(
+                manager
+                    .query_all(|entity| {
+                        entity.data.as_row().is_some_and(|row| {
+                            row_text(row, "kind").as_deref() == Some(kind)
+                                && row_text(row, "queue").as_deref() == Some(queue)
+                                && group
+                                    .map(|group_name| {
+                                        row_text(row, "group").as_deref() == Some(group_name)
+                                    })
+                                    .unwrap_or(true)
+                                && message_id
+                                    .map(|candidate| {
+                                        row_u64(row, "message_id") == Some(candidate.raw())
+                                    })
+                                    .unwrap_or(true)
+                        })
+                    })
+                    .into_iter()
+                    .filter_map(|entity| match entity.data {
+                        EntityData::Row(row) => Some((entity.id, row)),
+                        _ => None,
+                    }),
+            ),
+        }
+    }
+    pending.sort_unstable_by_key(|(id, _)| id.raw());
+    Ok(pending
         .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            let group = row_text(row, "group")?;
-            let message_id = row_u64(row, "message_id")?;
-            let kind = row_text(row, "kind")?;
+        .filter_map(|(entity_id, row)| {
+            let group = row_text(&row, "group")?;
+            let message_id = row_u64(&row, "message_id")?;
+            let kind = row_text(&row, "kind")?;
             let delivered_at_ns = if kind == "queue_pending_lc" {
-                row_u64(row, "lock_deadline_ns")
+                row_u64(&row, "lock_deadline_ns")
                     .unwrap_or(0)
                     .saturating_sub(lock_deadline_ns)
             } else {
-                row_u64(row, "delivered_at_ns")?
+                row_u64(&row, "delivered_at_ns")?
             };
             let delivery_count = if kind == "queue_pending_lc" {
                 attempts_by_key
@@ -2294,13 +2367,13 @@ pub(super) fn load_pending_entries(
                     .copied()
                     .unwrap_or(1)
             } else {
-                row_u64(row, "delivery_count").unwrap_or(1)
+                row_u64(&row, "delivery_count").unwrap_or(1)
             };
             Some(QueuePendingEntry {
-                entity_id: entity.id,
+                entity_id,
                 group,
                 message_id: EntityId::new(message_id),
-                consumer: row_text(row, "consumer").unwrap_or_default(),
+                consumer: row_text(&row, "consumer").unwrap_or_default(),
                 delivered_at_ns,
                 delivery_count: delivery_count as u32,
             })
@@ -2317,12 +2390,25 @@ pub(super) fn save_queue_pending(
     delivered_at_ns: u64,
     delivery_count: u32,
 ) -> RedDBResult<()> {
-    remove_meta_rows(store, |row| {
-        row_text(row, "kind").as_deref() == Some("queue_pending")
-            && row_text(row, "queue").as_deref() == Some(queue)
-            && row_text(row, "group").as_deref() == Some(group)
-            && row_u64(row, "message_id") == Some(message_id.raw())
-    });
+    match super::queue_storage_index::subject_rows_store(
+        store,
+        "queue_pending",
+        queue,
+        Some(group),
+        Some(message_id.raw()),
+    )? {
+        Some(rows) => {
+            for (id, _) in rows {
+                let _ = store.delete(QUEUE_META_COLLECTION, id);
+            }
+        }
+        None => remove_meta_rows(store, |row| {
+            row_text(row, "kind").as_deref() == Some("queue_pending")
+                && row_text(row, "queue").as_deref() == Some(queue)
+                && row_text(row, "group").as_deref() == Some(group)
+                && row_u64(row, "message_id") == Some(message_id.raw())
+        }),
+    }
 
     let mut fields = HashMap::new();
     fields.insert("kind".to_string(), Value::text("queue_pending".to_string()));
@@ -2372,26 +2458,41 @@ pub(super) fn load_ack_entries(
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return Ok(Vec::new());
     };
-    Ok(manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some("queue_ack")
-                    && row_text(row, "queue").as_deref() == Some(queue)
-                    && group
-                        .map(|group_name| row_text(row, "group").as_deref() == Some(group_name))
-                        .unwrap_or(true)
-                    && message_id
-                        .map(|candidate| row_u64(row, "message_id") == Some(candidate.raw()))
-                        .unwrap_or(true)
+    let rows = match super::queue_storage_index::subject_rows_store(
+        store,
+        "queue_ack",
+        queue,
+        group,
+        message_id.map(|id| id.raw()),
+    )? {
+        Some(rows) => rows,
+        None => manager
+            .query_all(|entity| {
+                entity.data.as_row().is_some_and(|row| {
+                    row_text(row, "kind").as_deref() == Some("queue_ack")
+                        && row_text(row, "queue").as_deref() == Some(queue)
+                        && group
+                            .map(|group_name| row_text(row, "group").as_deref() == Some(group_name))
+                            .unwrap_or(true)
+                        && message_id
+                            .map(|candidate| row_u64(row, "message_id") == Some(candidate.raw()))
+                            .unwrap_or(true)
+                })
             })
-        })
+            .into_iter()
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
+            })
+            .collect(),
+    };
+    Ok(rows
         .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
+        .filter_map(|(entity_id, row)| {
             Some(QueueAckEntry {
-                entity_id: entity.id,
-                group: row_text(row, "group")?,
-                message_id: EntityId::new(row_u64(row, "message_id")?),
+                entity_id,
+                group: row_text(&row, "group")?,
+                message_id: EntityId::new(row_u64(&row, "message_id")?),
             })
         })
         .collect())
@@ -2908,6 +3009,18 @@ pub(super) fn next_queue_position(
     queue: &str,
     side: QueueSide,
 ) -> RedDBResult<u64> {
+    if let Some(boundary) = super::queue_storage_index::position_boundary(
+        store,
+        queue,
+        matches!(side, QueueSide::Right),
+    )? {
+        return Ok(
+            boundary.map_or(QUEUE_POSITION_CENTER, |position| match side {
+                QueueSide::Left => position.saturating_sub(1),
+                QueueSide::Right => position.saturating_add(1),
+            }),
+        );
+    }
     let manager = store
         .get_collection(queue)
         .ok_or_else(|| RedDBError::NotFound(format!("queue '{queue}' not found")))?;
@@ -3039,7 +3152,11 @@ pub(super) fn queue_message_data(
 }
 
 fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedDBResult<EntityId> {
+    let created = store.get_collection(QUEUE_META_COLLECTION).is_none();
     let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
+    if created {
+        super::queue_storage_index::prepare_meta_store(store)?;
+    }
     let id = store
         .insert_auto(
             QUEUE_META_COLLECTION,
@@ -3228,16 +3345,27 @@ fn resolve_delivery_id(
             delivery_id
         )));
     };
-    for entity in manager.query_all(|entity| {
-        entity.data.as_row().is_some_and(|row| {
-            row_text(row, "kind").as_deref() == Some("queue_pending_lc")
-                && row_text(row, "delivery_id").as_deref() == Some(delivery_id)
-        })
-    }) {
-        if let Some(row) = entity.data.as_row() {
-            let row_queue = row_text(row, "queue").unwrap_or_default();
-            let row_group = row_text(row, "group").unwrap_or_default();
-            let row_message = row_u64(row, "message_id").unwrap_or(0);
+    let rows = match super::queue_storage_index::delivery_rows_store(store, delivery_id)? {
+        Some(rows) => rows,
+        None => manager
+            .query_all(|entity| {
+                entity.data.as_row().is_some_and(|row| {
+                    row_text(row, "kind").as_deref() == Some("queue_pending_lc")
+                        && row_text(row, "delivery_id").as_deref() == Some(delivery_id)
+                })
+            })
+            .into_iter()
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
+            })
+            .collect(),
+    };
+    for (_, row) in rows {
+        if row_text(&row, "kind").as_deref() == Some("queue_pending_lc") {
+            let row_queue = row_text(&row, "queue").unwrap_or_default();
+            let row_group = row_text(&row, "group").unwrap_or_default();
+            let row_message = row_u64(&row, "message_id").unwrap_or(0);
             if row_queue != queue {
                 return Err(RedDBError::Query(format!(
                     "delivery_id '{}' belongs to queue '{}', not '{}'",

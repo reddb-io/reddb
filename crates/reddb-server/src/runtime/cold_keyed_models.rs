@@ -289,6 +289,73 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
 }
 
 #[test]
+fn repeated_cold_boot_reuses_published_index_pages() {
+    let directory = tempfile::tempdir().expect("cold growth fixture");
+    let path = directory.path().join("cold-growth.rdb");
+    let options = RedDBOptions::persistent(path.clone())
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    seed.execute_query("CREATE TABLE cold_growth_rows (id INTEGER, email TEXT)")
+        .expect("table");
+    seed.execute_query(
+        "CREATE UNIQUE INDEX cold_growth_email ON cold_growth_rows (email) USING HASH",
+    )
+    .expect("index");
+    for id in 0..512 {
+        seed.execute_query_with_params(
+            "INSERT INTO cold_growth_rows (id, email) VALUES ($1, $2)",
+            &[
+                Value::Integer(id),
+                Value::text(format!("cold-growth-{id:04}@example.test")),
+            ],
+        )
+        .expect("source row");
+    }
+    seed.flush().expect("seed checkpoint");
+    drop(seed);
+
+    let mut warmed_pages = 0;
+    let mut warmed_bytes = 0;
+    for boot in 0..8 {
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold runtime");
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM cold_growth_rows")
+            .expect("indexed source survives boot");
+        assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(512)));
+        runtime.flush().expect("cold checkpoint");
+        let pages = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("paged store")
+            .page_count()
+            .expect("page count");
+        let bytes = std::fs::metadata(&path).expect("database file").len();
+        if boot == 2 {
+            warmed_pages = pages;
+            warmed_bytes = bytes;
+        } else if boot > 2 {
+            assert!(
+                pages <= warmed_pages + 32,
+                "unchanged cold boot grew from {warmed_pages} to {pages} pages at boot {boot}"
+            );
+            assert!(
+                bytes <= warmed_bytes + 32 * crate::storage::engine::PAGE_SIZE as u64,
+                "unchanged cold boot grew from {warmed_bytes} to {bytes} bytes at boot {boot}"
+            );
+        }
+        drop(runtime);
+    }
+}
+
+#[test]
 fn cold_hash_indexes_do_not_retain_a_posting_map_on_reopen() {
     let directory = tempfile::tempdir().expect("paged hash fixture");
     let options = RedDBOptions::persistent(directory.path().join("hash.rdb"))
