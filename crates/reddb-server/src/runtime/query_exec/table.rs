@@ -679,7 +679,10 @@ fn indexed_query_can_retry(query: &TableQuery) -> bool {
         && query.group_by.is_empty()
         && query.having_expr.is_none()
         && query.having.is_none()
-        && query.order_by.is_empty()
+        && query
+            .order_by
+            .iter()
+            .all(|order| order.expr.as_ref().is_none_or(indexed_pure_expr))
         && query.expand.is_none()
         && query.sessionize.is_none()
         && query.as_of.is_none()
