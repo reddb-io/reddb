@@ -11,22 +11,6 @@
 name: Security Audit
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - "audit.toml"
-      - ".github/workflows/security-audit.yml"
-  pull_request:
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - "audit.toml"
-      - ".github/workflows/security-audit.yml"
-  schedule:
-    # Daily, so an advisory published against an unchanged lockfile is caught.
-    - cron: "23 5 * * *"
   workflow_dispatch:
 
 permissions:

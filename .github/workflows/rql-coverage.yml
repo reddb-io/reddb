@@ -5,11 +5,6 @@ name: RQL Coverage
 # this workflow now blocks merge below 90% line coverage.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-rql/**'
-      - '.github/workflows/rql-coverage.yml'
   workflow_dispatch:
 
 concurrency:

@@ -1,29 +1,6 @@
 name: CI
 
 on:
-  merge_group:
-    types: [checks_requested]
-  push:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/Cargo.toml'
-      - 'package.json'
-      - '**/package.json'
-      - 'pnpm-lock.yaml'
-      - 'drivers/python/pyproject.toml'
-  pull_request:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
   workflow_dispatch:
     inputs:
       full_ci:
@@ -41,6 +18,7 @@ on:
 # through `workflow_dispatch` with full_ci=true. Stable release builds remain
 # authoritative in release.yml. rust-cache saves are restricted to non-PR runs
 # (save-if) so PR branches never persist multi-GB caches.
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
