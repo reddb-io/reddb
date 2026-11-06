@@ -3511,7 +3511,7 @@ fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> 
             if json_mode {
                 json_ok("salvage-paged-collections", &report.machine_json());
             } else {
-                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts and identity high-water marks are unknown. Do not use this output for writes until identities have been reconciled; see salvage.json.", report.collections.len());
+                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
             }
             0
         }

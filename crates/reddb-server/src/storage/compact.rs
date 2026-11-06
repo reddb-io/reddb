@@ -238,9 +238,27 @@ fn compact_paged_inner(
             })
         })?;
     }
+    if lost_collections.is_some() {
+        // Both copies must be fenced before the recovered filename is published.
+        // Old engines reject this newer version; this engine admits it read-only.
+        for _ in 0..2 {
+            target.commit_superblock(|slot| {
+                f::set_database_header_version(
+                    slot,
+                    f::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION,
+                )
+                .map_err(|error| {
+                    reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
+                })
+            })?;
+        }
+    }
     let assets_verification = assets.into_verification();
     drop(target);
     let reopened = Arc::new(Source::open(&temporary)?);
+    if salvage.is_some() || lost_collections.is_some() {
+        salvage::verify_vault(&temporary, &reopened)?;
+    }
     ensure(
         reopened.header.physical == physical,
         "rewritten physical header failed parity",

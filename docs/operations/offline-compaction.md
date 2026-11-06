@@ -11,8 +11,9 @@ catalog, collection and index trees, supported native metadata and blob
 checksums, and a marker-only operational manifest. A tree finding leaves the
 auxiliary checks explicitly incomplete. Allocated pages not identified as free
 or owned are counted as unclassified: they may be garbage, but prevent a clean
-result. It refuses authenticated Vaults,
-pending recovery, nonempty logical WAL, slot or audit files, operational
+result. When a Vault is present, it authenticates and decodes the Vault using
+the configured certificate or passphrase; missing or invalid credentials fail
+the scrub. It refuses pending recovery, nonempty logical WAL, slot or audit files, operational
 segments, columnar ownership, replicas and other unsupported layouts. It does
 not check the logical correspondence between index entries and rows. An error
 means the scrub could not verify the full supported layout; it is not a clean
@@ -46,8 +47,8 @@ red salvage-paged-indexes --source /preserved/data.rdb --destination-dir /new/re
 `salvage.json` lists the discarded roots and their reasons. Verify the recovered
 database and its indexes before serving it; retain the source. Data-tree,
 primary-key tree, catalog and pending-WAL corruption are not recovered by
-this command. An authenticated Vault, nonempty logical WAL, replication slot
-or audit files, operational segments and nonempty operational collection
+this command. A Vault must authenticate before recovery and again after it is
+copied. Nonempty logical WAL, replication slot or audit files, operational segments and nonempty operational collection
 files are refused because this operation cannot verify them. The compaction qualification boundaries below
 also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
 publish the output file.
@@ -62,13 +63,16 @@ red salvage-paged-collections --source /preserved/data.rdb --destination-dir /ne
 
 Each damaged collection is empty in the result. Its loss report identifies the
 root page but records the number of lost entities as unknown. Interior-root or
-descendant damage, system collection damage, ambiguous pages, authenticated
+descendant damage, system collection damage, ambiguous pages, unauthenticated
 Vaults, pending recovery, and more recent catalog formats are refused. This
 does not recover healthy records from inside an unreadable page. Validate the
 recovered store and its application-level relationships before serving it.
 The legacy format does not provide a trusted identity high-water mark after
-this loss; do not use the recovered store for writes until identities are
-reconciled against an authoritative source.
+this loss. Both superblocks are fenced to a read-only recovery version before
+publication; older engines reject that version. Export verified data into a
+new store after reconciling identities against an authoritative source. The
+low-level pager can inspect this version read-only; the server and SQL dump
+paths have not yet been qualified for it.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

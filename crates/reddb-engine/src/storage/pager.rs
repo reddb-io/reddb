@@ -449,6 +449,13 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
+            && !self.config.read_only
+        {
+            return Err(PagerError::InvalidDatabase(
+                "recovered database is read-only; export verified data into a new store".into(),
+            ));
+        }
         if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             && !self.config.disk_residency
             && !self.config.read_only
@@ -525,6 +532,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
+        }
+        if version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION {
+            return Err(PagerError::InvalidDatabase(
+                "recovery read-only format is reserved".into(),
+            ));
         }
         if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             && !self.config.disk_residency

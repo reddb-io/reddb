@@ -235,13 +235,42 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
             "physical metadata differs from its published checksum",
         )?;
     }
+    verify_vault(source, guard)?;
+    Ok(())
+}
+
+pub(super) fn verify_vault(source: &Path, guard: &Source) -> Result<()> {
     let vault = guard.raw_page(2, false)?;
     if !vault.as_bytes().iter().all(|byte| *byte == 0) {
+        ensure(vault.page_type()? == PageType::Vault, "invalid vault page")?;
+        if vault.content().iter().all(|byte| *byte == 0) {
+            vault.verify_checksum()?;
+            return Ok(());
+        }
+        let content = vault.content();
         ensure(
-            vault.page_type()? == PageType::Vault && vault.content().iter().all(|byte| *byte == 0),
-            "authenticated vault recovery requires vault verification",
+            &content[..4] == b"RDVT" && matches!(content[4], 2 | 3),
+            "unsupported vault header",
         )?;
-        vault.verify_checksum()?;
+        let payload = u32::from_le_bytes(content[21..25].try_into()?);
+        ensure(
+            payload <= 64 * 1024 * 1024,
+            "vault exceeds verification budget",
+        )?;
+        let pager = Pager::open(
+            source,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..PagerConfig::default()
+            },
+        )?;
+        let vault =
+            crate::auth::vault::Vault::open(&pager).map_err(|_| "vault authentication failed")?;
+        ensure(
+            matches!(vault.load(&pager), Ok(Some(_))),
+            "vault authentication failed",
+        )?;
     }
     Ok(())
 }
