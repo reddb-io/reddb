@@ -1610,6 +1610,41 @@ mod tests {
     }
 
     #[test]
+    fn renamed_collection_keeps_fork_isolation_and_drop_uses_recorded_path() {
+        let path = temp_db_path("rename_then_fork");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.create_collection("red_config").unwrap();
+        let old_path = manifest.collection_path_for_test("red_config");
+        fs::write(&old_path, b"before fork").unwrap();
+        manifest
+            .rename_collections(&[("red_config", "red.config")])
+            .unwrap();
+        manifest.create_fork("child", 1).unwrap();
+        manifest
+            .materialize_forks_before_write("red.config")
+            .unwrap();
+        fs::write(&old_path, b"after fork").unwrap();
+        let fork = manifest.fork_handle("child");
+        let child = fork.load_current().unwrap().unwrap();
+        let entry = &child.collections["red.config"];
+        assert!(entry.source.is_none());
+        assert_eq!(
+            fs::read(fork.collections_dir().join(&entry.path)).unwrap(),
+            b"before fork"
+        );
+        manifest
+            .prepare_collection_drop("red.config")
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(!old_path.exists());
+        assert_eq!(
+            fs::read(fork.collections_dir().join(&entry.path)).unwrap(),
+            b"before fork"
+        );
+    }
+
+    #[test]
     fn next_manifest_helper_writes_next_file_without_publishing() {
         let path = temp_db_path("next");
         let manifest = OperationalManifest::for_db_path(&path);
