@@ -740,6 +740,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_snapshot_keeps_legacy_and_namespaced_aliases_after_collection_migration() {
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        let store = runtime.db().store();
+        let manager = store.get_or_create_collection("red_config");
+        assert!(Arc::ptr_eq(
+            &manager,
+            &store.get_collection("red.config").unwrap()
+        ));
+        for (id, key, value, tombstone) in [
+            (1, "theme", "dark", false),
+            (2, "red.config.theme", "light", false),
+            (3, "other", "hidden", true),
+        ] {
+            let mut entity = UnifiedEntity::table_row(EntityId::new(id), "red_config", id, vec![]);
+            entity.data = EntityData::Row(RowData {
+                columns: vec![],
+                schema: None,
+                named: Some(HashMap::from([
+                    ("key".into(), Value::text(key)),
+                    ("value".into(), Value::text(value)),
+                    ("tombstone".into(), Value::Boolean(tombstone)),
+                ])),
+            });
+            manager.insert(entity).expect("config row");
+        }
+        let values = latest_config_snapshot(runtime.db().as_ref()).expect("snapshot");
+        assert_eq!(values.get("theme"), Some(&Value::text("dark")));
+        assert_eq!(values.get("red.config.theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("red.config/theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("other"), Some(&Value::text("hidden")));
+        assert!(!values.contains_key("red.config/other"));
+    }
+
     fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
         CURRENT_KV_RESOLVER.with(|cell| {
             cell.replace(Some(KvResolver {
@@ -818,7 +853,9 @@ mod tests {
 fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
     let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
 
-    if let Some(manager) = db.store().get_collection("red_config") {
+    // The store canonicalizes the legacy `red_config` name to `red.config`.
+    // Scan it once, but preserve both legacy and namespaced resolver keys.
+    if let Some(manager) = db.store().get_collection("red.config") {
         super::function_budget::try_scan(
             |visit| manager.try_for_each_entity(usize::MAX, visit),
             |entity| {
@@ -840,31 +877,9 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                         value,
                     );
                 }
-                true
-            },
-        )?;
-    }
-
-    if let Some(manager) = db.store().get_collection("red.config") {
-        super::function_budget::try_scan(
-            |visit| manager.try_for_each_entity(usize::MAX, visit),
-            |entity| {
-                let Some(row) = entity.data.as_row() else {
-                    return true;
-                };
-                if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                    return true;
+                if !matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
+                    insert_latest_config_value(&mut latest, format!("red.config/{key}"), id, value);
                 }
-                let Some(Value::Text(key)) = row.get_field("key") else {
-                    return true;
-                };
-                let value = row.get_field("value").unwrap_or(&Value::Null);
-                insert_latest_config_value(
-                    &mut latest,
-                    format!("red.config/{}", key.to_ascii_lowercase()),
-                    entity.id.raw(),
-                    value,
-                );
                 true
             },
         )?;

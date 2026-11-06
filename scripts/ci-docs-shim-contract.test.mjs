@@ -1,21 +1,8 @@
-// Issue #1307 — a docs-only / `**.md`-only PR cannot satisfy the `main` merge
-// gate. ci.yml is path-filtered (paths-ignore: **.md, docs/**, ...), so a
-// docs-only PR skips ci.yml and none of the required status checks (ADR 0059)
-// ever report -> branch protection treats them as pending -> the PR is BLOCKED
-// forever, even to `gh pr merge --admin` (enforce_admins).
-//
-// ci-docs.yml is the always-green shim: a workflow with NO paths-ignore that
-// re-reports every required context as success on docs-only PRs, so the gate is
-// satisfiable without lifting protection. GitHub matches required checks by
-// context NAME regardless of producing workflow, so a same-named success from
-// the shim satisfies the requirement.
-//
-// This contract test is the lock that keeps three artifacts in agreement:
-//   - .github/required-status-checks.json  (the canonical list)
-//   - .github/workflows/ci.yml             (produces the contexts on code PRs)
-//   - .github/workflows/ci-docs.yml        (re-produces them on docs PRs)
-// If a required job is renamed/added in ci.yml without updating the manifest and
-// the shim, this test fails on the (non-docs) PR that makes the change.
+// Keep the optional CI and docs-shim context names aligned with ADR 0059.
+// Full workflows are manually dispatched under the current cost policy;
+// quick-checks.yml runs automatically for PRs, pushes, and merge groups.
+// Check the merge-group classifier and failure-propagating aggregate separately
+// so a future trigger change cannot silently bypass the guarded heavy jobs.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -23,7 +10,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const read = (rel) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
+const read = (rel) => fs.readFileSync(path.join(repoRoot, rel), "utf8").replace(/\r\n/g, "\n");
 
 const MANIFEST = ".github/required-status-checks.json";
 const CI = ".github/workflows/ci.yml";
@@ -96,24 +83,30 @@ test("every required context is actually produced by ci.yml (manifest reflects r
   }
 });
 
-test("the shim triggers exactly on the paths ci.yml ignores (so it covers the gap)", () => {
-  const shim = read(SHIM);
-  // ci.yml's PR paths-ignore set; the shim must allow-list the same globs.
-  for (const glob of ["**.md", "docs/**", "CHANGELOG**", "LICENSE**"]) {
-    assert.ok(shim.includes(`- '${glob}'`), `ci-docs.yml does not trigger on ${glob}`);
+test("expensive CI and the docs shim remain manually dispatched, with automatic quick checks", () => {
+  for (const file of [CI, SHIM]) {
+    const triggers = read(file).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
+    assert.ok(triggers, `${file} must define triggers`);
+    assert.match(triggers, /^  workflow_dispatch:/m);
+    assert.doesNotMatch(triggers, /^  (push|pull_request|merge_group|schedule):/m);
   }
-  // It must be a pull_request workflow with no paths-ignore (else it would be
-  // skipped on the very docs-only PRs it exists to cover).
-  assert.match(shim, /pull_request:/);
-  assert.ok(!/^\s*paths-ignore:/m.test(shim), "ci-docs.yml must not use paths-ignore");
+  const quick = read(".github/workflows/quick-checks.yml");
+  for (const event of ["pull_request", "push", "merge_group"]) {
+    assert.match(quick, new RegExp(`^  ${event}:`, "m"));
+  }
 });
 
-test("the first CI job classifies merge-group diffs with the docs-shim path set", () => {
+test("platform selection precedes the gate and the gate classifies merge-group diffs", () => {
   const ci = read(CI);
   const jobs = jobBlocks(ci);
-  assert.equal(jobs.keys().next().value, "gate", "gate must remain the first CI job");
+  assert.deepEqual([...jobs.keys()].slice(0, 2), ["platforms", "gate"]);
+  const platforms = jobs.get("platforms");
+  assert.match(platforms, /^    timeout-minutes: 3$/m);
+  assert.match(platforms, /^    permissions: \{\}$/m);
+  assert.doesNotMatch(platforms, /actions\/checkout/);
 
   const gate = jobs.get("gate");
+  assert.match(gate, /needs:\n\s+- platforms/);
   assert.match(gate, /run_heavy: \$\{\{ steps\.classify\.outputs\.run_heavy \}\}/);
   assert.match(gate, /fetch-depth: 2/, "the fast classifier should fetch only the merge commit and its parent");
   assert.match(gate, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
@@ -133,6 +126,7 @@ test("the first CI job classifies merge-group diffs with the docs-shim path set"
 test("docs-only merge groups skip every heavy job and code diffs keep them enabled", () => {
   const jobs = jobBlocks(read(CI));
   jobs.delete("gate");
+  jobs.delete("platforms");
   assert.ok(jobs.size > 0);
   for (const [jobId, block] of jobs) {
     assert.ok(block.includes("needs.gate.outputs.run_heavy == 'true'"),
@@ -160,7 +154,7 @@ test("Test Suite shards on free runners and reports one failure-propagating requ
   assert.match(aggregate, /^ {4}name: Test Suite$/m);
   assert.match(aggregate, /^ {4}runs-on: ubuntu-latest$/m,
     "the required-context aggregate must use a free GitHub-hosted public runner");
-  assert.match(aggregate, /needs: \[gate, test-shards, client-size-budget\]/);
+  assert.match(aggregate, /needs:\n\s+- gate\n\s+- test-shards\n\s+- client-size-budget\n\s+- platforms/);
   assert.match(aggregate, /always\(\).*needs\.gate\.outputs\.run_heavy == 'true'/);
   assert.match(aggregate, /needs\.test-shards\.result.*success/,
     "the required Test Suite context must fail when any shard fails");
