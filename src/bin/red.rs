@@ -1764,6 +1764,10 @@ fn main() {
             std::process::exit(run_compact_command(&result.flags));
         }
 
+        "scrub-paged-trees" => {
+            std::process::exit(run_scrub_paged_trees_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -3274,6 +3278,68 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged_trees(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(),
+                            "tree": finding.tree.clone(),
+                            "root_page": finding.root_page,
+                            "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "paged_trees_only",
+                    "trees_verified": report.trees_verified,
+                    "records_verified": report.records_verified,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged-trees", &value.to_string_compact());
+            } else {
+                println!(
+                    "Tree-only diagnostic: {} trees and {} records verified; {} findings.",
+                    report.trees_verified,
+                    report.records_verified,
+                    report.findings.len()
+                );
+                println!("Vault, physical assets, logical index correctness and replica state were not checked.");
+                for finding in &report.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.findings.is_empty() {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged-trees", &error.to_string());
+            } else {
+                eprintln!("scrub-paged-trees: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -3904,6 +3970,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("scrub-paged-trees".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),
