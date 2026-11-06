@@ -482,7 +482,12 @@ mod tests {
         let mut server: Stream = Box::pin(server);
         let peer = tokio::spawn(async move {
             let request = io::read_frame(&mut server).await.expect("request");
-            let reply = Frame::new(MessageKind::Pong, request.correlation_id + 1, Vec::new());
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id + 1,
+                MessageKind::Pong,
+                Vec::new(),
+            )
+            .expect("build mismatched reply");
             io::write_frame(&mut server, &reply)
                 .await
                 .expect("wrong response");
