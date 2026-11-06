@@ -14,7 +14,7 @@
 /// appropriate command, and dispatches execution.
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,6 +58,7 @@ fn open_local_runtime(flags: &HashMap<String, FlagValue>) -> Result<reddb::RedDB
         Some(path) if !path.is_empty() => {
             let storage_profile = resolve_storage_profile(flags, "local")?;
             let options = reddb::api::RedDBOptions::persistent(&path)
+                .with_bounded_disk_residency(flag_bool(flags, "bounded-disk-residency"))
                 .with_storage_profile(storage_profile)
                 .map_err(|e| format!("storage profile: {e}"))?;
             reddb::RedDBRuntime::with_options(options).map_err(|e| format!("open {path}: {e}"))
@@ -1342,6 +1343,10 @@ fn restore_identifier_is_safe(name: &str) -> bool {
     })
 }
 
+fn restore_input_lines<R: Read>(reader: R) -> impl Iterator<Item = std::io::Result<String>> {
+    BufReader::new(reader).lines()
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -1374,6 +1379,23 @@ fn main() {
     // before threads exist, so the process-global change races nothing.
     reddb::utils::file_mode::restrict_new_file_permissions();
 
+    // Windows executables have a smaller default main-thread stack. Embedded
+    // query startup can exceed it in debug builds, so run the dispatcher with
+    // the same 8 MiB stack used by the integration-test threads.
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("red-cli".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)
+        .expect("start CLI thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+    #[cfg(not(windows))]
+    run_cli();
+}
+
+fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Private desktop persistence service: fixed loopback binding, authenticated
@@ -1764,6 +1786,26 @@ fn main() {
             std::process::exit(run_compact_command(&result.flags));
         }
 
+        "recover-paged-wal" => {
+            std::process::exit(run_recover_paged_wal_command(&result.flags));
+        }
+
+        "scrub-paged-trees" => {
+            std::process::exit(run_scrub_paged_trees_command(&result.flags));
+        }
+
+        "scrub-paged" => {
+            std::process::exit(run_scrub_paged_command(&result.flags));
+        }
+
+        "salvage-paged-indexes" => {
+            std::process::exit(run_salvage_paged_indexes_command(&result.flags));
+        }
+
+        "salvage-paged-collections" => {
+            std::process::exit(run_salvage_paged_collections_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -2083,6 +2125,13 @@ fn main() {
                 }
                 _ => store.list_collections(),
             };
+            // Keep the stable dump identity for configuration rows even when
+            // the store lists their canonical internal collection name.
+            for name in &mut targets {
+                if name == "red.config" {
+                    *name = "red_config".to_string();
+                }
+            }
             targets.sort();
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
@@ -2276,7 +2325,7 @@ fn main() {
             };
             let override_collection = flag_string(&result.flags, "collection");
 
-            let file_text = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
+            let input = std::fs::File::open(&input_path).unwrap_or_else(|e| {
                 if json_mode {
                     json_error("restore", &format!("read failed: {e}"));
                 }
@@ -2296,7 +2345,15 @@ fn main() {
             let mut errors = 0usize;
             let mut restored_secret_keys = 0usize;
             let mut auth_store: Option<std::sync::Arc<reddb::auth::AuthStore>> = None;
-            for (line_no, line) in file_text.lines().enumerate() {
+            for (line_no, line) in restore_input_lines(input).enumerate() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        errors += 1;
+                        eprintln!("line {}: read failed: {error}", line_no + 1);
+                        break;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -3274,6 +3331,242 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_recover_paged_wal_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::recover_paged_wal(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("recover-paged-wal", &report.machine_json());
+            } else {
+                println!(
+                    "Replayed WAL on a preserved copy and verified {} records. Source preserved.",
+                    report.records
+                );
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("recover-paged-wal", &error.to_string());
+            } else {
+                eprintln!("recover-paged-wal: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged_trees(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(),
+                            "tree": finding.tree.clone(),
+                            "root_page": finding.root_page,
+                            "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "paged_trees_only",
+                    "trees_verified": report.trees_verified,
+                    "records_verified": report.records_verified,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged-trees", &value.to_string_compact());
+            } else {
+                println!(
+                    "Tree-only diagnostic: {} trees and {} records verified; {} findings.",
+                    report.trees_verified,
+                    report.records_verified,
+                    report.findings.len()
+                );
+                println!("Vault, physical assets, logical index correctness and replica state were not checked.");
+                for finding in &report.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.findings.is_empty() {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged-trees", &error.to_string());
+            } else {
+                eprintln!("scrub-paged-trees: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .trees
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(), "tree": finding.tree.clone(),
+                            "root_page": finding.root_page, "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "supported_offline_paged_layout",
+                    "trees_verified": report.trees.trees_verified,
+                    "records_verified": report.trees.records_verified,
+                    "assets_verified": report.assets_verified,
+                    "unclassified_pages": report.unclassified_pages,
+                    "page_generation_freshness_verified": false,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged", &value.to_string_compact());
+            } else {
+                println!(
+                    "Verified {} trees and {} records; {} findings. Auxiliary assets verified: {}; unclassified pages: {}.",
+                    report.trees.trees_verified,
+                    report.trees.records_verified,
+                    report.trees.findings.len(),
+                    report.assets_verified,
+                    report.unclassified_pages
+                );
+                println!("Checksums do not establish that every page is the latest published generation.");
+                for finding in &report.trees.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.trees.findings.is_empty()
+                && report.assets_verified
+                && report.unclassified_pages == 0
+            {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged", &error.to_string());
+            } else {
+                eprintln!("scrub-paged: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_indexes_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_indexes(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-indexes", &report.machine_json());
+            } else {
+                println!("Recovered verified trees into a new directory; {} secondary indexes were discarded for rebuilding. See salvage.json.", report.indexes.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-indexes", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-indexes: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_collections(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-collections", &report.machine_json());
+            } else {
+                println!("Recovered verified collection records; {} collections had damaged pages. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-collections", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-collections: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -3904,6 +4197,11 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
+        ("scrub-paged-trees".to_string(), vec![]),
+        ("scrub-paged".to_string(), vec![]),
+        ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),
@@ -5838,7 +6136,34 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::io::{self, Read};
     use std::sync::{Mutex, OnceLock};
+
+    struct OneReadThenPanic {
+        emitted: bool,
+    }
+
+    impl Read for OneReadThenPanic {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            assert!(!self.emitted, "restore input was read eagerly");
+            let line = b"{\"collection\":\"items\",\"fields\":{\"id\":\"1\"}}\n";
+            assert!(buf.len() >= line.len());
+            buf[..line.len()].copy_from_slice(line);
+            self.emitted = true;
+            Ok(line.len())
+        }
+    }
+
+    #[test]
+    fn restore_input_is_consumed_incrementally() {
+        let reader = OneReadThenPanic { emitted: false };
+        let mut lines = restore_input_lines(reader);
+
+        assert_eq!(
+            lines.next().expect("first line").expect("read line"),
+            r#"{"collection":"items","fields":{"id":"1"}}"#,
+        );
+    }
 
     #[test]
     fn doctor_parses_simple_metric_line() {

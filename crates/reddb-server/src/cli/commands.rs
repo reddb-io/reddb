@@ -138,6 +138,45 @@ pub fn all_commands() -> Vec<CommandDef> {
       ],
     },
     CommandDef {
+      name: "recover-paged-wal",
+      summary: "Replay a supported pending WAL against an isolated copy",
+      usage: "red recover-paged-wal --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
+      name: "scrub-paged-trees",
+      summary: "Check tree structure in a closed checkpointed paged database",
+      usage: "red scrub-paged-trees --source data.rdb [--json]",
+      flags: vec![FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged")],
+    },
+    CommandDef {
+      name: "scrub-paged",
+      summary: "Verify a supported closed checkpointed paged store",
+      usage: "red scrub-paged --source data.rdb [--json]",
+      flags: vec![FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged")],
+    },
+    CommandDef {
+      name: "salvage-paged-indexes",
+      summary: "Recover a paged store with corrupt secondary indexes into a fresh directory",
+      usage: "red salvage-paged-indexes --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
+      name: "salvage-paged-collections",
+      summary: "Recover intact collections from a restricted legacy paged store",
+      usage: "red salvage-paged-collections --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -756,6 +795,8 @@ fn restore_flags() -> Vec<FlagSchema> {
         storage_profile_flag(),
         storage_packaging_flag(),
         storage_preset_flag(),
+        FlagSchema::boolean("bounded-disk-residency")
+            .with_description("Keep restored rows within the resolved memory budget"),
         FlagSchema::new("input")
             .with_short('i')
             .with_description("Dump file to read (required)"),
@@ -1008,6 +1049,11 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
+        ("scrub-paged-trees".to_string(), vec![]),
+        ("scrub-paged".to_string(), vec![]),
+        ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),

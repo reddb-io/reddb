@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.28.19
+
+### Patch Changes
+
+- [#2689](https://github.com/reddb-io/reddb/pull/2689) [`7a94140`](https://github.com/reddb-io/reddb/commit/7a94140eec3f640a5a13dfb8beb47a3d7c875de4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile populated legacy and canonical system collection names only when their complete physical state is identical, preserving shared data and index roots while continuing to fail closed on divergent collections.
+
+## 1.28.18
+
+### Patch Changes
+
+- [#2687](https://github.com/reddb-io/reddb/pull/2687) [`b3d2025`](https://github.com/reddb-io/reddb/commit/b3d202592a874c2aa06dbca3262c87c0a33da8b9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild a missing physical metadata sidecar for legacy paged stores after an in-place catalogue migration while preserving native collection roots and failing closed on partial summary publications.
+
+## 1.28.17
+
+### Patch Changes
+
+- [#2685](https://github.com/reddb-io/reddb/pull/2685) [`f3ed5eb`](https://github.com/reddb-io/reddb/commit/f3ed5ebb80ebe486034d137c26b623c558fd6419) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover catalogues containing an empty duplicate legacy system collection while preserving the populated collection and its existing data and index roots.
+
+## 1.28.16
+
+### Patch Changes
+
+- [#2683](https://github.com/reddb-io/reddb/pull/2683) [`2f32b89`](https://github.com/reddb-io/reddb/commit/2f32b89cd8b0c99c885c0ac12ea01e79aeb36513) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound logical restores by the configured memory budget and seek exact composite BTREE prefixes containing NULL values.
+
+## 1.28.15
+
+### Patch Changes
+
+- [#2679](https://github.com/reddb-io/reddb/pull/2679) [`b41962a`](https://github.com/reddb-io/reddb/commit/b41962ad17db4863a97ee20f5d17fde7531c49df) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Enforce configured authentication for native wire transports.
+
 ## 1.28.14
 
 ### Patch Changes

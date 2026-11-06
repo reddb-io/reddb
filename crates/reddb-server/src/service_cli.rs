@@ -1930,6 +1930,9 @@ fn build_runtime_with_bootstrap(
             .ok();
     }
 
+    // Native wire listeners obtain their authentication authority from the
+    // runtime, including deployments without an HTTP or gRPC server object.
+    runtime.set_auth_store(Arc::clone(&auth_store));
     Ok((runtime, auth_store, telemetry_guard))
 }
 
@@ -2940,6 +2943,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn server_runtime_receives_the_bootstrapped_auth_authority() {
+        let mut options = RedDBOptions::in_memory();
+        options.auth.enabled = true;
+        let (runtime, store, _telemetry) =
+            build_runtime_with_telemetry(options, None).expect("server runtime");
+        let installed = runtime.auth_store().expect("runtime auth authority");
+        assert!(Arc::ptr_eq(&store, &installed));
+    }
+
+    #[test]
     fn runtime_workers_use_both_cores_on_small_instances() {
         assert_eq!(suggested_worker_count(1), 1);
         assert_eq!(suggested_worker_count(2), 2);
@@ -3176,6 +3189,7 @@ mod tests {
 
     #[test]
     fn required_auth_simple_preset_waits_for_durable_admin() {
+        let _guard = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
             enabled: true,

@@ -4,6 +4,20 @@ use parking_lot::RwLock;
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
 const CHECKPOINT_BATCH_ROWS: usize = 512;
 
+#[derive(Debug)]
+struct SystemCollectionCollision {
+    survivor: String,
+    loser: String,
+    canonical: String,
+    shared_physical_state: bool,
+}
+
+#[derive(Debug, Default)]
+struct CatalogLoadOutcome {
+    migrated: bool,
+    collisions: Vec<SystemCollectionCollision>,
+}
+
 /// Keep encoded payload memory proportional to a small batch, not a collection.
 /// A single large value retains the existing B-tree value-size contract.
 struct CheckpointTreeBuilder {
@@ -1142,18 +1156,18 @@ impl UnifiedStore {
         );
         // Load existing data from pages if database exists
         let page_load_started = std::time::Instant::now();
-        let migrated_catalog = store.load_from_pages()?;
+        let catalog_load = store.load_from_pages()?;
         trace_startup_phase(path, "paged_catalog_and_roots", page_load_started);
         // Reconcile independently from the catalog flag. A prior process may
         // have published one side of the rename before crashing; the manifest
         // operation is idempotent and fails closed on old/new collisions.
-        store.migrate_operational_manifest()?;
+        store.migrate_operational_manifest(&catalog_load.collisions)?;
         let wal_replay_started = std::time::Instant::now();
         if let Some(commit) = &store.commit {
             commit.replay_into(&store).map_err(StoreError::Io)?;
         }
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
-        if migrated_catalog {
+        if catalog_load.migrated {
             // Publish only the renamed catalog keys. Existing row, key and
             // secondary-index roots remain attached and are not rebuilt.
             store.mark_paged_registry_dirty();
@@ -1325,11 +1339,28 @@ impl UnifiedStore {
         Ok(())
     }
 
-    fn migrate_operational_manifest(&self) -> Result<(), StoreError> {
+    fn migrate_operational_manifest(
+        &self,
+        collisions: &[SystemCollectionCollision],
+    ) -> Result<(), StoreError> {
         let Some(path) = &self.db_path else {
             return Ok(());
         };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+        let manifest = crate::storage::operational_manifest::OperationalManifest::for_db_path(path);
+        let collision_refs = collisions
+            .iter()
+            .map(|collision| {
+                (
+                    collision.survivor.as_str(),
+                    collision.loser.as_str(),
+                    collision.canonical.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        manifest
+            .reconcile_collection_collisions(&collision_refs)
+            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
+        manifest
             .rename_collections(reddb_engine::storage::system_collection_names::LEGACY_NAMES)
             .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))
     }
@@ -1374,10 +1405,10 @@ impl UnifiedStore {
     }
 
     /// Read the B-tree indices and reconstruct collections from pages.
-    fn load_from_pages(&self) -> Result<bool, StoreError> {
+    fn load_from_pages(&self) -> Result<CatalogLoadOutcome, StoreError> {
         let pager = match &self.pager {
             Some(p) => p,
-            None => return Ok(false), // No pager, nothing to load
+            None => return Ok(CatalogLoadOutcome::default()), // No pager, nothing to load
         };
 
         // Get page count
@@ -1389,7 +1420,7 @@ impl UnifiedStore {
         })?;
         if page_count <= 1 {
             // Empty database (only header page)
-            return Ok(false);
+            return Ok(CatalogLoadOutcome::default());
         }
 
         // Read metadata starting from page 1 (collections registry). The
@@ -1410,9 +1441,95 @@ impl UnifiedStore {
             } else {
                 None
             };
+            let mut outcome = CatalogLoadOutcome::default();
+            let mut ignored_collections = std::collections::HashSet::new();
             if let Some(resume) = &resume {
+                for &(legacy, canonical) in
+                    reddb_engine::storage::system_collection_names::LEGACY_NAMES
+                {
+                    let (Some(legacy_state), Some(canonical_state)) = (
+                        resume.collections.get(legacy),
+                        resume.collections.get(canonical),
+                    ) else {
+                        continue;
+                    };
+                    let shared_physical_state = legacy_state == canonical_state;
+                    let (survivor, loser) = match (
+                        legacy_state.entities == 0,
+                        canonical_state.entities == 0,
+                    ) {
+                        (false, true) => (legacy, canonical),
+                        (true, false) | (true, true) => (canonical, legacy),
+                        (false, false) if shared_physical_state => (canonical, legacy),
+                        (false, false) => {
+                            return Err(page_integrity(
+                                1,
+                                None,
+                                format!(
+                                    "catalog contains both populated legacy collection '{legacy}' and canonical collection '{canonical}'"
+                                ),
+                            ));
+                        }
+                    };
+                    ignored_collections.insert(loser.to_string());
+                    outcome.collisions.push(SystemCollectionCollision {
+                        survivor: survivor.to_string(),
+                        loser: loser.to_string(),
+                        canonical: canonical.to_string(),
+                        shared_physical_state,
+                    });
+                }
+                let live_roots = resume
+                    .collections
+                    .iter()
+                    .filter(|(name, _)| !ignored_collections.contains(name.as_str()))
+                    .flat_map(|(_, state)| {
+                        std::iter::once(state.root_page)
+                            .chain(state.key_index_root)
+                            .chain(
+                                state
+                                    .secondary_indices
+                                    .values()
+                                    .map(|index| index.root_page),
+                            )
+                    })
+                    .filter(|root| *root != 0)
+                    .collect::<std::collections::HashSet<_>>();
+                for collision in &outcome.collisions {
+                    if collision.shared_physical_state {
+                        continue;
+                    }
+                    let loser_state = resume
+                        .collections
+                        .get(&collision.loser)
+                        .expect("collision loser is present");
+                    if std::iter::once(loser_state.root_page)
+                        .chain(loser_state.key_index_root)
+                        .chain(
+                            loser_state
+                                .secondary_indices
+                                .values()
+                                .map(|index| index.root_page),
+                        )
+                        .filter(|root| *root != 0)
+                        .any(|root| live_roots.contains(&root))
+                    {
+                        return Err(page_integrity(
+                            1,
+                            None,
+                            format!(
+                                "empty collection '{}' aliases a live collection root",
+                                collision.loser
+                            ),
+                        ));
+                    }
+                }
                 reddb_engine::storage::system_collection_names::migration_plan(
-                    resume.collections.keys().map(String::as_str),
+                    resume
+                        .collections
+                        .keys()
+                        .map(String::as_str)
+                        .filter(|name| !ignored_collections.contains(*name)),
                 )
                 .map_err(|(legacy, canonical)| {
                     page_integrity(
@@ -1462,6 +1579,7 @@ impl UnifiedStore {
                         roots: resume
                             .collections
                             .iter()
+                            .filter(|(name, _)| !ignored_collections.contains(name.as_str()))
                             .map(|(name, state)| {
                                 (
                                     reddb_engine::storage::system_collection_names::canonical_or_self(name)
@@ -1498,11 +1616,12 @@ impl UnifiedStore {
                 self.set_format_version(format_version);
 
                 if pos > content.len() {
-                    return Ok(false);
+                    return Ok(CatalogLoadOutcome::default());
                 }
 
                 let mut source_names = std::collections::HashMap::<String, String>::new();
-                let mut migrated_catalog = false;
+                let mut migrated_catalog = !outcome.collisions.is_empty();
+                let mut empty_duplicate_roots = std::collections::HashSet::new();
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
@@ -1511,6 +1630,33 @@ impl UnifiedStore {
                     // Root page ID for this collection's B-tree
                     let root_page = root.root_page;
                     let stored_name = root.collection;
+                    if ignored_collections.contains(&stored_name) {
+                        let shared_physical_state = outcome
+                            .collisions
+                            .iter()
+                            .find(|collision| collision.loser == stored_name)
+                            .is_some_and(|collision| collision.shared_physical_state);
+                        if shared_physical_state {
+                            continue;
+                        }
+                        let state = resume
+                            .as_ref()
+                            .and_then(|resume| resume.collections.get(&stored_name))
+                            .expect("ignored collection was proven by catalog resume");
+                        for retired_root in std::iter::once(state.root_page)
+                            .chain(state.key_index_root)
+                            .chain(
+                                state
+                                    .secondary_indices
+                                    .values()
+                                    .map(|index| index.root_page),
+                            )
+                            .filter(|root| *root != 0)
+                        {
+                            empty_duplicate_roots.insert(retired_root);
+                        }
+                        continue;
+                    }
                     let name = reddb_engine::storage::system_collection_names::canonical_or_self(
                         &stored_name,
                     )
@@ -1737,6 +1883,10 @@ impl UnifiedStore {
                 }
                 let retired = reddb_file::decode_native_paged_retired_trees(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
+                let already_retired = retired
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
                 let mut live_roots: std::collections::HashSet<_> = self
                     .btree_indices
                     .read()
@@ -1768,9 +1918,19 @@ impl UnifiedStore {
                         published: true,
                     });
                 }
+                for root in empty_duplicate_roots
+                    .iter()
+                    .copied()
+                    .filter(|root| !already_retired.contains(root))
+                {
+                    self.retire_btree(Arc::new(BTree::with_root(Arc::clone(pager), root)));
+                }
                 let deferred = reddb_file::decode_native_paged_deferred_pages(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
-                if deferred.iter().any(|id| live_roots.contains(id)) {
+                if deferred
+                    .iter()
+                    .any(|id| live_roots.contains(id) || empty_duplicate_roots.contains(id))
+                {
                     return Err(page_integrity(1, None, "deferred page aliases a live root"));
                 }
                 pager
@@ -1789,7 +1949,8 @@ impl UnifiedStore {
                 if self.format_version() < STORE_VERSION_V11 {
                     self.set_format_version(STORE_VERSION_V11);
                 }
-                return Ok(migrated_catalog);
+                outcome.migrated = migrated_catalog;
+                return Ok(outcome);
             }
         }
 
@@ -1797,7 +1958,7 @@ impl UnifiedStore {
             self.set_format_version(STORE_VERSION_V11);
         }
 
-        Ok(false)
+        Ok(CatalogLoadOutcome::default())
     }
 
     /// Deserialize an entity from binary bytes
@@ -3001,6 +3162,355 @@ mod checkpoint_work_tests {
                 .recover_or_bootstrap(&["red.config".to_string()])
                 .expect("canonical manifest")
                 .is_empty()
+        );
+    }
+
+    struct DuplicateSystemCatalogFixture {
+        _directory: tempfile::TempDir,
+        path: std::path::PathBuf,
+        config: UnifiedStoreConfig,
+        pages_before: u32,
+        legacy_root: Option<u32>,
+        legacy_key_root: Option<u32>,
+        legacy_secondary_root: Option<u32>,
+        index_identity: super::super::secondary_index::SecondaryIndexIdentity,
+    }
+
+    fn duplicate_system_catalog_fixture(
+        legacy_populated: bool,
+        canonical_populated: bool,
+        index_legacy: bool,
+    ) -> DuplicateSystemCatalogFixture {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let config = UnifiedStoreConfig {
+            page_cache_slots: Some(32),
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let index_identity = super::super::secondary_index::SecondaryIndexIdentity {
+            codec_version: 1,
+            definition: [73; 32],
+        };
+        let (legacy_root, legacy_key_root, legacy_secondary_root);
+        {
+            let store = UnifiedStore::open_with_config(&path, config.clone()).expect("paged store");
+            store
+                .create_collection("cfg_legacy")
+                .expect("legacy source collection");
+            if legacy_populated {
+                store
+                    .insert_auto(
+                        "cfg_legacy",
+                        UnifiedEntity::table_row(
+                            EntityId::new(1),
+                            "red_config",
+                            1,
+                            vec![Value::text("legacy")],
+                        ),
+                    )
+                    .expect("legacy row");
+            }
+            store
+                .create_collection("cfg.canon_")
+                .expect("canonical source collection");
+            if canonical_populated {
+                store
+                    .insert_auto(
+                        "cfg.canon_",
+                        UnifiedEntity::table_row(
+                            EntityId::new(2),
+                            "red.config",
+                            2,
+                            vec![Value::text("canonical")],
+                        ),
+                    )
+                    .expect("canonical row");
+            }
+            if index_legacy {
+                store
+                    .register_secondary_index(
+                        "cfg_legacy",
+                        "by_id",
+                        index_identity.clone(),
+                        Arc::new(SystemNameProjection),
+                    )
+                    .expect("legacy secondary index");
+            }
+            store.persist().expect("checkpoint duplicate catalog");
+            legacy_root = store.collection_root_page("cfg_legacy");
+            legacy_key_root = store
+                .key_indices
+                .read()
+                .get("cfg_legacy")
+                .map(|index| index.tree.root_page_id());
+            legacy_secondary_root = index_legacy.then(|| {
+                store
+                    .secondary_index("cfg_legacy", "by_id", &index_identity)
+                    .expect("legacy secondary root")
+                    .root_page_id()
+            });
+        }
+
+        // Recreate the production shape: a populated legacy collection and an
+        // empty canonical collection published by an intermediate binary.
+        // Every spelling has the same byte length, so roots and checksummed
+        // page layouts stay unchanged while only the catalog identities move.
+        {
+            let pager = Pager::open(
+                &path,
+                PagerConfig {
+                    disk_residency: true,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("open pager");
+            let mut page = pager.read_page(1).expect("catalog page");
+            let bytes = page.as_bytes_mut();
+            for (source, destination) in [
+                (b"cfg_legacy".as_slice(), b"red_config".as_slice()),
+                (b"cfg.canon_".as_slice(), b"red.config".as_slice()),
+            ] {
+                let mut replacements = 0;
+                for offset in 0..=bytes.len() - source.len() {
+                    if &bytes[offset..offset + source.len()] == source {
+                        bytes[offset..offset + destination.len()].copy_from_slice(destination);
+                        replacements += 1;
+                    }
+                }
+                assert!(replacements >= 1, "catalog must contain the source name");
+            }
+            pager.write_page(1, page).expect("write duplicate catalog");
+            pager.sync().expect("sync duplicate catalog");
+        }
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(&path)
+            .rename_collections(&[("cfg_legacy", "red_config"), ("cfg.canon_", "red.config")])
+            .expect("publish duplicate operational names");
+
+        let pages_before = Pager::open(
+            &path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("inspect pager")
+        .page_count()
+        .expect("page count");
+        DuplicateSystemCatalogFixture {
+            _directory: directory,
+            path,
+            config,
+            pages_before,
+            legacy_root,
+            legacy_key_root,
+            legacy_secondary_root,
+            index_identity,
+        }
+    }
+
+    fn alias_duplicate_system_catalog_state(fixture: &DuplicateSystemCatalogFixture) {
+        let pager = Pager::open(
+            &fixture.path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("open duplicate catalog pager");
+        let mut metadata = read_meta_payload(&pager)
+            .expect("read duplicate catalog")
+            .expect("published duplicate catalog");
+        let mut resume = reddb_file::native_resume::decode_catalog_resume(&metadata)
+            .expect("decode duplicate resume")
+            .expect("prepared duplicate resume");
+        let legacy_state = resume
+            .collections
+            .get("red_config")
+            .expect("legacy resume state")
+            .clone();
+        resume
+            .collections
+            .insert("red.config".to_string(), legacy_state.clone());
+
+        let header = reddb_file::decode_native_paged_metadata_header(&metadata)
+            .expect("decode metadata header")
+            .expect("native metadata header");
+        let mut position = reddb_file::METADATA_HEADER_BYTES;
+        let mut replaced_root = false;
+        for _ in 0..header.collection_count {
+            let root = reddb_file::decode_native_paged_collection_root(&metadata, &mut position)
+                .expect("decode collection root");
+            if root.collection == "red.config" {
+                metadata[position - 4..position]
+                    .copy_from_slice(&legacy_state.root_page.to_le_bytes());
+                replaced_root = true;
+            }
+        }
+        assert!(replaced_root, "canonical catalog root must be present");
+
+        let trailer = metadata
+            .windows(4)
+            .rposition(|bytes| bytes == b"RDRS")
+            .expect("catalog resume trailer");
+        metadata.truncate(trailer);
+        reddb_file::native_resume::encode_catalog_resume(&mut metadata, &resume)
+            .expect("encode aliased resume");
+        publish_paged_metadata(&pager, &metadata).expect("publish aliased catalog");
+    }
+
+    #[test]
+    fn populated_legacy_system_collection_replaces_empty_canonical_duplicate() {
+        let fixture = duplicate_system_catalog_fixture(true, false, true);
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config.clone())
+            .expect("resolve empty duplicate");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered
+                .get("red.config", EntityId::new(1))
+                .expect("preserved legacy row")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        assert_eq!(
+            recovered.collection_root_page("red.config"),
+            fixture.legacy_root,
+            "the populated data root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .key_indices
+                .read()
+                .get("red.config")
+                .map(|index| index.tree.root_page_id()),
+            fixture.legacy_key_root,
+            "the populated key-index root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .secondary_index("red.config", "by_id", &fixture.index_identity)
+                .expect("surviving secondary index")
+                .root_page_id(),
+            fixture
+                .legacy_secondary_root
+                .expect("fixture secondary root")
+        );
+        drop(recovered);
+
+        let cold = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("idempotent cold boot");
+        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            cold.pager()
+                .expect("pager")
+                .page_count()
+                .expect("page count"),
+            fixture.pages_before,
+            "resolving an empty duplicate must not extend the file"
+        );
+    }
+
+    #[test]
+    fn populated_canonical_system_collection_replaces_empty_legacy_duplicate() {
+        let fixture = duplicate_system_catalog_fixture(false, true, false);
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("retain populated canonical duplicate");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered
+                .get("red.config", EntityId::new(2))
+                .expect("preserved canonical row")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        assert!(recovered.get("red.config", EntityId::new(1)).is_none());
+    }
+
+    #[test]
+    fn empty_canonical_system_collection_replaces_empty_legacy_duplicate() {
+        let fixture = duplicate_system_catalog_fixture(false, false, false);
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("prefer canonical empty duplicate");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered
+                .get_collection("red.config")
+                .expect("canonical collection")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn populated_system_collection_duplicates_still_fail_closed() {
+        let fixture = duplicate_system_catalog_fixture(true, true, false);
+        let error = match UnifiedStore::open_with_config(&fixture.path, fixture.config) {
+            Ok(_) => panic!("two populated identities are ambiguous"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("both populated legacy collection 'red_config' and canonical collection 'red.config'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn populated_system_collection_aliases_reconcile_without_rebuild() {
+        let fixture = duplicate_system_catalog_fixture(true, false, true);
+        alias_duplicate_system_catalog_state(&fixture);
+
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config.clone())
+            .expect("reconcile identical populated aliases");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered
+                .get("red.config", EntityId::new(1))
+                .expect("preserved aliased row")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        assert_eq!(
+            recovered.collection_root_page("red.config"),
+            fixture.legacy_root,
+            "the shared data root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .key_indices
+                .read()
+                .get("red.config")
+                .map(|index| index.tree.root_page_id()),
+            fixture.legacy_key_root,
+            "the shared key-index root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .secondary_index("red.config", "by_id", &fixture.index_identity)
+                .expect("shared secondary index")
+                .root_page_id(),
+            fixture
+                .legacy_secondary_root
+                .expect("fixture secondary root")
+        );
+        drop(recovered);
+
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        let cold = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("idempotent cold boot");
+        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+        assert_eq!(
+            cold.pager()
+                .expect("pager")
+                .page_count()
+                .expect("page count"),
+            fixture.pages_before,
+            "reconciling a physical alias must not extend the file"
         );
     }
 

@@ -8,6 +8,9 @@ pub(super) struct Catalog {
     pub resume: Option<f::native_resume::CatalogResume>,
 }
 impl Catalog {
+    pub fn has_cross_references(&self) -> bool {
+        !self.references.is_empty()
+    }
     pub fn read(source: &Source) -> Result<Self> {
         let page = source.raw_page(1, true)?;
         ensure(

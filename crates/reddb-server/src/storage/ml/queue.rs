@@ -85,6 +85,8 @@ impl JobHandle {
 struct Shared {
     state: Mutex<QueueState>,
     signal: Condvar,
+    // Serialize backend writes independently of the state lock.
+    persistence: Mutex<()>,
     backend: Option<Arc<dyn MlPersistence>>,
 }
 
@@ -100,8 +102,23 @@ fn persist_job(shared: &Arc<Shared>, job: &MlJob) {
     let Some(backend) = shared.backend.as_ref() else {
         return;
     };
-    let raw = job.to_json();
-    let _ = backend.put(ns::JOBS, &key::job(job.id), &raw);
+    // A transition can be superseded before its persistence call runs.
+    // Serialize writes and read the latest state while holding that ordering
+    // lock, so a delayed queued/progress snapshot cannot overwrite a terminal
+    // result. Do not hold the queue state mutex while invoking the backend.
+    let _persistence = shared.persistence.lock().unwrap_or_else(|p| p.into_inner());
+    let current = {
+        let state = shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        state
+            .jobs
+            .iter()
+            .find(|current| current.id == job.id)
+            .cloned()
+    };
+    if let Some(current) = current {
+        let raw = current.to_json();
+        let _ = backend.put(ns::JOBS, &key::job(current.id), &raw);
+    }
 }
 
 #[derive(Debug)]
@@ -200,6 +217,7 @@ impl MlJobQueue {
                 next_id: resume_next_id,
             }),
             signal: Condvar::new(),
+            persistence: Mutex::new(()),
             backend,
         });
 
@@ -303,9 +321,8 @@ impl MlJobQueue {
         true
     }
 
-    /// Stop every worker thread after they finish their current job.
-    /// Pending jobs are left in the queue — a future process start
-    /// would pick them up once persistence is wired.
+    /// Stop every worker thread after it drains the pending queue.
+    /// This waits for running and already queued jobs to finish.
     pub fn shutdown(&self) {
         {
             let mut guard = match self.shared.state.lock() {
@@ -569,6 +586,32 @@ mod tests {
         let decoded = MlJob::from_json(&raw).unwrap();
         assert_eq!(decoded.status, MlJobStatus::Completed);
         assert_eq!(decoded.metrics_json.as_deref(), Some("{\"f1\":0.9}"));
+    }
+
+    #[test]
+    fn delayed_queued_snapshot_cannot_replace_a_completed_job() {
+        use super::super::persist::InMemoryMlPersistence;
+        let backend = Arc::new(InMemoryMlPersistence::new());
+        let q = MlJobQueue::start_with_backend(
+            1,
+            Arc::new(|_| Ok("{\"done\":true}".to_string())),
+            backend.clone(),
+        );
+        let id = q.submit(MlJobKind::Train, "late", "{}");
+        let queued = MlJob::new(id, MlJobKind::Train, "late".into(), "{}".into());
+        q.shutdown();
+        assert_eq!(q.get(id).unwrap().status, MlJobStatus::Completed);
+
+        // Simulate submit's initial write arriving after the worker's final
+        // write, without relying on thread scheduling to expose the race.
+        persist_job(&q.shared, &queued);
+        let raw = backend
+            .get(super::ns::JOBS, &super::key::job(id))
+            .unwrap()
+            .unwrap();
+        let restored = MlJob::from_json(&raw).unwrap();
+        assert_eq!(restored.status, MlJobStatus::Completed);
+        assert_eq!(restored.metrics_json.as_deref(), Some("{\"done\":true}"));
     }
 
     #[test]
