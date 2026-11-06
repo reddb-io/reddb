@@ -30,6 +30,29 @@ use std::collections::HashMap;
 thread_local! {
     static DELETE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static TIMESTAMP_CONTEXT: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+    static DELETE_CANDIDATES: RefCell<Option<Vec<crate::storage::EntityId>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn with_delete_candidates<T>(
+    candidates: Vec<crate::storage::EntityId>,
+    collection: &str,
+    column: &str,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Vec<crate::storage::EntityId>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DELETE_CANDIDATES.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let limit = candidates.len();
+    let previous = DELETE_CANDIDATES.with(|slot| slot.replace(Some(candidates)));
+    let _restore = Restore(previous);
+    with_delete_limit(limit, collection, column, f)
+}
+
+pub(crate) fn take_delete_candidates() -> Option<Vec<crate::storage::EntityId>> {
+    DELETE_CANDIDATES.with(|slot| slot.borrow_mut().take())
 }
 
 /// Scope the limit to the synchronous maintenance statement and restore it on
@@ -129,16 +152,51 @@ pub(crate) struct SweeperState {
 }
 
 /// Per-runtime sweeper state map. Keyed by collection name.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct RetentionSweeperState {
     states: HashMap<String, SweeperState>,
+    cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
+    next_collection: Option<String>,
 }
 
 impl RetentionSweeperState {
     pub(crate) fn new() -> Self {
         Self {
             states: HashMap::new(),
+            cursors: HashMap::new(),
+            next_collection: None,
         }
+    }
+
+    pub(crate) fn scan_tick(
+        &mut self,
+        store: &crate::storage::unified::store::UnifiedStore,
+        collection: &str,
+        budget: usize,
+    ) -> Result<(Vec<crate::storage::EntityId>, usize), crate::storage::StoreError> {
+        if !self.cursors.contains_key(collection) {
+            let Some(cursor) = store.mvcc_reclaim_cursor(collection.to_owned()) else {
+                return Ok((Vec::new(), 0));
+            };
+            self.cursors.insert(collection.to_owned(), cursor);
+        }
+        let cursor = self
+            .cursors
+            .get_mut(collection)
+            .expect("cursor was inserted");
+        let result = store.retention_scan_tick(cursor, budget)?;
+        if cursor.finished() {
+            self.cursors.remove(collection);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn next_collection(&self) -> Option<&str> {
+        self.next_collection.as_deref()
+    }
+
+    pub(crate) fn resume_at(&mut self, collection: String) {
+        self.next_collection = Some(collection);
     }
 
     /// Snapshot of every tracked collection's sweeper state.
@@ -186,6 +244,7 @@ impl RetentionSweeperState {
     /// Drop bookkeeping for a collection (DROP TABLE / DROP COLLECTION).
     pub(crate) fn forget(&mut self, collection: &str) {
         self.states.remove(collection);
+        self.cursors.remove(collection);
     }
 }
 

@@ -8,6 +8,104 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[test]
+fn mutable_scan_budget_is_shared_and_rotates_between_collections() {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    for name in ["events", "logs"] {
+        rt.execute_query(&format!(
+            "CREATE TABLE {name} (id INTEGER) WITH timestamps = true"
+        ))
+        .unwrap();
+        rt.execute_query(&format!("INSERT INTO {name} (id) VALUES (1), (2)"))
+            .unwrap();
+        let manager = rt.db().store().get_collection(name).unwrap();
+        for mut entity in manager.query_all(|_| true) {
+            entity.created_at = 1;
+            if let EntityData::Row(row) = &mut entity.data {
+                if let Some(named) = &mut row.named {
+                    named.insert("created_at".into(), Value::UnsignedInteger(1));
+                }
+                if let Some(schema) = &row.schema {
+                    let index = schema
+                        .iter()
+                        .position(|field| field == "created_at")
+                        .unwrap();
+                    row.columns[index] = Value::UnsignedInteger(1);
+                }
+            }
+            manager.update(entity).unwrap();
+        }
+        rt.execute_query(&format!("ALTER COLLECTION {name} SET RETENTION 1 d"))
+            .unwrap();
+    }
+    for expected in [[1, 2], [1, 1]] {
+        rt.sweep_retention_tick(1);
+        for name in ["events", "logs"] {
+            rt.execute_query(&format!("ALTER COLLECTION {name} UNSET RETENTION"))
+                .unwrap();
+        }
+        let counts = ["events", "logs"].map(|name| {
+            rt.execute_query(&format!("SELECT id FROM {name}"))
+                .unwrap()
+                .result
+                .records
+                .len()
+        });
+        assert_eq!(counts, expected);
+        for name in ["events", "logs"] {
+            rt.execute_query(&format!("ALTER COLLECTION {name} SET RETENTION 1 d"))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn retention_scan_advances_past_live_rows_in_bounded_ticks() {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true")
+        .unwrap();
+    rt.execute_query("INSERT INTO events (id) VALUES (1), (2), (3), (4), (5), (6)")
+        .unwrap();
+    let manager = rt.db().store().get_collection("events").unwrap();
+    let mut entities = manager.query_all(|_| true);
+    entities.sort_by_key(|entity| entity.id);
+    for mut entity in entities.into_iter().skip(4) {
+        entity.created_at = 1;
+        if let EntityData::Row(row) = &mut entity.data {
+            if let Some(named) = &mut row.named {
+                named.insert("created_at".into(), Value::UnsignedInteger(1));
+            }
+            if let Some(schema) = &row.schema {
+                let index = schema
+                    .iter()
+                    .position(|field| field == "created_at")
+                    .unwrap();
+                row.columns[index] = Value::UnsignedInteger(1);
+            }
+        }
+        manager.update(entity).unwrap();
+    }
+    rt.execute_query("ALTER COLLECTION events SET RETENTION 1 d")
+        .unwrap();
+    for expected in [6, 6, 4] {
+        rt.sweep_retention_tick(2);
+        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+            .unwrap();
+        assert_eq!(
+            rt.execute_query("SELECT id FROM events")
+                .unwrap()
+                .result
+                .records
+                .len(),
+            expected
+        );
+        rt.execute_query("ALTER COLLECTION events SET RETENTION 1 d")
+            .unwrap();
+    }
+}
+
+#[test]
 fn cold_retention_sweeps_persisted_rows_in_bounded_batches() {
     let directory = tempfile::tempdir().unwrap();
     let options = RedDBOptions::persistent(directory.path().join("retention.rdb"))
@@ -59,16 +157,28 @@ fn cold_retention_sweeps_persisted_rows_in_bounded_batches() {
         assert_eq!(before.result.records.len(), previous, "before sweep");
         rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
             .unwrap();
-        rt.sweep_retention_tick(2);
-        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
-            .unwrap();
-        assert_eq!(
-            rt.execute_query("SELECT id FROM events")
+        let mut remaining = previous;
+        for _ in 0..10 {
+            rt.sweep_retention_tick(2);
+            rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+                .unwrap();
+            let next = rt
+                .execute_query("SELECT id FROM events")
                 .unwrap()
                 .result
                 .records
-                .len(),
-            expected
+                .len();
+            assert!(next <= remaining && remaining - next <= 2);
+            remaining = next;
+            if remaining <= expected {
+                break;
+            }
+            rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                .unwrap();
+        }
+        assert_eq!(
+            remaining, expected,
+            "cold cursor must advance past deleted versions"
         );
         rt.flush().unwrap();
     }

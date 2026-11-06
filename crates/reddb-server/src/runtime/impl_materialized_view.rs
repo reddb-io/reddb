@@ -68,9 +68,8 @@ impl RedDBRuntime {
     /// sweeper's deletes via the same WAL stream with no special
     /// handling on the replication side.
     ///
-    /// The normal DML target scan stops after `batch_size` matching rows,
-    /// including when timestamps tie. A full batch indicates possible
-    /// remaining work, which is retried on the next tick.
+    /// Mutable scans inspect at most `batch_size` physical positions across
+    /// collections and resume from their previous position on the next tick.
     pub fn sweep_retention_tick(&self, batch_size: usize) {
         if batch_size == 0 {
             return;
@@ -81,9 +80,16 @@ impl RedDBRuntime {
             .unwrap_or(0);
 
         let store = self.inner.db.store();
-        let collections = store.list_collections();
+        let mut collections = store.list_collections();
+        collections.sort();
+        if let Some(next) = self.inner.retention_sweeper.read().next_collection() {
+            if let Some(start) = collections.iter().position(|name| name == next) {
+                collections.rotate_left(start);
+            }
+        }
+        let mut remaining = batch_size;
         let mut append_only_checked = false;
-        for name in collections {
+        for (index, name) in collections.iter().enumerate() {
             let Some(contract) = self.inner.db.collection_contract(&name) else {
                 continue;
             };
@@ -105,18 +111,57 @@ impl RedDBRuntime {
             if store.get_collection(&name).is_none() {
                 continue;
             }
+            if remaining == 0 {
+                continue;
+            }
             let cutoff = super::retention_sweeper::cutoff_ms(now_ms, retention_ms);
 
+            let candidates = self
+                .inner
+                .retention_sweeper
+                .write()
+                .scan_tick(&store, &name, remaining);
+            let (candidates, scanned) = match candidates {
+                Ok(result) => result,
+                Err(_) => {
+                    self.inner
+                        .retention_sweeper
+                        .write()
+                        .record_tick(&name, 0, 1, now_ms);
+                    // The failed scan may already have consumed its budget.
+                    // Retry other collections on a later tick.
+                    remaining = 0;
+                    self.inner
+                        .retention_sweeper
+                        .write()
+                        .resume_at(collections[(index + 1) % collections.len()].clone());
+                    continue;
+                }
+            };
+            remaining -= scanned;
+            if remaining == 0 && !collections.is_empty() {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .resume_at(collections[(index + 1) % collections.len()].clone());
+            }
+            if candidates.is_empty() {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .record_tick(&name, 0, 1, now_ms);
+                continue;
+            }
+
             let stmt = format!("DELETE FROM {} WHERE {} < {}", name, ts_column, cutoff);
-            let result =
-                super::retention_sweeper::with_delete_limit(batch_size, &name, &ts_column, || {
-                    self.execute_query(&stmt)
-                });
+            let result = super::retention_sweeper::with_delete_candidates(
+                candidates,
+                &name,
+                &ts_column,
+                || self.execute_query(&stmt),
+            );
             let (deleted, pending) = match result {
-                Ok(r) => (
-                    r.affected_rows,
-                    u64::from(r.affected_rows >= batch_size as u64),
-                ),
+                Ok(r) => (r.affected_rows, u64::from(scanned > 0)),
                 Err(_) => (0, 1),
             };
 

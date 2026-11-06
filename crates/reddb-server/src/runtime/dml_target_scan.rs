@@ -90,6 +90,10 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
+        if let Some(ids) = super::retention_sweeper::take_delete_candidates() {
+            return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+        }
+
         // Fast path: WHERE _entity_id = N. The resolver maps stable
         // table-row identity to the version visible to this statement.
         // Skip for graph node/edge targets — the table-row resolver only

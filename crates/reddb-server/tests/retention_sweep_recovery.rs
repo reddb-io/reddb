@@ -101,7 +101,12 @@ fn bounded_sweep_replays_committed_deletes_after_process_exit() {
         );
         rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
             .unwrap();
-        rt.sweep_retention_tick(2);
+        // Recovery can leave deleted physical versions before live rows. Each
+        // position consumes the scan budget; later ticks must still reach the
+        // remaining live rows.
+        for _ in 0..10 {
+            rt.sweep_retention_tick(2);
+        }
     }
     let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
     rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
@@ -112,7 +117,7 @@ fn bounded_sweep_replays_committed_deletes_after_process_exit() {
             .result
             .records
             .len(),
-        1
+        0
     );
 }
 
@@ -144,23 +149,37 @@ fn mutable_retention_ties_are_bounded_and_resume_after_reopen() {
     }
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
-        rt.sweep_retention_tick(2);
-        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
-            .unwrap();
-        assert_eq!(
-            rt.execute_query("SELECT id FROM events")
+        let mut previous = 3;
+        for _ in 0..10 {
+            rt.sweep_retention_tick(2);
+            rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+                .unwrap();
+            let remaining = rt
+                .execute_query("SELECT id FROM events")
                 .unwrap()
                 .result
                 .records
-                .len(),
-            1
+                .len();
+            assert!(remaining <= previous && previous - remaining <= 2);
+            previous = remaining;
+            if remaining <= 1 {
+                break;
+            }
+            rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                .unwrap();
+        }
+        assert_eq!(
+            previous, 1,
+            "the cursor eventually passes old versions after boot"
         );
         rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
             .unwrap();
     }
     {
         let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
-        rt.sweep_retention_tick(2);
+        for _ in 0..10 {
+            rt.sweep_retention_tick(2);
+        }
         rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
             .unwrap();
         assert!(rt
