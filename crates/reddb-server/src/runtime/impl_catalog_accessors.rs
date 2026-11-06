@@ -94,24 +94,28 @@ impl RedDBRuntime {
         // inventory before their first resident-to-disk publication too.
         self.prepare_paged_counts()?;
         self.persist_probabilistic_snapshots()?;
-        self.inner.db.flush_local_only().map_err(|err| {
-            // Issue #205 — local flush failure is a CheckpointFailed
-            // operator-grade event. The local-flush path also covers
-            // the WAL fsync we depend on, so a failure here doubles as
-            // the WalFsyncFailed signal for the runtime entry point.
-            let msg = err.to_string();
-            crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
-                lsn: 0,
-                error: msg.clone(),
-            }
-            .emit_global();
-            crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
-                path: "<flush_local_only>".to_string(),
-                error: msg.clone(),
-            }
-            .emit_global();
-            RedDBError::Engine(msg)
-        })?;
+        self.inner
+            .db
+            .flush_local_after_runtime_snapshots()
+            .map_err(|err| {
+                // Issue #205 — local flush failure is a CheckpointFailed
+                // operator-grade event. The local-flush path also covers
+                // the WAL fsync we depend on, so a failure here doubles as
+                // the WalFsyncFailed signal for the runtime entry point.
+                let msg = err.to_string();
+                crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
+                    lsn: 0,
+                    error: msg.clone(),
+                }
+                .emit_global();
+                crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
+                    path: "<flush_local_only>".to_string(),
+                    error: msg.clone(),
+                }
+                .emit_global();
+                RedDBError::Engine(msg)
+            })?;
+        self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
         let checkpoint_lsn = self.cdc_current_lsn();
         self.inner

@@ -92,12 +92,24 @@ do not use its intermediate files as a database.
 Schema and auxiliary-metadata actions in the unified WAL are replayed; legacy
 physical engine WALs are applied only when their page images and transaction
 records verify. There is no total WAL-size limit, although individual records
-remain subject to the format's limits. Legacy pager WALs and runtime-owned
-vector or probabilistic WAL records are refused. Supported physical metadata
+remain subject to the format's limits. Legacy pager WALs are refused.
+Probabilistic WAL deltas are materialized on the recovery copy. Turbo vector
+records are accepted only if the recovered entity contains the exact vector;
+validated turbo snapshots up to 64 MiB are discarded as rebuildable caches.
+Recovery refuses missing or mismatched vector entities, unsupported support
+files, malformed deltas and unclassified non-vector pages. Records already
+lost before recovery cannot be reconstructed from the WAL. Supported physical metadata
 is verified and copied with its sidecars, and saved Vaults must authenticate
 before publication. Incomplete or corrupt WAL and double-write frames are
 refused. The replayed copy must have readable data trees; this command does not
 combine replay with salvage of damaged trees.
+
+Internal storage checkpoints retain vector and probabilistic WAL records until
+a runtime checkpoint publishes the corresponding state. They rewrite the WAL
+through a synced temporary file and atomic replacement; the original frames and
+their authority are preserved. Runtime checkpoints serialize probabilistic
+snapshots before discarding these records. A turbo index rebuild also scans the
+durable vector entities because an existing snapshot may be older than the WAL.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

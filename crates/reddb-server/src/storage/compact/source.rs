@@ -41,7 +41,11 @@ impl Source {
         )?;
         let support = f::support_dir_for(path);
         if support.exists() {
-            validate_empty_directory(&support, 0)?;
+            if allow_unified_wal {
+                validate_recovery_support(&support, 0, false)?;
+            } else {
+                validate_empty_directory(&support, 0)?;
+            }
         }
         let mut file = File::open(path)?;
         // Some network filesystems (including OCI FSS/NFS) reject an exclusive
@@ -208,6 +212,17 @@ impl Source {
             .iter()
             .filter(|owner| **owner == 0)
             .count() as u64
+    }
+    pub fn verify_unclaimed_vector_pages(&self) -> Result<()> {
+        for id in FIRST_ALLOCATABLE_PAGE..self.header.page_count {
+            if self.ownership.lock()[id as usize] == 0 {
+                ensure(
+                    self.raw_page(id, true)?.page_type()? == PageType::Vector,
+                    "unclassified recovery page is not a vector cache page",
+                )?;
+            }
+        }
+        Ok(())
     }
     pub fn claim(&self, id: u32) -> Result<()> {
         ensure(

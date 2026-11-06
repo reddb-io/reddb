@@ -2375,7 +2375,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             // Lazy populate so an INSERT after restart sees the
             // pre-restart vectors in the index before appending its
             // own.
-            state.ensure_populated(&db.store(), &input.collection);
+            state.ensure_populated(&db.store(), &input.collection)?;
             // Issue #694 — named crash boundaries for #673.
             use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
             fire(InjectionPoint::BeforeWalFsync);

@@ -337,6 +337,8 @@ pub(crate) struct StoreCommitCoordinator {
     ownership_last_epoch: AtomicU64,
     // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
     ownership_wal_state: AtomicU8,
+    // 0: existing WAL not scanned; 1: no runtime records; 2: retained.
+    runtime_wal_state: AtomicU8,
 }
 
 /// Connects a fenced pager ownership epoch to the store's durable WAL.
@@ -518,6 +520,7 @@ impl StoreCommitCoordinator {
             wal_generation: AtomicU64::new(0),
             ownership_last_epoch: AtomicU64::new(0),
             ownership_wal_state: AtomicU8::new(0),
+            runtime_wal_state: AtomicU8::new(0),
         })
     }
 
@@ -708,6 +711,12 @@ impl StoreCommitCoordinator {
             ));
         }
         let _epoch = self.queue.epoch.read();
+        if matches!(
+            record,
+            WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+        ) {
+            self.runtime_wal_state.store(2, Ordering::Release);
+        }
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
@@ -809,7 +818,27 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
+        self.truncate_inner(false)
+    }
+
+    pub(super) fn truncate_after_runtime_checkpoint(&self) -> io::Result<()> {
+        self.truncate_inner(true)
+    }
+
+    fn truncate_inner(&self, runtime_snapshots_durable: bool) -> io::Result<()> {
         let _epoch = self.queue.epoch.write();
+        // Async appenders may have returned while their entries remain queued.
+        // Drain them before deciding what the checkpoint may discard.
+        {
+            let mut wal = self.wal.lock();
+            for (offset, bytes) in self.queue.drain_sorted() {
+                if offset != wal.current_lsn() {
+                    return Err(io::Error::other("WAL queue offset differs from writer"));
+                }
+                wal.append_bytes(&bytes)?;
+            }
+            wal.sync()?;
+        }
         if self.ownership_wal_state.load(Ordering::Acquire) == 0 {
             let reader = WalReader::open(&self.wal_path)?;
             let mut protected = false;
@@ -834,9 +863,29 @@ impl StoreCommitCoordinator {
                 "cannot truncate WAL while page ownership records require recovery",
             ));
         }
+        if self.runtime_wal_state.load(Ordering::Acquire) == 0 {
+            let mut protected = false;
+            for item in WalReader::open(&self.wal_path)?.iter() {
+                if matches!(
+                    item?.1,
+                    WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+                ) {
+                    protected = true;
+                }
+            }
+            self.runtime_wal_state
+                .store(if protected { 2 } else { 1 }, Ordering::Release);
+        }
         self.wal_generation.fetch_add(1, Ordering::AcqRel);
         let mut wal = self.wal.lock();
-        wal.truncate()?;
+        let retain_runtime =
+            !runtime_snapshots_durable && self.runtime_wal_state.load(Ordering::Acquire) == 2;
+        if retain_runtime {
+            self.retain_runtime_wal(&mut wal)?;
+        } else {
+            wal.truncate()?;
+            self.runtime_wal_state.store(1, Ordering::Release);
+        }
         let durable = wal.durable_lsn();
         let current = wal.current_lsn();
         drop(wal);
@@ -856,7 +905,106 @@ impl StoreCommitCoordinator {
         state.first_pending_at = None;
         state.last_error = None;
         cond.notify_all();
+        drop(state);
+        if retain_runtime {
+            use reddb_file::Vfs;
+            let parent = self
+                .wal_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            reddb_file::StdVfs.sync_dir(parent)?;
+        }
         Ok(())
+    }
+
+    /// Replace the checkpointed WAL with the exact runtime-owned frames. The
+    /// temporary file is synced before atomic publication, so interruption
+    /// leaves either the original WAL or a complete retained journal.
+    fn retain_runtime_wal(&self, wal: &mut WalWriter) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let mut name = self
+            .wal_path
+            .file_name()
+            .ok_or_else(|| io::Error::other("WAL filename missing"))?
+            .to_os_string();
+        name.push(format!(
+            ".{}.{}.runtime.tmp",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = self.wal_path.with_file_name(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut temp_file = options.open(&temporary)?;
+        let result = (|| -> io::Result<()> {
+            let mut source = std::fs::File::open(&self.wal_path)?;
+            let mut header = [0u8; reddb_file::WAL_FILE_HEADER_BYTES];
+            source.read_exact(&mut header)?;
+            reddb_file::decode_wal_file_header(&header)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            temp_file.write_all(&header)?;
+            temp_file.sync_all()?;
+            drop(temp_file);
+            let mut retained = WalWriter::open(&temporary)?;
+            let mut previous = None;
+            let end = wal.current_lsn();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut copy_frame = |start: u64, end: u64| -> io::Result<()> {
+                source.seek(SeekFrom::Start(start))?;
+                let mut remaining = end
+                    .checked_sub(start)
+                    .ok_or_else(|| io::Error::other("invalid WAL frame boundary"))?;
+                while remaining > 0 {
+                    let length = usize::try_from(remaining.min(buffer.len() as u64))
+                        .map_err(|_| io::Error::other("invalid WAL frame length"))?;
+                    source.read_exact(&mut buffer[..length])?;
+                    retained.append_bytes(&buffer[..length])?;
+                    remaining -= length as u64;
+                }
+                Ok(())
+            };
+            for item in WalReader::open(&self.wal_path)?.iter() {
+                let (offset, record) = item?;
+                if let Some((start, true)) = previous.take() {
+                    copy_frame(start, offset)?;
+                }
+                previous = Some((
+                    offset,
+                    matches!(
+                        record,
+                        WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+                    ),
+                ));
+            }
+            if let Some((start, true)) = previous {
+                copy_frame(start, end)?;
+            }
+            drop(copy_frame);
+            drop(source);
+            retained.sync()?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_BEFORE_RUNTIME_WAL_RENAME").is_some() {
+                std::process::exit(211);
+            }
+            std::fs::rename(&temporary, &self.wal_path)?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_RUNTIME_WAL_RENAME").is_some() {
+                std::process::exit(212);
+            }
+            *wal = retained;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn release_completed_ownership_wal(&self) -> io::Result<()> {
@@ -1114,6 +1262,7 @@ impl StoreCommitCoordinator {
                     entity_id,
                     vector,
                 } => {
+                    self.runtime_wal_state.store(2, Ordering::Release);
                     // Issue #694 — capture `vector.turbo` WAL inserts so the
                     // boot-time TurboQuant index rebuild can drain them in
                     // WAL order (deterministic against the pre-restart
@@ -1132,6 +1281,7 @@ impl StoreCommitCoordinator {
                     name,
                     operands,
                 } => {
+                    self.runtime_wal_state.store(2, Ordering::Release);
                     let mut deltas = store.replayed_probabilistic_deltas.lock();
                     deltas.push((kind, operation, name, operands));
                 }
@@ -1936,6 +2086,200 @@ mod tests {
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    #[test]
+    fn runtime_wal_retention_serializes_concurrent_appends() {
+        let directory = tempfile::tempdir().expect("temporary WAL directory");
+        let path = directory.path().join("data.wal");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                &path,
+                DurabilityMode::WalDurableGrouped,
+                GroupCommitOptions::default(),
+            )
+            .expect("coordinator"),
+        );
+        let barrier = Arc::new(Barrier::new(5));
+        let mut workers = Vec::new();
+        for worker in 0..4u8 {
+            let coordinator = Arc::clone(&coordinator);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for index in 0..20u8 {
+                    coordinator
+                        .append_single_record(WalRecord::ProbabilisticDelta {
+                            kind: 1,
+                            operation: 1,
+                            name: "visitors".into(),
+                            operands: vec![vec![worker, index]],
+                        })
+                        .expect("append delta");
+                }
+            }));
+        }
+        barrier.wait();
+        for _ in 0..5 {
+            coordinator.truncate().expect("retain while appending");
+        }
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        coordinator.truncate().expect("final retention");
+        let entries: std::collections::HashSet<_> = WalReader::open(&path)
+            .expect("reader")
+            .iter()
+            .map(|entry| match entry.expect("record").1 {
+                WalRecord::ProbabilisticDelta { operands, .. } => operands[0].clone(),
+                _ => panic!("unexpected retained record"),
+            })
+            .collect();
+        assert_eq!(entries.len(), 80);
+    }
+
+    #[test]
+    fn runtime_wal_retention_preserves_exact_frames_and_append_order() {
+        use crate::storage::wal::record::WalRecordAuthority;
+        for mode in [
+            DurabilityMode::Strict,
+            DurabilityMode::WalDurableGrouped,
+            DurabilityMode::Async,
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL directory");
+            let path = directory.path().join("data.wal");
+            let record = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            };
+            let mut frame = Vec::new();
+            record.encode_with_authority_into(
+                &mut frame,
+                WalRecordAuthority {
+                    term: 42,
+                    ownership_epoch: Some(9),
+                },
+            );
+            {
+                let mut writer = WalWriter::open(&path).expect("WAL writer");
+                writer
+                    .append(&WalRecord::Begin { tx_id: 1 })
+                    .expect("logical begin");
+                writer.append_bytes(&frame).expect("runtime record");
+                writer
+                    .append(&WalRecord::Commit { tx_id: 1 })
+                    .expect("logical commit");
+                writer.sync().expect("sync");
+            }
+            let coordinator =
+                StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                    .expect("coordinator");
+            coordinator.truncate().expect("retain runtime records");
+            let mut expected = reddb_file::encode_wal_file_header().to_vec();
+            expected.extend_from_slice(&frame);
+            assert_eq!(std::fs::read(&path).expect("retained WAL"), expected);
+            let later = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"bob".to_vec()],
+            };
+            coordinator
+                .append_single_record(later.clone())
+                .expect("append after rewrite");
+            coordinator.truncate().expect("retain queued record");
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("reader")
+                .iter()
+                .map(|entry| entry.expect("record").1)
+                .collect();
+            assert_eq!(records, vec![record, later]);
+            coordinator
+                .truncate_after_runtime_checkpoint()
+                .expect("runtime snapshot permits truncation");
+            assert_eq!(
+                std::fs::read(&path).expect("checkpointed WAL"),
+                reddb_file::encode_wal_file_header()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_wal_rewrite_survives_interruption() {
+        const TEST: &str =
+            "storage::unified::store::commit::tests::runtime_wal_rewrite_survives_interruption";
+        const CHILD: &str = "REDDB_TEST_RUNTIME_WAL_REWRITE_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let coordinator = StoreCommitCoordinator::open(
+                path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("child coordinator");
+            coordinator.truncate().expect("fault injection");
+            panic!("interruption point was not reached");
+        }
+        for (hook, code, replaced) in [
+            ("REDDB_TEST_EXIT_BEFORE_RUNTIME_WAL_RENAME", 211, false),
+            ("REDDB_TEST_EXIT_AFTER_RUNTIME_WAL_RENAME", 212, true),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL directory");
+            let path = directory.path().join("data.wal");
+            let record = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            };
+            {
+                let mut writer = WalWriter::open(&path).expect("WAL writer");
+                writer
+                    .append(&WalRecord::Begin { tx_id: 1 })
+                    .expect("begin");
+                writer.append(&record).expect("runtime record");
+                writer
+                    .append(&WalRecord::Commit { tx_id: 1 })
+                    .expect("commit");
+                writer.sync().expect("sync");
+            }
+            let original = std::fs::read(&path).expect("original WAL");
+            let child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, &path)
+                    .env(hook, "1")
+                    .output()
+                    .expect("child");
+            assert_eq!(
+                child.status.code(),
+                Some(code),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let after = std::fs::read(&path).expect("WAL after interruption");
+            if replaced {
+                let mut expected = reddb_file::encode_wal_file_header().to_vec();
+                expected.extend_from_slice(&record.encode());
+                assert_eq!(after, expected);
+            } else {
+                assert_eq!(after, original);
+            }
+            let coordinator = StoreCommitCoordinator::open(
+                &path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("reopen");
+            coordinator.truncate().expect("retry rewrite");
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("reader")
+                .iter()
+                .map(|entry| entry.expect("record").1)
+                .collect();
+            assert_eq!(records, vec![record]);
+        }
+    }
 
     #[test]
     fn ownership_epoch_rejects_nested_begin_and_wrong_finish() {

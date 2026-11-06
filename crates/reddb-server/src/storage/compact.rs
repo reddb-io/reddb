@@ -128,11 +128,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
                         verify_wal_recovery_action(&action)?;
                     }
                 }
-                WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {
-                    return Err(
-                        "WAL contains runtime-owned data requiring separate recovery".into(),
-                    );
-                }
+                WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {}
                 WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. } => {
                     pending_ownership = true
                 }
@@ -188,7 +184,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     let name = source.file_name().ok_or("source filename is missing")?;
     let staged_source = stage.join(name);
     guard.copy_snapshot(&staged_source)?;
-    copy_sidecars(&source, &staged_source)?;
+    copy_sidecars(&source, &staged_source, true)?;
     copy_physical_metadata_files(&source, &staged_source)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
         resident_memory_bytes_max: (guard.header.version
@@ -210,14 +206,18 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
         writer.truncate()?;
         writer.sync()?;
     }
+    let probabilistic_deltas;
+    let mut has_vector_cache = false;
     {
         let store =
             crate::storage::unified::UnifiedStore::open_with_config(&staged_source, config)?;
         if pending_engine || guard.pending_double_write {
             store.reconcile_physical_recovery()?;
-            // The same root can now contain newer entity headers than the
-            // old catalog summary. Preserve its previous floor, account for
-            // the physical WAL, and visit the recovered base before publishing.
+        }
+        if pending_unified || pending_engine || guard.pending_double_write {
+            // Replayed physical pages or logical overlays may contain newer
+            // identifiers than the old catalog. Capture their floors before
+            // checkpoint turns the overlay into an immutable base.
             let mut high = store
                 .startup_xid_high_water_mark()
                 .unwrap_or(0)
@@ -262,7 +262,54 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
             )?;
             store.remember_startup_xid_high_water_mark(high);
         }
+        // Turbo WAL is an index projection, while the persisted entity owns
+        // its content and metadata. Do not discard a vector that cannot be
+        // rebuilt exactly from the recovered entities.
+        for (collection, records) in store.replayed_turbo_inserts.lock().iter() {
+            has_vector_cache = true;
+            ensure(
+                crate::runtime::vector_turbo_kind::is_turbo(&store, collection),
+                "WAL vector collection is not a turbo collection",
+            )?;
+            for (id, vector) in records {
+                let entity = store
+                    .try_get(
+                        collection,
+                        crate::storage::EntityId::new(*id),
+                        32 * 1024 * 1024,
+                    )?
+                    .ok_or("WAL vector has no recovered entity")?;
+                let crate::storage::EntityData::Vector(data) = entity.data else {
+                    return Err("WAL vector points to a non-vector entity".into());
+                };
+                ensure(
+                    data.dense.len() == vector.len()
+                        && data
+                            .dense
+                            .iter()
+                            .zip(vector)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "WAL vector differs from recovered entity",
+                )?;
+            }
+        }
+        has_vector_cache |= verify_turbo_snapshots(&staged_source, &store)?;
+        probabilistic_deltas = store.take_replayed_probabilistic_deltas();
         store.persist()?;
+    }
+    if !probabilistic_deltas.is_empty() {
+        let options = crate::RedDBOptions::persistent(&staged_source)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(
+                guard.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION,
+            );
+        let runtime = crate::RedDBRuntime::with_options(options)?;
+        runtime.persist_offline_probabilistic_recovery(probabilistic_deltas)?;
+        runtime.checkpoint()?;
+        runtime.graceful_shutdown(false)?;
+    }
+    if has_vector_cache {
+        scrub::verify_recovery_vector_pages(&staged_source)?;
     }
     let validated_dir = stage.join("validated");
     let report = compact_paged(&staged_source, &validated_dir)?;
@@ -274,7 +321,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
         "replayed store failed scrub",
     )?;
     let final_path = destination.join(name);
-    copy_sidecars(&validated_dir.join(name), &final_path)?;
+    copy_sidecars(&validated_dir.join(name), &final_path, false)?;
     copy_physical_metadata_files(&validated_dir.join(name), &final_path)?;
     write_new(
         &destination.join("compaction.json"),
@@ -293,6 +340,77 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
 fn verify_wal_recovery_action(bytes: &[u8]) -> Result<()> {
     f::decode_store_wal_action_frame(bytes)?;
     Ok(())
+}
+
+fn verify_turbo_snapshots(
+    path: &Path,
+    store: &crate::storage::unified::UnifiedStore,
+) -> Result<bool> {
+    let snapshots = f::support_dir_for(path).join("snapshots");
+    if !snapshots.exists() {
+        return Ok(false);
+    }
+    let mut found = false;
+    for entry in std::fs::read_dir(snapshots)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        found = true;
+        let path = entry.path();
+        let name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid turbo snapshot name")?;
+        ensure(
+            crate::runtime::vector_turbo_kind::is_turbo(store, name),
+            "snapshot has no turbo collection",
+        )?;
+        let length = entry.metadata()?.len();
+        ensure(
+            length <= 64 * 1024 * 1024,
+            "turbo snapshot exceeds recovery budget",
+        )?;
+        let mut header = [0u8; f::TURBOQUANT_SNAPSHOT_HEADER_BYTES];
+        File::open(&path)?.read_exact(&mut header)?;
+        let dim = u32::from_le_bytes(header[12..16].try_into()?);
+        let count = u64::from_le_bytes(header[32..40].try_into()?);
+        let record_size = u64::from(dim)
+            .checked_mul(4)
+            .and_then(|v| v.checked_add(12))
+            .ok_or("snapshot dimension overflow")?;
+        let expected = count
+            .checked_mul(record_size)
+            .and_then(|v| v.checked_add(header.len() as u64))
+            .ok_or("snapshot length overflow")?;
+        ensure(expected == length, "invalid turbo snapshot length")?;
+        let payload = f::read_turboquant_snapshot(
+            &path,
+            dim,
+            crate::runtime::vector_turbo_kind::TURBO_CODEC_SEED,
+        )?;
+        for (id, vector) in payload.vectors {
+            let entity = store
+                .try_get(name, crate::storage::EntityId::new(id), 32 * 1024 * 1024)?
+                .ok_or("snapshot vector has no recovered entity")?;
+            let crate::storage::EntityData::Vector(data) = entity.data else {
+                return Err("snapshot points to a non-vector entity".into());
+            };
+            ensure(
+                data.dense.len() == vector.len()
+                    && data
+                        .dense
+                        .iter()
+                        .zip(&vector)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "snapshot vector differs from recovered entity",
+            )?;
+        }
+        // This verified cache predates WAL replay. Rebuild it from the durable
+        // entities instead of allowing a stale snapshot to hide recovered rows.
+        std::fs::remove_file(path)?;
+    }
+    Ok(found)
 }
 
 fn wal_has_records(path: &Path) -> Result<bool> {
@@ -679,7 +797,7 @@ fn compact_paged_inner(
         repaired_leaf_backlinks,
     };
     drop(reopened);
-    copy_sidecars(&source_path, &output)?;
+    copy_sidecars(&source_path, &output, false)?;
     if retain_canonical_system_config {
         let operational_path = output.with_file_name(format!("{}.ops", f::data_file_name(&output)));
         if operational_path.exists() {
@@ -895,7 +1013,7 @@ fn verify_tree(source: &Arc<Source>, destination: &Arc<Source>, old: u32, new: u
         }
     }
 }
-fn copy_sidecars(source: &Path, destination: &Path) -> Result<()> {
+fn copy_sidecars(source: &Path, destination: &Path, recovery: bool) -> Result<()> {
     // These files contain logical records, not physical page addresses. Empty
     // checkpointed WALs also preserve their version exactly.
     for (old, new) in [
@@ -930,7 +1048,11 @@ fn copy_sidecars(source: &Path, destination: &Path) -> Result<()> {
     }
     let support = f::support_dir_for(source);
     if support.exists() {
-        validate_empty_directory(&support, 0)?;
+        if recovery {
+            validate_recovery_support(&support, 0, false)?;
+        } else {
+            validate_empty_directory(&support, 0)?;
+        }
         copy_directory(&support, &f::support_dir_for(destination), 0)?;
     }
     let old = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
@@ -981,6 +1103,32 @@ fn validate_empty_directory(path: &Path, depth: usize) -> Result<()> {
             "non-empty support layout requires separate compaction qualification",
         )?;
         validate_empty_directory(&entry.path(), depth + 1)?;
+    }
+    Ok(())
+}
+fn validate_recovery_support(path: &Path, depth: usize, snapshots: bool) -> Result<()> {
+    ensure(depth < 32, "support directory nesting exceeds limit")?;
+    ensure(
+        std::fs::symlink_metadata(path)?.is_dir(),
+        "support directory must not be a symlink",
+    )?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            validate_recovery_support(
+                &entry.path(),
+                depth + 1,
+                depth == 0 && entry.file_name() == "snapshots",
+            )?;
+        } else {
+            ensure(
+                snapshots
+                    && kind.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "tv"),
+                "unsupported recovery support file",
+            )?;
+        }
     }
     Ok(())
 }

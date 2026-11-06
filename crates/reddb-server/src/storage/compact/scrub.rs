@@ -53,6 +53,21 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
     })
 }
 
+pub(super) fn verify_recovery_vector_pages(path: &Path) -> Result<()> {
+    let source = Arc::new(Source::open(path)?);
+    super::salvage::verify_supported_source(path, &source)?;
+    let trees = inspect_all_trees(&source)?;
+    ensure(
+        trees.findings.is_empty(),
+        "recovered tree verification failed",
+    )?;
+    let mut assets = super::assets::Assets::for_verification(&source);
+    assets.vault()?;
+    assets.physical()?;
+    assets.metadata(path, None)?;
+    source.verify_unclaimed_vector_pages()
+}
+
 /// Inspect trees in a closed, checkpointed paged store without writing to it.
 /// Vault, physical assets, logical index correctness and replica state are not
 /// verified. The same layout and WAL restrictions as offline compaction apply.

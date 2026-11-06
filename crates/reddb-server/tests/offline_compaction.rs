@@ -168,6 +168,306 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
 }
 
 #[test]
+fn recovery_refuses_stale_legacy_pager_wal_without_losing_newer_data() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let (root, old_page) = recovery_page_fixture(&source);
+    {
+        let pager = Arc::new(Pager::open_default(&source).unwrap());
+        let catalog = pager.read_page(1).unwrap();
+        let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
+            .unwrap()
+            .unwrap()
+            .format_version;
+        let newer = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(29)]);
+        let encoded =
+            reddb_engine::storage::metadata_codec::serialize_entity_record(&newer, None, format);
+        let tree = BTree::with_root(Arc::clone(&pager), root);
+        tree.insert(&2u64.to_be_bytes(), &encoded).unwrap();
+        assert_eq!(tree.root_page_id(), root);
+        pager.sync().unwrap();
+    }
+    let wal = reddb_file::pager_legacy_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 1,
+                page_id: root,
+                data: old_page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let before = std::fs::read(&source).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    let destination = directory.path().join("rejected");
+    assert!(recover_paged_wal(&source, &destination).is_err());
+    assert!(!destination.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    std::fs::remove_file(&wal).unwrap();
+    let store = UnifiedStore::open(&source).unwrap();
+    assert_eq!(
+        store
+            .get("rows", EntityId::new(2))
+            .unwrap()
+            .data
+            .as_row()
+            .unwrap()
+            .columns,
+        vec![Value::Integer(29)]
+    );
+}
+
+#[test]
+fn recovery_refuses_unmaterialized_multimodel_wal_without_changing_source() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    recovery_page_fixture(&source);
+    let wal = reddb_file::unified_wal_path(&source);
+    for (name, record) in [
+        (
+            "vector",
+            WalRecord::VectorInsert {
+                collection: "embeddings".into(),
+                entity_id: 42,
+                vector: vec![1.0, 2.0],
+            },
+        ),
+        (
+            "probabilistic",
+            WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            },
+        ),
+    ] {
+        {
+            let mut writer = WalWriter::open(&wal).unwrap();
+            writer.append(&record).unwrap();
+            writer.sync().unwrap();
+        }
+        let before = std::fs::read(&source).unwrap();
+        let wal_before = std::fs::read(&wal).unwrap();
+        let destination = directory.path().join(name);
+        recover_paged_wal(&source, &destination).expect_err("runtime data has no base state");
+        assert!(!destination.join("source.rdb").exists());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+        std::fs::remove_file(&wal).unwrap();
+    }
+}
+
+#[test]
+fn pending_multimodel_wal_child() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let Some(path) = std::env::var_os("REDDB_TEST_MULTIMODEL_WAL_PATH") else {
+        return;
+    };
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(std::path::PathBuf::from(path))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .unwrap();
+    let queries = if std::env::var_os("REDDB_TEST_PROBABILISTIC_BEFORE_DDL").is_some() {
+        [
+            "HLL ADD visitors 'alice' 'bob' 'carol'",
+            "SKETCH ADD frequencies 'red' 3",
+            "FILTER ADD seen 'alice'",
+            "DROP HLL obsolete_hll",
+            "INSERT INTO embeddings VECTOR (embedding, content) VALUES ([1, 0], 'alice')",
+        ]
+    } else {
+        [
+            "DROP HLL obsolete_hll",
+            "INSERT INTO embeddings VECTOR (embedding, content) VALUES ([1, 0], 'alice')",
+            "HLL ADD visitors 'alice' 'bob' 'carol'",
+            "SKETCH ADD frequencies 'red' 3",
+            "FILTER ADD seen 'alice'",
+        ]
+    };
+    for query in queries {
+        runtime
+            .execute_query(query)
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+    }
+    std::process::exit(0);
+}
+
+#[test]
+fn recover_multimodel_wal_survives_checkpoint_and_reopening() {
+    run_multimodel_wal_recovery(false);
+}
+
+#[test]
+fn recover_multimodel_wal_after_catalog_checkpoint() {
+    run_multimodel_wal_recovery(true);
+}
+
+fn run_multimodel_wal_recovery(probabilistic_before_ddl: bool) {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("multimodel.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        for query in [
+            "CREATE HLL visitors",
+            "CREATE HLL obsolete_hll",
+            "CREATE SKETCH frequencies",
+            "CREATE FILTER seen",
+            "CREATE COLLECTION embeddings KIND vector.turbo DIM 2 METRIC cosine",
+        ] {
+            runtime
+                .execute_query(query)
+                .unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+        runtime.checkpoint().unwrap();
+        runtime.graceful_shutdown(false).unwrap();
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "pending_multimodel_wal_child", "--nocapture"])
+        .env("REDDB_TEST_MULTIMODEL_WAL_PATH", &source);
+    if probabilistic_before_ddl {
+        command.env("REDDB_TEST_PROBABILISTIC_BEFORE_DDL", "1");
+    }
+    let child = command.output().unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let wal = reddb_file::unified_wal_path(&source);
+    let before = std::fs::read(&source).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    let records: Vec<_> = reddb_server::storage::wal::WalReader::open(&wal)
+        .unwrap()
+        .iter()
+        .map(|record| record.unwrap().1)
+        .collect();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        reddb_server::storage::wal::WalRecord::VectorInsert { .. }
+    )));
+    for kind in 1..=3 {
+        assert!(records.iter().any(|record| matches!(record, reddb_server::storage::wal::WalRecord::ProbabilisticDelta { kind: found, operation: 1, .. } if *found == kind)), "kind {kind}");
+    }
+    let snapshot = reddb_file::support_dir_for(&source).join("snapshots/embeddings.tv");
+    let snapshot_before = std::fs::read(&snapshot).unwrap();
+    let destination = directory.path().join("recovered");
+    recover_paged_wal(&source, &destination).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_before);
+    let mut damaged_snapshot = snapshot_before.clone();
+    *damaged_snapshot.last_mut().unwrap() ^= 1;
+    std::fs::write(&snapshot, &damaged_snapshot).unwrap();
+    let bad_snapshot_output = directory.path().join("bad-snapshot");
+    assert!(recover_paged_wal(&source, &bad_snapshot_output).is_err());
+    assert!(!bad_snapshot_output.join("multimodel.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(std::fs::read(&snapshot).unwrap(), damaged_snapshot);
+    std::fs::write(&snapshot, &snapshot_before).unwrap();
+    let wrong_vector = records
+        .iter()
+        .find_map(|record| match record {
+            reddb_server::storage::wal::WalRecord::VectorInsert {
+                collection,
+                entity_id,
+                vector,
+            } => {
+                let mut vector = vector.clone();
+                vector[0] += 0.5;
+                Some(reddb_server::storage::wal::WalRecord::VectorInsert {
+                    collection: collection.clone(),
+                    entity_id: *entity_id,
+                    vector,
+                })
+            }
+            _ => None,
+        })
+        .unwrap();
+    {
+        let mut writer = reddb_server::storage::wal::WalWriter::open(&wal).unwrap();
+        writer.append(&wrong_vector).unwrap();
+        writer.sync().unwrap();
+    }
+    let mismatched_wal = std::fs::read(&wal).unwrap();
+    let mismatch_output = directory.path().join("mismatched-vector");
+    assert!(recover_paged_wal(&source, &mismatch_output).is_err());
+    assert!(!mismatch_output.join("multimodel.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), mismatched_wal);
+    std::fs::write(&wal, &wal_before).unwrap();
+    let recovered = RedDBOptions::persistent(destination.join("multimodel.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    for _ in 0..2 {
+        let runtime = RedDBRuntime::with_options(recovered.clone()).unwrap();
+        let count = runtime.execute_query("HLL COUNT visitors").unwrap();
+        assert_eq!(
+            count.result.records[0]
+                .get("count")
+                .unwrap()
+                .display_string(),
+            "3"
+        );
+        let sketch = runtime
+            .execute_query("SKETCH COUNT frequencies 'red'")
+            .unwrap();
+        assert_eq!(
+            sketch.result.records[0]
+                .get("estimate")
+                .unwrap()
+                .display_string(),
+            "3"
+        );
+        let filter = runtime.execute_query("FILTER CHECK seen 'alice'").unwrap();
+        assert_eq!(
+            filter.result.records[0]
+                .get("exists")
+                .unwrap()
+                .display_string(),
+            "true"
+        );
+        assert!(runtime.execute_query("HLL COUNT obsolete_hll").is_err());
+        for mode in ["EXACT", "APPROXIMATE"] {
+            let vectors = runtime
+                .execute_query(&format!(
+                    "VECTOR SEARCH embeddings SIMILAR TO [1, 0] MODE {mode} LIMIT 2"
+                ))
+                .unwrap();
+            assert!(
+                vectors
+                    .result
+                    .records
+                    .iter()
+                    .any(|row| row.get("content") == Some(&reddb_types::Value::text("alice"))),
+                "{mode}"
+            );
+        }
+        runtime.checkpoint().unwrap();
+        runtime.graceful_shutdown(false).unwrap();
+    }
+}
+
+#[test]
 fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     use reddb_server::storage::wal::{WalRecord, WalWriter};
     let directory = tempfile::tempdir().unwrap();
