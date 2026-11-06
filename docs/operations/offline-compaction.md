@@ -1,5 +1,21 @@
 # Offline native compaction
 
+For a read-only diagnostic of collection, key-index and secondary-index trees,
+close and checkpoint the store, then run:
+
+```sh
+red scrub-paged-trees --source /preserved/data.rdb --json
+```
+
+This checks the catalog, allocator, tree ownership and forward leaf chains,
+key ordering and readable records. The command exits unsuccessfully when it
+finds a damaged tree or cannot safely inspect the source. It reports the
+affected collection and root, but cannot determine how many records were lost.
+Its scope is **trees only**: it does not validate the Vault, native physical
+assets, logical correspondence between indexes and rows, or replicated and
+serverless state. It is not a complete store scrub or a salvage operation.
+It applies the same source restrictions and per-value allowance listed below.
+
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim
 historical physical allocation:
