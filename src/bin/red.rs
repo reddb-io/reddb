@@ -14,7 +14,7 @@
 /// appropriate command, and dispatches execution.
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,6 +58,7 @@ fn open_local_runtime(flags: &HashMap<String, FlagValue>) -> Result<reddb::RedDB
         Some(path) if !path.is_empty() => {
             let storage_profile = resolve_storage_profile(flags, "local")?;
             let options = reddb::api::RedDBOptions::persistent(&path)
+                .with_bounded_disk_residency(flag_bool(flags, "bounded-disk-residency"))
                 .with_storage_profile(storage_profile)
                 .map_err(|e| format!("storage profile: {e}"))?;
             reddb::RedDBRuntime::with_options(options).map_err(|e| format!("open {path}: {e}"))
@@ -1342,6 +1343,10 @@ fn restore_identifier_is_safe(name: &str) -> bool {
     })
 }
 
+fn restore_input_lines<R: Read>(reader: R) -> impl Iterator<Item = std::io::Result<String>> {
+    BufReader::new(reader).lines()
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -2304,7 +2309,7 @@ fn run_cli() {
             };
             let override_collection = flag_string(&result.flags, "collection");
 
-            let file_text = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
+            let input = std::fs::File::open(&input_path).unwrap_or_else(|e| {
                 if json_mode {
                     json_error("restore", &format!("read failed: {e}"));
                 }
@@ -2324,7 +2329,15 @@ fn run_cli() {
             let mut errors = 0usize;
             let mut restored_secret_keys = 0usize;
             let mut auth_store: Option<std::sync::Arc<reddb::auth::AuthStore>> = None;
-            for (line_no, line) in file_text.lines().enumerate() {
+            for (line_no, line) in restore_input_lines(input).enumerate() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        errors += 1;
+                        eprintln!("line {}: read failed: {error}", line_no + 1);
+                        break;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -5929,7 +5942,34 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::io::{self, Read};
     use std::sync::{Mutex, OnceLock};
+
+    struct OneReadThenPanic {
+        emitted: bool,
+    }
+
+    impl Read for OneReadThenPanic {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            assert!(!self.emitted, "restore input was read eagerly");
+            let line = b"{\"collection\":\"items\",\"fields\":{\"id\":\"1\"}}\n";
+            assert!(buf.len() >= line.len());
+            buf[..line.len()].copy_from_slice(line);
+            self.emitted = true;
+            Ok(line.len())
+        }
+    }
+
+    #[test]
+    fn restore_input_is_consumed_incrementally() {
+        let reader = OneReadThenPanic { emitted: false };
+        let mut lines = restore_input_lines(reader);
+
+        assert_eq!(
+            lines.next().expect("first line").expect("read line"),
+            r#"{"collection":"items","fields":{"id":"1"}}"#,
+        );
+    }
 
     #[test]
     fn doctor_parses_simple_metric_line() {
