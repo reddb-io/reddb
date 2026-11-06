@@ -76,26 +76,28 @@ new store after reconciling identities against an authoritative source. The
 low-level pager can inspect this version read-only; the server and SQL dump
 paths have not yet been qualified for it.
 
-For a supported closed store with a pending unified WAL, replay on an isolated
-copy and verify the result with:
+For a supported closed store with pending WAL, checkpoint or double-write
+recovery, replay on an isolated copy and verify the result with:
 
 ```sh
 red recover-paged-wal --source /preserved/data.rdb --destination-dir /new/recovered --json
 ```
 
 The source read lock excludes normal writers; the original file and sidecars
-remain unchanged. The operation
-strictly reads the WAL before making a copy, replays and checkpoints the copy,
+remain unchanged. The operation strictly reads the WAL and validates any
+complete double-write frame before making a copy. It recovers the copy,
 then rewrites and scrubs it before publishing the final filename. A private
 `.wal-replay` subdirectory retains the copied source and validation artifacts;
 do not use its intermediate files as a database.
-The current qualification excludes interrupted checkpoints, pending
-double-write or non-unified WALs, schema or auxiliary-metadata changes, WALs
-larger than 256 MiB, and runtime-owned vector or probabilistic records. Supported
-physical metadata is verified and copied with its sidecars. A saved Vault must
-authenticate before replay and after recovery. Incomplete or
-corrupt WAL frames are refused. This command requires readable data trees; it
-does not combine WAL replay with salvage of damaged trees.
+Schema and auxiliary-metadata actions in the unified WAL are replayed; legacy
+physical engine WALs are applied only when their page images and transaction
+records verify. There is no total WAL-size limit, although individual records
+remain subject to the format's limits. Legacy pager WALs and runtime-owned
+vector or probabilistic WAL records are refused. Supported physical metadata
+is verified and copied with its sidecars, and saved Vaults must authenticate
+before publication. Incomplete or corrupt WAL and double-write frames are
+refused. The replayed copy must have readable data trees; this command does not
+combine replay with salvage of damaged trees.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

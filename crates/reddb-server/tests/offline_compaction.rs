@@ -20,6 +20,188 @@ fn payload(id: u64) -> Vec<u8> {
         .collect()
 }
 
+fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    {
+        let store = UnifiedStore::open(path).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(17)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+    }
+    let pager = Pager::open_default(path).unwrap();
+    let catalog = pager.read_page(1).unwrap();
+    let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .unwrap()
+        .unwrap();
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = (0..header.collection_count)
+        .map(|_| {
+            reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset).unwrap()
+        })
+        .find(|entry| entry.collection == "rows")
+        .unwrap()
+        .root_page;
+    let page = pager.read_page(root).unwrap();
+    (root, page)
+}
+
+fn damage_page(path: &std::path::Path, page_id: u32) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(page_id) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+}
+
+fn assert_recovered_fixture(path: &std::path::Path) {
+    use reddb_server::storage::{EntityId, UnifiedStore};
+    use reddb_types::Value;
+    for _ in 0..2 {
+        let store = UnifiedStore::open(path).unwrap();
+        assert_eq!(
+            store
+                .get("rows", EntityId::new(1))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            vec![Value::Integer(17)]
+        );
+    }
+}
+
+#[test]
+fn recover_pending_double_write_repairs_only_the_staged_copy() {
+    use std::io::{Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let (root, page) = recovery_page_fixture(&source);
+    let frame = reddb_file::encode_paged_dwb_frame([(root, page.as_bytes())]);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.seek(SeekFrom::Start(
+            u64::from(reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE) * 16384,
+        ))
+        .unwrap();
+        file.write_all(&frame).unwrap();
+        file.sync_all().unwrap();
+    }
+    damage_page(&source, root);
+    let before = std::fs::read(&source).unwrap();
+    let output = directory.path().join("recovered");
+    recover_paged_wal(&source, &output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_recovered_fixture(&output.join("source.rdb"));
+
+    let mut invalid = before.clone();
+    invalid[reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE as usize * 16384 + 20] ^= 1;
+    let corrupted = directory.path().join("corrupt-frame.rdb");
+    std::fs::write(&corrupted, &invalid).unwrap();
+    let output = directory.path().join("corrupt-output");
+    assert!(recover_paged_wal(&corrupted, &output).is_err());
+    assert!(!output.join("corrupt-frame.rdb").exists());
+    assert_eq!(std::fs::read(corrupted).unwrap(), invalid);
+    let mut duplicate = before;
+    let frame =
+        reddb_file::encode_paged_dwb_frame([(root, page.as_bytes()), (root, page.as_bytes())]);
+    let offset = reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE as usize * 16384;
+    duplicate[offset..offset + frame.len()].copy_from_slice(&frame);
+    let duplicate_source = directory.path().join("duplicate.rdb");
+    std::fs::write(&duplicate_source, &duplicate).unwrap();
+    let output = directory.path().join("duplicate-output");
+    assert!(recover_paged_wal(&duplicate_source, &output).is_err());
+    assert!(!output.join("duplicate.rdb").exists());
+    assert_eq!(std::fs::read(duplicate_source).unwrap(), duplicate);
+}
+
+#[test]
+fn recover_interrupted_engine_checkpoint_from_committed_wal() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let (root, page) = recovery_page_fixture(&source);
+    let wal = reddb_file::engine_wal_path(&source);
+    let checkpoint_lsn;
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        let mut obsolete_page = page.clone();
+        obsolete_page.set_cell_count(0);
+        obsolete_page.update_checksum();
+        writer.append(&WalRecord::Begin { tx_id: 7 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: root,
+                data: obsolete_page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: root,
+                data: page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        checkpoint_lsn = writer.append(&WalRecord::Commit { tx_id: 7 }).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 8 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 8,
+                page_id: root,
+                data: obsolete_page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+    {
+        let pager = Pager::open_default(&source).unwrap();
+        pager
+            .set_checkpoint_in_progress(true, checkpoint_lsn)
+            .unwrap();
+    }
+    damage_page(&source, root);
+    let before = std::fs::read(&source).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    let output = directory.path().join("recovered");
+    recover_paged_wal(&source, &output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_recovered_fixture(&output.join("source.rdb"));
+    let missing_target = &wal_before[..checkpoint_lsn as usize];
+    std::fs::write(&wal, missing_target).unwrap();
+    let output = directory.path().join("missing-checkpoint-target");
+    let error = recover_paged_wal(&source, &output).expect_err("checkpoint target is absent");
+    assert!(error.to_string().contains("checkpoint target"), "{error}");
+    assert!(!output.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), missing_target);
+    let mut truncated = wal_before;
+    truncated.pop();
+    std::fs::write(&wal, &truncated).unwrap();
+    let output = directory.path().join("truncated-checkpoint");
+    assert!(recover_paged_wal(&source, &output).is_err());
+    assert!(!output.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), truncated);
+}
+
 #[test]
 fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
     use reddb_server::storage::wal::{WalRecord, WalWriter};
@@ -117,14 +299,35 @@ fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
                 actions: vec![action],
             })
             .unwrap();
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "committed_legacy".into(),
+            },
+        )
+        .unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1001 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 1001,
+                page_id: 0,
+                data: action,
+            })
+            .unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 1001 }).unwrap();
         writer.sync().unwrap();
     }
     let schema_wal = std::fs::read(&wal).unwrap();
-    let failed = directory.path().join("unsupported-schema-wal");
-    let error =
-        recover_paged_wal(&source, &failed).expect_err("schema changes must be qualified first");
-    assert!(error.to_string().contains("schema"), "{error}");
-    assert!(!failed.exists());
+    let schema_output = directory.path().join("schema-wal");
+    recover_paged_wal(&source, &schema_output).expect("replay committed collection creation");
+    let recovered = UnifiedStore::open(schema_output.join("source.rdb")).unwrap();
+    assert!(recovered
+        .list_collections()
+        .iter()
+        .any(|name| name == "new_table"));
+    assert!(recovered
+        .list_collections()
+        .iter()
+        .any(|name| name == "committed_legacy"));
     assert_eq!(std::fs::read(&source).unwrap(), source_image);
     assert_eq!(std::fs::read(&wal).unwrap(), schema_wal);
 }
@@ -182,6 +385,93 @@ fn recover_pending_wal_for_disk_resident_store() {
 }
 
 #[test]
+fn recover_wal_larger_than_256_mib_without_collecting_uncommitted_payloads() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    use std::io::Read;
+    fn digest(path: &std::path::Path) -> blake3::Hash {
+        let mut input = std::fs::File::open(path).unwrap();
+        let mut hash = blake3::Hasher::new();
+        let mut bytes = vec![0; 1024 * 1024];
+        loop {
+            let n = input.read(&mut bytes).unwrap();
+            if n == 0 {
+                break;
+            }
+            hash.update(&bytes[..n]);
+        }
+        hash.finalize()
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("large-wal.rdb");
+    {
+        let store = UnifiedStore::open(&source).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(10)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(20)]),
+            )
+            .unwrap();
+    }
+    let wal = reddb_file::unified_wal_path(&source);
+    let mut random = 1u64;
+    let bytes: Vec<u8> = (0..1024 * 1024)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random.to_le_bytes()[0]
+        })
+        .collect();
+    let action = reddb_file::encode_store_wal_action_frame(
+        &reddb_file::StoreWalActionFrame::SetAuxMetadata { bytes },
+    )
+    .unwrap();
+    let frame = WalRecord::PageWrite {
+        tx_id: 999,
+        page_id: 0,
+        data: action,
+    }
+    .encode();
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 999 }).unwrap();
+        for _ in 0..258 {
+            writer.append_bytes(&frame).unwrap();
+        }
+        writer.sync().unwrap();
+    }
+    assert!(std::fs::metadata(&wal).unwrap().len() > 256 * 1024 * 1024);
+    let wal_hash = digest(&wal);
+    let source_image = std::fs::read(&source).unwrap();
+    let output = directory.path().join("large-recovered");
+    recover_paged_wal(&source, &output).expect("stream large WAL");
+    assert_eq!(digest(&wal), wal_hash);
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    let store = UnifiedStore::open(output.join("large-wal.rdb")).unwrap();
+    for (id, expected) in [(1, 10), (2, 20)] {
+        assert_eq!(
+            store
+                .get("rows", EntityId::new(id))
+                .unwrap()
+                .data
+                .as_row()
+                .unwrap()
+                .columns,
+            vec![Value::Integer(expected)]
+        );
+    }
+}
+
+#[test]
 fn pending_runtime_wal_child() {
     use reddb_server::{RedDBOptions, RedDBRuntime};
     let Some(path) = std::env::var_os("REDDB_TEST_PENDING_RUNTIME_PATH") else {
@@ -230,8 +520,8 @@ fn recover_pending_runtime_wal_preserves_sql_and_index_results() {
         "{}",
         String::from_utf8_lossy(&child.stdout)
     );
-    let before = std::fs::read(&source).unwrap();
     let wal = reddb_file::unified_wal_path(&source);
+    let before = std::fs::read(&source).unwrap();
     let wal_before = std::fs::read(&wal).unwrap();
     let metadata = reddb_file::physical_metadata_binary_path(&source);
     let metadata_before = std::fs::read(&metadata).unwrap();
@@ -264,6 +554,126 @@ fn recover_pending_runtime_wal_preserves_sql_and_index_results() {
     }
     assert!(uses_index, "recovered query should use its secondary index");
     runtime.graceful_shutdown(false).unwrap();
+}
+
+#[test]
+fn pending_schema_wal_child() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let Some(path) = std::env::var_os("REDDB_TEST_SCHEMA_WAL_PATH") else {
+        return;
+    };
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(std::path::PathBuf::from(path))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .unwrap();
+    runtime
+        .execute_query("CREATE TABLE customers (id INT, name TEXT)")
+        .unwrap();
+    runtime
+        .execute_query("CREATE INDEX customer_name ON customers (name) USING HASH")
+        .unwrap();
+    runtime
+        .execute_query("ALTER TABLE customers ADD COLUMN points INT")
+        .unwrap();
+    runtime
+        .execute_query("INSERT INTO customers (id, name, points) VALUES (7, 'Ada', 42)")
+        .unwrap();
+    runtime.execute_query("DROP TABLE obsolete").unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn recover_schema_wal_preserves_created_and_dropped_tables_and_index() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("schema.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        runtime
+            .execute_query("CREATE TABLE obsolete (id INT)")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO obsolete (id) VALUES (99)")
+            .unwrap();
+        runtime.graceful_shutdown(false).unwrap();
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "pending_schema_wal_child", "--nocapture"])
+        .env("REDDB_TEST_SCHEMA_WAL_PATH", &source)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let wal = reddb_file::unified_wal_path(&source);
+    {
+        use reddb_server::storage::wal::{WalRecord, WalWriter};
+        let mut writer = WalWriter::open(&wal).unwrap();
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "uncommitted_table".into(),
+            },
+        )
+        .unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 9001 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 9001,
+                page_id: 0,
+                data: action,
+            })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+    let before = std::fs::read(&source).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    let output = directory.path().join("recovered");
+    recover_paged_wal(&source, &output).expect("recover committed DDL and data");
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    let recovered = RedDBOptions::persistent(output.join("schema.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    for _ in 0..2 {
+        let runtime = RedDBRuntime::with_options(recovered.clone()).unwrap();
+        let row = runtime
+            .execute_query("SELECT id, points FROM customers WHERE name = 'Ada'")
+            .unwrap();
+        assert_eq!(row.result.records.len(), 1);
+        assert_eq!(
+            row.result.records[0].get("id").unwrap().display_string(),
+            "7"
+        );
+        assert_eq!(
+            row.result.records[0]
+                .get("points")
+                .unwrap()
+                .display_string(),
+            "42"
+        );
+        assert!(runtime.execute_query("SELECT id FROM obsolete").is_err());
+        assert!(runtime
+            .execute_query("SELECT * FROM uncommitted_table")
+            .is_err());
+        let explain = runtime
+            .explain_query("SELECT id FROM customers WHERE name = 'Ada'")
+            .unwrap();
+        let mut nodes = vec![&explain.logical_plan.root];
+        let mut indexed = false;
+        while let Some(node) = nodes.pop() {
+            indexed |= node.operator == "index_seek";
+            nodes.extend(&node.children);
+        }
+        assert!(indexed, "recovered query must use the recreated index");
+        runtime.graceful_shutdown(false).unwrap();
+    }
 }
 
 #[test]

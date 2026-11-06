@@ -1062,7 +1062,7 @@ impl StoreCommitCoordinator {
         };
 
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
-        let mut pending = Vec::<(u64, Vec<u8>)>::new();
+        let mut has_page_writes = false;
         let mut ownership_journal = Vec::new();
         let mut latest_ownership_epoch = 0;
         let mut incomplete_wal_tail = false;
@@ -1107,11 +1107,7 @@ impl StoreCommitCoordinator {
                 WalRecord::Rollback { tx_id } => {
                     tx_states.remove(&tx_id);
                 }
-                WalRecord::PageWrite {
-                    tx_id,
-                    page_id: _,
-                    data,
-                } => pending.push((tx_id, data)),
+                WalRecord::PageWrite { .. } => has_page_writes = true,
                 WalRecord::Checkpoint { .. } => {}
                 WalRecord::VectorInsert {
                     collection,
@@ -1153,16 +1149,29 @@ impl StoreCommitCoordinator {
         }
         self.recover_page_ownership(store, &ownership_journal)?;
 
-        for (tx_id, payload) in pending {
-            if !tx_states.get(&tx_id).copied().unwrap_or(false) {
-                continue;
+        if has_page_writes {
+            // Do not retain every transaction's page payload while scanning a
+            // large WAL. The writer remains open and ownership recovery may
+            // append a Finish record, but it does not truncate the journal.
+            for item in WalReader::open(&self.wal_path)?.iter() {
+                let record = match item {
+                    Ok((_, record)) => record,
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(err) => return Err(err),
+                };
+                let WalRecord::PageWrite { tx_id, data, .. } = record else {
+                    continue;
+                };
+                if !tx_states.get(&tx_id).copied().unwrap_or(false) {
+                    continue;
+                }
+                let action = StoreWalAction::decode(&data)?;
+                applied = true;
+                store.apply_replayed_action(&action, false).map_err(|err| {
+                    io::Error::other(format!("failed to replay store wal action: {err}"))
+                })?;
+                store.remember_checkpoint_rows(vec![action], Default::default());
             }
-            let action = StoreWalAction::decode(&payload)?;
-            applied = true;
-            store.apply_replayed_action(&action, false).map_err(|err| {
-                io::Error::other(format!("failed to replay store wal action: {err}"))
-            })?;
-            store.remember_checkpoint_rows(vec![action], Default::default());
         }
 
         if applied && store.config.resident_memory_bytes_max.is_some() {

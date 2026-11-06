@@ -70,7 +70,7 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
 
 /// Replay a supported pending unified WAL only against an isolated copy, then
 /// publish a validated compacted database. The locked source is never opened
-/// by a writer. Interrupted checkpoints, DWB and non-unified WALs are refused.
+/// by a writer. Unsupported WAL families and ambiguous recovery fail closed.
 pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<CompactionReport> {
     use crate::storage::wal::{WalReader, WalRecord};
     let source = source.canonicalize()?;
@@ -91,33 +91,79 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
         }
     }
     let guard = Source::open_for_wal_recovery(&source)?;
-    salvage::verify_supported_source(&source, &guard)?;
-    let mut assets = assets::Assets::for_verification(&guard);
-    assets.vault()?;
-    assets.physical()?;
-    assets.metadata(&source, None)?;
+    guard.verify_superblocks()?;
+    salvage::verify_standalone_sidecars(&source)?;
     let wal = f::unified_wal_path(&source);
-    let length = std::fs::metadata(&wal)?.len();
+    let engine_wal = f::engine_wal_path(&source);
+    let pending_unified = wal_has_records(&wal)?;
+    let pending_engine = wal_has_records(&engine_wal)?;
     ensure(
-        length > f::WAL_FILE_HEADER_BYTES as u64,
-        "no pending unified WAL",
+        pending_unified
+            || pending_engine
+            || guard.pending_double_write
+            || guard.header.checkpoint_in_progress,
+        "no pending recovery",
     )?;
     ensure(
-        length <= 256 * 1024 * 1024,
-        "WAL exceeds recovery verification budget",
+        !guard.header.checkpoint_in_progress || pending_engine,
+        "interrupted page checkpoint requires its engine WAL",
     )?;
-    for entry in WalReader::open(&wal)?.iter() {
-        match entry?.1 {
-            WalRecord::PageWrite { data, .. } => verify_wal_recovery_action(&data)?,
-            WalRecord::TxCommitBatch { actions, .. } => {
-                for action in actions {
-                    verify_wal_recovery_action(&action)?;
+    let mut pending_ownership = false;
+    if pending_unified {
+        for entry in WalReader::open(&wal)?.iter() {
+            match entry?.1 {
+                WalRecord::PageWrite { data, .. } => verify_wal_recovery_action(&data)?,
+                WalRecord::TxCommitBatch { actions, .. } => {
+                    for action in actions {
+                        verify_wal_recovery_action(&action)?;
+                    }
                 }
+                WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {
+                    return Err(
+                        "WAL contains runtime-owned data requiring separate recovery".into(),
+                    );
+                }
+                WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. } => {
+                    pending_ownership = true
+                }
+                _ => {}
             }
-            WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {
-                return Err("WAL contains runtime-owned data requiring separate recovery".into());
+        }
+    }
+    if !guard.pending_double_write
+        && !guard.header.checkpoint_in_progress
+        && !pending_ownership
+        && !pending_engine
+    {
+        salvage::verify_vault(&source, &guard)?;
+    }
+    if pending_engine {
+        for entry in WalReader::open(&engine_wal)?.iter() {
+            match entry?.1 {
+                WalRecord::Begin { .. }
+                | WalRecord::Commit { .. }
+                | WalRecord::Rollback { .. }
+                | WalRecord::Checkpoint { .. } => {}
+                WalRecord::PageWrite { page_id, data, .. } => {
+                    ensure(
+                        page_id > 0
+                            && (page_id < DWB_ZONE_START_PAGE || page_id >= FIRST_ALLOCATABLE_PAGE)
+                            && u64::from(page_id) < guard.bytes / PAGE_SIZE as u64
+                            && data.len() == PAGE_SIZE,
+                        "invalid engine WAL page",
+                    )?;
+                    let page = Page::from_slice(&data)?;
+                    ensure(
+                        page.page_id() == page_id,
+                        "engine WAL page identity mismatch",
+                    )?;
+                    page.page_type()?;
+                    if page_id != 2 {
+                        page.verify_checksum()?;
+                    }
+                }
+                _ => return Err("unsupported engine WAL record".into()),
             }
-            _ => {}
         }
     }
     std::fs::create_dir(destination)?;
@@ -144,6 +190,20 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
             .then_some(64 * 1024 * 1024),
         ..Default::default()
     };
+    if pending_engine {
+        let pager = Pager::open(
+            &staged_source,
+            PagerConfig {
+                disk_residency: config.resident_memory_bytes_max.is_some(),
+                ..PagerConfig::default()
+            },
+        )?;
+        let wal = f::engine_wal_path(&staged_source);
+        replay_engine_wal_on_copy(&pager, &wal)?;
+        let mut writer = crate::storage::wal::WalWriter::open(&wal)?;
+        writer.truncate()?;
+        writer.sync()?;
+    }
     {
         let store =
             crate::storage::unified::UnifiedStore::open_with_config(&staged_source, config)?;
@@ -176,12 +236,73 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
 }
 
 fn verify_wal_recovery_action(bytes: &[u8]) -> Result<()> {
-    match f::decode_store_wal_action_frame(bytes)? {
-        f::StoreWalActionFrame::UpsertEntityRecord { .. }
-        | f::StoreWalActionFrame::DeleteEntityRecord { .. }
-        | f::StoreWalActionFrame::BulkUpsertEntityRecords { .. } => Ok(()),
-        _ => Err("WAL schema or metadata changes require separate recovery qualification".into()),
+    f::decode_store_wal_action_frame(bytes)?;
+    Ok(())
+}
+
+fn wal_has_records(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > f::WAL_FILE_HEADER_BYTES as u64),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
+}
+
+fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<()> {
+    use crate::storage::wal::{WalReader, WalRecord};
+    let mut transactions = std::collections::HashMap::new();
+    let mut last_lsn = 0;
+    let header = pager.header()?;
+    let mut target_seen = !header.checkpoint_in_progress;
+    for item in WalReader::open(path)?.iter() {
+        let (lsn, record) = item?;
+        last_lsn = lsn;
+        target_seen |= lsn == header.checkpoint_target_lsn;
+        match record {
+            WalRecord::Begin { tx_id } => {
+                transactions.insert(tx_id, false);
+            }
+            WalRecord::Commit { tx_id } => {
+                transactions.insert(tx_id, true);
+            }
+            WalRecord::Rollback { tx_id } => {
+                transactions.remove(&tx_id);
+            }
+            _ => {}
+        }
+    }
+    ensure(
+        target_seen,
+        "engine WAL does not contain the interrupted checkpoint target",
+    )?;
+    // Store only the LSN of each latest committed page, not every page image.
+    let mut latest = std::collections::HashMap::new();
+    for item in WalReader::open(path)?.iter() {
+        let (lsn, record) = item?;
+        if let WalRecord::PageWrite { tx_id, page_id, .. } = record {
+            if transactions.get(&tx_id).copied().unwrap_or(false) {
+                latest.insert(page_id, lsn);
+            }
+        }
+    }
+    ensure(
+        !header.checkpoint_in_progress || !latest.is_empty(),
+        "interrupted checkpoint has no committed page images",
+    )?;
+    if !latest.is_empty() {
+        pager.set_checkpoint_in_progress(true, last_lsn)?;
+        for item in WalReader::open(path)?.iter() {
+            let (lsn, record) = item?;
+            if let WalRecord::PageWrite { page_id, data, .. } = record {
+                if latest.get(&page_id) == Some(&lsn) {
+                    pager.write_page(page_id, Page::from_slice(&data)?)?;
+                }
+            }
+        }
+        pager.sync()?;
+        pager.complete_checkpoint(last_lsn)?;
+    }
+    Ok(())
 }
 
 fn copy_physical_metadata_files(source: &Path, destination: &Path) -> Result<()> {
