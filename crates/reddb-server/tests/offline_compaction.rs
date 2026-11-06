@@ -523,6 +523,55 @@ fn collection_salvage_refuses_catalog_cross_references() {
 }
 
 #[test]
+fn collection_salvage_never_discards_damaged_system_collections() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let pager = Pager::open_default(&source).unwrap();
+    let page = pager.read_page(1).unwrap();
+    let mut pos = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos)
+        .unwrap()
+        .root_page;
+    let mut metadata = Vec::new();
+    reddb_file::encode_native_paged_metadata_header(
+        &mut metadata,
+        reddb_file::NativePagedMetadataHeader {
+            format_version: 11,
+            collection_count: 1,
+        },
+    );
+    reddb_file::encode_native_paged_collection_root(&mut metadata, "red_config", root);
+    metadata.extend_from_slice(&0u32.to_le_bytes());
+    let mut catalog = Page::new(PageType::Header, 1);
+    catalog.content_mut()[..metadata.len()].copy_from_slice(&metadata);
+    pager.write_page(1, catalog).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(root) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("rejected");
+    let error =
+        salvage_paged_collections(&source, &destination).expect_err("system collection damage");
+    assert!(error.to_string().contains("system collections"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
+#[test]
 fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     use std::io::{Seek, SeekFrom, Write};
     let directory = tempfile::tempdir().expect("directory");
