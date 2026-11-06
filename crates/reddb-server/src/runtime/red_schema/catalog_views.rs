@@ -534,6 +534,49 @@ fn collections_query_needs_on_disk_bytes(query: &TableQuery) -> bool {
     projection_needs_bytes || filter_needs_bytes || order_needs_bytes
 }
 
+fn collections_query_needs_legacy_payloads(query: &TableQuery) -> bool {
+    const PAYLOAD_DERIVED_COLUMNS: [&str; 7] = [
+        "model",
+        "schema_mode",
+        "queue_mode",
+        "dimension",
+        "metric",
+        "session_key",
+        "session_gap_ms",
+    ];
+
+    let projection_needs_payload =
+        effective_table_projections(query)
+            .iter()
+            .any(|projection| match projection {
+                Projection::All => true,
+                Projection::Column(column) | Projection::Alias(column, _) => {
+                    PAYLOAD_DERIVED_COLUMNS.contains(&column.as_str())
+                }
+                Projection::Field(field, _) => PAYLOAD_DERIVED_COLUMNS
+                    .iter()
+                    .any(|column| field_is_column(field, column)),
+                Projection::Function(_, _)
+                | Projection::Expression(_, _)
+                | Projection::Window { .. } => true,
+            });
+    let filter_needs_payload = effective_table_filter(query)
+        .as_ref()
+        .is_some_and(|filter| {
+            PAYLOAD_DERIVED_COLUMNS
+                .iter()
+                .any(|column| filter_references_column(filter, column))
+        });
+    let order_needs_payload = query.order_by.iter().any(|order| {
+        order.expr.is_some()
+            || PAYLOAD_DERIVED_COLUMNS
+                .iter()
+                .any(|column| field_is_column(&order.field, column))
+    });
+
+    projection_needs_payload || filter_needs_payload || order_needs_payload
+}
+
 pub(super) fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
@@ -543,8 +586,11 @@ pub(super) fn collections_snapshot(
     let candidate_names = effective_table_filter(query)
         .as_ref()
         .and_then(collection_name_candidates_from_filter);
+    let observe_legacy_payloads = collections_query_needs_legacy_payloads(query);
     let snapshot = match candidate_names.as_ref() {
-        Some(candidate_names) => runtime.try_catalog_for_collections(candidate_names)?,
+        Some(candidate_names) => {
+            runtime.try_catalog_for_collections(candidate_names, observe_legacy_payloads)?
+        }
         None => runtime.try_catalog()?,
     };
     let schema = Arc::new(
@@ -613,6 +659,14 @@ pub(super) fn collections_snapshot(
                 .session_gap_ms
                 .map(Value::UnsignedInteger)
                 .unwrap_or(Value::Null);
+            let index_count = if collection.contract_present {
+                collection.indices.len()
+            } else {
+                runtime
+                    .index_store_ref()
+                    .list_indices(&collection.name)
+                    .len()
+            };
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -621,7 +675,7 @@ pub(super) fn collections_snapshot(
                     Value::text(schema_mode_name(collection.schema_mode)),
                     Value::UnsignedInteger(collection.entities as u64),
                     Value::UnsignedInteger(collection.segments as u64),
-                    Value::UnsignedInteger(collection.indices.len() as u64),
+                    Value::UnsignedInteger(index_count as u64),
                     Value::UnsignedInteger(in_memory_bytes),
                     on_disk_bytes,
                     Value::Boolean(internal),
@@ -2244,6 +2298,49 @@ mod scoped_collection_introspection_io_tests {
         assert!(
             read_bytes <= 64 * 1024,
             "projected red.collections measured unrequested disk bytes and read {read_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn selected_large_red_collection_bounds_synchronous_disk_accounting() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query(
+                    "SELECT name, entities, segments, indices, in_memory_bytes, on_disk_bytes \
+                     FROM red.collections \
+                     WHERE name = 'unrelated_payloads'",
+                )
+                .expect("large collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("unrelated_payloads"))
+        );
+        assert_eq!(
+            result.result.records[0].get("on_disk_bytes"),
+            Some(&Value::Null),
+            "large trees must report unknown rather than synchronously walking every page"
+        );
+        assert!(
+            read_bytes <= 2 * 1024 * 1024,
+            "large red.collections disk accounting read {read_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn selected_legacy_collection_still_observes_payload_when_model_is_requested() {
+        let (_directory, runtime) = persistent_fixture();
+        let result = runtime
+            .execute_query(
+                "SELECT name, model FROM red.collections WHERE name = 'unrelated_payloads'",
+            )
+            .expect("legacy model introspection");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("model"),
+            Some(&Value::text("table"))
         );
     }
 }
