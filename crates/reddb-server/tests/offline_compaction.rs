@@ -162,6 +162,37 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
 }
 
 #[test]
+fn destroyed_paged_superblocks_do_not_trigger_embedded_carving() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let destination = directory.path().join("recovered.rdb");
+    fixture(&source);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .expect("open source for fault injection");
+    file.write_all(&vec![0; reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE])
+        .expect("destroy both superblocks");
+    file.seek(SeekFrom::End(0)).expect("end");
+    let mut embedded_value =
+        reddb_file::encode_native_store_header(reddb_file::STORE_VERSION_CURRENT);
+    embedded_value.extend_from_slice(&[0; 16]);
+    reddb_file::append_native_store_crc32_footer(&mut embedded_value);
+    file.write_all(&embedded_value)
+        .expect("embedded-looking bytes");
+    file.sync_all().expect("sync fault injection");
+    drop(file);
+    let damaged = std::fs::read(&source).expect("damaged image");
+    let error = reddb_file::salvage_embedded_store(&source, &destination)
+        .expect_err("paged source must not be carved as embedded");
+    assert!(error.to_string().contains("paged"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).expect("preserved source"), damaged);
+}
+
+#[test]
 fn compact_refuses_busy_source_and_existing_destination() {
     let directory = tempfile::tempdir().expect("directory");
     let source = directory.path().join("source.rdb");
