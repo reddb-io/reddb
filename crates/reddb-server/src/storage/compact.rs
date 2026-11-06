@@ -75,6 +75,22 @@ fn compact_paged_inner(
     lost_collections: Option<&PagedCollectionSalvageReport>,
 ) -> Result<CompactionReport> {
     let source_path = source.canonicalize()?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()?;
+    for source_directory in [
+        f::support_dir_for(&source_path),
+        source_path.with_file_name(format!("{}.ops", f::data_file_name(&source_path))),
+    ] {
+        if source_directory.exists() {
+            ensure(
+                !parent.starts_with(source_directory.canonicalize()?),
+                "destination is inside source storage",
+            )?;
+        }
+    }
     let source = Arc::new(Source::open(&source_path)?);
     let mut catalog = Catalog::read(&source)?;
     ensure(

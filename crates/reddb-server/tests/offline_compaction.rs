@@ -773,6 +773,13 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     assert!(!scrub.assets_verified);
     assert_eq!(scrub.trees.findings.len(), 1);
     assert_eq!(std::fs::read(&source).unwrap(), damaged);
+    let nested = source.with_file_name("source.rdb.ops").join("recovered");
+    let error = salvage_paged_indexes(&source, &nested).expect_err("destination inside source");
+    assert!(
+        error.to_string().contains("destination is inside source"),
+        "{error}"
+    );
+    assert!(!nested.exists());
     let destination = directory.path().join("recovered");
     let report = salvage_paged_indexes(&source, &destination).expect("recover index");
     assert_eq!(report.indexes.len(), 1);
