@@ -71,3 +71,43 @@ identity and version requirements; this policy does not publish anything itself.
 
 Browser behavior/distribution checks run independently in `browser.yml`.
 Compatibility runtime behavior checks run in `grpc-runtime-checks.yml`.
+
+## Platform switches
+
+Multiplatform workflows declare `ENABLE_*` variables in their top-level `env`.
+Values must be `true` or `false`. Repository Actions variables with the same
+names override the workflow defaults, so platforms can be changed without a commit.
+
+| Variable | Default |
+| --- | --- |
+| `ENABLE_LINUX_X64` | `true` |
+| `ENABLE_LINUX_ARM64` | `true` |
+| `ENABLE_WINDOWS_X64` | `true` |
+| `ENABLE_WINDOWS_ARM64` | `false` |
+| `ENABLE_MACOS_X64` | `false` |
+| `ENABLE_MACOS_ARM64` | `false` |
+| `ENABLE_LINUX_ARMV7` | `false` |
+| `ENABLE_LINUX_X86` | `false` |
+
+`x64` means x86_64; `ARM64` means aarch64. glibc/musl and baseline variants
+follow their OS/architecture switch. A flag only enables targets already supported
+by that workflow; it does not add new build targets. Older tags keep their original
+workflow configuration.
+
+The lightweight `Select platforms` job filters matrices before platform runners
+are allocated. Disabled platforms create no build/test runner. All native
+platforms can be disabled; jobs that require their artifacts then skip. Portable
+web packages and platform-independent orchestration keep their existing behavior. The
+three-minute automatic Quick checks policy and manual heavy-suite triggers remain.
+
+Example (change only future runs):
+
+```sh
+gh variable set ENABLE_MACOS_ARM64 --body true
+gh variable set ENABLE_WINDOWS_ARM64 --body false
+```
+
+Inspect the `Select platforms` job summary to see the effective selection.
+
+Select `preview_platforms: true` in Run workflow to execute only the lightweight
+platform selector. Builds, tests and publication are all skipped in this mode.
