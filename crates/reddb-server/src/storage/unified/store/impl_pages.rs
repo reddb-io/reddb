@@ -10,12 +10,46 @@ struct SystemCollectionCollision {
     loser: String,
     canonical: String,
     shared_physical_state: bool,
+    resume_counter_drift: bool,
+    merged_resume: Option<reddb_file::native_resume::CollectionResume>,
 }
 
 #[derive(Debug, Default)]
 struct CatalogLoadOutcome {
     migrated: bool,
     collisions: Vec<SystemCollectionCollision>,
+}
+
+fn merge_shared_alias_resume(
+    legacy: &reddb_file::native_resume::CollectionResume,
+    canonical: &reddb_file::native_resume::CollectionResume,
+) -> Option<reddb_file::native_resume::CollectionResume> {
+    let (data_root_match, key_index_root_match, secondary_index_state_match) =
+        shared_alias_resume_matches(legacy, canonical);
+    if !data_root_match || !key_index_root_match || !secondary_index_state_match {
+        return None;
+    }
+    let mut merged = legacy.clone();
+    // The shared roots bind the exact durable data and derived indexes. Resume
+    // counters are advisory allocation state; retaining each high-water mark
+    // prevents identity reuse after an interrupted name migration. The exact
+    // entity count is read from the shared data tree while loading.
+    merged.entities = legacy.entities.max(canonical.entities);
+    merged.entity_id_next = legacy.entity_id_next.max(canonical.entity_id_next);
+    merged.row_id_next = legacy.row_id_next.max(canonical.row_id_next);
+    merged.sequence_id_next = legacy.sequence_id_next.max(canonical.sequence_id_next);
+    Some(merged)
+}
+
+fn shared_alias_resume_matches(
+    legacy: &reddb_file::native_resume::CollectionResume,
+    canonical: &reddb_file::native_resume::CollectionResume,
+) -> (bool, bool, bool) {
+    (
+        legacy.root_page == canonical.root_page,
+        legacy.key_index_root == canonical.key_index_root,
+        legacy.secondary_indices == canonical.secondary_indices,
+    )
 }
 
 /// Keep encoded payload memory proportional to a small batch, not a collection.
@@ -1453,7 +1487,9 @@ impl UnifiedStore {
                     ) else {
                         continue;
                     };
-                    let shared_physical_state = legacy_state == canonical_state;
+                    let merged_resume = merge_shared_alias_resume(legacy_state, canonical_state);
+                    let shared_physical_state = merged_resume.is_some();
+                    let resume_counter_drift = legacy_state != canonical_state;
                     let (survivor, loser) = match (
                         legacy_state.entities == 0,
                         canonical_state.entities == 0,
@@ -1462,11 +1498,16 @@ impl UnifiedStore {
                         (true, false) | (true, true) => (canonical, legacy),
                         (false, false) if shared_physical_state => (canonical, legacy),
                         (false, false) => {
+                            let (
+                                data_root_match,
+                                key_index_root_match,
+                                secondary_index_state_match,
+                            ) = shared_alias_resume_matches(legacy_state, canonical_state);
                             return Err(page_integrity(
                                 1,
                                 None,
                                 format!(
-                                    "catalog contains both populated legacy collection '{legacy}' and canonical collection '{canonical}'"
+                                    "catalog contains both populated legacy collection '{legacy}' and canonical collection '{canonical}' (data_root_match={data_root_match}, key_index_root_match={key_index_root_match}, secondary_index_state_match={secondary_index_state_match})"
                                 ),
                             ));
                         }
@@ -1477,6 +1518,8 @@ impl UnifiedStore {
                         loser: loser.to_string(),
                         canonical: canonical.to_string(),
                         shared_physical_state,
+                        resume_counter_drift,
+                        merged_resume,
                     });
                 }
                 let live_roots = resume
@@ -1679,9 +1722,16 @@ impl UnifiedStore {
                     // before the existing B-tree roots are attached.
                     let _ = self.create_collection_in_memory(&name);
 
-                    let counters = resume
-                        .as_ref()
-                        .and_then(|resume| resume.collections.get(&stored_name));
+                    let shared_alias = outcome.collisions.iter().find(|collision| {
+                        collision.survivor == stored_name && collision.shared_physical_state
+                    });
+                    let counters = shared_alias
+                        .and_then(|collision| collision.merged_resume.as_ref())
+                        .or_else(|| {
+                            resume
+                                .as_ref()
+                                .and_then(|resume| resume.collections.get(&stored_name))
+                        });
                     if let (Some(counters), Some(manager)) = (counters, self.get_collection(&name))
                     {
                         manager.restore_identity_counters(
@@ -1769,6 +1819,18 @@ impl UnifiedStore {
 
                         // Store the B-tree for future lookups
                         let btree = Arc::new(btree);
+                        if shared_alias.is_some_and(|collision| collision.resume_counter_drift) {
+                            persisted_entities = u64::try_from(btree.count().map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?)
+                            .map_err(|_| {
+                                page_integrity(
+                                    root_page,
+                                    Some(name.clone()),
+                                    "shared collection entity count exceeds u64",
+                                )
+                            })?;
+                        }
                         let key_tree = counters
                             .and_then(|state| state.key_index_root)
                             .map(|root| Arc::new(BTree::with_root(Arc::clone(pager), root)));
@@ -3309,7 +3371,10 @@ mod checkpoint_work_tests {
         }
     }
 
-    fn alias_duplicate_system_catalog_state(fixture: &DuplicateSystemCatalogFixture) {
+    fn alias_duplicate_system_catalog_state_with(
+        fixture: &DuplicateSystemCatalogFixture,
+        mutate_canonical: impl FnOnce(&mut reddb_file::native_resume::CollectionResume),
+    ) {
         let pager = Pager::open(
             &fixture.path,
             PagerConfig {
@@ -3329,9 +3394,11 @@ mod checkpoint_work_tests {
             .get("red_config")
             .expect("legacy resume state")
             .clone();
+        let mut canonical_state = legacy_state.clone();
+        mutate_canonical(&mut canonical_state);
         resume
             .collections
-            .insert("red.config".to_string(), legacy_state.clone());
+            .insert("red.config".to_string(), canonical_state);
 
         let header = reddb_file::decode_native_paged_metadata_header(&metadata)
             .expect("decode metadata header")
@@ -3357,6 +3424,10 @@ mod checkpoint_work_tests {
         reddb_file::native_resume::encode_catalog_resume(&mut metadata, &resume)
             .expect("encode aliased resume");
         publish_paged_metadata(&pager, &metadata).expect("publish aliased catalog");
+    }
+
+    fn alias_duplicate_system_catalog_state(fixture: &DuplicateSystemCatalogFixture) {
+        alias_duplicate_system_catalog_state_with(fixture, |_| {});
     }
 
     #[test]
@@ -3456,6 +3527,12 @@ mod checkpoint_work_tests {
                 .contains("both populated legacy collection 'red_config' and canonical collection 'red.config'"),
             "unexpected error: {error}"
         );
+        assert!(
+            error.to_string().contains(
+                "data_root_match=false, key_index_root_match=true, secondary_index_state_match=true"
+            ),
+            "the error must identify which physical state diverged without exposing page IDs: {error}"
+        );
     }
 
     #[test]
@@ -3511,6 +3588,47 @@ mod checkpoint_work_tests {
                 .expect("page count"),
             fixture.pages_before,
             "reconciling a physical alias must not extend the file"
+        );
+    }
+
+    #[test]
+    fn populated_system_collection_aliases_merge_resume_counter_drift() {
+        let fixture = duplicate_system_catalog_fixture(true, false, false);
+        alias_duplicate_system_catalog_state_with(&fixture, |canonical| {
+            canonical.entities += 7;
+            canonical.entity_id_next += 100;
+            canonical.row_id_next += 200;
+            canonical.sequence_id_next += 300;
+        });
+
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config.clone())
+            .expect("reconcile shared roots with conservative counters");
+        let manager = recovered
+            .get_collection("red.config")
+            .expect("canonical collection");
+        assert_eq!(manager.count(), 1, "the shared tree owns the exact count");
+        assert_eq!(manager.identity_counters(), (102, 202));
+        assert_eq!(manager.sequence_id_next(), 301);
+        assert_eq!(
+            recovered.collection_root_page("red.config"),
+            fixture.legacy_root,
+            "counter reconciliation must keep the shared data root"
+        );
+        drop(manager);
+        drop(recovered);
+
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        let cold = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("idempotent cold boot after counter reconciliation");
+        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+        assert_eq!(
+            cold.pager()
+                .expect("pager")
+                .page_count()
+                .expect("page count"),
+            fixture.pages_before,
+            "counter reconciliation must not extend the file"
         );
     }
 
