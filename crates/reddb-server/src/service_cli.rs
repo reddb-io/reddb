@@ -1930,6 +1930,9 @@ fn build_runtime_with_bootstrap(
             .ok();
     }
 
+    // Native wire listeners obtain their authentication authority from the
+    // runtime, including deployments without an HTTP or gRPC server object.
+    runtime.set_auth_store(Arc::clone(&auth_store));
     Ok((runtime, auth_store, telemetry_guard))
 }
 
@@ -2938,6 +2941,16 @@ fn resolve_http_tls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_runtime_receives_the_bootstrapped_auth_authority() {
+        let mut options = RedDBOptions::in_memory();
+        options.auth.enabled = true;
+        let (runtime, store, _telemetry) =
+            build_runtime_with_telemetry(options, None).expect("server runtime");
+        let installed = runtime.auth_store().expect("runtime auth authority");
+        assert!(Arc::ptr_eq(&store, &installed));
+    }
 
     #[test]
     fn runtime_workers_use_both_cores_on_small_instances() {
