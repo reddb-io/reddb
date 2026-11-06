@@ -236,6 +236,8 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     writeback_failed: std::sync::atomic::AtomicBool,
     /// Page cache
     cache: PageCache,
+    /// Recovery images must survive cache eviction without writing the source.
+    read_only_recovery: RwLock<std::collections::HashMap<u32, Page>>,
     /// Free page list
     freelist: RwLock<FreeList>,
     /// Store-managed frees stay unavailable until their removal from the
@@ -310,6 +312,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             dwb_enabled: config.double_write && !config.read_only,
             writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
+            read_only_recovery: RwLock::new(std::collections::HashMap::new()),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
             ownership_mutations: parking_lot::ReentrantMutex::new(()),
@@ -588,9 +591,24 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // entire physical extent before allocating; never overwrite that tail.
         // A partial last page is reserved too, without treating it as verified.
         let physical_pages = self.file_lock()?.file_len()?.div_ceil(PAGE_SIZE as u64);
-        let physical_pages = u32::try_from(physical_pages).map_err(|_| {
+        let mut physical_pages = u32::try_from(physical_pages).map_err(|_| {
             PagerError::InvalidDatabase("data file exceeds the page address space".into())
         })?;
+        if self.config.read_only {
+            if let Some(id) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .keys()
+                .max()
+            {
+                physical_pages = physical_pages.max(id.checked_add(1).ok_or_else(|| {
+                    PagerError::InvalidDatabase(
+                        "recovery page exceeds the page address space".into(),
+                    )
+                })?);
+            }
+        }
         if decoded_header.page_count < physical_pages {
             decoded_header.page_count = physical_pages;
             if !self.config.read_only {
@@ -698,6 +716,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Read a page (cache-aware)
     pub fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                if self.config.verify_checksums {
+                    page.verify_checksum()?;
+                }
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
@@ -728,6 +759,16 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn read_page_no_checksum(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
@@ -1486,6 +1527,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// this times the page size is the cache's memory footprint (ADR 0073 §2).
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+            + if self.config.read_only {
+                self.read_only_recovery
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len()
+            } else {
+                0
+            }
     }
 
     /// Preallocated page-cache slots — the sizing this process derived from
@@ -1594,7 +1643,47 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
+        if self.config.read_only {
+            for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
+                // The DWB checksum seals raw bytes, which may be ciphertext.
+                // Normal reads check the page checksum; encryption hosts use
+                // read_page_no_checksum and authenticate after decrypting.
+                self.install_read_only_page(id, page)?;
+            }
+            return Ok(());
+        }
         Ok(pager_io::recover_from_dwb(&mut *file)?)
+    }
+
+    /// Install a validated recovery image only in this reader's private view.
+    /// The source and ordinary mutation APIs remain read-only. Bound pinned
+    /// images by the cache budget (with room for one complete DWB frame).
+    pub fn restore_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        if !self.config.read_only || page_id == 0 || page.page_id() != page_id {
+            return Err(PagerError::InvalidDatabase(
+                "invalid read-only recovery image".into(),
+            ));
+        }
+        page.verify_checksum()?;
+        self.install_read_only_page(page_id, page)
+    }
+
+    fn install_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        let mut images = self
+            .read_only_recovery
+            .write()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let limit = self
+            .config
+            .cache_size
+            .max(pager_io::DWB_MAX_PAGES_PER_FRAME);
+        if images.len() >= limit && !images.contains_key(&page_id) {
+            return Err(PagerError::InvalidDatabase(
+                "read-only recovery exceeds the page cache budget".into(),
+            ));
+        }
+        images.insert(page_id, page);
+        Ok(())
     }
 
     /// Finish a consumed trunk's durable ownership change, retaining errors

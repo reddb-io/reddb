@@ -276,6 +276,21 @@ impl<V: Vfs> OperationalManifest<V> {
         Ok(completed_pending_drops)
     }
 
+    /// Validate the published view without bootstrap, rename, quarantine or
+    /// cleanup. Pending drops are applied only to the reader's resident view.
+    pub fn read_only_pending_drops(&self) -> io::Result<Vec<String>> {
+        let Some(manifest) = self.load_current()? else {
+            return Ok(Vec::new());
+        };
+        self.validate_manifest_artifacts(&manifest)?;
+        Ok(manifest
+            .collections
+            .iter()
+            .filter(|(_, entry)| entry.state == CollectionState::PendingDrop)
+            .map(|(name, _)| name.clone())
+            .collect())
+    }
+
     pub fn create_collection(&self, name: &str) -> io::Result<()> {
         self.prepare_collection_create(name)?.publish()
     }

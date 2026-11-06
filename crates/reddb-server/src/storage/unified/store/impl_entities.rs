@@ -70,7 +70,8 @@ impl UnifiedStore {
         if entities.is_empty() {
             return Ok(());
         }
-        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
+        if self.is_read_only() || (self.pager.is_none() && self.config.embedded_wal_path.is_none())
+        {
             return Ok(());
         }
         let fv = self.format_version();
@@ -158,7 +159,8 @@ impl UnifiedStore {
             return Ok(());
         }
 
-        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
+        if self.is_read_only() || (self.pager.is_none() && self.config.embedded_wal_path.is_none())
+        {
             return Ok(());
         }
 
@@ -1328,7 +1330,10 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
+        if self.pager.is_some()
+            && !self.is_read_only()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1394,7 +1399,10 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         let mut updated_tree = false;
-        if self.pager.is_some() && self.config.resident_memory_bytes_max.is_none() {
+        if self.pager.is_some()
+            && !self.is_read_only()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 updated_tree = true;

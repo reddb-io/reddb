@@ -902,6 +902,9 @@ impl UnifiedStore {
     }
 
     pub(crate) fn flush_paged_state(&self) -> Result<(), StoreError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let Some(pager) = &self.pager else {
             return Ok(());
         };
@@ -920,6 +923,9 @@ impl UnifiedStore {
     }
 
     pub(crate) fn flush_paged_registry(&self) -> Result<(), StoreError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let _vault_guard = self.vault_publication_lock.lock();
         let Some(pager) = &self.pager else {
             return Ok(());
@@ -995,6 +1001,12 @@ impl UnifiedStore {
     /// Get a reference to the underlying pager (if in paged mode).
     pub fn pager(&self) -> Option<&Arc<Pager>> {
         self.pager.as_ref()
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.pager
+            .as_ref()
+            .is_some_and(|pager| pager.is_read_only())
     }
 
     /// Bytes of page-cache memory currently occupied by resident pages
@@ -1097,6 +1109,55 @@ impl UnifiedStore {
         config: UnifiedStoreConfig,
     ) -> Result<Self, StoreError> {
         Self::open_with_config_for_recovery(path, config, false, None, None)
+    }
+
+    /// Recover a native database into a private read view. No WAL writer,
+    /// checkpoint, manifest publication or allocator reclamation is attached.
+    pub fn open_read_only_with_config(
+        path: impl AsRef<Path>,
+        mut config: UnifiedStoreConfig,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        config.embedded_wal_path = None;
+        let pager = Pager::open(
+            path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: config.resident_memory_bytes_max.is_some(),
+                cache_size: config
+                    .page_cache_slots
+                    .unwrap_or_else(|| PagerConfig::default().cache_size),
+                ..PagerConfig::default()
+            },
+        )
+        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        pager
+            .enable_deferred_reclamation()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let mut store = Self::with_config(config);
+        store.pager = Some(Arc::new(pager));
+        store.db_path = Some(path.to_path_buf());
+        let wal_path = reddb_file::layout::unified_wal_path(path);
+        StoreCommitCoordinator::restore_checkpoint_page_images_from_path(&store, &wal_path)
+            .map_err(StoreError::Io)?;
+        let catalog = store.load_from_pages(false, None)?;
+        StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
+        let pending_drops = store
+            .operational_manifest_for_path(path)
+            .read_only_pending_drops()
+            .map_err(StoreError::Io)?;
+        for name in pending_drops {
+            if !catalog
+                .collisions
+                .iter()
+                .any(|collision| collision.loser == name)
+                && store.get_collection(&name).is_some()
+            {
+                store.drop_collection_in_memory(&name)?;
+            }
+        }
+        Ok(store)
     }
 
     /// Only for an isolated, operator-selected recovery copy. The caller must
@@ -1419,6 +1480,9 @@ impl UnifiedStore {
         &self,
         name: &str,
     ) -> Result<Option<reddb_file::PreparedCollectionCreate<reddb_file::StdVfs>>, StoreError> {
+        if self.is_read_only() {
+            return Ok(None);
+        }
         let Some(path) = &self.db_path else {
             return Ok(None);
         };
@@ -1432,6 +1496,9 @@ impl UnifiedStore {
         &self,
         name: &str,
     ) -> Result<Option<reddb_file::PreparedCollectionDrop<reddb_file::StdVfs>>, StoreError> {
+        if self.is_read_only() {
+            return Ok(None);
+        }
         let Some(path) = &self.db_path else {
             return Ok(None);
         };
@@ -1810,8 +1877,14 @@ impl UnifiedStore {
                             page_integrity(root_page, Some(name.clone()), err.to_string())
                         })?;
                         let manager = self.get_collection(&name);
-                        let mut persisted_entities = counters.map_or(0, |state| state.entities);
-                        while counters.is_none() {
+                        let hydrate_read_only =
+                            self.is_read_only() && self.config.resident_memory_bytes_max.is_none();
+                        let mut persisted_entities = if hydrate_read_only {
+                            0
+                        } else {
+                            counters.map_or(0, |state| state.entities)
+                        };
+                        while counters.is_none() || hydrate_read_only {
                             let next = cursor
                                 .next_with_budget(
                                     self.config
@@ -2173,6 +2246,9 @@ impl UnifiedStore {
     }
 
     fn persist_inner(&self, runtime_snapshots_durable: bool) -> Result<(), StoreError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let _vault_guard = self.vault_publication_lock.lock();
         let pending_vault_versions = self.pending_vault_versions.read();
         let pager = match &self.pager {
