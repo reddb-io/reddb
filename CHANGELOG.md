@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.24
+
+### Patch Changes
+
+- [#2703](https://github.com/reddb-io/reddb/pull/2703) [`0181217`](https://github.com/reddb-io/reddb/commit/0181217b2c856bc3140d7438b51064f866ca8438) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow explicit recovery of pending WAL on an isolated copy while retaining the canonical system configuration. Reject WAL actions and cross-references targeting the divergent legacy identity instead of silently redirecting them.
+
 ## 1.28.23
 
 ### Patch Changes
