@@ -82,6 +82,24 @@ pub fn compact_paged_canonical_system_config(
 /// publish a validated compacted database. The locked source is never opened
 /// by a writer. Unsupported WAL families and ambiguous recovery fail closed.
 pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<CompactionReport> {
+    recover_paged_wal_inner(source, destination, false)
+}
+
+/// Recover an isolated copy while explicitly retaining `red.config`.
+/// WAL actions targeting the divergent `red_config` are refused rather than
+/// silently replayed against the canonical collection.
+pub fn recover_paged_wal_canonical_system_config(
+    source: &Path,
+    destination: &Path,
+) -> Result<CompactionReport> {
+    recover_paged_wal_inner(source, destination, true)
+}
+
+fn recover_paged_wal_inner(
+    source: &Path,
+    destination: &Path,
+    retain_canonical_system_config: bool,
+) -> Result<CompactionReport> {
     use crate::storage::wal::{WalReader, WalRecord};
     let source = source.canonicalize()?;
     let parent = destination
@@ -122,13 +140,26 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     if pending_unified {
         for entry in WalReader::open(&wal)?.iter() {
             match entry?.1 {
-                WalRecord::PageWrite { data, .. } => verify_wal_recovery_action(&data)?,
+                WalRecord::PageWrite { data, .. } => {
+                    verify_wal_recovery_action(&data, retain_canonical_system_config)?
+                }
                 WalRecord::TxCommitBatch { actions, .. } => {
                     for action in actions {
-                        verify_wal_recovery_action(&action)?;
+                        verify_wal_recovery_action(&action, retain_canonical_system_config)?;
                     }
                 }
-                WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {}
+                WalRecord::VectorInsert { collection, .. } => {
+                    ensure(
+                        !retain_canonical_system_config || collection != "red_config",
+                        "WAL references divergent legacy red_config",
+                    )?;
+                }
+                WalRecord::ProbabilisticDelta { name, .. } => {
+                    ensure(
+                        !retain_canonical_system_config || name != "red_config",
+                        "WAL references divergent legacy red_config",
+                    )?;
+                }
                 WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. } => {
                     pending_ownership = true
                 }
@@ -210,8 +241,11 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     let probabilistic_deltas;
     let mut has_vector_cache = false;
     {
-        let store =
-            crate::storage::unified::UnifiedStore::open_with_config(&staged_source, config)?;
+        let store = crate::storage::unified::UnifiedStore::open_with_config_for_recovery(
+            &staged_source,
+            config,
+            retain_canonical_system_config,
+        )?;
         if pending_engine || guard.pending_double_write {
             store.reconcile_physical_recovery()?;
         }
@@ -341,9 +375,93 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     Ok(report)
 }
 
-fn verify_wal_recovery_action(bytes: &[u8]) -> Result<()> {
-    f::decode_store_wal_action_frame(bytes)?;
+fn verify_wal_recovery_action(bytes: &[u8], retain_canonical_system_config: bool) -> Result<()> {
+    let action = f::decode_store_wal_action_frame(bytes)?;
+    if retain_canonical_system_config {
+        let name = match &action {
+            f::StoreWalActionFrame::CreateCollection { name }
+            | f::StoreWalActionFrame::DropCollection { name } => Some(name),
+            f::StoreWalActionFrame::UpsertEntityRecord { collection, .. }
+            | f::StoreWalActionFrame::DeleteEntityRecord { collection, .. }
+            | f::StoreWalActionFrame::BulkUpsertEntityRecords { collection, .. }
+            | f::StoreWalActionFrame::RefreshCollection { collection, .. } => Some(collection),
+            f::StoreWalActionFrame::SetAuxMetadata { bytes } => {
+                if bytes.first() == Some(&b'[') {
+                    let contracts: crate::serde_json::Value = crate::serde_json::from_slice(bytes)?;
+                    let contracts = contracts.as_array().ok_or("invalid WAL contract catalog")?;
+                    ensure(
+                        contracts.iter().all(|contract| {
+                            contract
+                                .get("name")
+                                .and_then(crate::serde_json::Value::as_str)
+                                != Some("red_config")
+                        }),
+                        "WAL references divergent legacy red_config",
+                    )?;
+                }
+                None
+            }
+        };
+        ensure(
+            name.is_none_or(|name| name != "red_config"),
+            "WAL references divergent legacy red_config",
+        )?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod canonical_config_wal_tests {
+    use super::*;
+
+    #[test]
+    fn every_legacy_collection_action_is_rejected_before_name_normalization() {
+        use f::StoreWalActionFrame as Action;
+
+        let actions = [
+            Action::CreateCollection {
+                name: "red_config".into(),
+            },
+            Action::DropCollection {
+                name: "red_config".into(),
+            },
+            Action::UpsertEntityRecord {
+                collection: "red_config".into(),
+                record: vec![1],
+            },
+            Action::DeleteEntityRecord {
+                collection: "red_config".into(),
+                entity_id: 1,
+            },
+            Action::BulkUpsertEntityRecords {
+                collection: "red_config".into(),
+                records: vec![vec![1]],
+            },
+            Action::RefreshCollection {
+                collection: "red_config".into(),
+                records: vec![vec![1]],
+            },
+        ];
+        for action in actions {
+            let bytes = f::encode_store_wal_action_frame(&action).unwrap();
+            assert!(verify_wal_recovery_action(&bytes, false).is_ok());
+            assert!(verify_wal_recovery_action(&bytes, true)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL references divergent legacy red_config"));
+        }
+        let canonical = f::encode_store_wal_action_frame(&Action::DeleteEntityRecord {
+            collection: "red.config".into(),
+            entity_id: 1,
+        })
+        .unwrap();
+        assert!(verify_wal_recovery_action(&canonical, true).is_ok());
+        let legacy_contract = f::encode_store_wal_action_frame(&Action::SetAuxMetadata {
+            bytes: br#"[{"name":"red\u005fconfig"}]"#.to_vec(),
+        })
+        .unwrap();
+        assert!(verify_wal_recovery_action(&legacy_contract, true).is_err());
+    }
 }
 
 fn verify_turbo_snapshots(

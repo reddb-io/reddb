@@ -33,7 +33,7 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
     let canonical_path = path.canonicalize()?;
     let path = canonical_path.as_path();
     let source = Arc::new(Source::open(path)?);
-    super::salvage::verify_supported_source(path, &source)?;
+    super::salvage::verify_supported_source_with_audit(path, &source)?;
     let trees = inspect_all_trees(&source)?;
     if !trees.findings.is_empty() {
         return Ok(PagedScrubReport {

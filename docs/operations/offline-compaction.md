@@ -83,6 +83,15 @@ recovery, replay on an isolated copy and verify the result with:
 red recover-paged-wal --source /preserved/data.rdb --destination-dir /new/recovered --json
 ```
 
+For a store with divergent, populated `red_config` and `red.config` identities,
+an operator who has chosen the latter may explicitly add
+`--retain-canonical-system-config`. This retires the old identity only on the
+recovery copy. The operation refuses WAL actions addressed to `red_config`,
+because replay would otherwise redirect those actions to `red.config`. It also
+refuses cross-references to the old identity. Inspect the preserved source and
+its WAL separately if either condition occurs. The normal recovery command
+continues to reject the ambiguous catalog.
+
 The source read lock excludes normal writers; the original file and sidecars
 remain unchanged. The operation strictly reads the WAL and validates any
 complete double-write frame before making a copy. It recovers the copy,
@@ -106,6 +115,8 @@ they are copied byte-for-byte outside the writable replay stage, restored after
 scrub, and read back for exact parity before publication. The first retained
 event may carry a valid external hash anchor when older archives were pruned.
 Individual audit events are capped at 1 MiB during verification.
+`red scrub-paged` verifies the same audit chain without modifying it, including
+rotated archives, before reporting success for a recovered store.
 Logical WAL and slot sidecars must still be empty. Incomplete or corrupt WAL,
 audit chains and double-write frames are refused. The replayed copy must have
 readable data trees; this command does not combine replay with salvage of
