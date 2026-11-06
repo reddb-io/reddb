@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.20
+
+### Patch Changes
+
+- [#2691](https://github.com/reddb-io/reddb/pull/2691) [`5c24dc9`](https://github.com/reddb-io/reddb/commit/5c24dc9e3eba92a551b310d4bf455feafc700e76) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile legacy and canonical system collection aliases when they share the same physical data and index roots but carry different resume counters, preserving the roots, recounting the shared tree, and retaining conservative identity high-water marks.
+
 ## 1.28.19
 
 ### Patch Changes
