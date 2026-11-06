@@ -166,15 +166,13 @@ impl<'a> DmlTargetScan<'a> {
         let can_retry = self.filter.is_some_and(dml_filter_can_retry)
             && compiled_filter.is_some()
             && !super::function_budget::stored_function_active();
-        if !(self.target.is_none() && self.limit.is_some())
-            && !matches!(self.target, Some(UpdateTarget::Documents))
-            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
-            && can_retry
-            && !index_store.indexed_mutation_active()
-            && snapshot
-                .as_ref()
-                .is_none_or(|ctx| !dml_snapshot_index_is_stale(ctx))
-        {
+        let scan_required = self.target.is_none() && self.limit.is_some()
+            || matches!(self.target, Some(UpdateTarget::Documents))
+            || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+            || !can_retry
+            || index_store.indexed_mutation_active()
+            || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
+        if !scan_required {
             if let Some(filter) = self.filter {
                 #[cfg(test)]
                 index_store.mutation_test_hook(
