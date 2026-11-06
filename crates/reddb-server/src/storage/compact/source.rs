@@ -132,6 +132,7 @@ impl Source {
                 f::paged_superblock_slot_generation(slot, copy).is_some(),
                 "superblock damage requires separate recovery",
             )?;
+            f::decode_database_header(slot)?;
         }
         Ok(())
     }
