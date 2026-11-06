@@ -401,7 +401,7 @@ impl RedDBRuntime {
                     // log must NOT land as a sibling. Route it to a
                     // process-unique temp location even when a data path is
                     // set; only the non-embedded case uses the data dir.
-                    let data_path = if embedded_single_file {
+                    let data_path = if embedded_single_file || options.read_only {
                         std::env::temp_dir()
                             .join("reddb-embedded-runtime")
                             .join(format!("audit-{}", std::process::id()))
@@ -412,8 +412,14 @@ impl RedDBRuntime {
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
+                    let audit_dest = if options.read_only {
+                        crate::storage::layout::LogDestination::Stderr
+                    } else {
+                        audit_dest
+                    };
                     if !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
                         && (embedded_single_file
+                            || options.read_only
                             || options
                                 .metadata
                                 .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
@@ -477,7 +483,7 @@ impl RedDBRuntime {
                     // never writes the slow-query log as a sibling of the
                     // `.rdb`. Route to a process-unique temp dir when embedded,
                     // regardless of the data path.
-                    let fallback_dir = if embedded_single_file {
+                    let fallback_dir = if embedded_single_file || options.read_only {
                         std::env::temp_dir()
                             .join("reddb-embedded-runtime")
                             .join(format!("slow-{}", std::process::id()))
@@ -497,6 +503,11 @@ impl RedDBRuntime {
                         .and_then(|s| s.parse::<u8>().ok())
                         .unwrap_or(100);
                     let (_, slow_dest) = crate::api::tier_wiring::current_log_destinations();
+                    let slow_dest = if options.read_only {
+                        crate::storage::layout::LogDestination::Stderr
+                    } else {
+                        slow_dest
+                    };
                     crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
                         &slow_dest,
                         &fallback_dir,
