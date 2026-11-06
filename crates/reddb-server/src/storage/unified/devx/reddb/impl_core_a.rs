@@ -819,16 +819,42 @@ impl RedDB {
         column: &str,
         row: &reddb_file::AppendOnlySegmentRow,
     ) -> Option<i64> {
+        const MAX_REVALIDATION_DECODE_BYTES: usize = 64 * 1024 * 1024;
+        self.revalidate_append_only_row_with_budget(
+            collection,
+            column,
+            row,
+            MAX_REVALIDATION_DECODE_BYTES,
+        )
+    }
+
+    fn revalidate_append_only_row_with_budget(
+        &self,
+        collection: &str,
+        column: &str,
+        row: &reddb_file::AppendOnlySegmentRow,
+        limit: usize,
+    ) -> Option<i64> {
         let manager = self.store.get_collection(collection)?;
         let raw_id: [u8; 8] = row.primary_key.as_slice().try_into().ok()?;
         let expected_id = u64::from_be_bytes(raw_id);
         let mut timestamp = None;
         for version in reddb_file::STORE_VERSION_V1..=reddb_file::STORE_VERSION_CURRENT {
-            let Ok((mut entity, metadata)) =
-                UnifiedStore::deserialize_entity_record(&row.payload, version)
-            else {
-                continue;
-            };
+            let mut budget = reddb_file::native_value::DecodeBudget::new(limit);
+            budget.charge(row.payload.len()).ok()?;
+            let (mut entity, metadata) =
+                match reddb_engine::storage::metadata_codec::deserialize_entity_record_with_budget(
+                    &row.payload,
+                    version,
+                    &mut budget,
+                ) {
+                    Ok(record) => record,
+                    // An incomplete interpretation cannot prove this version is invalid.
+                    Err(reddb_engine::storage::error::StoreError::ReadLimitExceeded { .. }) => {
+                        return None
+                    }
+                    Err(_) => continue,
+                };
             if UnifiedStore::serialize_entity_record(&entity, metadata.as_ref(), version)
                 != row.payload
             {
@@ -1690,6 +1716,16 @@ mod append_only_publication_tests {
                 primary_key: entity.id.raw().to_be_bytes().to_vec(),
                 payload: UnifiedStore::serialize_entity_record(&entity, None, version),
             };
+            assert_eq!(
+                rt.db().revalidate_append_only_row_with_budget(
+                    "events",
+                    "created_at",
+                    &row,
+                    row.payload.len(),
+                ),
+                None,
+                "an incomplete interpretation must never authorize retirement"
+            );
             let bytes = reddb_file::encode_append_only_segment(
                 reddb_file::AppendOnlySegmentCodec::None,
                 &[row],
