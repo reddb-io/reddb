@@ -103,6 +103,21 @@ fn system_aliases_with_empty_peer() {
             manager.count()
         );
     }
+    for &(legacy, canonical) in reddb_engine::storage::system_collection_names::LEGACY_NAMES {
+        for entries in [
+            [(legacy, true), (canonical, false)],
+            [(canonical, false), (legacy, true)],
+        ] {
+            let (store, _) = ResidentStore::from_snapshot(
+                &fixture(&entries),
+                &ManagerConfig::default(),
+                true,
+                1000,
+            )
+            .expect("a historical system alias must survive alongside an empty canonical name");
+            assert_eq!(store.get_collection(canonical).unwrap().count(), 1);
+        }
+    }
     for entries in [
         [("red.config", true), ("red_config", true)],
         [("red_config", true), ("red.config", true)],
