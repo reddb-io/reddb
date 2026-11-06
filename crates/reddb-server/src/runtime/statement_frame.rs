@@ -1492,11 +1492,13 @@ mod tests {
             }
         }));
         std::thread::scope(|scope| {
-            let writer = scope.spawn(|| {
+            let writer_rt = &rt;
+            let writer = scope.spawn(move || {
                 started_rx
                     .recv_timeout(Duration::from_secs(10))
                     .expect("lookup started");
-                rt.execute_query("UPDATE dml_lookup_race SET status = 'new' WHERE id = 1")
+                writer_rt
+                    .execute_query("UPDATE dml_lookup_race SET status = 'new' WHERE id = 1")
                     .expect("publish update");
                 published_tx.send(()).expect("release lookup");
             });
