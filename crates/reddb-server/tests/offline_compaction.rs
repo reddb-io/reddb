@@ -1012,7 +1012,13 @@ fn recover_pending_wal_preserves_and_continues_the_audit_chain() {
     let recovered_audit = reddb_file::legacy_audit_log_path(&recovered);
     let recovered_rotated = output.join(rotated_audit.file_name().unwrap());
     assert_eq!(std::fs::read(&recovered_audit).unwrap(), audit_before);
-    assert_eq!(std::fs::read(recovered_rotated).unwrap(), rotated_before);
+    assert_eq!(std::fs::read(&recovered_rotated).unwrap(), rotated_before);
+    let report = scrub_paged(&recovered).expect("scrub recovered store with verified audit");
+    assert!(report.assets_verified);
+    assert!(report.trees.findings.is_empty());
+    assert_eq!(report.unclassified_pages, 0);
+    assert_eq!(std::fs::read(&recovered_audit).unwrap(), audit_before);
+    assert_eq!(std::fs::read(&recovered_rotated).unwrap(), rotated_before);
 
     let previous_line = String::from_utf8(audit_before)
         .unwrap()
@@ -1031,7 +1037,7 @@ fn recover_pending_wal_preserves_and_continues_the_audit_chain() {
         );
         assert!(logger.wait_idle(Duration::from_secs(2)));
     }
-    let body = std::fs::read_to_string(recovered_audit).unwrap();
+    let body = std::fs::read_to_string(&recovered_audit).unwrap();
     let appended: reddb_server::serde_json::Value =
         reddb_server::serde_json::from_str(body.lines().next_back().unwrap()).unwrap();
     let expected =
@@ -1040,6 +1046,25 @@ fn recover_pending_wal_preserves_and_continues_the_audit_chain() {
         appended.get("prev_hash").and_then(|value| value.as_str()),
         Some(expected.as_str())
     );
+    assert!(scrub_paged(&recovered).is_ok());
+    let mut damaged = body.clone();
+    let marker = "\"prev_hash\":\"";
+    let offset = damaged.find(marker).unwrap() + marker.len();
+    damaged.replace_range(
+        offset..offset + 1,
+        if &damaged[offset..offset + 1] == "0" {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    std::fs::write(&recovered_audit, damaged).unwrap();
+    let error = scrub_paged(&recovered).expect_err("scrub must reject a broken audit chain");
+    assert!(
+        error.to_string().contains("audit log hash chain"),
+        "{error}"
+    );
+    std::fs::write(&recovered_audit, body).unwrap();
 
     let mut tampered = std::fs::read_to_string(&audit).unwrap();
     let prefix = "\"prev_hash\":\"";

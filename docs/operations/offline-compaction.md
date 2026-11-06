@@ -115,6 +115,8 @@ they are copied byte-for-byte outside the writable replay stage, restored after
 scrub, and read back for exact parity before publication. The first retained
 event may carry a valid external hash anchor when older archives were pruned.
 Individual audit events are capped at 1 MiB during verification.
+`red scrub-paged` verifies the same audit chain without modifying it, including
+rotated archives, before reporting success for a recovered store.
 Logical WAL and slot sidecars must still be empty. Incomplete or corrupt WAL,
 audit chains and double-write frames are refused. The replayed copy must have
 readable data trees; this command does not combine replay with salvage of

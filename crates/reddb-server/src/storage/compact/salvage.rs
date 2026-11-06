@@ -183,8 +183,20 @@ pub fn salvage_paged_collections(
 }
 
 pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<()> {
+    verify_supported_source_inner(source, guard, false)
+}
+
+pub(super) fn verify_supported_source_with_audit(source: &Path, guard: &Source) -> Result<()> {
+    verify_supported_source_inner(source, guard, true)
+}
+
+fn verify_supported_source_inner(
+    source: &Path,
+    guard: &Source,
+    preserve_audit: bool,
+) -> Result<()> {
     guard.verify_superblocks()?;
-    verify_standalone_sidecars(source)?;
+    verify_standalone_sidecars_inner(source, preserve_audit)?;
     let physical = guard.header.physical;
     for (page_id, expected) in [
         (physical.manifest_page, physical.manifest_checksum),
@@ -235,10 +247,6 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
     }
     verify_vault(source, guard)?;
     Ok(())
-}
-
-pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
-    verify_standalone_sidecars_inner(source, false)
 }
 
 pub(super) fn verify_wal_recovery_sidecars(source: &Path) -> Result<()> {
