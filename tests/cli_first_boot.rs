@@ -10,7 +10,7 @@
 mod support;
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -138,10 +138,8 @@ fn spawn_server_with_cert_file(args: &[&str], stderr_path: &Path, cert_file: &Pa
     }
 }
 
-/// Wait until the spawned server is serving: it is still alive AND a TCP
-/// connection to its listener succeeds (listeners bind only after the
-/// runtime + vault + preset are built, so a live connect proves the boot
-/// got past the vault gate). Returns `false` if the process exits first.
+/// Wait for a TCP listener. HTTP binds before opening the database, so HTTP
+/// tests must use `wait_until_http_ready` instead of treating SYN as readiness.
 fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
@@ -154,6 +152,73 @@ fn wait_until_serving(server: &mut ServerChild, addr: &str, timeout: Duration) -
         std::thread::sleep(Duration::from_millis(150));
     }
     false
+}
+
+fn http_ready(addr: &str, timeout: Duration) -> bool {
+    let addr = addr.parse().expect("test socket address");
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
+        return false;
+    };
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    stream.set_write_timeout(Some(timeout)).unwrap();
+    if stream
+        .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    // Read the entire status prefix, including when TCP splits the response.
+    let mut status = [0_u8; 13];
+    stream.read_exact(&mut status).is_ok() && matches!(&status, b"HTTP/1.1 200 " | b"HTTP/1.0 200 ")
+}
+
+fn wait_until_http_ready(server: &mut ServerChild, addr: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Some(_status)) = server.child.try_wait() {
+            return false;
+        }
+        if http_ready(addr, Duration::from_millis(250)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[test]
+fn http_readiness_rejects_bound_socket_without_ready_service() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    // A listener accepts TCP handshakes even before an application handles it.
+    assert!(TcpStream::connect(&addr).is_ok());
+    assert!(!http_ready(&addr, Duration::from_millis(50)));
+}
+
+#[test]
+fn http_readiness_requires_successful_health_response() {
+    for (response, ready) in [
+        ("HTTP/1.1 503 Unavailable\r\n", false),
+        ("HTTP/1.1 200 OK\r\n", true),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let expected =
+                b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            let mut request = vec![0_u8; expected.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, expected);
+            stream.write_all(&response.as_bytes()[..6]).unwrap();
+            stream.write_all(&response.as_bytes()[6..]).unwrap();
+        });
+        assert_eq!(http_ready(&addr, Duration::from_secs(2)), ready);
+        responder.join().unwrap();
+    }
 }
 
 /// Poll until `path` contains data (the spawned server is still alive), or
@@ -289,15 +354,7 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
-    // A freed ephemeral port can be claimed by another parallel test. First
-    // require the artifact owned by this child, rather than accepting a TCP
-    // connection to an unrelated listener and killing our child before boot.
-    assert!(
-        wait_for_file(&mut server, &db_path, Duration::from_secs(30)),
-        "child did not create its database: {}",
-        server.stderr()
-    );
-    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let serving = wait_until_http_ready(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         serving,
@@ -330,7 +387,7 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
-    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
+    let serving2 = wait_until_http_ready(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
@@ -432,7 +489,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
         "--bootstrap-cert-out file was not written.\nstderr:\n{stderr}"
     );
     assert!(
-        wait_until_serving(&mut server, &http_addr, Duration::from_secs(30)),
+        wait_until_http_ready(&mut server, &http_addr, Duration::from_secs(30)),
         "first boot did not reach its listener.\nstderr:\n{}",
         server.stderr()
     );
@@ -466,7 +523,7 @@ fn first_boot_cert_out_writes_cert_then_unseal_roundtrip_no_churn() {
     // re-application and certificate replacement. ----
     let stderr_path2 = dir.join("server2.stderr");
     let mut server2 = spawn_server_with_cert_file(&cloud_with_cert_out, &stderr_path2, &cert_out);
-    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
+    let serving2 = wait_until_http_ready(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
@@ -739,7 +796,7 @@ fn first_boot_tolerates_cert_file_env_pointing_at_absent_bootstrap_cert_out() {
     // ---- First boot: env points at the not-yet-existing file. ----
     let stderr_path = dir.join("server.stderr");
     let mut server = spawn_server_with_cert_file(&args, &stderr_path, &cert_out);
-    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let serving = wait_until_http_ready(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         serving,
@@ -759,7 +816,7 @@ fn first_boot_tolerates_cert_file_env_pointing_at_absent_bootstrap_cert_out() {
     // ---- Second boot: SAME config, file now exists → unseal. ----
     let stderr_path2 = dir.join("server2.stderr");
     let mut server2 = spawn_server_with_cert_file(&args, &stderr_path2, &cert_out);
-    let serving2 = wait_until_serving(&mut server2, &http_addr, Duration::from_secs(30));
+    let serving2 = wait_until_http_ready(&mut server2, &http_addr, Duration::from_secs(30));
     let stderr2 = server2.stderr();
     assert!(
         serving2,
@@ -926,7 +983,7 @@ fn http_only_env_plaintext_wire_listener_accepts_connections() {
         ],
     );
 
-    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let serving = wait_until_http_ready(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         serving,
@@ -976,7 +1033,7 @@ fn http_only_reports_wire_transport_ready_on_health() {
         &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
-    let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
+    let serving = wait_until_http_ready(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
         serving,
