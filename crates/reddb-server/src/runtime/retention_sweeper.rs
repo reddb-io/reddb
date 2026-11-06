@@ -157,6 +157,7 @@ pub(crate) struct RetentionSweeperState {
     states: HashMap<String, SweeperState>,
     cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
     next_collection: Option<String>,
+    append_only_revalidation_after: Option<(String, u64)>,
 }
 
 impl RetentionSweeperState {
@@ -165,6 +166,7 @@ impl RetentionSweeperState {
             states: HashMap::new(),
             cursors: HashMap::new(),
             next_collection: None,
+            append_only_revalidation_after: None,
         }
     }
 
@@ -197,6 +199,16 @@ impl RetentionSweeperState {
 
     pub(crate) fn resume_at(&mut self, collection: String) {
         self.next_collection = Some(collection);
+    }
+
+    pub(crate) fn append_only_revalidation_after(&self) -> Option<(&str, u64)> {
+        self.append_only_revalidation_after
+            .as_ref()
+            .map(|(name, id)| (name.as_str(), *id))
+    }
+
+    pub(crate) fn advance_append_only_revalidation(&mut self, collection: String, id: u64) {
+        self.append_only_revalidation_after = Some((collection, id));
     }
 
     /// Snapshot of every tracked collection's sweeper state.

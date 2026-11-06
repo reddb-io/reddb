@@ -13,10 +13,10 @@ use serde_json::{Map, Value};
 use crate::{OpenMode, StdVfs, Vfs, VfsFile};
 
 use crate::append_only_segment::{
-    append_only_segment_chunk_checksums, decode_append_only_segment, AppendOnlySegmentBloom,
-    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+    AppendOnlySegmentBloom, AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec,
 };
 
+mod append_only;
 mod fork;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
@@ -252,11 +252,10 @@ impl<V: Vfs> OperationalManifest<V> {
             .collect::<Vec<_>>();
         if !pending_segments.is_empty() {
             for entry in &pending_segments {
-                let _ = self
-                    .vfs
-                    .remove_file(&self.append_only_segments_dir().join(&entry.path));
+                self.remove_append_only_segment_file(entry)?;
                 record_retired_append_only_segment(&mut manifest, entry);
             }
+            self.vfs.sync_dir(&self.append_only_segments_dir())?;
             manifest
                 .append_only_segments
                 .retain(|entry| entry.state != AppendOnlySegmentState::PendingDrop);
@@ -457,178 +456,6 @@ impl<V: Vfs> OperationalManifest<V> {
         self.root.to_string_lossy().into_owned()
     }
 
-    pub fn publish_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.publish_append_only_segment_with_retention_bounds(
-            collection, segment_id, codec, bytes, None, None,
-        )
-    }
-
-    pub fn publish_append_only_segment_with_retention_bounds(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-        retention_min_ms: Option<i64>,
-        retention_max_ms: Option<i64>,
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.publish_append_only_segment_with_retention_column(
-            collection,
-            segment_id,
-            codec,
-            bytes,
-            (retention_min_ms, retention_max_ms),
-            None,
-        )
-    }
-
-    /// The caller must derive both bounds from every row using `timestamp_column`.
-    pub fn publish_append_only_segment_with_retention_column(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-        retention_bounds: (Option<i64>, Option<i64>),
-        timestamp_column: Option<&str>,
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        let (retention_min_ms, retention_max_ms) = retention_bounds;
-        self.ensure_dirs()?;
-        let decoded = decode_append_only_segment(bytes).map_err(invalid_data)?;
-        if decoded.codec != codec {
-            return Err(invalid_data("append-only segment codec metadata mismatch"));
-        }
-        let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        if manifest
-            .append_only_segments
-            .iter()
-            .any(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("append-only segment already published: {collection}/{segment_id}"),
-            ));
-        }
-
-        let path = self.append_only_segment_file_name(collection, segment_id);
-        let segment_path = self.append_only_segments_dir().join(&path);
-        if self.vfs.exists(&segment_path) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("closed append-only segment already exists: {path}"),
-            ));
-        }
-        {
-            let mut file = self.vfs.open(&segment_path, OpenMode::create_new())?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        self.vfs.sync_dir(&self.append_only_segments_dir())?;
-
-        let entry = AppendOnlySegmentManifestEntry {
-            collection: collection.to_string(),
-            segment_id,
-            state: AppendOnlySegmentState::Active,
-            path,
-            codec,
-            chunk_size: APPEND_ONLY_SEGMENT_CHUNK_BYTES,
-            row_count: decoded.rows.len() as u64,
-            retention_min_ms,
-            retention_max_ms,
-            retention_timestamp_column: timestamp_column
-                .filter(|_| retention_min_ms.is_some() && retention_max_ms.is_some())
-                .map(str::to_owned),
-            primary_min: decoded.primary_min.as_ref().map(hex::encode),
-            primary_max: decoded.primary_max.as_ref().map(hex::encode),
-            primary_bloom: decoded.primary_bloom.clone(),
-            chunk_checksums: append_only_segment_chunk_checksums(bytes),
-        };
-        manifest.append_only_segments.push(entry.clone());
-        manifest
-            .append_only_segments
-            .sort_by(|a, b| (&a.collection, a.segment_id).cmp(&(&b.collection, b.segment_id)));
-        let retired = manifest
-            .append_only_retired
-            .entry(collection.to_string())
-            .or_default();
-        retired.segment_high_water = retired.segment_high_water.max(segment_id);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(entry)
-    }
-
-    pub fn begin_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(entry) = manifest
-            .append_only_segments
-            .iter_mut()
-            .find(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if entry.state == AppendOnlySegmentState::PendingDrop {
-            return Ok(true);
-        }
-        entry.state = AppendOnlySegmentState::PendingDrop;
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
-    pub fn finish_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if manifest.append_only_segments[index].state != AppendOnlySegmentState::PendingDrop {
-            manifest.append_only_segments[index].state = AppendOnlySegmentState::PendingDrop;
-            manifest.generation += 1;
-            self.publish(&manifest)?;
-            manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        }
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        let entry = manifest.append_only_segments.remove(index);
-        let _ = self
-            .vfs
-            .remove_file(&self.append_only_segments_dir().join(&entry.path));
-        record_retired_append_only_segment(&mut manifest, &entry);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
     fn protected_collection_paths(&self, manifest: &Manifest) -> io::Result<BTreeSet<String>> {
         let mut paths = active_collection_paths(manifest);
         paths.extend(self.fork_referenced_collection_paths()?);
@@ -655,74 +482,6 @@ impl<V: Vfs> OperationalManifest<V> {
 
     pub fn append_only_segment_path_for_test(&self, file_name: &str) -> PathBuf {
         self.append_only_segments_dir().join(file_name)
-    }
-
-    pub fn append_only_segments_for_test(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        self.append_only_segments()
-    }
-
-    pub fn append_only_segments(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| active_append_only_segments(&manifest))
-            .unwrap_or_default())
-    }
-
-    /// Select bounded retention candidates without cloning segment checksums,
-    /// bloom filters or other payload-sized metadata into the runtime.
-    pub fn append_only_retention_candidates(
-        &self,
-        cutoffs: &BTreeMap<String, (i64, String)>,
-        limit: usize,
-    ) -> io::Result<Vec<(String, u64)>> {
-        if limit == 0 || cutoffs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let Some(manifest) = self.load_current()? else {
-            return Ok(Vec::new());
-        };
-        Ok(manifest
-            .append_only_segments
-            .iter()
-            .filter(|segment| segment.state == AppendOnlySegmentState::Active)
-            .filter(|segment| {
-                cutoffs
-                    .get(&segment.collection)
-                    .is_some_and(|(cutoff, column)| {
-                        segment.retention_timestamp_column.as_ref() == Some(column)
-                            && segment.retention_max_ms.is_some_and(|max| max < *cutoff)
-                    })
-            })
-            .take(limit)
-            .map(|segment| (segment.collection.clone(), segment.segment_id))
-            .collect())
-    }
-
-    pub fn append_only_segments_with_pending_for_test(
-        &self,
-    ) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| manifest.append_only_segments)
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| append_only_published_rows(&manifest, collection))
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows_for_test(&self, collection: &str) -> io::Result<u64> {
-        self.append_only_published_rows(collection)
-    }
-
-    pub fn next_append_only_segment_id(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| next_append_only_segment_id(&manifest, collection))
-            .unwrap_or(1))
     }
 
     pub fn write_next_manifest_for_test(&self, name: &str) -> io::Result<()> {
@@ -756,6 +515,29 @@ impl<V: Vfs> OperationalManifest<V> {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    /// Never read an oversized manifest for a bounded maintenance pass.
+    fn load_current_bounded(&self, limit: usize) -> io::Result<Option<Manifest>> {
+        let mut file = match self
+            .vfs
+            .open(&self.root.join(MANIFEST_FILE), OpenMode::read_only())
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let len = file.file_len()?;
+        if len > limit as u64 {
+            return Ok(None);
+        }
+        let len = usize::try_from(len).map_err(invalid_data)?;
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes)?;
+        if file.file_len()? != len as u64 {
+            return Err(invalid_data("manifest changed during bounded read"));
+        }
+        manifest_from_bytes(&bytes).map(Some)
     }
 
     fn publish(&self, manifest: &Manifest) -> io::Result<()> {
@@ -1025,14 +807,18 @@ fn manifest_from_bytes(bytes: &[u8]) -> io::Result<Manifest> {
         .get("checksum")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("manifest checksum is missing"))?;
-    let manifest = manifest_from_object(object)?;
-    let expected = format!("{:08x}", checksum_manifest(&manifest));
+    // Check the persisted shape before adding defaults for older formats.
+    // Historical manifests did not contain segment state or retirement data.
+    let mut body = object.clone();
+    body.remove("checksum");
+    let body = serde_json::to_vec(&Value::Object(body)).map_err(invalid_data)?;
+    let expected = format!("{:08x}", crc32fast::hash(&body));
     if checksum != expected {
         return Err(invalid_data(format!(
             "manifest checksum mismatch: expected {expected}, got {checksum}"
         )));
     }
-    Ok(manifest)
+    manifest_from_object(object)
 }
 
 fn manifest_from_object(object: &Map<String, Value>) -> io::Result<Manifest> {

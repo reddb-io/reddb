@@ -795,6 +795,53 @@ impl RedDB {
         Ok(())
     }
 
+    /// Recompute bounds only when every row has one unambiguous timestamp.
+    pub(crate) fn revalidate_append_only_bounds(
+        &self,
+        collection: &str,
+        column: &str,
+        segment: &reddb_file::AppendOnlySegment,
+    ) -> Option<(i64, i64)> {
+        let manager = self.store.get_collection(collection)?;
+        let mut bounds: Option<(i64, i64)> = None;
+        for row in &segment.rows {
+            let raw_id: [u8; 8] = row.primary_key.as_slice().try_into().ok()?;
+            let expected_id = u64::from_be_bytes(raw_id);
+            let mut timestamp = None;
+            let mut matched = false;
+            for version in reddb_file::STORE_VERSION_V1..=reddb_file::STORE_VERSION_CURRENT {
+                let Ok((mut entity, metadata)) =
+                    UnifiedStore::deserialize_entity_record(&row.payload, version)
+                else {
+                    continue;
+                };
+                if UnifiedStore::serialize_entity_record(&entity, metadata.as_ref(), version)
+                    != row.payload
+                {
+                    continue;
+                }
+                if entity.id.raw() != expected_id || entity.kind.collection() != collection {
+                    return None;
+                }
+                manager.restore_owned_row_schemas(std::iter::once(&mut entity));
+                let current = append_only_entity_timestamp_ms(&entity, column)?;
+                if timestamp.is_some_and(|previous| previous != current) {
+                    return None;
+                }
+                timestamp = Some(current);
+                matched = true;
+            }
+            if !matched {
+                return None;
+            }
+            let timestamp = timestamp?;
+            bounds = Some(bounds.map_or((timestamp, timestamp), |(min, max)| {
+                (min.min(timestamp), max.max(timestamp))
+            }));
+        }
+        bounds
+    }
+
     pub fn embedded_pending_wal_records(&self) -> Option<u64> {
         if self.paged_mode || !embedded_single_file_selected(&self.options) {
             return None;
@@ -1599,14 +1646,17 @@ fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> O
 }
 
 fn value_as_retention_ms(value: &Value) -> Option<i64> {
-    match value {
+    let timestamp = match value {
         Value::TimestampMs(t) => Some(*t),
         Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
         Value::BigInt(t) => Some(*t),
         Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
         Value::Integer(t) => Some(*t),
         _ => None,
-    }
+    };
+    // The read-time retention filter currently keeps negative timestamps.
+    // A whole segment may not be removed while such a row remains visible.
+    timestamp.filter(|timestamp| *timestamp >= 0)
 }
 
 thread_local! {
@@ -1617,6 +1667,43 @@ thread_local! {
 mod append_only_publication_tests {
     use super::*;
     use crate::storage::RowData;
+
+    #[test]
+    fn legacy_bounds_require_matching_identity_and_canonical_versioned_records() {
+        assert_eq!(value_as_retention_ms(&Value::TimestampMs(-1)), None);
+        let rt = crate::RedDBRuntime::in_memory().unwrap();
+        rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true APPEND ONLY")
+            .unwrap();
+        let mut entity = UnifiedEntity::table_row(EntityId::new(7), "events", 7, vec![]);
+        entity.created_at = 10;
+        for version in [
+            reddb_file::STORE_VERSION_V10,
+            reddb_file::STORE_VERSION_V11,
+            reddb_file::STORE_VERSION_V12,
+        ] {
+            let row = reddb_file::AppendOnlySegmentRow {
+                primary_key: entity.id.raw().to_be_bytes().to_vec(),
+                payload: UnifiedStore::serialize_entity_record(&entity, None, version),
+            };
+            let bytes = reddb_file::encode_append_only_segment(
+                reddb_file::AppendOnlySegmentCodec::None,
+                &[row],
+            )
+            .unwrap();
+            let mut segment = reddb_file::decode_append_only_segment(&bytes).unwrap();
+            assert_eq!(
+                rt.db()
+                    .revalidate_append_only_bounds("events", "created_at", &segment),
+                Some((10_999, 10_999))
+            );
+            segment.rows[0].primary_key = 8_u64.to_be_bytes().to_vec();
+            assert_eq!(
+                rt.db()
+                    .revalidate_append_only_bounds("events", "created_at", &segment),
+                None
+            );
+        }
+    }
 
     #[test]
     fn retention_bounds_require_all_rows_and_convert_system_seconds() {

@@ -99,7 +99,9 @@ impl RedDBRuntime {
             if contract.append_only {
                 if !append_only_checked {
                     append_only_checked = true;
-                    let _ = self.retire_expired_append_only_segments(now_ms, batch_size);
+                    if let Err(err) = self.retire_expired_append_only_segments(now_ms, batch_size) {
+                        tracing::warn!(error = %err, "append-only retention sweep failed");
+                    }
                 }
                 continue;
             }

@@ -23,6 +23,8 @@ impl RedDBRuntime {
 
         self.flush()?;
         let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let manifest =
             crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
         manifest
@@ -47,6 +49,8 @@ impl RedDBRuntime {
             RedDBError::InvalidOperation("store fork requires a data path".into())
         })?;
 
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let manifest =
             crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
         manifest

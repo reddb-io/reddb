@@ -8,6 +8,192 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[test]
+fn legacy_segment_revalidation_recomputes_bounds_across_cold_boot() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-retention.rdb");
+    let options = RedDBOptions::persistent(&path);
+    let legacy_bytes = {
+        let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+        rt.background_tasks.as_ref().unwrap().shutdown();
+        rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true APPEND ONLY")
+            .unwrap();
+        rt.execute_query("INSERT INTO events (id) VALUES (1), (2)")
+            .unwrap();
+        let manager = rt.db().store().get_collection("events").unwrap();
+        let mut rows = manager.query_all(|_| true);
+        rows.sort_by_key(|entity| entity.id);
+        let mut expired = rows.remove(0);
+        expired.created_at = 1;
+        if let EntityData::Row(row) = &mut expired.data {
+            if let Some(named) = &mut row.named {
+                named.insert("created_at".into(), Value::UnsignedInteger(1));
+            }
+            if let Some(schema) = &row.schema {
+                let index = schema.iter().position(|name| name == "created_at").unwrap();
+                row.columns[index] = Value::UnsignedInteger(1);
+            }
+        }
+        manager.update(expired).unwrap();
+        let rows = manager
+            .query_all(|_| true)
+            .into_iter()
+            .map(|entity| {
+                let metadata = manager.get_metadata(entity.id);
+                reddb_file::AppendOnlySegmentRow {
+                    primary_key: entity.id.raw().to_be_bytes().to_vec(),
+                    payload: crate::storage::unified::store::UnifiedStore::serialize_entity_record(
+                        &entity,
+                        metadata.as_ref(),
+                        reddb_file::STORE_VERSION_V10,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let legacy =
+            reddb_file::encode_append_only_segment(reddb_file::AppendOnlySegmentCodec::Zstd, &rows)
+                .unwrap();
+        rt.flush().unwrap();
+        legacy
+    };
+    let manifest = reddb_file::OperationalManifest::for_db_path(&path);
+    let segment = manifest.append_only_segments().unwrap().remove(0);
+    std::fs::write(
+        manifest.append_only_segment_path_for_test(&segment.path),
+        &legacy_bytes,
+    )
+    .unwrap();
+    let manifest_path = manifest.current_manifest_path_for_test();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let entry = value["append_only_segments"]
+        .as_array_mut()
+        .unwrap()
+        .first_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    entry.remove("state");
+    entry.remove("primary_bloom");
+    entry.remove("retention_timestamp_column");
+    entry.insert(
+        "chunk_checksums".into(),
+        serde_json::to_value(reddb_file::append_only_segment_chunk_checksums(
+            &legacy_bytes,
+        ))
+        .unwrap(),
+    );
+    entry.insert("retention_min_ms".into(), serde_json::Value::from(1));
+    entry.insert("retention_max_ms".into(), serde_json::Value::from(1));
+    value.as_object_mut().unwrap().remove("append_only_retired");
+    value.as_object_mut().unwrap().remove("checksum");
+    let checksum = crc32fast::hash(&serde_json::to_vec(&value).unwrap());
+    value["checksum"] = serde_json::Value::String(format!("{checksum:08x}"));
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    {
+        let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+        rt.background_tasks.as_ref().unwrap().shutdown();
+        rt.execute_query("ALTER COLLECTION events SET RETENTION 1 d")
+            .unwrap();
+        rt.sweep_retention_tick(1);
+        let entries = manifest.append_only_segments().unwrap();
+        assert_eq!(entries.len(), 1, "a live row must keep the segment");
+        assert_eq!(
+            entries[0].retention_timestamp_column.as_deref(),
+            Some("created_at")
+        );
+        assert!(entries[0].retention_max_ms.unwrap() > 1);
+        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+            .unwrap();
+        assert_eq!(
+            rt.execute_query("SELECT id FROM events")
+                .unwrap()
+                .result
+                .records
+                .len(),
+            2
+        );
+        rt.execute_query("ALTER COLLECTION events SET RETENTION 1 ms")
+            .unwrap();
+        rt.sweep_retention_tick(1);
+        assert!(manifest.append_only_segments().unwrap().is_empty());
+        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+            .unwrap();
+    }
+    let rt = RedDBRuntime::with_options(options).unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    assert_eq!(
+        rt.execute_query("SELECT id FROM events")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        2
+    );
+    assert!(manifest.append_only_segments().unwrap().is_empty());
+}
+
+#[test]
+fn dropping_a_fork_waits_for_segment_publication_and_preserves_cold_boot() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fork-retention.rdb");
+    let options = RedDBOptions::persistent(&path);
+    let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true APPEND ONLY")
+        .unwrap();
+    rt.execute_query("FORK STORE AS experiment").unwrap();
+    rt.execute_query("INSERT INTO events (id) VALUES (1)")
+        .unwrap();
+
+    let store = rt.db().store();
+    let publication = store.vault_publication_lock.lock();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let fork_runtime = rt.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        done_tx
+            .send(fork_runtime.execute_query("DROP FORK experiment"))
+            .unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        done_rx.recv_timeout(Duration::from_millis(200)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    rt.flush().unwrap();
+    let manifest = reddb_file::OperationalManifest::for_db_path(&path);
+    let segments = manifest.append_only_segments().unwrap();
+    assert_eq!(segments.len(), 1);
+    let segment_path = manifest.append_only_segment_path_for_test(&segments[0].path);
+    drop(publication);
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(segment_path.exists());
+    drop(store);
+    drop(rt);
+
+    let reopened = RedDBRuntime::with_options(options).unwrap();
+    reopened.background_tasks.as_ref().unwrap().shutdown();
+    assert_eq!(
+        reopened
+            .execute_query("SELECT id FROM events")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
+    assert!(segment_path.exists());
+}
+
+#[test]
 fn mutable_scan_budget_is_shared_and_rotates_between_collections() {
     let rt = RedDBRuntime::in_memory().unwrap();
     rt.background_tasks.as_ref().unwrap().shutdown();

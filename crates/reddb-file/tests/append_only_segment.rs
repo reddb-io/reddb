@@ -150,6 +150,224 @@ fn retention_candidates_obey_cutoff_budget_and_recovery_state() {
 }
 
 #[test]
+fn historical_manifest_without_segment_state_or_retirement_data_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("historical.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let bytes = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: b"legacy".to_vec(),
+        }],
+    )
+    .unwrap();
+    let original = manifest
+        .publish_append_only_segment("events", 7, AppendOnlySegmentCodec::None, &bytes)
+        .unwrap();
+    let path = manifest.current_manifest_path_for_test();
+    let mut body: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let entry = body["append_only_segments"].as_array_mut().unwrap()[0]
+        .as_object_mut()
+        .unwrap();
+    entry.remove("state");
+    entry.remove("primary_bloom");
+    entry.remove("retention_timestamp_column");
+    entry.remove("retention_min_ms");
+    entry.remove("retention_max_ms");
+    body.as_object_mut().unwrap().remove("append_only_retired");
+    body.as_object_mut().unwrap().remove("checksum");
+    let checksum = crc32fast::hash(&serde_json::to_vec(&body).unwrap());
+    body["checksum"] = serde_json::Value::String(format!("{checksum:08x}"));
+    fs::write(&path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
+    drop(manifest);
+
+    let reopened = OperationalManifest::for_db_path(&db_path);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    let entries = reopened.append_only_segments().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].state, AppendOnlySegmentState::Active);
+    assert_eq!(entries[0].segment_id, original.segment_id);
+    assert_eq!(reopened.next_append_only_segment_id("events").unwrap(), 8);
+    assert_eq!(reopened.append_only_published_rows("events").unwrap(), 1);
+    assert_eq!(
+        reopened
+            .read_append_only_segment_bounded(&entries[0], bytes.len(), 8192)
+            .unwrap()
+            .unwrap()
+            .rows[0]
+            .payload,
+        b"legacy"
+    );
+}
+
+#[test]
+fn legacy_revalidation_is_bounded_and_rejects_changed_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let bytes = encode_append_only_segment(
+        AppendOnlySegmentCodec::Zstd,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: vec![42; 1024],
+        }],
+    )
+    .unwrap();
+    let first = manifest
+        .publish_append_only_segment_with_retention_bounds(
+            "events",
+            1,
+            AppendOnlySegmentCodec::Zstd,
+            &bytes,
+            Some(0),
+            Some(0),
+        )
+        .unwrap();
+    let second = manifest
+        .publish_append_only_segment_with_retention_bounds(
+            "events",
+            2,
+            AppendOnlySegmentCodec::Zstd,
+            &bytes,
+            Some(0),
+            Some(0),
+        )
+        .unwrap();
+    let cutoffs = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
+    assert!(manifest
+        .next_unverified_append_only_segment(&cutoffs, None, 0)
+        .unwrap()
+        .is_none());
+    assert!(!manifest
+        .publish_revalidated_append_only_bounds(&first, "ts", (5, 8), 0)
+        .unwrap());
+    assert_eq!(
+        manifest
+            .next_unverified_append_only_segment(&cutoffs, None, 1024 * 1024)
+            .unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(
+        manifest
+            .next_unverified_append_only_segment(&cutoffs, Some(("events", 1)), 1024 * 1024)
+            .unwrap(),
+        Some(second.clone())
+    );
+    assert_eq!(
+        manifest
+            .next_unverified_append_only_segment(&cutoffs, Some(("events", 2)), 1024 * 1024)
+            .unwrap(),
+        Some(first.clone())
+    );
+    assert!(manifest
+        .read_append_only_segment_bounded(&first, bytes.len() - 1, 8192)
+        .unwrap()
+        .is_none());
+    assert!(manifest
+        .retire_append_only_retention_batch(&cutoffs, 10)
+        .unwrap()
+        .is_empty());
+    assert!(manifest
+        .append_only_segment_path_for_test(&first.path)
+        .exists());
+    assert!(manifest
+        .read_append_only_segment_bounded(&first, bytes.len(), 100)
+        .is_err());
+    assert_eq!(
+        manifest
+            .read_append_only_segment_bounded(&first, bytes.len(), 8192)
+            .unwrap()
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    let segment_path = manifest.append_only_segment_path_for_test(&first.path);
+    let mut corrupted = bytes.clone();
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 1;
+    fs::write(&segment_path, &corrupted).unwrap();
+    assert!(manifest
+        .read_append_only_segment_bounded(&first, bytes.len(), 8192)
+        .is_err());
+    fs::write(segment_path, &bytes).unwrap();
+    assert!(manifest
+        .publish_revalidated_append_only_bounds(&first, "ts", (5, 8), 1024 * 1024)
+        .unwrap());
+    assert!(!manifest
+        .publish_revalidated_append_only_bounds(&first, "ts", (1, 2), 1024 * 1024)
+        .unwrap());
+    drop(manifest);
+    let reopened = OperationalManifest::for_db_path(&db_path);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert_eq!(
+        reopened
+            .next_unverified_append_only_segment(&cutoffs, None, 1024 * 1024)
+            .unwrap(),
+        Some(second)
+    );
+    assert_eq!(
+        reopened
+            .append_only_retention_candidates(&cutoffs, 10)
+            .unwrap(),
+        vec![("events".to_string(), 1)]
+    );
+}
+
+#[test]
+fn retention_batch_publishes_once_per_phase_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let bytes = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: b"row".to_vec(),
+        }],
+    )
+    .unwrap();
+    for (id, time) in [(1, 1), (2, 2), (3, 20)] {
+        manifest
+            .publish_append_only_segment_with_retention_column(
+                "events",
+                id,
+                AppendOnlySegmentCodec::None,
+                &bytes,
+                (Some(time), Some(time)),
+                Some("ts"),
+            )
+            .unwrap();
+    }
+    let generation = manifest.read_generation_for_test().unwrap();
+    let cutoffs = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
+    assert_eq!(
+        manifest
+            .retire_append_only_retention_batch(&cutoffs, 2)
+            .unwrap(),
+        vec![("events".to_string(), 1), ("events".to_string(), 2)]
+    );
+    assert_eq!(manifest.read_generation_for_test().unwrap(), generation + 2);
+    drop(manifest);
+    let reopened = OperationalManifest::for_db_path(&path);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert_eq!(
+        reopened
+            .append_only_segments()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.segment_id)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert_eq!(reopened.append_only_published_rows("events").unwrap(), 3);
+}
+
+#[test]
 fn legacy_bounds_and_changed_timestamp_column_do_not_retire_segments() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("data.rdb");

@@ -428,24 +428,68 @@ impl RedDBRuntime {
                 ))
             })
             .collect();
-        let candidates = manifest
-            .append_only_retention_candidates(&cutoffs, max_segments)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        let mut total_retired = 0u64;
-        for (collection, segment_id) in candidates {
-            manifest
-                .begin_retire_append_only_segment(&collection, segment_id)
+        if !cutoffs.is_empty() {
+            const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+            const MAX_SEGMENT_FILE_BYTES: usize = 1024 * 1024;
+            const MAX_SEGMENT_PLAIN_BYTES: usize = 8 * 1024 * 1024;
+            let after = self
+                .inner
+                .retention_sweeper
+                .read()
+                .append_only_revalidation_after()
+                .map(|(collection, id)| (collection.to_owned(), id));
+            let entry = manifest
+                .next_unverified_append_only_segment(
+                    &cutoffs,
+                    after
+                        .as_ref()
+                        .map(|(collection, id)| (collection.as_str(), *id)),
+                    MAX_MANIFEST_BYTES,
+                )
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
-            if manifest
-                .finish_retire_append_only_segment(&collection, segment_id)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?
-            {
+            if let Some(entry) = entry {
                 self.inner
                     .retention_sweeper
                     .write()
-                    .record_segments_retired(&collection, 1, now_ms);
-                total_retired = total_retired.saturating_add(1);
+                    .advance_append_only_revalidation(entry.collection.clone(), entry.segment_id);
+                let column = &cutoffs[&entry.collection].1;
+                match manifest.read_append_only_segment_bounded(
+                    &entry,
+                    MAX_SEGMENT_FILE_BYTES,
+                    MAX_SEGMENT_PLAIN_BYTES,
+                ) {
+                    Ok(Some(segment)) => {
+                        if let Some(bounds) = self.inner.db.revalidate_append_only_bounds(
+                            &entry.collection,
+                            column,
+                            &segment,
+                        ) {
+                            manifest
+                                .publish_revalidated_append_only_bounds(
+                                    &entry,
+                                    column,
+                                    bounds,
+                                    MAX_MANIFEST_BYTES,
+                                )
+                                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(collection = %entry.collection, segment_id = entry.segment_id, error = %err, "append-only segment could not be revalidated")
+                    }
+                }
             }
+        }
+        let candidates = manifest
+            .retire_append_only_retention_batch(&cutoffs, max_segments)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let total_retired = candidates.len() as u64;
+        for (collection, _) in candidates {
+            self.inner
+                .retention_sweeper
+                .write()
+                .record_segments_retired(&collection, 1, now_ms);
         }
         Ok(total_retired)
     }

@@ -134,6 +134,14 @@ pub fn encode_append_only_segment(
 }
 
 pub fn decode_append_only_segment(bytes: &[u8]) -> RdbFileResult<AppendOnlySegment> {
+    decode_append_only_segment_with_limit(bytes, usize::MAX)
+}
+
+/// Decode a segment only when its declared uncompressed body fits the limit.
+pub fn decode_append_only_segment_with_limit(
+    bytes: &[u8],
+    max_uncompressed_bytes: usize,
+) -> RdbFileResult<AppendOnlySegment> {
     if bytes.len() < FIXED_HEADER_LEN {
         return Err(RdbFileError::InvalidOperation(
             "append-only segment frame too short".into(),
@@ -173,6 +181,11 @@ pub fn decode_append_only_segment(bytes: &[u8]) -> RdbFileResult<AppendOnlySegme
         ));
     }
     let header: SegmentHeader = serde_json::from_slice(header_bytes).map_err(invalid_operation)?;
+    if header.uncompressed_len > max_uncompressed_bytes as u64 {
+        return Err(RdbFileError::InvalidOperation(
+            "append-only segment exceeds uncompressed read limit".into(),
+        ));
+    }
     if header.version != APPEND_ONLY_SEGMENT_VERSION {
         return Err(RdbFileError::InvalidOperation(format!(
             "unsupported append-only segment version: {}",
