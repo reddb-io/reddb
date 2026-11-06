@@ -3380,6 +3380,7 @@ fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
                     "records_verified": report.trees.records_verified,
                     "assets_verified": report.assets_verified,
                     "unclassified_pages": report.unclassified_pages,
+                    "page_generation_freshness_verified": false,
                     "findings": findings,
                 });
                 json_ok("scrub-paged", &value.to_string_compact());
@@ -3392,6 +3393,7 @@ fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
                     report.assets_verified,
                     report.unclassified_pages
                 );
+                println!("Checksums do not establish that every page is the latest published generation.");
                 for finding in &report.trees.findings {
                     println!(
                         "{} / {} (root {}): {}",
@@ -3472,7 +3474,7 @@ fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> 
             if json_mode {
                 json_ok("salvage-paged-collections", &report.machine_json());
             } else {
-                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts are unknown; see salvage.json.", report.collections.len());
+                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts and identity high-water marks are unknown. Do not use this output for writes until identities have been reconciled; see salvage.json.", report.collections.len());
             }
             0
         }

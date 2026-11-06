@@ -30,6 +30,7 @@ impl PagedIndexSalvageReport {
         crate::serde_json::json!({
             "scope": "secondary_indexes_only",
             "action": "discarded_for_rebuild",
+            "page_generation_freshness_verified": false,
             "indexes": indexes,
         })
         .to_string_compact()
@@ -95,7 +96,7 @@ impl PagedCollectionSalvageReport {
                 })
             })
             .collect();
-        crate::serde_json::json!({"scope": "legacy_collection_root_only", "collections": collections}).to_string_compact()
+        crate::serde_json::json!({"scope": "legacy_collection_root_only", "page_generation_freshness_verified": false, "identity_high_water_verified": false, "safe_for_writes": false, "collections": collections}).to_string_compact()
     }
 }
 

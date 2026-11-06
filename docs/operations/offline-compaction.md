@@ -16,7 +16,8 @@ pending recovery, nonempty logical WAL, slot or audit files, operational
 segments, columnar ownership, replicas and other unsupported layouts. It does
 not check the logical correspondence between index entries and rows. An error
 means the scrub could not verify the full supported layout; it is not a clean
-result. The source is never written.
+result. Page checksums alone do not prove that a checksum-valid page is the
+latest published generation. The source is never written.
 
 For a read-only diagnostic of collection, key-index and secondary-index trees,
 close and checkpoint the store, then run:
@@ -65,6 +66,9 @@ descendant damage, system collection damage, ambiguous pages, authenticated
 Vaults, pending recovery, and more recent catalog formats are refused. This
 does not recover healthy records from inside an unreadable page. Validate the
 recovered store and its application-level relationships before serving it.
+The legacy format does not provide a trusted identity high-water mark after
+this loss; do not use the recovered store for writes until identities are
+reconciled against an authoritative source.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

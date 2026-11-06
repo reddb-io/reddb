@@ -434,6 +434,8 @@ fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
     assert_eq!(report.collections[0].root_page, root);
     let loss_report = std::fs::read_to_string(destination.join("salvage.json")).unwrap();
     assert!(loss_report.contains("\"skipped_entities\":null"));
+    assert!(loss_report.contains("\"page_generation_freshness_verified\":false"));
+    assert!(loss_report.contains("\"safe_for_writes\":false"));
     assert_eq!(std::fs::read(&source).unwrap(), before);
     let reopened =
         UnifiedStore::open(destination.join("initial.rdb")).expect("reopen recovered store");
@@ -788,6 +790,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     let saved = std::fs::read_to_string(destination.join("salvage.json")).expect("loss report");
     assert!(saved.contains("record_value"));
     assert!(saved.contains("discarded_for_rebuild"));
+    assert!(saved.contains("\"page_generation_freshness_verified\":false"));
     assert_eq!(std::fs::read(&source).unwrap(), damaged);
     let recovered = RedDBOptions::persistent(destination.join("source.rdb"))
         .with_memory_budget(64 * 1024 * 1024)
