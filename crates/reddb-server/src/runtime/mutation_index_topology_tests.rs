@@ -170,6 +170,47 @@ fn index_publication_guard_is_scoped_to_one_database() {
 }
 
 #[test]
+fn index_rebuild_and_drop_guard_partial_topology_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let rebuild_seen = Arc::new(AtomicBool::new(false));
+    let drop_seen = Arc::new(AtomicBool::new(false));
+    let rebuilding = Arc::clone(&rebuild_seen);
+    let dropping = Arc::clone(&drop_seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::IndexTopologyPublishing {
+            rebuilding.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+        if collection == COLLECTION && phase == MutationTestPhase::IndexTopologyDropping {
+            dropping.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime
+        .rebuild_runtime_indexes_for_table(COLLECTION)
+        .expect("rebuild");
+    assert!(runtime
+        .index_store_ref()
+        .drop_index("mutation_lookup", COLLECTION));
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        rebuild_seen.load(Ordering::SeqCst),
+        "index rebuild publication must be guarded"
+    );
+    assert!(
+        drop_seen.load(Ordering::SeqCst),
+        "index drop publication must be guarded"
+    );
+}
+
+#[test]
 fn rollback_guards_the_index_undo_window() {
     let runtime = RedDBRuntime::in_memory().expect("runtime");
     let id = seed(&runtime, "table");

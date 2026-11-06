@@ -1098,6 +1098,8 @@ pub(crate) enum MutationTestPhase {
     BeforeUndoTopology,
     UndoIndexRemoved,
     DeleteVisibilityCommitted,
+    IndexTopologyPublishing,
+    IndexTopologyDropping,
 }
 
 type PagedBtreeProviders =
@@ -1173,8 +1175,11 @@ impl IndexStore {
     /// The caller exclusively fences collection topology until publication.
     /// No live backing is changed until the complete replacement is ready.
     pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let _indexed_mutation = self.begin_indexed_mutation();
         let mut registry = self.registry.write();
         self.hash.replace_collection_from(collection, prepared.hash);
+        #[cfg(test)]
+        self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyPublishing);
         self.bitmap
             .replace_collection_from(collection, prepared.bitmap);
         let mut sorted = self.sorted.indices.write();
@@ -1477,9 +1482,12 @@ impl IndexStore {
 
     /// Drop an index
     pub fn drop_index(&self, name: &str, collection: &str) -> bool {
+        let _indexed_mutation = self.begin_indexed_mutation();
         let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
+            #[cfg(test)]
+            self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyDropping);
             self.paged_btrees.write().remove(&key);
             match info.method {
                 IndexMethodKind::Hash => self.hash.drop_index(collection, name),
