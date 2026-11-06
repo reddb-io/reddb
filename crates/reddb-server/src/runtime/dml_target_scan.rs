@@ -155,11 +155,11 @@ impl<'a> DmlTargetScan<'a> {
         let generation = index_store.indexed_mutation_generation();
         // DML target discovery may run against a retained snapshot even for an
         // autocommit statement. Current index entries cannot recover old values.
-        // Only retry a pure, unmetered filter if publication raced the lookup.
+        // Only retry a pure filter outside stored-function work limits if
+        // publication raced the lookup. Query deadlines still cover both scans.
         let can_retry = self.filter.is_some_and(dml_filter_can_retry)
             && compiled_filter.is_some()
-            && !super::query_budget::active()
-            && !super::function_budget::active();
+            && !super::function_budget::stored_function_active();
         if !matches!(self.target, Some(UpdateTarget::Documents))
             && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
             && can_retry

@@ -1451,6 +1451,59 @@ mod tests {
     }
 
     #[test]
+    fn dml_target_scan_does_not_retry_inside_stored_function_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE dml_budget_guard (id INT, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO dml_budget_guard (id, status) VALUES (1, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX dml_budget_status ON dml_budget_guard (status) USING HASH")
+            .expect("create index");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("DELETE FROM dml_budget_guard WHERE status = 'old'"),
+        )
+        .expect("capture snapshot");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM dml_budget_guard WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+            if collection == "dml_budget_guard"
+                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let _budget = super::super::function_budget::Scope::enter(1_000, 10_000)
+            .expect("stored function budget");
+        let _guards = frame.install(&rt);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &rt,
+            "dml_budget_guard",
+            Some(&filter),
+            None,
+        )
+        .find_target_ids()
+        .expect("find DML targets");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "bounded stored functions must not retry indexed discovery"
+        );
+        *rt.index_store_ref().mutation_hook.lock() = None;
+    }
+
+    #[test]
     fn dml_index_lookup_retries_when_publication_races_target_selection() {
         use std::sync::{mpsc, Arc, Mutex};
         use std::time::Duration;
@@ -1502,6 +1555,13 @@ mod tests {
                     .expect("publish update");
                 published_tx.send(()).expect("release lookup");
             });
+            let limits = super::super::resource_limits::ResourceLimits {
+                max_query_duration: Some(Duration::from_secs(30)),
+                ..Default::default()
+            };
+            let slots = std::sync::atomic::AtomicU64::new(0);
+            let _budget = super::super::query_budget::Scope::enter(&limits, &slots)
+                .expect("query deadline scope");
             let _guards = frame.install(&rt);
             let ids = super::super::dml_target_scan::DmlTargetScan::new(
                 &rt,
