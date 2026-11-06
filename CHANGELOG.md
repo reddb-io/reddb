@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.14
+
+### Patch Changes
+
+- [#2669](https://github.com/reddb-io/reddb/pull/2669) [`91eeaa5`](https://github.com/reddb-io/reddb/commit/91eeaa5256d405ab868f1c9ed28eba2d8987a5b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound synchronous `red.collections` disk accounting and skip legacy payload inspection when projected catalog fields do not require it, preventing large collections from blocking metadata requests.
+
 ## 1.28.13
 
 ### Patch Changes
