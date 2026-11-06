@@ -9,6 +9,7 @@ struct SystemCollectionCollision {
     survivor: String,
     loser: String,
     canonical: String,
+    shared_physical_state: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1452,12 +1453,14 @@ impl UnifiedStore {
                     ) else {
                         continue;
                     };
+                    let shared_physical_state = legacy_state == canonical_state;
                     let (survivor, loser) = match (
                         legacy_state.entities == 0,
                         canonical_state.entities == 0,
                     ) {
                         (false, true) => (legacy, canonical),
                         (true, false) | (true, true) => (canonical, legacy),
+                        (false, false) if shared_physical_state => (canonical, legacy),
                         (false, false) => {
                             return Err(page_integrity(
                                 1,
@@ -1473,6 +1476,7 @@ impl UnifiedStore {
                         survivor: survivor.to_string(),
                         loser: loser.to_string(),
                         canonical: canonical.to_string(),
+                        shared_physical_state,
                     });
                 }
                 let live_roots = resume
@@ -1492,6 +1496,9 @@ impl UnifiedStore {
                     .filter(|root| *root != 0)
                     .collect::<std::collections::HashSet<_>>();
                 for collision in &outcome.collisions {
+                    if collision.shared_physical_state {
+                        continue;
+                    }
                     let loser_state = resume
                         .collections
                         .get(&collision.loser)
@@ -1624,6 +1631,14 @@ impl UnifiedStore {
                     let root_page = root.root_page;
                     let stored_name = root.collection;
                     if ignored_collections.contains(&stored_name) {
+                        let shared_physical_state = outcome
+                            .collisions
+                            .iter()
+                            .find(|collision| collision.loser == stored_name)
+                            .is_some_and(|collision| collision.shared_physical_state);
+                        if shared_physical_state {
+                            continue;
+                        }
                         let state = resume
                             .as_ref()
                             .and_then(|resume| resume.collections.get(&stored_name))
@@ -3294,6 +3309,56 @@ mod checkpoint_work_tests {
         }
     }
 
+    fn alias_duplicate_system_catalog_state(fixture: &DuplicateSystemCatalogFixture) {
+        let pager = Pager::open(
+            &fixture.path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("open duplicate catalog pager");
+        let mut metadata = read_meta_payload(&pager)
+            .expect("read duplicate catalog")
+            .expect("published duplicate catalog");
+        let mut resume = reddb_file::native_resume::decode_catalog_resume(&metadata)
+            .expect("decode duplicate resume")
+            .expect("prepared duplicate resume");
+        let legacy_state = resume
+            .collections
+            .get("red_config")
+            .expect("legacy resume state")
+            .clone();
+        resume
+            .collections
+            .insert("red.config".to_string(), legacy_state.clone());
+
+        let header = reddb_file::decode_native_paged_metadata_header(&metadata)
+            .expect("decode metadata header")
+            .expect("native metadata header");
+        let mut position = reddb_file::METADATA_HEADER_BYTES;
+        let mut replaced_root = false;
+        for _ in 0..header.collection_count {
+            let root = reddb_file::decode_native_paged_collection_root(&metadata, &mut position)
+                .expect("decode collection root");
+            if root.collection == "red.config" {
+                metadata[position - 4..position]
+                    .copy_from_slice(&legacy_state.root_page.to_le_bytes());
+                replaced_root = true;
+            }
+        }
+        assert!(replaced_root, "canonical catalog root must be present");
+
+        let trailer = metadata
+            .windows(4)
+            .rposition(|bytes| bytes == b"RDRS")
+            .expect("catalog resume trailer");
+        metadata.truncate(trailer);
+        reddb_file::native_resume::encode_catalog_resume(&mut metadata, &resume)
+            .expect("encode aliased resume");
+        publish_paged_metadata(&pager, &metadata).expect("publish aliased catalog");
+    }
+
     #[test]
     fn populated_legacy_system_collection_replaces_empty_canonical_duplicate() {
         let fixture = duplicate_system_catalog_fixture(true, false, true);
@@ -3390,6 +3455,62 @@ mod checkpoint_work_tests {
                 .to_string()
                 .contains("both populated legacy collection 'red_config' and canonical collection 'red.config'"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn populated_system_collection_aliases_reconcile_without_rebuild() {
+        let fixture = duplicate_system_catalog_fixture(true, false, true);
+        alias_duplicate_system_catalog_state(&fixture);
+
+        let recovered = UnifiedStore::open_with_config(&fixture.path, fixture.config.clone())
+            .expect("reconcile identical populated aliases");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered
+                .get("red.config", EntityId::new(1))
+                .expect("preserved aliased row")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        assert_eq!(
+            recovered.collection_root_page("red.config"),
+            fixture.legacy_root,
+            "the shared data root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .key_indices
+                .read()
+                .get("red.config")
+                .map(|index| index.tree.root_page_id()),
+            fixture.legacy_key_root,
+            "the shared key-index root must be reused"
+        );
+        assert_eq!(
+            recovered
+                .secondary_index("red.config", "by_id", &fixture.index_identity)
+                .expect("shared secondary index")
+                .root_page_id(),
+            fixture
+                .legacy_secondary_root
+                .expect("fixture secondary root")
+        );
+        drop(recovered);
+
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        let cold = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .expect("idempotent cold boot");
+        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()), 0);
+        assert_eq!(
+            cold.pager()
+                .expect("pager")
+                .page_count()
+                .expect("page count"),
+            fixture.pages_before,
+            "reconciling a physical alias must not extend the file"
         );
     }
 
