@@ -4098,13 +4098,19 @@ mod checkpoint_work_tests {
                 )
                 .unwrap();
                 assert!(store.get_collection("durable_rows").is_some());
-                let imported = store
+                let mut imported = Vec::new();
+                store
                     .get_collection("red.index.registry")
                     .unwrap()
-                    .query_all(|entity| {
-                        entity.data.as_row().and_then(|r| r.get_field("name"))
+                    .try_for_each_entity(4 * 1024 * 1024, |entity| {
+                        if entity.data.as_row().and_then(|r| r.get_field("name"))
                             == Some(&Value::text("legacy_only"))
-                    });
+                        {
+                            imported.push(entity.clone());
+                        }
+                        true
+                    })
+                    .unwrap();
                 assert_eq!(imported.len(), 1, "legacy-only index must survive");
                 assert!(
                     imported[0].id.raw() > 10003,
