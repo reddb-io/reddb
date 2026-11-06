@@ -51,7 +51,7 @@ pub(crate) fn try_handle_query_binary_direct(
     #[cfg(test)]
     index_store.mutation_test_hook(
         "__direct_wire_query__",
-        crate::runtime::index_store::MutationTestPhase::DirectWireQueryStarted,
+        crate::runtime::MutationTestPhase::DirectWireQueryStarted,
     );
     let response = try_handle_query_binary_direct_inner(runtime, sql);
     if index_store.indexed_mutation_active()
@@ -1585,18 +1585,19 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (published_tx, published_rx) = mpsc::channel();
         let published_rx = Mutex::new(published_rx);
-        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
-            if collection == "__direct_wire_query__"
-                && phase == crate::runtime::index_store::MutationTestPhase::DirectWireQueryStarted
-            {
-                started_tx.send(()).expect("notify writer");
-                published_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("writer published");
-            }
-        }));
+        rt.index_store_ref()
+            .set_mutation_test_hook(Some(Arc::new(move |collection, phase| {
+                if collection == "__direct_wire_query__"
+                    && phase == crate::runtime::MutationTestPhase::DirectWireQueryStarted
+                {
+                    started_tx.send(()).expect("notify writer");
+                    published_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("writer published");
+                }
+            })));
         std::thread::scope(|scope| {
             let writer_rt = &rt;
             let writer = scope.spawn(move || {
@@ -1615,7 +1616,7 @@ mod tests {
                 "racing index publication must use the standard query path"
             );
         });
-        *rt.index_store_ref().mutation_hook.lock() = None;
+        rt.index_store_ref().set_mutation_test_hook(None);
     }
 
     #[test]

@@ -1198,6 +1198,14 @@ impl IndexStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_mutation_test_hook(
+        &self,
+        hook: Option<std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + Sync>>,
+    ) {
+        *self.mutation_hook.lock() = hook;
+    }
+
+    #[cfg(test)]
     pub(crate) fn mutation_test_hook(&self, collection: &str, phase: MutationTestPhase) {
         let hook = self.mutation_hook.lock().clone();
         if let Some(hook) = hook {
