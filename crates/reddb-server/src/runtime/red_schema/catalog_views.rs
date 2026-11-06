@@ -438,12 +438,115 @@ fn render_sql_identifier(identifier: &str) -> String {
     reddb_rql::renderer::render_identifier(identifier)
 }
 
+fn field_is_column(field: &FieldRef, expected: &str) -> bool {
+    matches!(field, FieldRef::TableColumn { column, .. } if column == expected)
+}
+
+fn collection_name_candidates_from_filter(filter: &Filter) -> Option<HashSet<String>> {
+    match filter {
+        Filter::Compare {
+            field,
+            op: CompareOp::Eq,
+            value: Value::Text(value),
+        } if field_is_column(field, "name") => Some(HashSet::from([value.to_string()])),
+        Filter::In { field, values } if field_is_column(field, "name") => Some(
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Text(value) => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        Filter::And(left, right) => match (
+            collection_name_candidates_from_filter(left),
+            collection_name_candidates_from_filter(right),
+        ) {
+            (Some(left), Some(right)) => {
+                Some(left.intersection(&right).cloned().collect::<HashSet<_>>())
+            }
+            (Some(candidates), None) | (None, Some(candidates)) => Some(candidates),
+            (None, None) => None,
+        },
+        Filter::Or(left, right) => match (
+            collection_name_candidates_from_filter(left),
+            collection_name_candidates_from_filter(right),
+        ) {
+            (Some(mut left), Some(right)) => {
+                left.extend(right);
+                Some(left)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn filter_references_column(filter: &Filter, expected: &str) -> bool {
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => field_is_column(field, expected),
+        Filter::CompareFields { left, right, .. } => {
+            field_is_column(left, expected) || field_is_column(right, expected)
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            filter_references_column(left, expected) || filter_references_column(right, expected)
+        }
+        Filter::Not(inner) => filter_references_column(inner, expected),
+        // Expression trees may reference any virtual column. Keep the
+        // expensive value available until expression-level column analysis is
+        // shared with the normal table executor.
+        Filter::CompareExpr { .. } => true,
+    }
+}
+
+fn collections_query_needs_on_disk_bytes(query: &TableQuery) -> bool {
+    let projection_needs_bytes =
+        effective_table_projections(query)
+            .iter()
+            .any(|projection| match projection {
+                Projection::All => true,
+                Projection::Column(column) | Projection::Alias(column, _) => {
+                    column == "on_disk_bytes"
+                }
+                Projection::Field(field, _) => field_is_column(field, "on_disk_bytes"),
+                // Functions, expressions, and windows may contain nested field
+                // references. Be conservative rather than returning a wrong row.
+                Projection::Function(_, _)
+                | Projection::Expression(_, _)
+                | Projection::Window { .. } => true,
+            });
+    let filter_needs_bytes = effective_table_filter(query)
+        .as_ref()
+        .is_some_and(|filter| filter_references_column(filter, "on_disk_bytes"));
+    let order_needs_bytes = query
+        .order_by
+        .iter()
+        .any(|order| field_is_column(&order.field, "on_disk_bytes") || order.expr.is_some());
+
+    projection_needs_bytes || filter_needs_bytes || order_needs_bytes
+}
+
 pub(super) fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&std::collections::HashSet<String>>,
+    query: &TableQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let snapshot = runtime.try_catalog()?;
+    let candidate_names = effective_table_filter(query)
+        .as_ref()
+        .and_then(collection_name_candidates_from_filter);
+    let snapshot = match candidate_names.as_ref() {
+        Some(candidate_names) => runtime.try_catalog_for_collections(candidate_names)?,
+        None => runtime.try_catalog()?,
+    };
     let schema = Arc::new(
         COLLECTION_COLUMNS
             .iter()
@@ -452,10 +555,16 @@ pub(super) fn collections_snapshot(
     );
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+    let needs_on_disk_bytes = collections_query_needs_on_disk_bytes(query);
 
     Ok(snapshot
         .collections
         .into_iter()
+        .filter(|collection| {
+            candidate_names
+                .as_ref()
+                .is_none_or(|candidates| candidates.contains(&collection.name))
+        })
         .filter(|collection| {
             visible_collections.is_none_or(|visible| visible.contains(&collection.name))
         })
@@ -474,7 +583,11 @@ pub(super) fn collections_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
+            let on_disk_bytes = if needs_on_disk_bytes {
+                on_disk_bytes_value(store.as_ref(), &collection.name)
+            } else {
+                Value::Null
+            };
             let queue_mode = if collection.model == CollectionModel::Queue {
                 Value::text(super::impl_queue::queue_mode_str(
                     store.as_ref(),
@@ -2047,6 +2160,90 @@ mod scoped_index_introspection_io_tests {
         assert!(
             read_bytes <= 64 * 1024,
             "SHOW INDEXES ON target read {read_bytes} bytes from unrelated payloads"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scoped_collection_introspection_io_tests {
+    use super::*;
+    use crate::storage::engine::pager::measure_pager_read_bytes;
+    use crate::storage::{EntityId, UnifiedEntity};
+
+    fn persistent_fixture() -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("collection introspection fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join("collections.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            runtime
+                .execute_query("CREATE TABLE target (id INT, value TEXT)")
+                .expect("target table");
+            runtime
+                .execute_query("INSERT INTO target (id, value) VALUES (1, 'kept')")
+                .expect("target row");
+            let store = runtime.db().store();
+            store
+                .create_collection("unrelated_payloads")
+                .expect("unrelated collection");
+            for id in 1..=4_096 {
+                store
+                    .insert(
+                        "unrelated_payloads",
+                        UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "unrelated_payloads",
+                            id,
+                            vec![Value::text(format!("payload-{id:08}-{}", "x".repeat(512)))],
+                        ),
+                    )
+                    .expect("unrelated payload");
+            }
+            runtime.checkpoint().expect("persist fixture");
+        }
+
+        let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+        (directory, runtime)
+    }
+
+    #[test]
+    fn filtered_red_collections_does_not_read_unrelated_collection_pages() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query(
+                    "SELECT name, on_disk_bytes FROM red.collections WHERE name IN ('target')",
+                )
+                .expect("target collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("target"))
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "filtered red.collections read {read_bytes} bytes from unrelated collection pages"
+        );
+    }
+
+    #[test]
+    fn projected_red_collections_does_not_measure_unrequested_disk_bytes() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query("SELECT name FROM red.collections WHERE name = 'target'")
+                .expect("projected collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("target"))
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "projected red.collections measured unrequested disk bytes and read {read_bytes} bytes"
         );
     }
 }

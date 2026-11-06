@@ -860,7 +860,7 @@ pub(super) fn red_query(
     let control_events = matches!(virtual_kind, VirtualTableKind::ControlEvents);
     let mut records = match virtual_kind {
         VirtualTableKind::Collections => {
-            catalog_views::collections_snapshot(runtime, tenant, visible_collections)?
+            catalog_views::collections_snapshot(runtime, tenant, visible_collections, query)?
         }
         VirtualTableKind::Columns => catalog_views::columns_snapshot(runtime, visible_collections)?,
         VirtualTableKind::Describe => {
