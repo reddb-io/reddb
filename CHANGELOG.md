@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.28.25
+
+### Patch Changes
+
+- [#2702](https://github.com/reddb-io/reddb/pull/2702) [`1b8c4d0`](https://github.com/reddb-io/reddb/commit/1b8c4d07527a2726a785cb0b6f2b10c43fb2dd2c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve snapshot-visible rows during secondary-index publication and logical replay. Persist replayed version changes in WAL, retain table-delete tombstones, and update indexes before advancing the replica frontier. Keep embedded read-only opens and legacy snapshots unchanged, detect Windows memory, and preserve client projection and cancellation contracts. Interrupted RedWire connections must be reopened without automatically retrying writes; unsupported read-only native paged recovery now fails before writing.
+
+- [#2709](https://github.com/reddb-io/reddb/pull/2709) [`c023b67`](https://github.com/reddb-io/reddb/commit/c023b67b925f5c8f30196078c04e321d34654d22) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read materialized-view definitions from disk-backed collections during boot, replacement and deletion. Decode both named and schema-backed rows, propagate storage scan failures, and prevent descriptor accumulation across cold restarts.
+
+- [#2707](https://github.com/reddb-io/reddb/pull/2707) [`08ecd91`](https://github.com/reddb-io/reddb/commit/08ecd914e75f0c344affa95c09f43946f3d4698f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile duplicate runtime metadata during explicit canonical-config WAL recovery. Preserve missing index and view definitions, verify equivalent queue-group identities, keep canonical planner observations, and reject conflicting definitions, delivery state, references and overlapping metadata WAL.
+
+- [#2705](https://github.com/reddb-io/reddb/pull/2705) [`ce38731`](https://github.com/reddb-io/reddb/commit/ce387314a3112b95feec72bea897950cd8359e9c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a canonical system-config copy when its pending WAL only targets proved boot-derived legacy metadata. Preserve all other transactions, original WAL framing and consumed identities; reject unknown deletes and user configuration changes.
+
 ## 1.28.24
 
 ### Patch Changes
