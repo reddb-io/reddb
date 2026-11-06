@@ -22,7 +22,9 @@ mod scrub;
 mod source;
 use catalog::Catalog;
 pub use salvage::{salvage_paged_indexes, PagedIndexSalvageFinding, PagedIndexSalvageReport};
-pub use scrub::{scrub_paged_trees, PagedTreeFinding, PagedTreeScrubReport};
+pub use scrub::{
+    scrub_paged, scrub_paged_trees, PagedScrubReport, PagedTreeFinding, PagedTreeScrubReport,
+};
 use source::Source;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -162,7 +164,18 @@ fn compact_paged_inner(
     let mut assets = assets::Assets::new(&source, &target);
     assets.vault()?;
     let physical = assets.physical()?;
-    assets.metadata(&source_path, &output)?;
+    assets.metadata(&source_path, Some(&output))?;
+    if let Some(salvage) = salvage {
+        for index in &salvage.indexes {
+            if index.root_page != 0 {
+                source.claim(index.root_page)?;
+            }
+        }
+        ensure(
+            source.unclaimed_pages() == 0,
+            "unclassified source pages require separate recovery verification",
+        )?;
+    }
     catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
     target.update_physical_header(physical)?;
     target.fence_file_format_version(source.header.version)?;

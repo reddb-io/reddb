@@ -1,4 +1,6 @@
-use reddb_server::storage::compact::{compact_paged, salvage_paged_indexes, scrub_paged_trees};
+use reddb_server::storage::compact::{
+    compact_paged, salvage_paged_indexes, scrub_paged, scrub_paged_trees,
+};
 use reddb_server::storage::engine::{BTree, Page, PageType, Pager, PagerConfig, HEADER_SIZE};
 use std::sync::Arc;
 
@@ -302,10 +304,58 @@ fn index_salvage_refuses_unverified_vault() {
     pager.sync().expect("checkpoint");
     drop(pager);
     let image = std::fs::read(&source).unwrap();
+    assert!(scrub_paged(&source).is_err());
     let error = salvage_paged_indexes(&source, &destination).expect_err("unverified vault");
     assert!(error.to_string().contains("vault"), "{error}");
     assert!(!destination.exists());
     assert_eq!(std::fs::read(&source).unwrap(), image);
+}
+
+#[test]
+fn physical_scrub_detects_native_metadata_damage_without_writes() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let pager = Pager::open_default(&source).expect("pager");
+    let data = reddb_file::encode_native_collection_roots_page(&std::collections::BTreeMap::new());
+    let mut page = pager
+        .allocate_page(PageType::NativeMeta)
+        .expect("native metadata");
+    let id = page.page_id();
+    page.content_mut()[..data.len()].copy_from_slice(&data);
+    pager.write_page(id, page).expect("write metadata");
+    let mut physical = pager.physical_header().unwrap();
+    physical.collection_roots_page = id;
+    physical.collection_roots_checksum = reddb_file::native_store_page_checksum(&data);
+    pager.update_physical_header(physical).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+    let before = std::fs::read(&source).unwrap();
+    let report = scrub_paged(&source).expect("scrub healthy metadata");
+    assert!(report.assets_verified);
+    assert!(report.trees.findings.is_empty());
+    assert!(
+        report.unclassified_pages >= 512,
+        "abandoned allocations remain explicitly unclassified"
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(id) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let damaged = std::fs::read(&source).unwrap();
+    assert!(scrub_paged(&source).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), damaged);
 }
 
 #[test]
@@ -462,6 +512,9 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
         },
     )
     .expect("pager");
+    let healthy = scrub_paged(&source).expect("physical scrub");
+    assert!(healthy.assets_verified);
+    assert!(healthy.trees.findings.is_empty());
     let catalog = pager.read_page(1).expect("catalog");
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .expect("decode catalog")
@@ -483,6 +536,10 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     file.sync_all().unwrap();
     drop(file);
     let damaged = std::fs::read(&source).unwrap();
+    let scrub = scrub_paged(&source).expect("scrub damaged index");
+    assert!(!scrub.assets_verified);
+    assert_eq!(scrub.trees.findings.len(), 1);
+    assert_eq!(std::fs::read(&source).unwrap(), damaged);
     let destination = directory.path().join("recovered");
     let report = salvage_paged_indexes(&source, &destination).expect("recover index");
     assert_eq!(report.indexes.len(), 1);
@@ -602,6 +659,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     pager.sync().unwrap();
     drop(pager);
     let rejected = directory.path().join("rejected-metadata");
+    assert!(scrub_paged(&source).is_err());
     let err = salvage_paged_indexes(&source, &rejected).expect_err("metadata digest mismatch");
     assert!(err.to_string().contains("metadata"), "{err}");
     assert!(!rejected.exists());
@@ -617,6 +675,26 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     pager.update_physical_header(physical).unwrap();
     pager.sync().unwrap();
     drop(pager);
+
+    // An allocation with unknown ownership must not be silently discarded.
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            disk_residency: true,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("allocate unclassified page");
+    let page = pager.allocate_page(PageType::Overflow).unwrap();
+    pager.write_page(page.page_id(), page).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+    let unclassified = std::fs::read(&source).unwrap();
+    let rejected = directory.path().join("rejected-unclassified");
+    let err = salvage_paged_indexes(&source, &rejected).expect_err("unclassified page");
+    assert!(err.to_string().contains("unclassified"), "{err}");
+    assert!(!rejected.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), unclassified);
 
     // A second damaged authority must not be silently repaired or omitted
     // from a report that only describes index recovery.

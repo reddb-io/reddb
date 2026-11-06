@@ -135,6 +135,12 @@ impl Source {
         }
         Ok(())
     }
+    pub fn unclaimed_pages(&self) -> u64 {
+        self.ownership.lock()[FIRST_ALLOCATABLE_PAGE as usize..]
+            .iter()
+            .filter(|owner| **owner == 0)
+            .count() as u64
+    }
     pub fn claim(&self, id: u32) -> Result<()> {
         ensure(
             id >= FIRST_ALLOCATABLE_PAGE && id < self.header.page_count,

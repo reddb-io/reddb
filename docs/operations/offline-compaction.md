@@ -1,5 +1,23 @@
 # Offline native compaction
 
+For a physical scrub of the supported closed, checkpointed standalone layout:
+
+```sh
+red scrub-paged --source /preserved/data.rdb --json
+```
+
+This checks both superblocks, the checkpointed WAL boundary, allocator and
+catalog, collection and index trees, supported native metadata and blob
+checksums, and a marker-only operational manifest. A tree finding leaves the
+auxiliary checks explicitly incomplete. Allocated pages not identified as free
+or owned are counted as unclassified: they may be garbage, but prevent a clean
+result. It refuses authenticated Vaults,
+pending recovery, nonempty logical WAL, slot or audit files, operational
+segments, columnar ownership, replicas and other unsupported layouts. It does
+not check the logical correspondence between index entries and rows. An error
+means the scrub could not verify the full supported layout; it is not a clean
+result. The source is never written.
+
 For a read-only diagnostic of collection, key-index and secondary-index trees,
 close and checkpoint the store, then run:
 
@@ -30,7 +48,7 @@ primary-key tree, catalog and pending-WAL corruption are not recovered by
 this command. An authenticated Vault, nonempty logical WAL, replication slot
 or audit files, operational segments and nonempty operational collection
 files are refused because this operation cannot verify them. The compaction qualification boundaries below
-also apply. A failed attempt may leave a diagnostic directory but will not
+also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
 publish the output file.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite

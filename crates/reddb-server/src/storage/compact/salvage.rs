@@ -43,6 +43,33 @@ impl PagedIndexSalvageReport {
 pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedIndexSalvageReport> {
     // Hold the source lock across both verification and publication.
     let guard = Source::open(source)?;
+    verify_supported_source(source, &guard)?;
+    let scrub = scrub_paged_trees(source)?;
+    let mut indexes = Vec::new();
+    for finding in scrub.findings {
+        let index = finding
+            .tree
+            .strip_prefix("secondary index ")
+            .ok_or_else(|| {
+                format!(
+                    "cannot safely recover {} tree of {}: {}",
+                    finding.tree, finding.collection, finding.reason
+                )
+            })?;
+        indexes.push(PagedIndexSalvageFinding {
+            collection: finding.collection,
+            index: index.to_owned(),
+            root_page: finding.root_page,
+            reason: finding.reason,
+        });
+    }
+    ensure(!indexes.is_empty(), "no damaged secondary index to recover")?;
+    let report = PagedIndexSalvageReport { indexes };
+    compact_paged_inner(source, destination, Some(&report))?;
+    Ok(report)
+}
+
+pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<()> {
     guard.verify_superblocks()?;
     let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     if operational.exists() {
@@ -119,27 +146,5 @@ pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedI
         )?;
         vault.verify_checksum()?;
     }
-    let scrub = scrub_paged_trees(source)?;
-    let mut indexes = Vec::new();
-    for finding in scrub.findings {
-        let index = finding
-            .tree
-            .strip_prefix("secondary index ")
-            .ok_or_else(|| {
-                format!(
-                    "cannot safely recover {} tree of {}: {}",
-                    finding.tree, finding.collection, finding.reason
-                )
-            })?;
-        indexes.push(PagedIndexSalvageFinding {
-            collection: finding.collection,
-            index: index.to_owned(),
-            root_page: finding.root_page,
-            reason: finding.reason,
-        });
-    }
-    ensure(!indexes.is_empty(), "no damaged secondary index to recover")?;
-    let report = PagedIndexSalvageReport { indexes };
-    compact_paged_inner(source, destination, Some(&report))?;
-    Ok(report)
+    Ok(())
 }

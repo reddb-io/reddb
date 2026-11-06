@@ -17,11 +17,49 @@ pub struct PagedTreeScrubReport {
     pub findings: Vec<PagedTreeFinding>,
 }
 
+/// A physical scrub of a supported, closed and checkpointed standalone store.
+/// If a tree fails, auxiliary checks are not considered complete.
+#[derive(Debug)]
+pub struct PagedScrubReport {
+    pub trees: PagedTreeScrubReport,
+    pub assets_verified: bool,
+    /// Allocated pages not identified as free or owned by a verified structure.
+    pub unclassified_pages: u64,
+}
+
+/// Verify the supported offline layout without writing to the source. Pending
+/// recovery, authenticated vaults and unsupported sidecars fail closed.
+pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
+    let source = Arc::new(Source::open(path)?);
+    super::salvage::verify_supported_source(path, &source)?;
+    let trees = inspect_all_trees(&source)?;
+    if !trees.findings.is_empty() {
+        return Ok(PagedScrubReport {
+            trees,
+            assets_verified: false,
+            unclassified_pages: source.unclaimed_pages(),
+        });
+    }
+    let mut assets = super::assets::Assets::for_verification(&source);
+    assets.vault()?;
+    assets.physical()?;
+    assets.metadata(path, None)?;
+    Ok(PagedScrubReport {
+        trees,
+        assets_verified: true,
+        unclassified_pages: source.unclaimed_pages(),
+    })
+}
+
 /// Inspect trees in a closed, checkpointed paged store without writing to it.
 /// Vault, physical assets, logical index correctness and replica state are not
 /// verified. The same layout and WAL restrictions as offline compaction apply.
 pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
     let source = Arc::new(Source::open(path)?);
+    inspect_all_trees(&source)
+}
+
+fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
     let catalog = Catalog::read(&source)?;
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION

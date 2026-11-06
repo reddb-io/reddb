@@ -1768,6 +1768,10 @@ fn main() {
             std::process::exit(run_scrub_paged_trees_command(&result.flags));
         }
 
+        "scrub-paged" => {
+            std::process::exit(run_scrub_paged_command(&result.flags));
+        }
+
         "salvage-paged-indexes" => {
             std::process::exit(run_salvage_paged_indexes_command(&result.flags));
         }
@@ -3344,6 +3348,73 @@ fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .trees
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(), "tree": finding.tree.clone(),
+                            "root_page": finding.root_page, "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "supported_offline_paged_layout",
+                    "trees_verified": report.trees.trees_verified,
+                    "records_verified": report.trees.records_verified,
+                    "assets_verified": report.assets_verified,
+                    "unclassified_pages": report.unclassified_pages,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged", &value.to_string_compact());
+            } else {
+                println!(
+                    "Verified {} trees and {} records; {} findings. Auxiliary assets verified: {}; unclassified pages: {}.",
+                    report.trees.trees_verified,
+                    report.trees.records_verified,
+                    report.trees.findings.len(),
+                    report.assets_verified,
+                    report.unclassified_pages
+                );
+                for finding in &report.trees.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.trees.findings.is_empty()
+                && report.assets_verified
+                && report.unclassified_pages == 0
+            {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged", &error.to_string());
+            } else {
+                eprintln!("scrub-paged: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_paged_indexes_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let result = (|| {
@@ -4009,6 +4080,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
         ("scrub-paged-trees".to_string(), vec![]),
+        ("scrub-paged".to_string(), vec![]),
         ("salvage-paged-indexes".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
