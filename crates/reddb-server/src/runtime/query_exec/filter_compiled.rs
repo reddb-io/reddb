@@ -231,9 +231,19 @@ pub(crate) fn resolve_kind<'a>(
             entity.logical_id().raw(),
         ))),
         EntityFieldKind::SystemCreatedAt => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "created_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)))
         }
         EntityFieldKind::SystemUpdatedAt => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "updated_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)))
         }
         EntityFieldKind::SystemSequenceId => {

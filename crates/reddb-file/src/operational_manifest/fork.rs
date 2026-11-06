@@ -22,7 +22,7 @@ use crate::Vfs;
 /// Where a store fork came from: the parent store's identity and the durable LSN
 /// the fork is pinned at. Recorded in the fork's own operational manifest so a
 /// listing can report each fork's parent and fork LSN without opening the parent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ForkOrigin {
     /// The fork's own name (as given to `FORK STORE AS <name>`).
     pub name: String,
@@ -98,6 +98,7 @@ impl<V: Vfs> OperationalManifest<V> {
         Self {
             root: self.forks_dir().join(sanitize_component(name)),
             vfs: self.vfs.clone(),
+            cache: Default::default(),
         }
     }
 
@@ -225,6 +226,7 @@ impl<V: Vfs> OperationalManifest<V> {
             let fork = Self {
                 root: entry.path,
                 vfs: self.vfs.clone(),
+                cache: Default::default(),
             };
             if let Some(manifest) = fork.load_current()? {
                 let Some(origin) = manifest.fork_origin.as_ref() else {
@@ -397,6 +399,7 @@ impl<V: Vfs> OperationalManifest<V> {
                 out.push(Self {
                     root: entry.path,
                     vfs: self.vfs.clone(),
+                    cache: Default::default(),
                 });
             }
         }
@@ -414,6 +417,7 @@ impl<V: Vfs> OperationalManifest<V> {
                 .root
                 .with_file_name(format!("{root_name}.detached-{}", sanitize_component(name))),
             vfs: self.vfs.clone(),
+            cache: Default::default(),
         }
     }
 
@@ -429,6 +433,7 @@ impl<V: Vfs> OperationalManifest<V> {
                 sanitize_component(name)
             )),
             vfs: self.vfs.clone(),
+            cache: Default::default(),
         }
     }
 
@@ -444,6 +449,7 @@ impl<V: Vfs> OperationalManifest<V> {
                 sanitize_component(name)
             )),
             vfs: self.vfs.clone(),
+            cache: Default::default(),
         }
     }
 
@@ -584,6 +590,7 @@ impl<V: Vfs> OperationalManifest<V> {
             staging = Some(Self {
                 root: entry.path,
                 vfs: self.vfs.clone(),
+                cache: Default::default(),
             });
         }
         Ok(staging)

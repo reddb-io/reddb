@@ -405,53 +405,48 @@ impl RedDBRuntime {
         let Some(path) = self.inner.db.path() else {
             return Ok(0);
         };
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let segments = manifest
-            .append_only_segments()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        if segments.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total_retired = 0u64;
-        for contract in self
+        // Flush publishes segments under the same fence. Do not interleave its
+        // manifest updates with selection and the two retirement phases.
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
+        let cutoffs: std::collections::BTreeMap<_, _> = self
             .inner
             .db
             .collection_contracts()
             .into_iter()
             .filter(|contract| contract.append_only)
-        {
-            let Some(retention_ms) = contract.retention_duration_ms else {
-                continue;
-            };
-            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
-            let mut retired_for_collection = 0u64;
-            for segment in segments
-                .iter()
-                .filter(|segment| segment.collection == contract.name)
-                .filter(|segment| segment.retention_max_ms.is_some_and(|max| max < cutoff))
-                .take(max_segments.saturating_sub(total_retired as usize))
-            {
+            .filter_map(|contract| {
+                let retention_ms = contract.retention_duration_ms?;
+                let column = super::retention_filter::resolve_timestamp_column(&contract)?;
+                Some((
+                    contract.name,
+                    (
+                        super::retention_sweeper::cutoff_ms(now_ms, retention_ms),
+                        column,
+                    ),
+                ))
+            })
+            .collect();
+        let candidates = if max_segments == usize::MAX {
+            // The explicit administrative operation remains synchronous.
+            let mut candidates =
+                self.maintain_append_only_tick(&manifest, &store, &cutoffs, max_segments)?;
+            candidates.extend(
                 manifest
-                    .begin_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                if manifest
-                    .finish_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?
-                {
-                    retired_for_collection = retired_for_collection.saturating_add(1);
-                }
-            }
-            if retired_for_collection > 0 {
-                self.inner
-                    .retention_sweeper
-                    .write()
-                    .record_segments_retired(&contract.name, retired_for_collection, now_ms);
-                total_retired = total_retired.saturating_add(retired_for_collection);
-            }
-            if total_retired >= max_segments as u64 {
-                break;
-            }
+                    .retire_append_only_retention_batch(&cutoffs, max_segments)
+                    .map_err(|err| RedDBError::Internal(err.to_string()))?,
+            );
+            candidates
+        } else {
+            self.maintain_append_only_tick(&manifest, &store, &cutoffs, max_segments)?
+        };
+        let total_retired = candidates.len() as u64;
+        for (collection, _) in candidates {
+            self.inner
+                .retention_sweeper
+                .write()
+                .record_segments_retired(&collection, 1, now_ms);
         }
         Ok(total_retired)
     }

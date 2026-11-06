@@ -986,7 +986,6 @@ impl StoreCommitCoordinator {
             if let Some((start, true)) = previous {
                 copy_frame(start, end)?;
             }
-            drop(copy_frame);
             drop(source);
             retained.sync()?;
             #[cfg(test)]

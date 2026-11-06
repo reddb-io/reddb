@@ -314,9 +314,19 @@ pub(crate) fn resolve_entity_field<'a>(
             )));
         }
         "created_at" => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "created_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             return Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)));
         }
         "updated_at" => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "updated_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             return Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)));
         }
         "red_sequence_id" => {

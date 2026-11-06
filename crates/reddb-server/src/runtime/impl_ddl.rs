@@ -1440,8 +1440,10 @@ impl RedDBRuntime {
         let retention_floor = operational_wal_retention_floor(durable_lsn);
         validate_store_fork_lsn(fork_lsn, retention_floor, durable_lsn)?;
 
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let mut collections = self.inner.db.store().list_collections();
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
+        let mut collections = store.list_collections();
         collections.sort();
         manifest.recover_or_bootstrap(&collections).map_err(|err| {
             RedDBError::Query(format!("failed to prepare store fork manifest: {err}"))
@@ -1465,7 +1467,9 @@ impl RedDBRuntime {
         let path = self.inner.db.path().ok_or_else(|| {
             RedDBError::Query("DROP FORK requires a persistent store".to_string())
         })?;
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let dropped = manifest
             .drop_fork(&query.name)
             .map_err(|err| RedDBError::Query(format!("failed to drop store fork: {err}")))?;
@@ -1489,7 +1493,9 @@ impl RedDBRuntime {
             RedDBError::Query("PROMOTE FORK requires a persistent store".to_string())
         })?;
         self.flush()?;
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let outcome = manifest
             .promote_fork(&query.name)
             .map_err(|err| RedDBError::Query(format!("failed to promote store fork: {err}")))?;

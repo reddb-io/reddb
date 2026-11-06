@@ -90,6 +90,10 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
+        if let Some(ids) = super::retention_sweeper::take_delete_candidates() {
+            return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+        }
+
         // Fast path: WHERE _entity_id = N. The resolver maps stable
         // table-row identity to the version visible to this statement.
         // Skip for graph node/edge targets — the table-row resolver only
@@ -130,8 +134,9 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
-        if !matches!(self.target, Some(UpdateTarget::Documents))
-            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+        if !(self.target.is_none() && self.limit.is_some()
+            || matches!(self.target, Some(UpdateTarget::Documents))
+            || crate::runtime::impl_core::current_snapshot_requires_index_fallback())
         {
             if let Some(filter) = self.filter {
                 if let Some(ids) = query_exec::try_hash_eq_lookup(
@@ -158,7 +163,9 @@ impl<'a> DmlTargetScan<'a> {
         let mut predicate_failure = None;
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
-            if !matches!(self.target, Some(UpdateTarget::Documents)) {
+            if !(matches!(self.target, Some(UpdateTarget::Documents))
+                || self.target.is_none() && self.limit.is_some())
+            {
                 query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
             }
             let zone_preds: Vec<_> = owned_zone_preds

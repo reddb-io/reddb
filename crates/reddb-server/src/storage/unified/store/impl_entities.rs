@@ -270,6 +270,9 @@ impl UnifiedStore {
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = reddb_engine::storage::system_collection_names::canonical_owned(name.into());
+        // Collection creation publishes the same manifest that flush and
+        // retention update. Fence the entire create, including registry/WAL.
+        let _publication = self.vault_publication_lock.lock();
         let mut collections = self.resident.collections.write();
 
         if collections.contains_key(&name) {

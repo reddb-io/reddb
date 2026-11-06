@@ -112,7 +112,7 @@ impl<P: PageStore> BTree<P> {
                 PageType::BTreeInterior => {
                     let (keys, children) = read_interior_keys_children(&page)?;
                     if children.len() != keys.len() + 1
-                        || children.iter().any(|id| *id == 0)
+                        || children.contains(&0)
                         || keys.windows(2).any(|pair| pair[0] >= pair[1])
                         || keys.iter().any(|key| {
                             work.low.as_ref().is_some_and(|low| key < low)

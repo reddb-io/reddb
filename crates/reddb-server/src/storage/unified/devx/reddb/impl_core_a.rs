@@ -750,7 +750,7 @@ impl RedDB {
     }
 
     fn publish_append_only_segments(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.store.operational_manifest_for_path(path);
         for contract in self
             .collection_contracts()
             .into_iter()
@@ -798,16 +798,97 @@ impl RedDB {
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &rows,
             )?;
-            manifest.publish_append_only_segment_with_retention_bounds(
+            let timestamp_column =
+                crate::runtime::retention_filter::resolve_timestamp_column(&contract);
+            manifest.publish_append_only_segment_with_retention_column(
                 &contract.name,
                 next_segment_id,
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &bytes,
-                retention_min_ms,
-                retention_max_ms,
+                (retention_min_ms, retention_max_ms),
+                timestamp_column.as_deref(),
             )?;
         }
         Ok(())
+    }
+
+    /// Recompute bounds only when every row has one unambiguous timestamp.
+    #[cfg(test)]
+    pub(crate) fn revalidate_append_only_bounds(
+        &self,
+        collection: &str,
+        column: &str,
+        segment: &reddb_file::AppendOnlySegment,
+    ) -> Option<(i64, i64)> {
+        let mut bounds: Option<(i64, i64)> = None;
+        for row in &segment.rows {
+            let timestamp = self.revalidate_append_only_row(collection, column, row)?;
+            bounds = Some(bounds.map_or((timestamp, timestamp), |(min, max)| {
+                (min.min(timestamp), max.max(timestamp))
+            }));
+        }
+        bounds
+    }
+
+    pub(crate) fn revalidate_append_only_row(
+        &self,
+        collection: &str,
+        column: &str,
+        row: &reddb_file::AppendOnlySegmentRow,
+    ) -> Option<i64> {
+        // Reserve space for the encoded value, decoded fields and canonical round trip.
+        const MAX_REVALIDATION_DECODE_BYTES: usize = 4 * reddb_file::BTREE_VALUE_MAX_SIZE;
+        self.revalidate_append_only_row_with_budget(
+            collection,
+            column,
+            row,
+            MAX_REVALIDATION_DECODE_BYTES,
+        )
+    }
+
+    fn revalidate_append_only_row_with_budget(
+        &self,
+        collection: &str,
+        column: &str,
+        row: &reddb_file::AppendOnlySegmentRow,
+        limit: usize,
+    ) -> Option<i64> {
+        let manager = self.store.get_collection(collection)?;
+        let raw_id: [u8; 8] = row.primary_key.as_slice().try_into().ok()?;
+        let expected_id = u64::from_be_bytes(raw_id);
+        let mut timestamp = None;
+        for version in reddb_file::STORE_VERSION_V1..=reddb_file::STORE_VERSION_CURRENT {
+            let mut budget = reddb_file::native_value::DecodeBudget::new(limit);
+            budget.charge(row.payload.len()).ok()?;
+            let (mut entity, metadata) =
+                match reddb_engine::storage::metadata_codec::deserialize_entity_record_with_budget(
+                    &row.payload,
+                    version,
+                    &mut budget,
+                ) {
+                    Ok(record) => record,
+                    // An incomplete interpretation cannot prove this version is invalid.
+                    Err(reddb_engine::storage::error::StoreError::ReadLimitExceeded { .. }) => {
+                        return None
+                    }
+                    Err(_) => continue,
+                };
+            if UnifiedStore::serialize_entity_record(&entity, metadata.as_ref(), version)
+                != row.payload
+            {
+                continue;
+            }
+            if entity.id.raw() != expected_id || entity.kind.collection() != collection {
+                return None;
+            }
+            manager.restore_owned_row_schemas(std::iter::once(&mut entity));
+            let current = append_only_entity_timestamp_ms(&entity, column)?;
+            if timestamp.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            timestamp = Some(current);
+        }
+        timestamp
     }
 
     pub fn embedded_pending_wal_records(&self) -> Option<u64> {
@@ -1576,7 +1657,8 @@ fn append_only_retention_bounds(
     let mut max_ts: Option<i64> = None;
     for entity in entities {
         let Some(ts) = append_only_entity_timestamp_ms(entity, &ts_column) else {
-            continue;
+            // An unknown timestamp cannot prove that every row has expired.
+            return (None, None);
         };
         min_ts = Some(min_ts.map_or(ts, |min| min.min(ts)));
         max_ts = Some(max_ts.map_or(ts, |max| max.max(ts)));
@@ -1586,18 +1668,24 @@ fn append_only_retention_bounds(
 
 fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> Option<i64> {
     match ts_column {
-        "created_at" => entity
+        "created_at" | "updated_at" => match entity
             .data
             .as_row()
-            .and_then(|row| row.get_field("created_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.created_at as i64)),
-        "updated_at" => entity
-            .data
-            .as_row()
-            .and_then(|row| row.get_field("updated_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.updated_at as i64)),
+            .and_then(|row| row.get_field(ts_column))
+        {
+            Some(value) => value_as_retention_ms(value),
+            None => {
+                let seconds = if ts_column == "created_at" {
+                    entity.created_at
+                } else {
+                    entity.updated_at
+                };
+                i64::try_from(seconds)
+                    .ok()?
+                    .checked_mul(1_000)?
+                    .checked_add(999)
+            }
+        },
         other => entity
             .data
             .as_row()
@@ -1607,14 +1695,17 @@ fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> O
 }
 
 fn value_as_retention_ms(value: &Value) -> Option<i64> {
-    match value {
+    let timestamp = match value {
         Value::TimestampMs(t) => Some(*t),
         Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
         Value::BigInt(t) => Some(*t),
         Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
         Value::Integer(t) => Some(*t),
         _ => None,
-    }
+    };
+    // The read-time retention filter currently keeps negative timestamps.
+    // A whole segment may not be removed while such a row remains visible.
+    timestamp.filter(|timestamp| *timestamp >= 0)
 }
 
 thread_local! {
@@ -1625,6 +1716,82 @@ thread_local! {
 mod append_only_publication_tests {
     use super::*;
     use crate::storage::RowData;
+
+    #[test]
+    fn legacy_bounds_require_matching_identity_and_canonical_versioned_records() {
+        assert_eq!(value_as_retention_ms(&Value::TimestampMs(-1)), None);
+        let rt = crate::RedDBRuntime::in_memory().unwrap();
+        rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true APPEND ONLY")
+            .unwrap();
+        let mut entity = UnifiedEntity::table_row(EntityId::new(7), "events", 7, vec![]);
+        entity.created_at = 10;
+        for version in [
+            reddb_file::STORE_VERSION_V10,
+            reddb_file::STORE_VERSION_V11,
+            reddb_file::STORE_VERSION_V12,
+        ] {
+            let row = reddb_file::AppendOnlySegmentRow {
+                primary_key: entity.id.raw().to_be_bytes().to_vec(),
+                payload: UnifiedStore::serialize_entity_record(&entity, None, version),
+            };
+            assert_eq!(
+                rt.db().revalidate_append_only_row_with_budget(
+                    "events",
+                    "created_at",
+                    &row,
+                    row.payload.len(),
+                ),
+                None,
+                "an incomplete interpretation must never authorize retirement"
+            );
+            let bytes = reddb_file::encode_append_only_segment(
+                reddb_file::AppendOnlySegmentCodec::None,
+                &[row],
+            )
+            .unwrap();
+            let mut segment = reddb_file::decode_append_only_segment(&bytes).unwrap();
+            assert_eq!(
+                rt.db()
+                    .revalidate_append_only_bounds("events", "created_at", &segment),
+                Some((10_999, 10_999))
+            );
+            segment.rows[0].primary_key = 8_u64.to_be_bytes().to_vec();
+            assert_eq!(
+                rt.db()
+                    .revalidate_append_only_bounds("events", "created_at", &segment),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn retention_bounds_require_all_rows_and_convert_system_seconds() {
+        let runtime = crate::RedDBRuntime::in_memory().unwrap();
+        runtime
+            .execute_query("CREATE TABLE events (id INTEGER, ts TIMESTAMP) APPEND ONLY")
+            .unwrap();
+        let contract = runtime.db().collection_contract("events").unwrap();
+        let mut timed = UnifiedEntity::table_row(EntityId::new(1), "events", 1, Vec::new());
+        timed.data = EntityData::Row(RowData::with_names(
+            vec![Value::Timestamp(10)],
+            vec!["ts".into()],
+        ));
+        let missing = UnifiedEntity::table_row(EntityId::new(2), "events", 2, Vec::new());
+        assert_eq!(
+            append_only_retention_bounds(&contract, &[&timed]),
+            (Some(10_000), Some(10_000))
+        );
+        assert_eq!(
+            append_only_retention_bounds(&contract, &[&timed, &missing]),
+            (None, None)
+        );
+        let mut system = missing;
+        system.created_at = 10;
+        assert_eq!(
+            append_only_entity_timestamp_ms(&system, "created_at"),
+            Some(10_999)
+        );
+    }
 
     #[test]
     fn already_published_append_only_checkpoint_does_not_clone_payloads() {

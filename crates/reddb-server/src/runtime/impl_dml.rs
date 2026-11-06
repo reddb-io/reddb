@@ -2962,6 +2962,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let maintenance_limit = super::retention_sweeper::take_delete_limit();
         let topology_lock = self
             .index_store_ref()
             .collection_topology_lock(&query.table);
@@ -2974,7 +2975,7 @@ impl RedDBRuntime {
             self,
             &query.table,
             effective_filter.as_ref(),
-            None,
+            maintenance_limit,
         );
         let ids_to_delete = {
             let _topology_guard = topology_lock.read();

@@ -337,6 +337,7 @@ impl RedDBRuntime {
                 retention_sweeper: parking_lot::RwLock::new(
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
+                append_only_revalidation: parking_lot::Mutex::new(Default::default()),
                 transaction_state: crate::runtime::transaction_state::TransactionState::new(),
                 env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
                 lock_manager: Arc::new({

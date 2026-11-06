@@ -13,16 +13,19 @@ use serde_json::{Map, Value};
 use crate::{OpenMode, StdVfs, Vfs, VfsFile};
 
 use crate::append_only_segment::{
-    append_only_segment_chunk_checksums, decode_append_only_segment, AppendOnlySegmentBloom,
-    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+    AppendOnlySegmentBloom, AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec,
 };
 
+mod append_only;
 mod fork;
+mod incremental;
+mod journal;
 mod offline;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
 // path (`operational_manifest::ForkInfo`, etc.) is unchanged.
 pub use fork::{ForkHydrationState, ForkInfo, ForkOrigin, PromoteForkOutcome};
+pub use incremental::{IncrementalManifest, ManifestReadStep};
 
 const FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -37,7 +40,7 @@ pub const QUARANTINE_DIR: &str = "quarantine";
 /// storage mechanics for experiment-and-discard workflows; it is never a branch.
 pub const FORKS_DIR: &str = "forks";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum CollectionState {
     Active,
     PendingDrop,
@@ -62,7 +65,7 @@ impl CollectionState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CollectionEntry {
     state: CollectionState,
     path: String,
@@ -83,7 +86,7 @@ struct Manifest {
     fork_origin: Option<ForkOrigin>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppendOnlySegmentState {
     Active,
     PendingDrop,
@@ -108,7 +111,7 @@ impl AppendOnlySegmentState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppendOnlySegmentManifestEntry {
     pub collection: String,
     pub segment_id: u64,
@@ -119,13 +122,16 @@ pub struct AppendOnlySegmentManifestEntry {
     pub row_count: u64,
     pub retention_min_ms: Option<i64>,
     pub retention_max_ms: Option<i64>,
+    /// Column used by the producer when checking every row for the bounds.
+    /// Legacy manifests lack this provenance and cannot justify deletion.
+    pub retention_timestamp_column: Option<String>,
     pub primary_min: Option<String>,
     pub primary_max: Option<String>,
     pub primary_bloom: Option<AppendOnlySegmentBloom>,
     pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AppendOnlyRetiredState {
     row_count: u64,
     segment_high_water: u64,
@@ -135,6 +141,7 @@ struct AppendOnlyRetiredState {
 pub struct OperationalManifest<V = StdVfs> {
     root: PathBuf,
     vfs: V,
+    cache: std::sync::Arc<std::sync::Mutex<Option<journal::CachedManifest>>>,
 }
 
 /// Manifest-owned create operation. Construction durably prepares the physical
@@ -177,6 +184,7 @@ impl<V: Vfs> OperationalManifest<V> {
         Self {
             root: PathBuf::from(root),
             vfs,
+            cache: Default::default(),
         }
     }
 
@@ -250,11 +258,10 @@ impl<V: Vfs> OperationalManifest<V> {
             .collect::<Vec<_>>();
         if !pending_segments.is_empty() {
             for entry in &pending_segments {
-                let _ = self
-                    .vfs
-                    .remove_file(&self.append_only_segments_dir().join(&entry.path));
+                self.remove_append_only_segment_file(entry)?;
                 record_retired_append_only_segment(&mut manifest, entry);
             }
+            self.vfs.sync_dir(&self.append_only_segments_dir())?;
             manifest
                 .append_only_segments
                 .retain(|entry| entry.state != AppendOnlySegmentState::PendingDrop);
@@ -556,154 +563,6 @@ impl<V: Vfs> OperationalManifest<V> {
         self.root.to_string_lossy().into_owned()
     }
 
-    pub fn publish_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.publish_append_only_segment_with_retention_bounds(
-            collection, segment_id, codec, bytes, None, None,
-        )
-    }
-
-    pub fn publish_append_only_segment_with_retention_bounds(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-        retention_min_ms: Option<i64>,
-        retention_max_ms: Option<i64>,
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.ensure_dirs()?;
-        let decoded = decode_append_only_segment(bytes).map_err(invalid_data)?;
-        if decoded.codec != codec {
-            return Err(invalid_data("append-only segment codec metadata mismatch"));
-        }
-        let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        if manifest
-            .append_only_segments
-            .iter()
-            .any(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("append-only segment already published: {collection}/{segment_id}"),
-            ));
-        }
-
-        let path = self.append_only_segment_file_name(collection, segment_id);
-        let segment_path = self.append_only_segments_dir().join(&path);
-        if self.vfs.exists(&segment_path) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("closed append-only segment already exists: {path}"),
-            ));
-        }
-        {
-            let mut file = self.vfs.open(&segment_path, OpenMode::create_new())?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        self.vfs.sync_dir(&self.append_only_segments_dir())?;
-
-        let entry = AppendOnlySegmentManifestEntry {
-            collection: collection.to_string(),
-            segment_id,
-            state: AppendOnlySegmentState::Active,
-            path,
-            codec,
-            chunk_size: APPEND_ONLY_SEGMENT_CHUNK_BYTES,
-            row_count: decoded.rows.len() as u64,
-            retention_min_ms,
-            retention_max_ms,
-            primary_min: decoded.primary_min.as_ref().map(hex::encode),
-            primary_max: decoded.primary_max.as_ref().map(hex::encode),
-            primary_bloom: decoded.primary_bloom.clone(),
-            chunk_checksums: append_only_segment_chunk_checksums(bytes),
-        };
-        manifest.append_only_segments.push(entry.clone());
-        manifest
-            .append_only_segments
-            .sort_by(|a, b| (&a.collection, a.segment_id).cmp(&(&b.collection, b.segment_id)));
-        let retired = manifest
-            .append_only_retired
-            .entry(collection.to_string())
-            .or_default();
-        retired.segment_high_water = retired.segment_high_water.max(segment_id);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(entry)
-    }
-
-    pub fn begin_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(entry) = manifest
-            .append_only_segments
-            .iter_mut()
-            .find(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if entry.state == AppendOnlySegmentState::PendingDrop {
-            return Ok(true);
-        }
-        entry.state = AppendOnlySegmentState::PendingDrop;
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
-    pub fn finish_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if manifest.append_only_segments[index].state != AppendOnlySegmentState::PendingDrop {
-            manifest.append_only_segments[index].state = AppendOnlySegmentState::PendingDrop;
-            manifest.generation += 1;
-            self.publish(&manifest)?;
-            manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        }
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        let entry = manifest.append_only_segments.remove(index);
-        let _ = self
-            .vfs
-            .remove_file(&self.append_only_segments_dir().join(&entry.path));
-        record_retired_append_only_segment(&mut manifest, &entry);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
     fn protected_collection_paths(&self, manifest: &Manifest) -> io::Result<BTreeSet<String>> {
         let mut paths = active_collection_paths(manifest);
         paths.extend(self.fork_referenced_collection_paths()?);
@@ -720,6 +579,15 @@ impl<V: Vfs> OperationalManifest<V> {
         self.collections_dir().join(self.collection_file_name(name))
     }
 
+    /// Encode the historical format for compatibility fixtures and offline inspection.
+    pub fn legacy_manifest_bytes_for_test(&self) -> io::Result<Vec<u8>> {
+        manifest_to_bytes(
+            &self
+                .load_current()?
+                .ok_or_else(|| invalid_data("missing manifest"))?,
+        )
+    }
+
     pub fn current_manifest_path_for_test(&self) -> PathBuf {
         self.root.join(MANIFEST_FILE)
     }
@@ -730,44 +598,6 @@ impl<V: Vfs> OperationalManifest<V> {
 
     pub fn append_only_segment_path_for_test(&self, file_name: &str) -> PathBuf {
         self.append_only_segments_dir().join(file_name)
-    }
-
-    pub fn append_only_segments_for_test(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        self.append_only_segments()
-    }
-
-    pub fn append_only_segments(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| active_append_only_segments(&manifest))
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_segments_with_pending_for_test(
-        &self,
-    ) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| manifest.append_only_segments)
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| append_only_published_rows(&manifest, collection))
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows_for_test(&self, collection: &str) -> io::Result<u64> {
-        self.append_only_published_rows(collection)
-    }
-
-    pub fn next_append_only_segment_id(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| next_append_only_segment_id(&manifest, collection))
-            .unwrap_or(1))
     }
 
     pub fn write_next_manifest_for_test(&self, name: &str) -> io::Result<()> {
@@ -795,26 +625,25 @@ impl<V: Vfs> OperationalManifest<V> {
     }
 
     fn load_current(&self) -> io::Result<Option<Manifest>> {
-        let path = self.root.join(MANIFEST_FILE);
-        match self.read_file(&path) {
-            Ok(bytes) => manifest_from_bytes(&bytes).map(Some),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
+        };
+        while !reader.step(64 * 1024)?.complete {}
+        Ok(Some(reader.snapshot()?.clone()))
+    }
+
+    fn load_current_bounded(&self, limit: usize) -> io::Result<Option<Manifest>> {
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
+        };
+        if !reader.step(limit)?.complete {
+            return Ok(None);
         }
+        Ok(Some(reader.snapshot()?.clone()))
     }
 
     fn publish(&self, manifest: &Manifest) -> io::Result<()> {
-        self.ensure_dirs()?;
-        let current = self.root.join(MANIFEST_FILE);
-        let next = self.root.join(NEXT_MANIFEST_FILE);
-        let bytes = manifest_to_bytes(manifest)?;
-        {
-            let mut file = self.vfs.open(&next, OpenMode::create_truncate())?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        self.vfs.rename(&next, &current)?;
-        self.vfs.sync_dir(&self.root)
+        self.publish_journal(manifest)
     }
 
     fn prepare_collection_file_by_name(&self, file_name: &str) -> io::Result<()> {
@@ -1051,33 +880,71 @@ fn next_append_only_segment_id(manifest: &Manifest, collection: &str) -> u64 {
     active_high_water.max(retired_high_water).saturating_add(1)
 }
 
-fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
-    let checksum = checksum_manifest(manifest);
+struct ManifestChecksumWriter(crc32fast::Hasher);
+
+impl io::Write for ManifestChecksumWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn checksum_manifest_body(body: &Map<String, Value>) -> io::Result<u32> {
+    let mut writer = ManifestChecksumWriter(crc32fast::Hasher::new());
+    serde_json::to_writer(&mut writer, body).map_err(invalid_data)?;
+    Ok(writer.0.finalize())
+}
+
+fn write_manifest(writer: impl io::Write, manifest: &Manifest) -> io::Result<()> {
     let mut object = manifest_body_json(manifest);
+    let checksum = checksum_manifest_body(&object)?;
     object.insert(
         "checksum".to_string(),
         Value::String(format!("{checksum:08x}")),
     );
-    serde_json::to_vec_pretty(&Value::Object(object)).map_err(invalid_data)
+    serde_json::to_writer_pretty(writer, &object).map_err(manifest_json_error)
+}
+
+fn manifest_json_error(error: serde_json::Error) -> io::Error {
+    if let Some(kind) = error.io_error_kind() {
+        io::Error::new(kind, error)
+    } else {
+        invalid_data(error)
+    }
+}
+
+fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_manifest(&mut bytes, manifest)?;
+    Ok(bytes)
 }
 
 fn manifest_from_bytes(bytes: &[u8]) -> io::Result<Manifest> {
-    let value: Value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    let value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    manifest_from_value(value)
+}
+
+fn manifest_from_value(mut value: Value) -> io::Result<Manifest> {
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| invalid_data("manifest root must be an object"))?;
     let checksum = object
-        .get("checksum")
-        .and_then(Value::as_str)
+        .remove("checksum")
+        .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| invalid_data("manifest checksum is missing"))?;
-    let manifest = manifest_from_object(object)?;
-    let expected = format!("{:08x}", checksum_manifest(&manifest));
+    // Check the persisted shape before adding defaults for older formats.
+    // Historical manifests did not contain segment state or retirement data.
+    let expected = format!("{:08x}", checksum_manifest_body(object)?);
     if checksum != expected {
         return Err(invalid_data(format!(
             "manifest checksum mismatch: expected {expected}, got {checksum}"
         )));
     }
-    Ok(manifest)
+    manifest_from_object(object)
 }
 
 fn manifest_from_object(object: &Map<String, Value>) -> io::Result<Manifest> {
@@ -1232,6 +1099,15 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         .transpose()?;
     let retention_min_ms = object.get("retention_min_ms").and_then(Value::as_i64);
     let retention_max_ms = object.get("retention_max_ms").and_then(Value::as_i64);
+    let retention_timestamp_column = object
+        .get("retention_timestamp_column")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_data("invalid retention timestamp column"))
+        })
+        .transpose()?;
     let chunk_checksums = object
         .get("chunk_checksums")
         .and_then(Value::as_array)
@@ -1249,6 +1125,7 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         row_count,
         retention_min_ms,
         retention_max_ms,
+        retention_timestamp_column,
         primary_min,
         primary_max,
         primary_bloom,
@@ -1353,12 +1230,6 @@ fn fork_origin_from_object(object: &Map<String, Value>) -> io::Result<ForkOrigin
     })
 }
 
-fn checksum_manifest(manifest: &Manifest) -> u32 {
-    let body = serde_json::to_vec(&Value::Object(manifest_body_json(manifest)))
-        .expect("manifest body is JSON encodable");
-    crc32fast::hash(&body)
-}
-
 fn manifest_body_json(manifest: &Manifest) -> Map<String, Value> {
     let mut collections = Map::new();
     for (name, entry) in &manifest.collections {
@@ -1447,6 +1318,12 @@ fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value
         object.insert(
             "retention_max_ms".to_string(),
             Value::from(retention_max_ms),
+        );
+    }
+    if let Some(column) = &entry.retention_timestamp_column {
+        object.insert(
+            "retention_timestamp_column".to_string(),
+            Value::String(column.clone()),
         );
     }
     if let Some(primary_min) = &entry.primary_min {

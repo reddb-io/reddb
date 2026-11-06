@@ -1226,6 +1226,8 @@ struct RuntimeInner {
     /// In-memory only; resets across restart.
     pub(crate) retention_sweeper:
         parking_lot::RwLock<crate::runtime::retention_sweeper::RetentionSweeperState>,
+    pub(crate) append_only_revalidation:
+        parking_lot::Mutex<crate::runtime::append_only_revalidation::AppendOnlyMaintenance>,
     /// Per-connection transaction contexts, local tenant overrides, and the
     /// shared MVCC snapshot manager behind the Transaction State interface.
     transaction_state: crate::runtime::transaction_state::TransactionState,
@@ -1571,6 +1573,7 @@ pub mod ai;
 mod allocator_pressure;
 pub mod analytics_schema_registry;
 pub(crate) mod analytics_source_catalog;
+mod append_only_revalidation;
 pub mod ask_pipeline;
 pub mod audit_log;
 pub mod audit_query;
