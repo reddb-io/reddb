@@ -4,6 +4,79 @@ use super::commit::{StoreWalAction, StoreWalCaptureGuard};
 use super::*;
 
 impl UnifiedStore {
+    /// Publish the boot-time red.system replacements together, retaining the
+    /// prior rows for rollback if the embedded WAL publication fails.
+    pub(crate) fn write_system_config_batch(
+        &self,
+        rows: Vec<(UnifiedEntity, Vec<EntityId>)>,
+    ) -> Result<(), StoreError> {
+        assert!(!Self::deferred_store_wal_capture_active());
+        let _publication = self.vault_publication_lock.lock();
+        let path = self
+            .config
+            .embedded_wal_path
+            .as_deref()
+            .expect("embedded system config");
+        let session = self
+            .embedded_commit_session
+            .get_or_init(|| crate::storage::EmbeddedRdbArtifact::group_commit_session(path));
+        session
+            .check()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let mut before = Vec::new();
+        for (_, previous) in &rows {
+            for id in previous {
+                let entity = self
+                    .get("red_config", *id)
+                    .ok_or(StoreError::EntityNotFound(*id))?;
+                let metadata = self.get_metadata("red_config", *id);
+                before.push((
+                    *id,
+                    StoreWalAction::upsert_entity(
+                        "red_config",
+                        &entity,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    ),
+                ));
+            }
+        }
+        let mut inserted = Vec::new();
+        let capture = StoreWalCaptureGuard::begin(Some(session));
+        let staged = (|| {
+            for (mut entity, previous) in rows {
+                entity.id = self.next_entity_id();
+                inserted.push(entity.id);
+                self.insert_auto("red_config", entity)?;
+                self.delete_batch("red_config", &previous)?;
+            }
+            Ok(())
+        })();
+        let actions = capture.finish();
+        let committed = staged.and_then(|()| self.finish_paged_write(actions.actions));
+        if let Err(error) = committed {
+            for id in inserted.into_iter().chain(before.iter().map(|(id, _)| *id)) {
+                self.apply_replayed_action(
+                    &StoreWalAction::DeleteEntityRecord {
+                        collection: "red_config".to_string(),
+                        entity_id: id.raw(),
+                    },
+                    true,
+                )?;
+            }
+            if !before.is_empty() {
+                self.get_collection("red_config")
+                    .expect("system config collection")
+                    .force_seal()?;
+                for (_, action) in before {
+                    self.apply_replayed_action(&action, true)?;
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn write_keyed_row(
         &self,
         collection: &str,

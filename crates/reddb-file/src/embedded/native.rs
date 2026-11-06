@@ -170,6 +170,16 @@ impl EmbeddedRdbArtifact {
         Self::open_inner(path, true)
     }
 
+    /// Open the selected snapshot and return the validated image.
+    pub fn open_with_snapshot(
+        path: impl AsRef<Path>,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        FileExt::lock_shared(&file)?;
+        Self::open_inner_with_snapshot(&mut NativeFile(&mut file), path)
+    }
+
     fn open_inner(
         path: impl AsRef<Path>,
         validate_snapshot_refs: bool,

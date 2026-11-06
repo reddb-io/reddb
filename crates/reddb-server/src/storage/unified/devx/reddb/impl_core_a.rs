@@ -516,20 +516,12 @@ impl RedDB {
         } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 let validation_started = std::time::Instant::now();
-                match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
-                    Ok(artifact) => {
+                match crate::storage::EmbeddedRdbArtifact::open_with_snapshot(&path_buf) {
+                    Ok((artifact, snapshot)) => {
                         crate::storage::unified::store::trace_startup_phase(
                             &path_buf,
-                            "embedded_snapshot_validation",
+                            "embedded_snapshot_validation_and_read",
                             validation_started,
-                        );
-                        let snapshot_read_started = std::time::Instant::now();
-                        let snapshot =
-                            crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)?;
-                        crate::storage::unified::store::trace_startup_phase(
-                            &path_buf,
-                            "embedded_snapshot_read",
-                            snapshot_read_started,
                         );
                         let snapshot_decode_started = std::time::Instant::now();
                         let store = match snapshot {

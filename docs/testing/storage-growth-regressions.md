@@ -90,12 +90,25 @@ The four-case fixture remains available through the manually dispatched storage
 recovery workflow, which retains its receipt. A single case can be selected
 locally with `--case serverless`.
 
-The Linux sparse-file startup regression measures pager data-file reads on the
-calling thread through the first query for identical live data at compact and
-50 GiB logical sizes.
-The physical allocation remains small. This guards against work proportional to
-logical file length, but does not emulate 50 GiB of populated data or count all
-WAL, metadata and network I/O. The serverless generation crash matrix separately
+The Linux and Windows sparse-file startup regressions measure pager data-file
+reads on the calling thread through the first query for identical live data at
+compact and 50 GiB logical sizes, in both resident and bounded disk-resident
+profiles. They also start separate processes and report process-wide read bytes,
+readiness, and first-result time, then write, checkpoint, and reopen the sparse
+database. Run them with:
+
+```sh
+cargo test -p reddb-io-server --lib runtime::startup_io_budget:: -- --test-threads=1 --nocapture
+```
+
+Physical allocation remains small; the sparse extent contains holes, not 50 GiB
+of populated rows. Process restarts do not evict the OS page cache. This guards
+against work proportional to the logical file extent, but does not establish
+latency for a fully populated database, remote hydration, or cold physical I/O.
+The embedded startup test separately uses a real multi-megabyte snapshot and a
+fresh process to bound total snapshot read bytes. The embedded format still
+materializes the complete snapshot and decoded data in memory.
+The serverless generation crash matrix separately
 checks that the selected published generation hydrates to queryable rows after
 each publication interruption; the partial-cache/source fixture checks failed
 hydration and retry. They do not model a process kill at every hydration write.

@@ -382,6 +382,10 @@ impl UnifiedStore {
         } else {
             manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
+        let batch_system = prefix == "red.system"
+            && self.config.embedded_wal_path.is_some()
+            && !Self::deferred_store_wal_capture_active();
+        let mut system_rows = Vec::new();
         let mut saved = 0;
         for (key, value) in pairs {
             let stale = previous.remove(&key).unwrap_or_default();
@@ -395,9 +399,6 @@ impl UnifiedStore {
                 }
             }
             let stale: Vec<EntityId> = stale.into_iter().map(|(id, _)| id).collect();
-            // Insert before removing the old rows: a failure in between
-            // leaves a duplicate that readers resolve to the newest row,
-            // never a missing key.
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
@@ -417,11 +418,21 @@ impl UnifiedStore {
                     schema: None,
                 }),
             );
+            if batch_system {
+                system_rows.push((entity, stale));
+                saved += 1;
+                continue;
+            }
+            // Insert before removing multiple old rows: a failure in between
+            // leaves a duplicate that readers resolve to the newest row.
             self.insert_auto("red_config", entity)?;
             saved += 1;
             if !stale.is_empty() {
                 self.delete_batch("red_config", &stale)?;
             }
+        }
+        if !system_rows.is_empty() {
+            self.write_system_config_batch(system_rows)?;
         }
         Ok(saved)
     }
