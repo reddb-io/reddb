@@ -52,10 +52,9 @@ impl RedDBRuntime {
         self.inner.retention_sweeper.read().snapshot()
     }
 
-    /// Drive one tick of the retention sweeper. Mutable collections
-    /// physically delete at most `batch_size` expired rows; append-only
-    /// collections retire at most `batch_size` whole expired segments across
-    /// collections through the operational manifest. Records the counters that
+    /// Drive one tick of the retention sweeper. Mutable and append-only
+    /// collections physically delete at most `batch_size` expired rows across
+    /// collections through the regular WAL path. Records the counters that
     /// `red.retention` exposes.
     /// Called from the background sweeper thread; safe to invoke directly
     /// from tests with a small batch size to drain rows deterministically.
@@ -68,7 +67,7 @@ impl RedDBRuntime {
     /// sweeper's deletes via the same WAL stream with no special
     /// handling on the replication side.
     ///
-    /// Mutable scans inspect at most `batch_size` physical positions across
+    /// Scans inspect at most `batch_size` physical positions across
     /// collections and resume from their previous position on the next tick.
     pub fn sweep_retention_tick(&self, batch_size: usize) {
         if batch_size == 0 {

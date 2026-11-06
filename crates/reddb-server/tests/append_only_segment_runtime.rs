@@ -74,7 +74,15 @@ fn append_only_retention_deletes_expired_rows_without_external_segments() {
     runtime
         .execute_query("INSERT INTO events (id, msg) VALUES (2, 'live')")
         .unwrap();
-    runtime.sweep_retention_tick(1000);
+    // A tick deliberately yields when a background checkpoint owns the
+    // publication fence. Retry bounded work instead of assuming immediate entry.
+    for _ in 0..100 {
+        runtime.sweep_retention_tick(1000);
+        if manager.count() == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(manager.count(), 1);
     assert!(runtime.execute_query("DELETE FROM events").is_err());
     let result = runtime.execute_query("SELECT rows_swept_total, segments_retired_total FROM red.retention WHERE name = 'events'").unwrap();

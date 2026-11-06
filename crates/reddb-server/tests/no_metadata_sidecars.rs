@@ -18,17 +18,19 @@ fn options(path: &Path, bounded: bool) -> RedDBOptions {
         .with_durability_mode(DurabilityMode::WalDurableGrouped)
 }
 
-fn assert_database_files_only(root: &Path) {
+fn assert_database_state_files_only(root: &Path) {
     for entry in std::fs::read_dir(root).expect("database directory") {
         let entry = entry.expect("entry");
         let path = entry.path();
         if path.is_dir() {
-            assert_database_files_only(&path);
+            assert_database_state_files_only(&path);
         } else {
             let name = entry.file_name();
             let name = name.to_str().expect("file name");
+            // Security audit output is diagnostic evidence, not a recovery
+            // sidecar. Its existing sink is preserved pending the policy decision.
             assert!(
-                name == "data.rdb" || name == "data.rdb-uwal",
+                name == "data.rdb" || name == "data.rdb-uwal" || name == ".audit.log",
                 "unexpected database sidecar: {}",
                 path.display()
             );
@@ -53,7 +55,7 @@ fn metadata_stays_inside_database_across_checkpoints_and_cold_boot() {
                 .execute_query("CREATE INDEX names ON documents (name) USING HASH")
                 .expect("index");
             runtime.checkpoint().expect("checkpoint");
-            assert_database_files_only(directory.path());
+            assert_database_state_files_only(directory.path());
         }
         for read_only in [false, true, false] {
             let runtime =
@@ -77,7 +79,7 @@ fn metadata_stays_inside_database_across_checkpoints_and_cold_boot() {
                 1
             );
             runtime.checkpoint().expect("checkpoint or read-only no-op");
-            assert_database_files_only(directory.path());
+            assert_database_state_files_only(directory.path());
         }
     }
 }
@@ -107,7 +109,7 @@ fn acknowledged_metadata_survives_process_exit_without_checkpoint() {
         .status()
         .expect("child process");
     assert!(status.success());
-    assert_database_files_only(directory.path());
+    assert_database_state_files_only(directory.path());
     for read_only in [true, false, true] {
         let runtime = RedDBRuntime::with_options(options(&path, true).with_read_only(read_only))
             .expect("WAL recovery");
@@ -130,7 +132,7 @@ fn acknowledged_metadata_survives_process_exit_without_checkpoint() {
         );
         runtime.checkpoint().expect("checkpoint");
     }
-    assert_database_files_only(directory.path());
+    assert_database_state_files_only(directory.path());
 }
 
 #[test]
@@ -198,7 +200,7 @@ fn legacy_metadata_is_imported_before_its_sidecars_are_removed() {
             reddb_server::catalog::CollectionModel::Document
         );
         runtime.checkpoint().expect("durable import");
-        assert_database_files_only(directory.path());
+        assert_database_state_files_only(directory.path());
     }
     let reader = RedDBRuntime::with_options(options(&path, true).with_read_only(true))
         .expect("cold boot without sidecars");

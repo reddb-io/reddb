@@ -376,16 +376,66 @@ impl RedDBRuntime {
                 resource_limits,
                 query_budget_slots: AtomicU64::new(0),
                 audit_log: {
-                    let (destination, _) = crate::api::tier_wiring::current_log_destinations();
-                    let destination = if options.read_only {
+                    // Default audit-log path for the in-memory case
+                    // sits in the system temp dir; persistent runs
+                    // place it next to the resolved data file.
+                    //
+                    // gh-471 iter 2: route through the resolved
+                    // `LogDestination`. Performance/Max tiers emit a
+                    // file-backed log destination under the file-owned
+                    // support-directory logs tier;
+                    // lower tiers / ephemeral runs report `Stderr`
+                    // and we keep the legacy file-next-to-data sink.
+                    // #1375 — single-file embedded mode keeps the data
+                    // directory to exactly the `.rdb` artifact, so the audit
+                    // log must NOT land as a sibling. Route it to a
+                    // process-unique temp location even when a data path is
+                    // set; only the non-embedded case uses the data dir.
+                    let data_path = if embedded_single_file || options.read_only {
+                        std::env::temp_dir()
+                            .join("reddb-embedded-runtime")
+                            .join(format!("audit-{}", std::process::id()))
+                    } else {
+                        options
+                            .data_path
+                            .clone()
+                            .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
+                    };
+                    let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
+                    let audit_dest = if options.read_only {
                         crate::storage::layout::LogDestination::Stderr
                     } else {
-                        destination
+                        audit_dest
                     };
-                    Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
-                        &destination,
-                        &options.resolved_path(reddb_file::default_database_path()),
-                    ))
+                    if !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
+                        && (embedded_single_file
+                            || options.read_only
+                            || options
+                                .metadata
+                                .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
+                    {
+                        // The Stderr/Syslog lower-tier sink resolves to a
+                        // `for_data_path` sibling that collides across concurrent
+                        // temp-dir runtimes — nextest's process-per-test model
+                        // truncates one shared file, flaking audit assertions.
+                        // Pin a unique sibling for these short-lived ephemeral /
+                        // single-file embedded runtimes. The file-owned support-
+                        // dir tier (`File`) is already per-data unique, so leave
+                        // it to `for_destination` (#1375: the embedded audit then
+                        // still never lands a sibling next to the `.rdb`).
+                        let audit_path = reddb_file::layout::sibling_path(
+                            &data_path,
+                            &reddb_file::layout::sidecar_file_name(&data_path, "audit.log"),
+                        );
+                        Arc::new(crate::runtime::audit_log::AuditLogger::with_path(
+                            audit_path,
+                        ))
+                    } else {
+                        Arc::new(crate::runtime::audit_log::AuditLogger::for_destination(
+                            &audit_dest,
+                            &data_path,
+                        ))
+                    }
                 },
                 control_event_ledger: parking_lot::RwLock::new(Arc::new(
                     crate::runtime::control_events::RuntimeLedger::new(db.store()),
