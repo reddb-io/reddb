@@ -60,7 +60,7 @@ pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
 }
 
 fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
-    let catalog = Catalog::read(&source)?;
+    let catalog = Catalog::read(source)?;
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             || catalog.resume.is_some(),
@@ -82,7 +82,7 @@ fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
             )?;
         }
         inspect_tree(
-            &source,
+            source,
             &mut report,
             &collection.collection,
             "collection",
@@ -97,11 +97,11 @@ fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
         )?;
         for (name, state) in &resume.collections {
             if let Some(root) = state.key_index_root {
-                inspect_tree(&source, &mut report, name, "key index", root, None);
+                inspect_tree(source, &mut report, name, "key index", root, None);
             }
             for (index, state) in &state.secondary_indices {
                 inspect_tree(
-                    &source,
+                    source,
                     &mut report,
                     name,
                     &format!("secondary index {index}"),
