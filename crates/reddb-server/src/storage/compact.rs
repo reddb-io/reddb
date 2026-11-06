@@ -68,6 +68,116 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
     compact_paged_inner(source, destination, None, None)
 }
 
+/// Replay a supported pending unified WAL only against an isolated copy, then
+/// publish a validated compacted database. The locked source is never opened
+/// by a writer. Interrupted checkpoints, DWB and non-unified WALs are refused.
+pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<CompactionReport> {
+    use crate::storage::wal::{WalReader, WalRecord};
+    let source = source.canonicalize()?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()?;
+    for owned in [
+        f::support_dir_for(&source),
+        source.with_file_name(format!("{}.ops", f::data_file_name(&source))),
+    ] {
+        if owned.exists() {
+            ensure(
+                !parent.starts_with(owned.canonicalize()?),
+                "destination is inside source storage",
+            )?;
+        }
+    }
+    let guard = Source::open_for_wal_recovery(&source)?;
+    salvage::verify_supported_source(&source, &guard)?;
+    ensure(
+        guard.header.physical == f::PhysicalFileHeader::default(),
+        "physical metadata requires separate WAL recovery qualification",
+    )?;
+    ensure(
+        !f::physical_metadata_binary_path(&source).exists()
+            && !f::physical_metadata_json_path(&source).exists(),
+        "physical metadata sidecar requires separate WAL recovery qualification",
+    )?;
+    let vault = guard.raw_page(2, false)?;
+    ensure(
+        vault.as_bytes().iter().all(|b| *b == 0)
+            || (vault.page_type()? == PageType::Vault && vault.content().iter().all(|b| *b == 0)),
+        "WAL recovery with a saved vault is not yet supported",
+    )?;
+    let wal = f::unified_wal_path(&source);
+    let length = std::fs::metadata(&wal)?.len();
+    ensure(
+        length > f::WAL_FILE_HEADER_BYTES as u64,
+        "no pending unified WAL",
+    )?;
+    ensure(
+        length <= 256 * 1024 * 1024,
+        "WAL exceeds recovery verification budget",
+    )?;
+    for entry in WalReader::open(&wal)?.iter() {
+        match entry?.1 {
+            WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {
+                return Err("WAL contains runtime-owned data requiring separate recovery".into());
+            }
+            _ => {}
+        }
+    }
+    std::fs::create_dir(destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let stage = destination.join(".wal-replay");
+    std::fs::create_dir(&stage)?;
+    let name = source.file_name().ok_or("source filename is missing")?;
+    let staged_source = stage.join(name);
+    let mut input = File::open(&source)?;
+    let mut output = create_new(&staged_source)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    verify_file_copy(&source, &staged_source)?;
+    copy_sidecars(&source, &staged_source)?;
+    let config = crate::storage::unified::UnifiedStoreConfig {
+        resident_memory_bytes_max: (guard.header.version
+            >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION)
+            .then_some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+    {
+        let store =
+            crate::storage::unified::UnifiedStore::open_with_config(&staged_source, config)?;
+        store.persist()?;
+    }
+    let validated_dir = stage.join("validated");
+    let report = compact_paged(&staged_source, &validated_dir)?;
+    let verified = scrub_paged(&validated_dir.join(name))?;
+    ensure(
+        verified.assets_verified
+            && verified.trees.findings.is_empty()
+            && verified.unclassified_pages == 0,
+        "replayed store failed scrub",
+    )?;
+    let final_path = destination.join(name);
+    copy_sidecars(&validated_dir.join(name), &final_path)?;
+    write_new(
+        &destination.join("compaction.json"),
+        report.machine_json().as_bytes(),
+    )?;
+    sync_directory(destination)?;
+    std::fs::hard_link(validated_dir.join(name), &final_path)?;
+    sync_directory(destination)?;
+    // The published database must not retain a second pathname with a
+    // different WAL family: future opens through that name would be unsafe.
+    std::fs::remove_file(validated_dir.join(name))?;
+    sync_directory(&validated_dir)?;
+    Ok(report)
+}
+
 fn compact_paged_inner(
     source: &Path,
     destination: &Path,
@@ -133,7 +243,9 @@ fn compact_paged_inner(
                 root.root_page == loss.root_page,
                 "collection root changed during salvage",
             )?;
-            root.root_page = 0;
+            if loss.skipped_pages == [loss.root_page] {
+                root.root_page = 0;
+            }
         }
     }
     let name = source_path
@@ -159,16 +271,29 @@ fn compact_paged_inner(
         },
     )?);
     let mut roots = BTreeMap::new();
+    let mut recovered_trees = BTreeMap::new();
     let mut records = 0;
     let mut repaired_leaf_backlinks = 0;
     for collection in &catalog.roots {
-        let count = rewrite_tree(
-            &source,
-            &target,
-            collection.root_page,
-            &mut roots,
-            &mut repaired_leaf_backlinks,
-        )?;
+        let loss = lost_collections.and_then(|report| {
+            report
+                .collections
+                .iter()
+                .find(|loss| loss.collection == collection.collection && collection.root_page != 0)
+        });
+        let count = if let Some(loss) = loss {
+            let (count, hash) = rewrite_recoverable_tree(&source, &target, loss, &mut roots)?;
+            recovered_trees.insert(loss.root_page, (count, hash));
+            count
+        } else {
+            rewrite_tree(
+                &source,
+                &target,
+                collection.root_page,
+                &mut roots,
+                &mut repaired_leaf_backlinks,
+            )?
+        };
         if let Some(resume) = &catalog.resume {
             ensure(
                 resume.collections[&collection.collection].entities == count,
@@ -207,13 +332,50 @@ fn compact_paged_inner(
         if let Some(salvage) = salvage {
             for index in &salvage.indexes {
                 if index.root_page != 0 {
-                    source.claim(index.root_page)?;
+                    match source.raw_page(index.root_page, true) {
+                        Ok(_) => {
+                            let tree = BTree::with_root(Arc::clone(&source), index.root_page);
+                            let skipped = tree.visit_recoverable_leaves(
+                                |id| {
+                                    source.claim(id).map_err(|error| {
+                                        reddb_engine::storage::btree::BTreeError::Corrupted(
+                                            error.to_string(),
+                                        )
+                                    })
+                                },
+                                |_, _| Ok(()),
+                            )?;
+                            ensure(
+                                !skipped.is_empty(),
+                                "index damage is not a verified leaf checksum failure",
+                            )?;
+                        }
+                        Err(error) => {
+                            ensure(
+                                matches!(
+                                    error.downcast_ref::<reddb_engine::storage::page::PageError>(),
+                                    Some(
+                                        reddb_engine::storage::page::PageError::ChecksumMismatch { .. }
+                                    )
+                                ),
+                                "index root failure is not a checksum mismatch",
+                            )?;
+                            ensure(
+                                source.raw_page(index.root_page, false)?.page_type()?
+                                    == PageType::BTreeLeaf,
+                                "damaged interior index root cannot be recovered",
+                            )?;
+                            source.claim(index.root_page)?;
+                        }
+                    }
                 }
             }
         }
         if let Some(losses) = lost_collections {
             for collection in &losses.collections {
-                source.claim(collection.root_page)?;
+                if collection.skipped_pages == [collection.root_page] {
+                    source.claim(collection.root_page)?;
+                }
             }
         }
         ensure(
@@ -269,7 +431,11 @@ fn compact_paged_inner(
         "rewritten catalog differs from source",
     )?;
     for (&old, &new) in &roots {
-        verify_tree(&source, &reopened, old, new)?;
+        if let Some((count, hash)) = recovered_trees.get(&old) {
+            verify_recovered_tree(&reopened, new, *count, *hash)?;
+        } else {
+            verify_tree(&source, &reopened, old, new)?;
+        }
     }
     for (id, expected, checksum) in assets_verification {
         let page = reopened.raw_page(id, checksum)?;
@@ -321,6 +487,80 @@ fn compact_paged_inner(
 }
 fn identity_roots(roots: &BTreeMap<u32, u32>) -> BTreeMap<u32, u32> {
     roots.values().map(|root| (*root, *root)).collect()
+}
+
+fn hash_record(hasher: &mut blake3::Hasher, key: &[u8], value: &[u8]) {
+    hasher.update(&(key.len() as u64).to_le_bytes());
+    hasher.update(key);
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn rewrite_recoverable_tree(
+    source: &Arc<Source>,
+    target: &Arc<Pager>,
+    loss: &PagedCollectionLoss,
+    roots: &mut BTreeMap<u32, u32>,
+) -> Result<(u64, blake3::Hash)> {
+    ensure(
+        !roots.contains_key(&loss.root_page),
+        "duplicate live tree owner",
+    )?;
+    let original = BTree::with_root(Arc::clone(source), loss.root_page);
+    let destination = BTree::new(Arc::clone(target));
+    let mut hash = blake3::Hasher::new();
+    let mut count = 0u64;
+    let mut batch = Vec::new();
+    let mut size = 0usize;
+    let skipped = original.visit_recoverable_leaves(
+        |id| {
+            source.claim(id).map_err(|error| {
+                reddb_engine::storage::btree::BTreeError::Corrupted(error.to_string())
+            })
+        },
+        |key, value| {
+            hash_record(&mut hash, &key, &value);
+            size += key.len() + value.len();
+            batch.push((key, value));
+            count += 1;
+            if size >= 1024 * 1024 || batch.len() >= 512 {
+                destination.bulk_insert_sorted(&batch)?;
+                batch.clear();
+                size = 0;
+            }
+            Ok(())
+        },
+    )?;
+    ensure(
+        skipped == loss.skipped_pages,
+        "damaged pages changed during recovery",
+    )?;
+    destination.bulk_insert_sorted(&batch)?;
+    roots.insert(loss.root_page, destination.root_page_id());
+    Ok((count, hash.finalize()))
+}
+
+fn verify_recovered_tree(
+    source: &Arc<Source>,
+    root: u32,
+    count: u64,
+    expected: blake3::Hash,
+) -> Result<()> {
+    let tree = BTree::with_root(Arc::clone(source), root);
+    let (owned, _) = inventory_tree(source, &tree, false)?;
+    ensure(owned == count, "recovered tree record count differs")?;
+    let mut cursor = tree.cursor_first()?;
+    let mut hash = blake3::Hasher::new();
+    let mut actual = 0u64;
+    while let Some((key, value)) = cursor.next_with_budget(32 * 1024 * 1024)? {
+        hash_record(&mut hash, &key, &value);
+        actual += 1;
+        ensure(actual <= count, "recovered tree has extra records")?;
+    }
+    ensure(
+        actual == count && hash.finalize() == expected,
+        "recovered tree failed record parity",
+    )
 }
 
 fn rewrite_tree(

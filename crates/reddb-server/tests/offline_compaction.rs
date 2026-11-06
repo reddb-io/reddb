@@ -1,5 +1,6 @@
 use reddb_server::storage::compact::{
-    compact_paged, salvage_paged_collections, salvage_paged_indexes, scrub_paged, scrub_paged_trees,
+    compact_paged, recover_paged_wal, salvage_paged_collections, salvage_paged_indexes,
+    scrub_paged, scrub_paged_trees,
 };
 use reddb_server::storage::engine::{BTree, Page, PageType, Pager, PagerConfig, HEADER_SIZE};
 use std::sync::Arc;
@@ -17,6 +18,145 @@ fn payload(id: u64) -> Vec<u8> {
             state.to_le_bytes()[0]
         })
         .collect()
+}
+
+#[test]
+fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    {
+        let store = UnifiedStore::open(&source).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(10)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(20)]),
+            )
+            .unwrap();
+    }
+    let wal = reddb_file::unified_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 999 }).unwrap();
+        let uncommitted = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::DeleteEntityRecord {
+                collection: "rows".into(),
+                entity_id: EntityId::new(1).raw(),
+            },
+        )
+        .unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 999,
+                page_id: 0,
+                data: uncommitted,
+            })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+    let source_image = std::fs::read(&source).unwrap();
+    let wal_image = std::fs::read(&wal).unwrap();
+    assert!(wal_image.len() > reddb_file::WAL_FILE_HEADER_BYTES);
+    let output = directory.path().join("recovered");
+    recover_paged_wal(&source, &output).expect("recover pending WAL");
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_image);
+    for _ in 0..2 {
+        let store = UnifiedStore::open(output.join("source.rdb")).unwrap();
+        for (id, value) in [(1, 10), (2, 20)] {
+            assert_eq!(
+                store
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::Integer(value)]
+            );
+        }
+    }
+    let mut truncated = wal_image.clone();
+    truncated.pop();
+    std::fs::write(&wal, &truncated).unwrap();
+    let failed = directory.path().join("truncated");
+    assert!(recover_paged_wal(&source, &failed).is_err());
+    assert!(!failed.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), truncated);
+    let mut corrupt = wal_image.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    std::fs::write(&wal, &corrupt).unwrap();
+    let failed = directory.path().join("corrupt-wal");
+    assert!(recover_paged_wal(&source, &failed).is_err());
+    assert!(!failed.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), corrupt);
+}
+
+#[test]
+fn recover_wal_child_process() {
+    let Some(source) = std::env::var_os("REDDB_WAL_RECOVERY_TEST_SOURCE") else {
+        return;
+    };
+    let destination = std::env::var_os("REDDB_WAL_RECOVERY_TEST_DEST").unwrap();
+    let _ = recover_paged_wal(
+        std::path::Path::new(&source),
+        std::path::Path::new(&destination),
+    );
+}
+
+#[test]
+fn interrupted_wal_copy_does_not_publish_or_modify_source() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let wal = reddb_file::unified_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 123 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let source_image = std::fs::read(&source).unwrap();
+    let wal_image = std::fs::read(&wal).unwrap();
+    let destination = directory.path().join("interrupted");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "recover_wal_child_process"])
+        .env("REDDB_WAL_RECOVERY_TEST_SOURCE", &source)
+        .env("REDDB_WAL_RECOVERY_TEST_DEST", &destination)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !destination.join(".wal-replay").join("source.rdb").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "recovery ended before interruption"
+        );
+        if started.elapsed() > std::time::Duration::from_secs(30) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("recovery did not start copying");
+        }
+        std::thread::yield_now();
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(!destination.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_image);
 }
 
 fn fixture(path: &std::path::Path) {
@@ -49,6 +189,63 @@ fn fixture(path: &std::path::Path) {
     page.as_bytes_mut()[HEADER_SIZE..HEADER_SIZE + metadata.len()].copy_from_slice(&metadata);
     pager.write_page(1, page).expect("catalog");
     pager.sync().expect("checkpoint");
+}
+
+#[test]
+fn system_collection_aliases_persist_under_canonical_names_without_renaming_user_collections() {
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("names.rdb");
+    let names = [
+        ("red_config", "red.config"),
+        ("red_queue_meta", "red.queue.meta"),
+        ("red.timeseries.meta", "red.timeseries.meta"),
+        ("red_queue_meta_user", "red_queue_meta_user"),
+    ];
+    {
+        let store = UnifiedStore::open(&source).unwrap();
+        for (position, (input, _)) in names.iter().enumerate() {
+            let id = (position + 1) as u64;
+            store
+                .insert_auto(
+                    input,
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        *input,
+                        id,
+                        vec![Value::text(format!("value-{id}"))],
+                    ),
+                )
+                .unwrap();
+        }
+        store.persist().unwrap();
+    }
+    for _ in 0..2 {
+        let store = UnifiedStore::open(&source).unwrap();
+        let collections = store.list_collections();
+        for (position, (input, expected)) in names.iter().enumerate() {
+            let id = (position + 1) as u64;
+            assert!(
+                collections.iter().any(|name| name == expected),
+                "missing {expected}: {collections:?}"
+            );
+            if input != expected {
+                assert!(!collections.iter().any(|name| name == input));
+            }
+            for spelling in [input, expected] {
+                let entity = store
+                    .get(spelling, EntityId::new(id))
+                    .expect("preserved row");
+                assert_eq!(entity.kind.collection(), *expected);
+                assert_eq!(
+                    entity.data.as_row().unwrap().columns,
+                    vec![Value::text(format!("value-{id}"))]
+                );
+            }
+        }
+        store.persist().unwrap();
+    }
 }
 
 #[test]
@@ -744,6 +941,231 @@ fn collection_salvage_refuses_a_damaged_interior_root() {
 }
 
 #[test]
+fn salvage_recovers_readable_leaves_of_a_multi_page_collection() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().unwrap();
+    let initial = directory.path().join("source.rdb");
+    fixture(&initial);
+    let compacted = directory.path().join("compacted");
+    compact_paged(&initial, &compacted).unwrap();
+    let source = compacted.join("source.rdb");
+    let pager = Arc::new(Pager::open_default(&source).unwrap());
+    let catalog = pager.read_page(1).unwrap();
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+        .unwrap()
+        .root_page;
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let leaves = structural_leaves(&pager, &tree);
+    assert!(leaves.len() > 2);
+    let (damaged_id, lost) = leaves
+        .iter()
+        .find_map(|id| {
+            let page = pager.read_page(*id).unwrap();
+            let mut keys = Vec::new();
+            for i in 0..usize::from(page.cell_count()) {
+                let bytes = page.as_bytes();
+                let slot = HEADER_SIZE + 8 + i * 2;
+                let cell = u16::from_le_bytes([bytes[slot], bytes[slot + 1]]) as usize;
+                let key_len = u16::from_le_bytes([bytes[cell], bytes[cell + 1]]) as usize;
+                assert_eq!(key_len, 8);
+                keys.push(u64::from_be_bytes(
+                    bytes[cell + 4..cell + 12].try_into().unwrap(),
+                ));
+            }
+            (!keys.is_empty() && keys.iter().all(|key| key % 100 != 0)).then_some((*id, keys))
+        })
+        .expect("leaf without overflow values");
+    let overflow_leaf = leaves
+        .iter()
+        .copied()
+        .find(|id| {
+            let page = pager.read_page(*id).unwrap();
+            (0..usize::from(page.cell_count())).any(|i| {
+                let bytes = page.as_bytes();
+                let slot = HEADER_SIZE + 8 + i * 2;
+                let cell = u16::from_le_bytes([bytes[slot], bytes[slot + 1]]) as usize;
+                let key = u64::from_be_bytes(bytes[cell + 4..cell + 12].try_into().unwrap());
+                key % 100 == 0
+            })
+        })
+        .expect("leaf with overflow value");
+    assert!(!lost.is_empty() && lost.len() < 1000);
+    drop(tree);
+    drop(pager);
+    let clean = std::fs::read(&source).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(damaged_id) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let original = std::fs::read(&source).unwrap();
+    let recovered = directory.path().join("recovered-leaves");
+    let report = salvage_paged_collections(&source, &recovered).expect("recover intact leaves");
+    assert_eq!(report.collections.len(), 1);
+    assert!(report.machine_json().contains(&damaged_id.to_string()));
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    let output = recovered.join("source.rdb");
+    assert!(Pager::open_default(&output).is_err());
+    let pager = Arc::new(
+        Pager::open(
+            &output,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    let catalog = pager.read_page(1).unwrap();
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+        .unwrap()
+        .root_page;
+    let tree = BTree::with_root(pager, root);
+    for id in 0u64..1000 {
+        assert_eq!(
+            tree.get(&id.to_be_bytes()).unwrap(),
+            if lost.contains(&id) {
+                None
+            } else {
+                Some(payload(id))
+            },
+            "record {id}"
+        );
+    }
+    let overflow_source = directory.path().join("overflow.rdb");
+    let mut ambiguous = clean;
+    ambiguous[overflow_leaf as usize * 16384 + 100] ^= 1;
+    std::fs::write(&overflow_source, &ambiguous).unwrap();
+    let refused = directory.path().join("unclassified-overflow");
+    let error = salvage_paged_collections(&overflow_source, &refused)
+        .expect_err("unknown overflow ownership must be refused");
+    assert!(error.to_string().contains("unclassified"), "{error}");
+    assert!(!refused.join("overflow.rdb").exists());
+    assert_eq!(std::fs::read(&overflow_source).unwrap(), ambiguous);
+}
+
+#[test]
+fn salvage_recovers_tree_with_multiple_interior_levels() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("deep.rdb");
+    let key = |id: u64| {
+        let mut value = id.to_be_bytes().to_vec();
+        value.extend_from_slice(&[0x5a; 800]);
+        value
+    };
+    {
+        let pager = Arc::new(Pager::open_default(&source).unwrap());
+        let tree = BTree::new(Arc::clone(&pager));
+        for id in 0u64..800 {
+            tree.insert(&key(id), &id.to_le_bytes()).unwrap();
+        }
+        let mut metadata = Vec::new();
+        reddb_file::encode_native_paged_metadata_header(
+            &mut metadata,
+            reddb_file::NativePagedMetadataHeader {
+                format_version: 11,
+                collection_count: 1,
+            },
+        );
+        reddb_file::encode_native_paged_collection_root(&mut metadata, "rows", tree.root_page_id());
+        metadata.extend_from_slice(&0u32.to_le_bytes());
+        let mut page = Page::new(PageType::Header, 1);
+        page.content_mut()[..metadata.len()].copy_from_slice(&metadata);
+        pager.write_page(1, page).unwrap();
+        pager.sync().unwrap();
+    }
+    let compacted = directory.path().join("deep-compacted");
+    compact_paged(&source, &compacted).unwrap();
+    let source = compacted.join("deep.rdb");
+    let pager = Arc::new(Pager::open_default(&source).unwrap());
+    let catalog = pager.read_page(1).unwrap();
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+        .unwrap()
+        .root_page;
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let pages = tree.retired_pages().unwrap();
+    assert!(
+        pages
+            .iter()
+            .filter(
+                |id| pager.read_page(**id).unwrap().page_type().unwrap() == PageType::BTreeInterior
+            )
+            .count()
+            > 1
+    );
+    let leaves = structural_leaves(&pager, &tree);
+    let damaged = leaves[leaves.len() / 2];
+    let page = pager.read_page(damaged).unwrap();
+    let lost: Vec<u64> = (0..usize::from(page.cell_count()))
+        .map(|i| {
+            let bytes = page.as_bytes();
+            let slot = HEADER_SIZE + 8 + i * 2;
+            let cell = u16::from_le_bytes([bytes[slot], bytes[slot + 1]]) as usize;
+            u64::from_be_bytes(bytes[cell + 4..cell + 12].try_into().unwrap())
+        })
+        .collect();
+    drop(tree);
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(damaged) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&source).unwrap();
+    let output = directory.path().join("deep-recovered");
+    salvage_paged_collections(&source, &output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let pager = Arc::new(
+        Pager::open(
+            output.join("deep.rdb"),
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    let catalog = pager.read_page(1).unwrap();
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+        .unwrap()
+        .root_page;
+    let tree = BTree::with_root(pager, root);
+    for id in 0u64..800 {
+        assert_eq!(
+            tree.get(&key(id)).unwrap(),
+            if lost.contains(&id) {
+                None
+            } else {
+                Some(id.to_le_bytes().to_vec())
+            }
+        );
+    }
+}
+
+#[test]
 fn collection_salvage_refuses_catalog_cross_references() {
     let directory = tempfile::tempdir().expect("directory");
     let source = directory.path().join("source.rdb");
@@ -1257,6 +1679,100 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     assert!(salvage_paged_indexes(&source, &rejected).is_err());
     assert!(!rejected.exists());
     assert_eq!(std::fs::read(&source).unwrap(), damaged_authority);
+}
+
+#[test]
+fn salvage_rebuilds_a_multi_page_secondary_index_after_leaf_damage() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        runtime
+            .execute_query("CREATE TABLE records (id INT, value TEXT)")
+            .unwrap();
+        runtime
+            .execute_query("CREATE INDEX record_value ON records (value) USING HASH")
+            .unwrap();
+        for start in (0..1500).step_by(300) {
+            let tuples = (start..start + 300)
+                .map(|id| format!("({id}, 'value-{id:04}')"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!("INSERT INTO records (id, value) VALUES {tuples}"))
+                .unwrap();
+        }
+        runtime.graceful_shutdown(false).unwrap();
+    }
+    let pager = Arc::new(
+        Pager::open(
+            &source,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    let catalog = pager.read_page(1).unwrap();
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .unwrap()
+        .unwrap();
+    let root = resume.collections["records"].secondary_indices["record_value"].root_page;
+    assert_eq!(
+        pager.read_page(root).unwrap().page_type().unwrap(),
+        PageType::BTreeInterior
+    );
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let leaves = structural_leaves(&pager, &tree);
+    assert!(leaves.len() > 1);
+    let leaf = leaves[leaves.len() / 2];
+    drop(tree);
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(leaf) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&source).unwrap();
+    let output = directory.path().join("recovered");
+    let report = salvage_paged_indexes(&source, &output).expect("recover multi-page index");
+    assert_eq!(report.indexes.len(), 1);
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let recovered = RedDBOptions::persistent(output.join("source.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    let runtime = RedDBRuntime::with_options(recovered).unwrap();
+    let count = runtime
+        .execute_query("SELECT COUNT(*) AS n FROM records")
+        .unwrap();
+    assert_eq!(
+        count.result.records[0].get("n").unwrap().display_string(),
+        "1500"
+    );
+    let row = runtime
+        .execute_query("SELECT id FROM records WHERE value = 'value-0777'")
+        .unwrap();
+    assert_eq!(row.result.records.len(), 1);
+    assert_eq!(
+        row.result.records[0].get("id").unwrap().display_string(),
+        "777"
+    );
+    runtime.graceful_shutdown(false).unwrap();
 }
 
 #[test]

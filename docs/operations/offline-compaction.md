@@ -53,26 +53,47 @@ files are refused because this operation cannot verify them. The compaction qual
 also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
 publish the output file.
 
-For a legacy paged store with no cross references or physical metadata, if a
-collection's entire tree is one checksum-damaged leaf, the following command
-copies the intact collections to a new directory:
+For a legacy paged store with no cross references or physical metadata, the
+following command copies intact collections and intact leaves of damaged
+multi-page collections to a new directory:
 
 ```sh
 red salvage-paged-collections --source /preserved/data.rdb --destination-dir /new/recovered --json
 ```
 
-Each damaged collection is empty in the result. Its loss report identifies the
-root page but records the number of lost entities as unknown. Interior-root or
-descendant damage, system collection damage, ambiguous pages, unauthenticated
-Vaults, pending recovery, and more recent catalog formats are refused. This
-does not recover healthy records from inside an unreadable page. Validate the
-recovered store and its application-level relationships before serving it.
+The loss report identifies skipped pages; the number of lost entities remains
+unknown. A checksum-damaged single-leaf root leaves that collection empty. For
+a multi-page tree, intact parent links, leaf depth, key ordering and surviving
+overflow ownership must verify; records in damaged leaves cannot be recovered.
+Interior damage, system collection damage, unclassified pages (including
+overflow pages whose owner was in a damaged leaf), unauthenticated Vaults,
+pending recovery, and more recent catalog formats are refused. Validate the
+recovered records and application-level relationships before using them.
 The legacy format does not provide a trusted identity high-water mark after
 this loss. Both superblocks are fenced to a read-only recovery version before
 publication; older engines reject that version. Export verified data into a
 new store after reconciling identities against an authoritative source. The
 low-level pager can inspect this version read-only; the server and SQL dump
 paths have not yet been qualified for it.
+
+For a supported closed store with a pending unified WAL, replay on an isolated
+copy and verify the result with:
+
+```sh
+red recover-paged-wal --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+The source read lock excludes normal writers; the original file and sidecars
+remain unchanged. The operation
+strictly reads the WAL before making a copy, replays and checkpoints the copy,
+then rewrites and scrubs it before publishing the final filename. A private
+`.wal-replay` subdirectory retains the copied source and validation artifacts;
+do not use its intermediate files as a database.
+The current qualification excludes interrupted checkpoints, pending
+double-write or non-unified WALs, saved Vaults, physical metadata, WALs larger
+than 256 MiB, and runtime-owned vector or probabilistic records. Incomplete or
+corrupt WAL frames are refused. This command requires readable data trees; it
+does not combine WAL replay with salvage of damaged trees.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

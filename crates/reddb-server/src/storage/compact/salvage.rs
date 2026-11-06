@@ -76,6 +76,7 @@ pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedI
 pub struct PagedCollectionLoss {
     pub collection: String,
     pub root_page: u32,
+    pub skipped_pages: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -91,24 +92,25 @@ impl PagedCollectionSalvageReport {
             .map(|loss| {
                 crate::serde_json::json!({
                     "collection": loss.collection.clone(), "root_page": loss.root_page,
-                    "action": "collection_emptied", "reason": "root_checksum_mismatch",
+                    "action": if loss.skipped_pages == [loss.root_page] { "collection_emptied" } else { "damaged_leaves_skipped" },
+                    "reason": "page_checksum_mismatch", "skipped_pages": loss.skipped_pages.clone(),
                     "skipped_entities": crate::serde_json::Value::Null,
                 })
             })
             .collect();
-        crate::serde_json::json!({"scope": "legacy_collection_root_only", "page_generation_freshness_verified": false, "identity_high_water_verified": false, "safe_for_writes": false, "collections": collections}).to_string_compact()
+        crate::serde_json::json!({"scope": "legacy_collection_trees", "page_generation_freshness_verified": false, "identity_high_water_verified": false, "safe_for_writes": false, "collections": collections}).to_string_compact()
     }
 }
 
-/// Recover intact collections while dropping a checksum-failed single-page
-/// collection in a reference-free legacy store. The number lost is unknown.
+/// Recover intact collections and verified leaves in a reference-free legacy
+/// store. Lost entity counts and identity high-water marks remain unknown.
 pub fn salvage_paged_collections(
     source: &Path,
     destination: &Path,
 ) -> Result<PagedCollectionSalvageReport> {
     let canonical_path = source.canonicalize()?;
     let source = canonical_path.as_path();
-    let guard = Source::open(source)?;
+    let guard = Arc::new(Source::open(source)?);
     verify_supported_source(source, &guard)?;
     ensure(
         guard.header.physical == f::PhysicalFileHeader::default(),
@@ -137,24 +139,38 @@ pub fn salvage_paged_collections(
             !canonical.starts_with("red.") && !canonical.starts_with('_'),
             "system collections cannot be dropped",
         )?;
-        let error = match guard.raw_page(finding.root_page, true) {
-            Ok(_) => return Err("collection root is not checksum damaged".into()),
-            Err(error) => error,
+        let skipped_pages = match guard.raw_page(finding.root_page, true) {
+            Ok(_) => {
+                let tree = BTree::with_root(Arc::clone(&guard), finding.root_page);
+                tree.visit_recoverable_leaves(
+                    |id| {
+                        guard.claim(id).map_err(|error| {
+                            reddb_engine::storage::btree::BTreeError::Corrupted(error.to_string())
+                        })
+                    },
+                    |_, _| Ok(()),
+                )?
+            }
+            Err(error) => {
+                ensure(
+                    matches!(
+                        error.downcast_ref::<reddb_engine::storage::page::PageError>(),
+                        Some(reddb_engine::storage::page::PageError::ChecksumMismatch { .. })
+                    ),
+                    "collection root failure is not a checksum mismatch",
+                )?;
+                ensure(
+                    guard.raw_page(finding.root_page, false)?.page_type()? == PageType::BTreeLeaf,
+                    "only leaf-root collection damage is supported",
+                )?;
+                vec![finding.root_page]
+            }
         };
-        ensure(
-            matches!(
-                error.downcast_ref::<reddb_engine::storage::page::PageError>(),
-                Some(reddb_engine::storage::page::PageError::ChecksumMismatch { .. })
-            ),
-            "collection root failure is not a checksum mismatch",
-        )?;
-        ensure(
-            guard.raw_page(finding.root_page, false)?.page_type()? == PageType::BTreeLeaf,
-            "only leaf-root collection damage is supported",
-        )?;
+        ensure(!skipped_pages.is_empty(), "no checksum-damaged leaf found")?;
         collections.push(PagedCollectionLoss {
             collection: finding.collection,
             root_page: finding.root_page,
+            skipped_pages,
         });
     }
     ensure(

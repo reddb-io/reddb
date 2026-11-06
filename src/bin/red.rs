@@ -1786,6 +1786,10 @@ fn run_cli() {
             std::process::exit(run_compact_command(&result.flags));
         }
 
+        "recover-paged-wal" => {
+            std::process::exit(run_recover_paged_wal_command(&result.flags));
+        }
+
         "scrub-paged-trees" => {
             std::process::exit(run_scrub_paged_trees_command(&result.flags));
         }
@@ -3327,6 +3331,43 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_recover_paged_wal_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::recover_paged_wal(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("recover-paged-wal", &report.machine_json());
+            } else {
+                println!(
+                    "Replayed WAL on a preserved copy and verified {} records. Source preserved.",
+                    report.records
+                );
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("recover-paged-wal", &error.to_string());
+            } else {
+                eprintln!("recover-paged-wal: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let result = (|| {
@@ -3511,7 +3552,7 @@ fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> 
             if json_mode {
                 json_ok("salvage-paged-collections", &report.machine_json());
             } else {
-                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
+                println!("Recovered verified collection records; {} collections had damaged pages. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
             }
             0
         }
@@ -4156,6 +4197,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
         ("scrub-paged-trees".to_string(), vec![]),
         ("scrub-paged".to_string(), vec![]),
         ("salvage-paged-indexes".to_string(), vec![]),

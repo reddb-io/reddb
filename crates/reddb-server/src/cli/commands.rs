@@ -138,6 +138,15 @@ pub fn all_commands() -> Vec<CommandDef> {
       ],
     },
     CommandDef {
+      name: "recover-paged-wal",
+      summary: "Replay a supported pending WAL against an isolated copy",
+      usage: "red recover-paged-wal --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "scrub-paged-trees",
       summary: "Check tree structure in a closed checkpointed paged database",
       usage: "red scrub-paged-trees --source data.rdb [--json]",
@@ -1040,6 +1049,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
         ("scrub-paged-trees".to_string(), vec![]),
         ("scrub-paged".to_string(), vec![]),
         ("salvage-paged-indexes".to_string(), vec![]),
