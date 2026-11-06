@@ -10,7 +10,7 @@ pub(super) struct Blob {
 }
 pub(super) struct Assets<'a> {
     pub source: &'a Source,
-    pub target: &'a Pager,
+    pub target: Option<&'a Pager>,
     blobs: BTreeMap<u32, Blob>,
     verification: Vec<(u32, blake3::Hash, bool)>,
 }
@@ -18,7 +18,15 @@ impl<'a> Assets<'a> {
     pub fn new(source: &'a Source, target: &'a Pager) -> Self {
         Self {
             source,
-            target,
+            target: Some(target),
+            blobs: BTreeMap::new(),
+            verification: Vec::new(),
+        }
+    }
+    pub fn for_verification(source: &'a Source) -> Self {
+        Self {
+            source,
+            target: None,
             blobs: BTreeMap::new(),
             verification: Vec::new(),
         }
@@ -51,19 +59,24 @@ impl<'a> Assets<'a> {
             bytes = bytes
                 .checked_add(chunk.len() as u64)
                 .ok_or("blob size overflow")?;
-            let destination = self.target.allocate_page(PageType::NativeMeta)?.page_id();
+            let destination = match self.target {
+                Some(target) => target.allocate_page(PageType::NativeMeta)?.page_id(),
+                None => next,
+            };
             pages.push((next, destination));
             next = following;
         }
-        for (index, &(old, new)) in pages.iter().enumerate() {
-            let original = self.source.raw_page(old, true)?;
-            let (_, chunk) = f::decode_native_blob_page(original.content())?;
-            let next = pages.get(index + 1).map_or(0, |(_, id)| *id);
-            let data = f::encode_native_blob_page(next, &chunk);
-            let mut page = Page::new(PageType::NativeMeta, new);
-            page.content_mut()[..data.len()].copy_from_slice(&data);
-            self.remember(&page, true);
-            self.target.write_page(new, page)?;
+        if let Some(target) = self.target {
+            for (index, &(old, new)) in pages.iter().enumerate() {
+                let original = self.source.raw_page(old, true)?;
+                let (_, chunk) = f::decode_native_blob_page(original.content())?;
+                let next = pages.get(index + 1).map_or(0, |(_, id)| *id);
+                let data = f::encode_native_blob_page(next, &chunk);
+                let mut page = Page::new(PageType::NativeMeta, new);
+                page.content_mut()[..data.len()].copy_from_slice(&data);
+                self.remember(&page, true);
+                target.write_page(new, page)?;
+            }
         }
         let blob = Blob {
             root: pages[0].1,
@@ -116,22 +129,33 @@ impl<'a> Assets<'a> {
                 page.page_type()? == PageType::Vault && &page.content()[..4] == b"RDVD",
                 "invalid vault continuation",
             )?;
-            pages.push((next, self.target.allocate_page(PageType::Vault)?.page_id()));
+            let destination = match self.target {
+                Some(target) => target.allocate_page(PageType::Vault)?.page_id(),
+                None => next,
+            };
+            pages.push((next, destination));
             next = number(page.content(), 4)?;
         }
         ensure(pages.len() == count as usize, "incomplete vault chain")?;
+        if self.target.is_none() {
+            return Ok(());
+        }
         for (index, &(old, new)) in pages.iter().enumerate() {
             let mut page = relocate(self.source.raw_page(old, false)?, new);
             page.content_mut()[4..8]
                 .copy_from_slice(&pages.get(index + 1).map_or(0, |(_, id)| *id).to_le_bytes());
             self.remember(&page, false);
-            self.target.write_page_no_checksum(new, page)?;
+            self.target
+                .expect("rewrite target")
+                .write_page_no_checksum(new, page)?;
         }
         let mut header = header;
         header.content_mut()[41..45]
             .copy_from_slice(&pages.first().map_or(0, |(_, id)| *id).to_le_bytes());
         self.remember(&header, false);
-        self.target.write_page_no_checksum(2, header)?;
+        self.target
+            .expect("rewrite target")
+            .write_page_no_checksum(2, header)?;
         Ok(())
     }
     pub fn physical(&mut self) -> Result<f::PhysicalFileHeader> {
@@ -178,11 +202,13 @@ impl<'a> Assets<'a> {
                 }
                 _ => return Err("unsupported physical summary".into()),
             }
-            let new = self.target.allocate_page(PageType::NativeMeta)?.page_id();
-            let page = relocate(page, new);
-            self.remember(&page, true);
-            self.target.write_page(new, page)?;
-            *id = new;
+            if let Some(target) = self.target {
+                let new = target.allocate_page(PageType::NativeMeta)?.page_id();
+                let page = relocate(page, new);
+                self.remember(&page, true);
+                target.write_page(new, page)?;
+                *id = new;
+            }
         }
         if header.vector_artifact_page != 0 {
             self.source.claim(header.vector_artifact_page)?;
@@ -207,16 +233,18 @@ impl<'a> Assets<'a> {
                 data.len() <= PAGE_SIZE - HEADER_SIZE,
                 "artifact summary exceeds page",
             )?;
-            let mut page = self.target.allocate_page(PageType::NativeMeta)?;
-            page.content_mut()[..data.len()].copy_from_slice(&data);
-            header.vector_artifact_page = page.page_id();
-            header.vector_artifact_checksum = f::native_store_page_checksum(&data);
-            self.remember(&page, true);
-            self.target.write_page(page.page_id(), page)?;
+            if let Some(target) = self.target {
+                let mut page = target.allocate_page(PageType::NativeMeta)?;
+                page.content_mut()[..data.len()].copy_from_slice(&data);
+                header.vector_artifact_page = page.page_id();
+                header.vector_artifact_checksum = f::native_store_page_checksum(&data);
+                self.remember(&page, true);
+                target.write_page(page.page_id(), page)?;
+            }
         }
         Ok(header)
     }
-    pub fn metadata(&mut self, source: &Path, destination: &Path) -> Result<()> {
+    pub fn metadata(&mut self, source: &Path, destination: Option<&Path>) -> Result<()> {
         let binary = f::physical_metadata_binary_path(source);
         let json = f::physical_metadata_json_path(source);
         let path = if binary.exists() {
@@ -269,6 +297,9 @@ impl<'a> Assets<'a> {
                 }
             }
         }
+        let Some(destination) = destination else {
+            return Ok(());
+        };
         let encoded =
             f::encode_physical_metadata_binary_document(&serde_json::to_string(&document)?)?;
         let output = f::physical_metadata_binary_path(destination);

@@ -17,12 +17,52 @@ pub struct PagedTreeScrubReport {
     pub findings: Vec<PagedTreeFinding>,
 }
 
+/// A physical scrub of a supported, closed and checkpointed standalone store.
+/// If a tree fails, auxiliary checks are not considered complete.
+#[derive(Debug)]
+pub struct PagedScrubReport {
+    pub trees: PagedTreeScrubReport,
+    pub assets_verified: bool,
+    /// Allocated pages not identified as free or owned by a verified structure.
+    pub unclassified_pages: u64,
+}
+
+/// Verify the supported offline layout without writing to the source. Pending
+/// recovery, vaults without valid credentials and unsupported sidecars fail closed.
+pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
+    let canonical_path = path.canonicalize()?;
+    let path = canonical_path.as_path();
+    let source = Arc::new(Source::open(path)?);
+    super::salvage::verify_supported_source(path, &source)?;
+    let trees = inspect_all_trees(&source)?;
+    if !trees.findings.is_empty() {
+        return Ok(PagedScrubReport {
+            trees,
+            assets_verified: false,
+            unclassified_pages: source.unclaimed_pages(),
+        });
+    }
+    let mut assets = super::assets::Assets::for_verification(&source);
+    assets.vault()?;
+    assets.physical()?;
+    assets.metadata(path, None)?;
+    Ok(PagedScrubReport {
+        trees,
+        assets_verified: true,
+        unclassified_pages: source.unclaimed_pages(),
+    })
+}
+
 /// Inspect trees in a closed, checkpointed paged store without writing to it.
 /// Vault, physical assets, logical index correctness and replica state are not
 /// verified. The same layout and WAL restrictions as offline compaction apply.
 pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
     let source = Arc::new(Source::open(path)?);
-    let catalog = Catalog::read(&source)?;
+    inspect_all_trees(&source)
+}
+
+fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
+    let catalog = Catalog::read(source)?;
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             || catalog.resume.is_some(),
@@ -44,7 +84,7 @@ pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
             )?;
         }
         inspect_tree(
-            &source,
+            source,
             &mut report,
             &collection.collection,
             "collection",
@@ -59,11 +99,11 @@ pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
         )?;
         for (name, state) in &resume.collections {
             if let Some(root) = state.key_index_root {
-                inspect_tree(&source, &mut report, name, "key index", root, None);
+                inspect_tree(source, &mut report, name, "key index", root, None);
             }
             for (index, state) in &state.secondary_indices {
                 inspect_tree(
-                    &source,
+                    source,
                     &mut report,
                     name,
                     &format!("secondary index {index}"),

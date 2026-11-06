@@ -1,5 +1,25 @@
 # Offline native compaction
 
+For a physical scrub of the supported closed, checkpointed standalone layout:
+
+```sh
+red scrub-paged --source /preserved/data.rdb --json
+```
+
+This checks both superblocks, the checkpointed WAL boundary, allocator and
+catalog, collection and index trees, supported native metadata and blob
+checksums, and a marker-only operational manifest. A tree finding leaves the
+auxiliary checks explicitly incomplete. Allocated pages not identified as free
+or owned are counted as unclassified: they may be garbage, but prevent a clean
+result. When a Vault is present, it authenticates and decodes the Vault using
+the configured certificate or passphrase; missing or invalid credentials fail
+the scrub. It refuses pending recovery, nonempty logical WAL, slot or audit files, operational
+segments, columnar ownership, replicas and other unsupported layouts. It does
+not check the logical correspondence between index entries and rows. An error
+means the scrub could not verify the full supported layout; it is not a clean
+result. Page checksums alone do not prove that a checksum-valid page is the
+latest published generation. The source is never written.
+
 For a read-only diagnostic of collection, key-index and secondary-index trees,
 close and checkpoint the store, then run:
 
@@ -15,6 +35,67 @@ Its scope is **trees only**: it does not validate the Vault, native physical
 assets, logical correspondence between indexes and rows, or replicated and
 serverless state. It is not a complete store scrub or a salvage operation.
 It applies the same source restrictions and per-value allowance listed below.
+
+If a closed, checkpointed store has damage limited to secondary index trees,
+the following operation copies verified data and surviving trees to a new
+directory and discards damaged secondary roots for rebuilding on reopen:
+
+```sh
+red salvage-paged-indexes --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+`salvage.json` lists the discarded roots and their reasons. Verify the recovered
+database and its indexes before serving it; retain the source. Data-tree,
+primary-key tree, catalog and pending-WAL corruption are not recovered by
+this command. A Vault must authenticate before recovery and again after it is
+copied. Nonempty logical WAL, replication slot or audit files, operational segments and nonempty operational collection
+files are refused because this operation cannot verify them. The compaction qualification boundaries below
+also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
+publish the output file.
+
+For a legacy paged store with no cross references or physical metadata, the
+following command copies intact collections and intact leaves of damaged
+multi-page collections to a new directory:
+
+```sh
+red salvage-paged-collections --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+The loss report identifies skipped pages; the number of lost entities remains
+unknown. A checksum-damaged single-leaf root leaves that collection empty. For
+a multi-page tree, intact parent links, leaf depth, key ordering and surviving
+overflow ownership must verify; records in damaged leaves cannot be recovered.
+Interior damage, system collection damage, unclassified pages (including
+overflow pages whose owner was in a damaged leaf), unauthenticated Vaults,
+pending recovery, and more recent catalog formats are refused. Validate the
+recovered records and application-level relationships before using them.
+The legacy format does not provide a trusted identity high-water mark after
+this loss. Both superblocks are fenced to a read-only recovery version before
+publication; older engines reject that version. Export verified data into a
+new store after reconciling identities against an authoritative source. The
+low-level pager can inspect this version read-only; the server and SQL dump
+paths have not yet been qualified for it.
+
+For a supported closed store with a pending unified WAL, replay on an isolated
+copy and verify the result with:
+
+```sh
+red recover-paged-wal --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+The source read lock excludes normal writers; the original file and sidecars
+remain unchanged. The operation
+strictly reads the WAL before making a copy, replays and checkpoints the copy,
+then rewrites and scrubs it before publishing the final filename. A private
+`.wal-replay` subdirectory retains the copied source and validation artifacts;
+do not use its intermediate files as a database.
+The current qualification excludes interrupted checkpoints, pending
+double-write or non-unified WALs, schema or auxiliary-metadata changes, WALs
+larger than 256 MiB, and runtime-owned vector or probabilistic records. Supported
+physical metadata is verified and copied with its sidecars. A saved Vault must
+authenticate before replay and after recovery. Incomplete or
+corrupt WAL frames are refused. This command requires readable data trees; it
+does not combine WAL replay with salvage of damaged trees.
 
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim

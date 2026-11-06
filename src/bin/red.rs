@@ -1786,8 +1786,24 @@ fn run_cli() {
             std::process::exit(run_compact_command(&result.flags));
         }
 
+        "recover-paged-wal" => {
+            std::process::exit(run_recover_paged_wal_command(&result.flags));
+        }
+
         "scrub-paged-trees" => {
             std::process::exit(run_scrub_paged_trees_command(&result.flags));
+        }
+
+        "scrub-paged" => {
+            std::process::exit(run_scrub_paged_command(&result.flags));
+        }
+
+        "salvage-paged-indexes" => {
+            std::process::exit(run_salvage_paged_indexes_command(&result.flags));
+        }
+
+        "salvage-paged-collections" => {
+            std::process::exit(run_salvage_paged_collections_command(&result.flags));
         }
 
         "salvage" => {
@@ -3315,6 +3331,43 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
     }
 }
 
+fn run_recover_paged_wal_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::recover_paged_wal(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("recover-paged-wal", &report.machine_json());
+            } else {
+                println!(
+                    "Replayed WAL on a preserved copy and verified {} records. Source preserved.",
+                    report.records
+                );
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("recover-paged-wal", &error.to_string());
+            } else {
+                eprintln!("recover-paged-wal: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let result = (|| {
@@ -3371,6 +3424,143 @@ fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
                 json_error("scrub-paged-trees", &error.to_string());
             } else {
                 eprintln!("scrub-paged-trees: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .trees
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(), "tree": finding.tree.clone(),
+                            "root_page": finding.root_page, "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "supported_offline_paged_layout",
+                    "trees_verified": report.trees.trees_verified,
+                    "records_verified": report.trees.records_verified,
+                    "assets_verified": report.assets_verified,
+                    "unclassified_pages": report.unclassified_pages,
+                    "page_generation_freshness_verified": false,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged", &value.to_string_compact());
+            } else {
+                println!(
+                    "Verified {} trees and {} records; {} findings. Auxiliary assets verified: {}; unclassified pages: {}.",
+                    report.trees.trees_verified,
+                    report.trees.records_verified,
+                    report.trees.findings.len(),
+                    report.assets_verified,
+                    report.unclassified_pages
+                );
+                println!("Checksums do not establish that every page is the latest published generation.");
+                for finding in &report.trees.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.trees.findings.is_empty()
+                && report.assets_verified
+                && report.unclassified_pages == 0
+            {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged", &error.to_string());
+            } else {
+                eprintln!("scrub-paged: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_indexes_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_indexes(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-indexes", &report.machine_json());
+            } else {
+                println!("Recovered verified trees into a new directory; {} secondary indexes were discarded for rebuilding. See salvage.json.", report.indexes.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-indexes", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-indexes: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_collections(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-collections", &report.machine_json());
+            } else {
+                println!("Recovered verified collection records; {} collections had damaged pages. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-collections", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-collections: {error}");
             }
             1
         }
@@ -4007,7 +4197,11 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
         ("scrub-paged-trees".to_string(), vec![]),
+        ("scrub-paged".to_string(), vec![]),
+        ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),

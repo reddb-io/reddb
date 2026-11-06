@@ -13,6 +13,18 @@ pub(super) struct Source {
 }
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_inner(path, false)
+    }
+
+    /// The replay path accepts a pending unified WAL but still rejects an
+    /// interrupted checkpoint, DWB recovery, and other pending WALs.
+    pub fn open_for_wal_recovery(path: &Path) -> Result<Self> {
+        Self::open_inner(path, true)
+    }
+
+    fn open_inner(path: &Path, allow_unified_wal: bool) -> Result<Self> {
+        let canonical_path = path.canonicalize()?;
+        let path = canonical_path.as_path();
         for unsupported in [
             f::primary_replica_root(path),
             f::layout::serverless_root(path),
@@ -60,19 +72,21 @@ impl Source {
             "source allocation boundary differs from file length",
         )?;
         // Ownership intents and undo images live in this WAL; none may be pending.
-        for wal in [
-            f::unified_wal_path(path),
-            f::engine_wal_path(path),
-            f::pager_legacy_wal_path(path),
+        for (wal, pending_supported) in [
+            (f::unified_wal_path(path), allow_unified_wal),
+            (f::engine_wal_path(path), false),
+            (f::pager_legacy_wal_path(path), false),
         ] {
-            match std::fs::metadata(&wal) {
+            match std::fs::symlink_metadata(&wal) {
                 Ok(stat) => {
+                    ensure(stat.is_file(), "WAL must be a regular file")?;
                     ensure(
-                        stat.len() == f::WAL_FILE_HEADER_BYTES as u64,
+                        stat.len() == f::WAL_FILE_HEADER_BYTES as u64 || pending_supported,
                         "source WAL is not checkpointed; close/checkpoint a preserved copy first",
                     )?;
-                    let data = std::fs::read(wal)?;
-                    f::decode_wal_file_header(data.as_slice().try_into()?)?;
+                    let mut data = [0; f::WAL_FILE_HEADER_BYTES];
+                    File::open(wal)?.read_exact(&mut data)?;
+                    f::decode_wal_file_header(&data)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
@@ -121,6 +135,26 @@ impl Source {
             "page identity mismatch",
         )?;
         Ok(page)
+    }
+    pub fn verify_superblocks(&self) -> Result<()> {
+        let mut zone = [0; f::PAGED_SUPERBLOCK_ZONE_SIZE];
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut zone)?;
+        for (copy, slot) in zone.chunks_exact(f::PAGED_SUPERBLOCK_SLOT_SIZE).enumerate() {
+            ensure(
+                f::paged_superblock_slot_generation(slot, copy).is_some(),
+                "superblock damage requires separate recovery",
+            )?;
+            f::decode_database_header(slot)?;
+        }
+        Ok(())
+    }
+    pub fn unclaimed_pages(&self) -> u64 {
+        self.ownership.lock()[FIRST_ALLOCATABLE_PAGE as usize..]
+            .iter()
+            .filter(|owner| **owner == 0)
+            .count() as u64
     }
     pub fn claim(&self, id: u32) -> Result<()> {
         ensure(
@@ -178,8 +212,12 @@ impl Drop for Source {
 }
 impl PageStore for Source {
     fn read_page(&self, id: u32) -> std::result::Result<Page, PagerError> {
-        self.raw_page(id, true)
-            .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+        self.raw_page(id, true).map_err(|error| {
+            match error.downcast::<reddb_engine::storage::page::PageError>() {
+                Ok(error) => PagerError::Page(*error),
+                Err(error) => PagerError::InvalidDatabase(error.to_string()),
+            }
+        })
     }
     fn page_count(&self) -> std::result::Result<u32, PagerError> {
         Ok(self.header.page_count)
