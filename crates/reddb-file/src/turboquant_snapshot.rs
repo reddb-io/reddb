@@ -188,19 +188,7 @@ pub fn read_turboquant_snapshot(
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        let mut x = (crc ^ byte as u32) & 0xFF;
-        for _ in 0..8 {
-            x = if x & 1 != 0 {
-                (x >> 1) ^ 0xEDB8_8320
-            } else {
-                x >> 1
-            };
-        }
-        crc = (crc >> 8) ^ x;
-    }
-    !crc
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]
@@ -228,6 +216,24 @@ mod tests {
         assert_eq!(payload.lsn, 42);
         assert_eq!(payload.vectors, vectors);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reads_and_writes_legacy_snapshot_checksums() {
+        // Version 1 snapshot produced with the original bitwise IEEE CRC-32.
+        let legacy = [
+            46, 84, 86, 83, 78, 65, 80, 1, 1, 0, 0, 0, 2, 0, 0, 0, 123, 0, 0, 0, 0, 0, 0, 0, 42, 0,
+            0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 190, 90, 15, 164, 24, 250, 127, 132, 7, 0, 0,
+            0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 192,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.tv");
+        std::fs::write(&path, legacy).unwrap();
+        let payload = read_turboquant_snapshot(&path, 2, 123).unwrap();
+        assert_eq!(payload.lsn, 42);
+        assert_eq!(payload.vectors, vec![(7, vec![1.0, -2.0])]);
+        write_turboquant_snapshot(&path, 2, 123, 42, &payload.vectors).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
     }
 
     #[test]
