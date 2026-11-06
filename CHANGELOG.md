@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.13
+
+### Patch Changes
+
+- [#2665](https://github.com/reddb-io/reddb/pull/2665) [`04d29a4`](https://github.com/reddb-io/reddb/commit/04d29a49956c41cf4ac562e95f93e2c4c92961e5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Push collection-name filters and projected fields into `red.collections` catalog snapshots so targeted introspection no longer decodes unrelated collection payloads or computes unrequested on-disk sizes.
+
 ## 1.28.12
 
 ### Patch Changes
