@@ -19,6 +19,7 @@ use crate::append_only_segment::{
 mod append_only;
 mod fork;
 mod incremental;
+mod journal;
 mod offline;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
@@ -39,7 +40,7 @@ pub const QUARANTINE_DIR: &str = "quarantine";
 /// storage mechanics for experiment-and-discard workflows; it is never a branch.
 pub const FORKS_DIR: &str = "forks";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum CollectionState {
     Active,
     PendingDrop,
@@ -64,7 +65,7 @@ impl CollectionState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CollectionEntry {
     state: CollectionState,
     path: String,
@@ -85,7 +86,7 @@ struct Manifest {
     fork_origin: Option<ForkOrigin>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppendOnlySegmentState {
     Active,
     PendingDrop,
@@ -110,7 +111,7 @@ impl AppendOnlySegmentState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppendOnlySegmentManifestEntry {
     pub collection: String,
     pub segment_id: u64,
@@ -130,7 +131,7 @@ pub struct AppendOnlySegmentManifestEntry {
     pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AppendOnlyRetiredState {
     row_count: u64,
     segment_high_water: u64,
@@ -140,6 +141,7 @@ struct AppendOnlyRetiredState {
 pub struct OperationalManifest<V = StdVfs> {
     root: PathBuf,
     vfs: V,
+    cache: std::sync::Arc<std::sync::Mutex<Option<journal::CachedManifest>>>,
 }
 
 /// Manifest-owned create operation. Construction durably prepares the physical
@@ -182,6 +184,7 @@ impl<V: Vfs> OperationalManifest<V> {
         Self {
             root: PathBuf::from(root),
             vfs,
+            cache: Default::default(),
         }
     }
 
@@ -576,6 +579,15 @@ impl<V: Vfs> OperationalManifest<V> {
         self.collections_dir().join(self.collection_file_name(name))
     }
 
+    /// Encode the historical format for compatibility fixtures and offline inspection.
+    pub fn legacy_manifest_bytes_for_test(&self) -> io::Result<Vec<u8>> {
+        manifest_to_bytes(
+            &self
+                .load_current()?
+                .ok_or_else(|| invalid_data("missing manifest"))?,
+        )
+    }
+
     pub fn current_manifest_path_for_test(&self) -> PathBuf {
         self.root.join(MANIFEST_FILE)
     }
@@ -613,55 +625,25 @@ impl<V: Vfs> OperationalManifest<V> {
     }
 
     fn load_current(&self) -> io::Result<Option<Manifest>> {
-        let path = self.root.join(MANIFEST_FILE);
-        let file = match self.vfs.open(&path, OpenMode::read_only()) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
         };
-        let reader = io::BufReader::new(ManifestFileReader(file));
-        let value = serde_json::from_reader(reader).map_err(manifest_json_error)?;
-        manifest_from_value(value).map(Some)
+        while !reader.step(64 * 1024)?.complete {}
+        Ok(Some(reader.snapshot()?.clone()))
     }
 
-    /// Never read an oversized manifest for a bounded maintenance pass.
     fn load_current_bounded(&self, limit: usize) -> io::Result<Option<Manifest>> {
-        let mut file = match self
-            .vfs
-            .open(&self.root.join(MANIFEST_FILE), OpenMode::read_only())
-        {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
         };
-        let len = file.file_len()?;
-        if len > limit as u64 {
+        if !reader.step(limit)?.complete {
             return Ok(None);
         }
-        let len = usize::try_from(len).map_err(invalid_data)?;
-        let mut bytes = vec![0; len];
-        file.read_exact(&mut bytes)?;
-        if file.file_len()? != len as u64 {
-            return Err(invalid_data("manifest changed during bounded read"));
-        }
-        manifest_from_bytes(&bytes).map(Some)
+        Ok(Some(reader.snapshot()?.clone()))
     }
 
     fn publish(&self, manifest: &Manifest) -> io::Result<()> {
-        self.ensure_dirs()?;
-        let current = self.root.join(MANIFEST_FILE);
-        let next = self.root.join(NEXT_MANIFEST_FILE);
-        {
-            let mut file = self.vfs.open(&next, OpenMode::create_truncate())?;
-            {
-                let mut writer = io::BufWriter::new(ManifestFileWriter(&mut file));
-                write_manifest(&mut writer, manifest)?;
-                io::Write::flush(&mut writer)?;
-            }
-            file.sync_all()?;
-        }
-        self.vfs.rename(&next, &current)?;
-        self.vfs.sync_dir(&self.root)
+        self.publish_journal(manifest)
     }
 
     fn prepare_collection_file_by_name(&self, file_name: &str) -> io::Result<()> {
@@ -896,27 +878,6 @@ fn next_append_only_segment_id(manifest: &Manifest, collection: &str) -> u64 {
         .map(|retired| retired.segment_high_water)
         .unwrap_or_default();
     active_high_water.max(retired_high_water).saturating_add(1)
-}
-
-struct ManifestFileWriter<'a, F: VfsFile>(&'a mut F);
-
-struct ManifestFileReader<F: VfsFile>(F);
-
-impl<F: VfsFile> io::Read for ManifestFileReader<F> {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.0.read(bytes)
-    }
-}
-
-impl<F: VfsFile> io::Write for ManifestFileWriter<'_, F> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write_all(bytes)?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 struct ManifestChecksumWriter(crc32fast::Hasher);

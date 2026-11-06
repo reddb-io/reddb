@@ -12,10 +12,12 @@ type SegmentFile = <StdVfs as Vfs>::File;
 pub(crate) const FILE_BYTES_PER_TICK: usize = 1024 * 1024;
 const PLAIN_BYTES_PER_TICK: usize = 1024 * 1024;
 const ROWS_PER_TICK: usize = 1_000;
-const MAX_ROW_BYTES: usize = 16 * 1024 * 1024;
+// Native records fit a B-tree value; JSON hex requires twice the bytes plus keys.
+const MAX_ROW_BYTES: usize = 2 * reddb_file::BTREE_VALUE_MAX_SIZE + 1024;
 
 #[derive(Default)]
 pub(crate) struct AppendOnlyMaintenance {
+    owner: Option<OperationalManifest>,
     pub(crate) manifest: Option<IncrementalManifest<StdVfs>>,
     pub(crate) job: Option<AppendOnlyRevalidation>,
 }
@@ -108,13 +110,27 @@ impl super::RedDBRuntime {
     ) -> RedDBResult<Vec<(String, u64)>> {
         let mut state = self.inner.append_only_revalidation.lock();
         if state.manifest.is_none() {
-            state.manifest = manifest
+            let owner = state.owner.get_or_insert_with(|| manifest.clone());
+            state.manifest = owner
                 .begin_incremental_read()
                 .map_err(|error| RedDBError::Internal(error.to_string()))?;
         }
         let Some(snapshot) = state.manifest.as_mut() else {
             return Ok(Vec::new());
         };
+        let progress = match snapshot.step(FILE_BYTES_PER_TICK) {
+            Ok(progress) => progress,
+            Err(error) => {
+                state.manifest = None;
+                return Err(RedDBError::Internal(error.to_string()));
+            }
+        };
+        if !progress.complete {
+            return Ok(Vec::new());
+        }
+        // Published journal prefixes and pinned legacy files are immutable.
+        // Finish a bounded replay before refreshing a stale head, otherwise
+        // an active writer could restart a large cold read on every tick.
         match snapshot.is_current() {
             Ok(true) => {}
             Ok(false) => {
@@ -126,20 +142,11 @@ impl super::RedDBRuntime {
                 return Err(RedDBError::Internal(error.to_string()));
             }
         }
-        let progress = match snapshot.step(FILE_BYTES_PER_TICK) {
-            Ok(progress) => progress,
-            Err(error) => {
-                state.manifest = None;
-                return Err(RedDBError::Internal(error.to_string()));
-            }
-        };
-        if !progress.complete {
-            return Ok(Vec::new());
-        }
         let file_budget = FILE_BYTES_PER_TICK - progress.bytes_read;
         let AppendOnlyMaintenance {
             manifest: snapshot,
             job,
+            ..
         } = &mut *state;
         let snapshot = snapshot
             .as_mut()
@@ -232,6 +239,98 @@ mod tests {
     use reddb_types::Value;
 
     #[test]
+    fn native_decode_above_old_budget_revalidates_after_cold_boot() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("large-native.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let manifest = OperationalManifest::for_db_path(&path);
+        let segment_path;
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("background tasks")
+                .shutdown();
+            runtime
+                .execute_query(
+                    "CREATE TABLE events (id INTEGER) WITH timestamps = true APPEND ONLY",
+                )
+                .expect("collection");
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(1),
+                "events",
+                1,
+                vec![Value::Blob(vec![42; 65 * 1024 * 1024])],
+            );
+            entity.created_at = 1;
+            let payload =
+                UnifiedStore::serialize_entity_record(&entity, None, reddb_file::STORE_VERSION_V10);
+            drop(entity);
+            // The native compression is tiny, but the retained decode alone
+            // exceeds the former 64 MiB allowance.
+            assert!(payload.len() < 1024 * 1024);
+            let rows = [reddb_file::AppendOnlySegmentRow {
+                primary_key: 1_u64.to_be_bytes().to_vec(),
+                payload,
+            }];
+            let bytes = reddb_file::encode_append_only_segment(
+                reddb_file::AppendOnlySegmentCodec::Zstd,
+                &rows,
+            )
+            .expect("segment");
+            let entry = manifest
+                .publish_append_only_segment_with_retention_bounds(
+                    "events",
+                    1,
+                    reddb_file::AppendOnlySegmentCodec::Zstd,
+                    &bytes,
+                    Some(1),
+                    Some(1),
+                )
+                .expect("publish legacy");
+            segment_path = manifest.append_only_segment_path_for_test(&entry.path);
+            runtime
+                .execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                .expect("retention");
+        }
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("cold runtime");
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("background tasks")
+                .shutdown();
+            for _ in 0..12 {
+                runtime.sweep_retention_tick(1);
+                if !segment_path.exists() {
+                    break;
+                }
+            }
+            assert!(
+                !segment_path.exists(),
+                "large native record must be revalidated and retired"
+            );
+        }
+        let runtime = RedDBRuntime::with_options(options).expect("second cold boot");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("background tasks")
+            .shutdown();
+        assert!(manifest
+            .append_only_segments()
+            .expect("segments")
+            .is_empty());
+        assert_eq!(
+            manifest
+                .append_only_published_rows("events")
+                .expect("high water"),
+            1
+        );
+    }
+
+    #[test]
     fn append_only_retention_respects_tick_budget_across_cold_boot() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("append_only_retention_budget.rdb");
@@ -310,7 +409,8 @@ mod tests {
                 .unwrap();
             let manifest_path = manifest.current_manifest_path_for_test();
             let mut value: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+                serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap())
+                    .unwrap();
             value["append_only_segments"][0]["primary_bloom"]["bits_hex"] =
                 serde_json::Value::String("ab".repeat(600_000));
             value.as_object_mut().unwrap().remove("checksum");

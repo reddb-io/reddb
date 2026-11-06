@@ -25,6 +25,8 @@ pub struct IncrementalManifest<V: Vfs> {
     bytes: Vec<u8>,
     manifest: Option<Manifest>,
     invalidated: bool,
+    head: Option<super::journal::Head>,
+    replay: Option<super::journal::Replay<V::File>>,
 }
 
 impl<V: Vfs> OperationalManifest<V> {
@@ -46,6 +48,8 @@ impl<V: Vfs> OperationalManifest<V> {
             bytes: Vec::new(),
             manifest: None,
             invalidated: false,
+            head: None,
+            replay: None,
         }))
     }
 }
@@ -82,12 +86,49 @@ impl<V: Vfs> IncrementalManifest<V> {
             self.bytes.extend_from_slice(&chunk[..read]);
             read_total += read;
         }
-        if self.bytes.len() as u64 == self.source_len {
+        if self.bytes.len() as u64 == self.source_len && self.head.is_none() {
             if self.file.file_len()? != self.source_len {
                 return Err(invalid_data("manifest changed during incremental read"));
             }
-            self.manifest = Some(manifest_from_bytes(&self.bytes)?);
-            self.bytes = Vec::new();
+            self.head = super::journal::Head::decode(&self.bytes)?;
+            let cache = self
+                .owner
+                .cache
+                .lock()
+                .map_err(|_| io::Error::other("manifest cache poisoned"))?;
+            if let Some(cached) = cache.as_ref().filter(|cached| cached.head == self.bytes) {
+                self.manifest = Some(cached.manifest.clone());
+            } else if let Some(head) = &self.head {
+                let file = self.owner.vfs.open(
+                    &self.owner.root.join(super::journal::JOURNAL_FILE),
+                    OpenMode::read_only(),
+                )?;
+                self.replay = Some(super::journal::Replay::resume(file, head, cache.as_ref())?);
+            } else {
+                self.manifest = Some(manifest_from_bytes(&self.bytes)?);
+            }
+        }
+        if let Some(replay) = self.replay.as_mut() {
+            read_total += replay.step(byte_budget - read_total)?;
+            if replay.complete() {
+                self.manifest = Some(
+                    self.replay
+                        .take()
+                        .expect("replay exists")
+                        .finish(self.head.as_ref().expect("journal head exists"))?,
+                );
+            }
+        }
+        if let Some(manifest) = &self.manifest {
+            *self
+                .owner
+                .cache
+                .lock()
+                .map_err(|_| io::Error::other("manifest cache poisoned"))? =
+                Some(super::journal::CachedManifest {
+                    head: self.bytes.clone(),
+                    manifest: manifest.clone(),
+                });
         }
         Ok(ManifestReadStep {
             bytes_read: read_total,
@@ -115,7 +156,7 @@ impl<V: Vfs> IncrementalManifest<V> {
             && self.file.same_file(&current)?)
     }
 
-    fn snapshot(&self) -> io::Result<&Manifest> {
+    pub(super) fn snapshot(&self) -> io::Result<&Manifest> {
         self.manifest
             .as_ref()
             .filter(|_| !self.invalidated)

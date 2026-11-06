@@ -9,14 +9,16 @@ use zstd::stream::raw::{Decoder, Operation};
 use zstd::zstd_safe::DParameter;
 
 use super::{
-    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, AppendOnlySegmentRow, RowJson,
-    SegmentHeader, APPEND_ONLY_SEGMENT_CHUNK_BYTES, APPEND_ONLY_SEGMENT_VERSION, FIXED_HEADER_LEN,
-    MAGIC,
+    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, AppendOnlySegmentRow, SegmentHeader,
+    APPEND_ONLY_SEGMENT_CHUNK_BYTES, APPEND_ONLY_SEGMENT_VERSION, FIXED_HEADER_LEN, MAGIC,
 };
 use crate::VfsFile;
 
 const IO_CHUNK: usize = 64 * 1024;
-const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
+mod header;
+mod rows;
+use header::HeaderDecoder;
+use rows::RowParser;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -95,128 +97,15 @@ impl Checksums {
     }
 }
 
-#[derive(Clone, Copy)]
-enum JsonState {
-    Start,
-    First,
-    Next,
-    Row,
-    Delimiter,
-    Done,
-}
-
-struct RowParser {
-    state: JsonState,
-    row: Vec<u8>,
-    depth: usize,
-    in_string: bool,
-    escaped: bool,
-    max_row_bytes: usize,
-}
-
-impl RowParser {
-    fn new(max_row_bytes: usize) -> Self {
-        Self {
-            state: JsonState::Start,
-            row: Vec::new(),
-            depth: 0,
-            in_string: false,
-            escaped: false,
-            max_row_bytes,
-        }
-    }
-
-    fn consume(
-        &mut self,
-        bytes: &[u8],
-        rows_left: &mut usize,
-        visit: &mut impl FnMut(AppendOnlySegmentRow) -> io::Result<()>,
-    ) -> io::Result<usize> {
-        let mut consumed = 0;
-        for &byte in bytes {
-            if *rows_left == 0 {
-                break;
-            }
-            consumed += 1;
-            match self.state {
-                JsonState::Start if json_whitespace(byte) => {}
-                JsonState::Start if byte == b'[' => self.state = JsonState::First,
-                JsonState::First | JsonState::Next if json_whitespace(byte) => {}
-                JsonState::First if byte == b']' => self.state = JsonState::Done,
-                JsonState::First | JsonState::Next if byte == b'{' => {
-                    self.row.clear();
-                    self.row.push(byte);
-                    self.depth = 1;
-                    self.in_string = false;
-                    self.escaped = false;
-                    self.state = JsonState::Row;
-                }
-                JsonState::Row => {
-                    if self.row.len() >= self.max_row_bytes {
-                        return Err(invalid("segment row exceeds validation memory limit"));
-                    }
-                    self.row.push(byte);
-                    if self.in_string {
-                        if self.escaped {
-                            self.escaped = false;
-                        } else if byte == b'\\' {
-                            self.escaped = true;
-                        } else if byte == b'"' {
-                            self.in_string = false;
-                        }
-                    } else {
-                        match byte {
-                            b'"' => self.in_string = true,
-                            b'{' | b'[' => {
-                                self.depth = self
-                                    .depth
-                                    .checked_add(1)
-                                    .ok_or_else(|| invalid("segment JSON nesting overflow"))?
-                            }
-                            b'}' | b']' => {
-                                self.depth = self
-                                    .depth
-                                    .checked_sub(1)
-                                    .ok_or_else(|| invalid("invalid segment JSON nesting"))?;
-                                if self.depth == 0 {
-                                    let row: RowJson = serde_json::from_slice(&self.row)
-                                        .map_err(|error| invalid(error.to_string()))?;
-                                    visit(AppendOnlySegmentRow {
-                                        primary_key: hex::decode(row.primary_key_hex)
-                                            .map_err(|error| invalid(error.to_string()))?,
-                                        payload: hex::decode(row.payload_hex)
-                                            .map_err(|error| invalid(error.to_string()))?,
-                                    })?;
-                                    *rows_left -= 1;
-                                    self.state = JsonState::Delimiter;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                JsonState::Delimiter if json_whitespace(byte) => {}
-                JsonState::Delimiter if byte == b',' => self.state = JsonState::Next,
-                JsonState::Delimiter if byte == b']' => self.state = JsonState::Done,
-                JsonState::Done if json_whitespace(byte) => {}
-                _ => return Err(invalid("invalid append-only row array")),
-            }
-        }
-        Ok(consumed)
-    }
-
-    fn finished(&self) -> bool {
-        matches!(self.state, JsonState::Done)
-    }
-}
-
 /// A single immutable segment, read and decompressed in bounded increments.
 pub struct StreamingAppendOnlySegment<F: VfsFile> {
     file: F,
     file_len: u64,
     whole: Checksums,
     fixed: Vec<u8>,
-    header_bytes: Vec<u8>,
+    header_decoder: Option<HeaderDecoder>,
+    header_read: usize,
+    header_crc: crc32fast::Hasher,
     header_len: Option<usize>,
     expected_body_len: u64,
     expected_header_crc: u32,
@@ -252,7 +141,9 @@ impl<F: VfsFile> StreamingAppendOnlySegment<F> {
             file_len,
             whole: Checksums::new(checksums),
             fixed: Vec::with_capacity(FIXED_HEADER_LEN),
-            header_bytes: Vec::new(),
+            header_decoder: None,
+            header_read: 0,
+            header_crc: crc32fast::Hasher::new(),
             header_len: None,
             expected_body_len: 0,
             expected_header_crc: 0,
@@ -303,9 +194,6 @@ impl<F: VfsFile> StreamingAppendOnlySegment<F> {
             return Err(invalid("invalid append-only segment magic"));
         }
         let header_len = u32::from_le_bytes(self.fixed[8..12].try_into().unwrap()) as usize;
-        if header_len > MAX_HEADER_BYTES {
-            return Err(invalid("segment header exceeds validation memory limit"));
-        }
         let body_len = u64::from_le_bytes(self.fixed[12..20].try_into().unwrap());
         let expected_len = (FIXED_HEADER_LEN as u64)
             .checked_add(header_len as u64)
@@ -318,15 +206,19 @@ impl<F: VfsFile> StreamingAppendOnlySegment<F> {
         self.expected_body_crc = u32::from_le_bytes(self.fixed[24..28].try_into().unwrap());
         self.expected_body_len = body_len;
         self.header_len = Some(header_len);
+        self.header_decoder = Some(HeaderDecoder::new()?);
         Ok(())
     }
 
     fn parse_header(&mut self) -> io::Result<()> {
-        if crc32fast::hash(&self.header_bytes) != self.expected_header_crc {
+        if self.header_crc.clone().finalize() != self.expected_header_crc {
             return Err(invalid("segment header checksum mismatch"));
         }
-        let mut header: SegmentHeader = serde_json::from_slice(&self.header_bytes)
-            .map_err(|error| invalid(error.to_string()))?;
+        let mut header = self
+            .header_decoder
+            .take()
+            .expect("header decoder exists")
+            .finish()?;
         if header.version != APPEND_ONLY_SEGMENT_VERSION
             || header.chunk_size != APPEND_ONLY_SEGMENT_CHUNK_BYTES
         {
@@ -335,11 +227,10 @@ impl<F: VfsFile> StreamingAppendOnlySegment<F> {
         self.body_checksums = Some(Checksums::new(std::mem::take(&mut header.chunk_checksums)));
         if header.codec == AppendOnlySegmentCodec::Zstd {
             let mut decoder = Decoder::new()?;
-            decoder.set_parameter(DParameter::WindowLogMax(23))?;
+            decoder.set_parameter(DParameter::WindowLogMax(27))?;
             self.decoder = Some(decoder);
         }
         self.header = Some(header);
-        self.header_bytes = Vec::new();
         Ok(())
     }
 
@@ -378,15 +269,19 @@ impl<F: VfsFile> StreamingAppendOnlySegment<F> {
             }
             if self.header.is_none() {
                 let len = self.header_len.expect("fixed header parsed");
-                if self.header_bytes.len() < len {
+                if self.header_read < len {
                     if progress.file_bytes == file_budget {
                         break;
                     }
-                    let amount =
-                        (len - self.header_bytes.len()).min(file_budget - progress.file_bytes);
+                    let amount = (len - self.header_read).min(file_budget - progress.file_bytes);
                     let bytes = self.read_chunk(amount)?;
                     progress.file_bytes += bytes.len();
-                    self.header_bytes.extend_from_slice(&bytes);
+                    self.header_read += bytes.len();
+                    self.header_crc.update(&bytes);
+                    self.header_decoder
+                        .as_ref()
+                        .expect("header decoder exists")
+                        .push(bytes)?;
                     continue;
                 }
                 self.parse_header()?;

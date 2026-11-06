@@ -240,7 +240,7 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
 pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
     let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     if operational.exists() {
-        validate_operational(&operational)?;
+        f::OperationalManifest::for_db_path(source).verify_owned_for_copy()?;
         f::OperationalManifest::for_db_path(source).verify_marker_only_for_recovery()?;
     }
     for path in [

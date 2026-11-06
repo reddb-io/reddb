@@ -167,7 +167,8 @@ fn historical_manifest_without_segment_state_or_retirement_data_recovers() {
         .publish_append_only_segment("events", 7, AppendOnlySegmentCodec::None, &bytes)
         .unwrap();
     let path = manifest.current_manifest_path_for_test();
-    let mut body: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
     let entry = body["append_only_segments"].as_array_mut().unwrap()[0]
         .as_object_mut()
         .unwrap();

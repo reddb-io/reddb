@@ -915,7 +915,7 @@ fn copy_sidecars(source: &Path, destination: &Path) -> Result<()> {
     let old = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     let new = destination.with_file_name(format!("{}.ops", f::data_file_name(destination)));
     if old.exists() {
-        validate_operational(&old)?;
+        f::OperationalManifest::for_db_path(source).verify_owned_for_copy()?;
         copy_directory(&old, &new, 0)?;
     }
     Ok(())
@@ -962,54 +962,6 @@ fn validate_empty_directory(path: &Path, depth: usize) -> Result<()> {
         validate_empty_directory(&entry.path(), depth + 1)?;
     }
     Ok(())
-}
-fn validate_operational(root: &Path) -> Result<()> {
-    ensure(
-        !root.join("forks").exists(),
-        "store forks require separate compaction qualification",
-    )?;
-    let manifest = root.join("manifest.json");
-    ensure(
-        std::fs::metadata(&manifest)?.len() <= 64 * 1024 * 1024,
-        "operational manifest exceeds budget",
-    )?;
-    let document: crate::serde_json::Value =
-        crate::serde_json::from_str(&std::fs::read_to_string(manifest)?)?;
-    fn check(value: &crate::serde_json::Value, depth: usize) -> Result<()> {
-        use crate::serde_json::Value;
-        ensure(depth < 32, "operational manifest exceeds nesting limit")?;
-        match value {
-            Value::Object(fields) => {
-                for (key, value) in fields {
-                    if key == "source" || key == "fork_origin" {
-                        ensure(
-                            matches!(value, Value::Null),
-                            "external operational owners require separate qualification",
-                        )?;
-                    }
-                    if key == "path" {
-                        let path = Path::new(value.as_str().ok_or("non-string operational path")?);
-                        ensure(
-                            !path.is_absolute()
-                                && path
-                                    .components()
-                                    .all(|part| matches!(part, std::path::Component::Normal(_))),
-                            "operational path escapes its directory",
-                        )?;
-                    }
-                    check(value, depth + 1)?;
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    check(value, depth + 1)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    check(&document, 0)
 }
 fn verify_file_copy(source: &Path, destination: &Path) -> Result<()> {
     ensure(

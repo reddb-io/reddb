@@ -30,7 +30,7 @@ fn incremental_manifest_limits_reads_and_rejects_a_replaced_generation() {
         .unwrap();
     let current = manifest.current_manifest_path_for_test();
     let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&current).unwrap()).unwrap();
+        serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
     value["append_only_segments"][0]["primary_bloom"]["bits_hex"] =
         serde_json::Value::String("ab".repeat(600_000));
     value.as_object_mut().unwrap().remove("checksum");

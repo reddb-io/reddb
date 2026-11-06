@@ -819,7 +819,8 @@ impl RedDB {
         column: &str,
         row: &reddb_file::AppendOnlySegmentRow,
     ) -> Option<i64> {
-        const MAX_REVALIDATION_DECODE_BYTES: usize = 64 * 1024 * 1024;
+        // Reserve space for the encoded value, decoded fields and canonical round trip.
+        const MAX_REVALIDATION_DECODE_BYTES: usize = 4 * reddb_file::BTREE_VALUE_MAX_SIZE;
         self.revalidate_append_only_row_with_budget(
             collection,
             column,

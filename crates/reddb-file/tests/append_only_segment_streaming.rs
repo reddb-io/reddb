@@ -188,3 +188,81 @@ fn incremental_segment_reader_checks_frame_crc_even_when_outer_checksums_match()
     bytes[last] ^= 1;
     assert_stream_rejects(&bytes, 1024);
 }
+
+#[test]
+fn header_row_and_zstd_window_above_old_limits_resume_with_bounded_reads() {
+    use std::io::{Read, Write};
+    let payload = vec![0xab; 9 * 1024 * 1024];
+    let plain = serde_json::to_vec(&serde_json::json!([{
+        "primary_key_hex": "01", "payload_hex": hex::encode(&payload)
+    }]))
+    .expect("row JSON");
+    assert!(plain.len() > 16 * 1024 * 1024);
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("encoder");
+    encoder.window_log(24).expect("16 MiB window");
+    encoder.include_contentsize(false).expect("stream frame");
+    encoder.write_all(&plain).expect("encode");
+    let body = encoder.finish().expect("finish frame");
+    let mut old_decoder = zstd::stream::read::Decoder::new(body.as_slice()).expect("decoder");
+    old_decoder.window_log_max(23).expect("old window limit");
+    assert!(old_decoder.read_to_end(&mut Vec::new()).is_err());
+    let header = serde_json::to_vec(&serde_json::json!({
+        "version": 1, "codec": "zstd", "chunk_size": 512 * 1024,
+        "row_count": 1, "uncompressed_len": plain.len(),
+        "primary_bloom": { "num_hashes": 1, "bit_size": 9 * 1024 * 1024 * 8, "inserted": 1,
+            "bits_hex": "00".repeat(9 * 1024 * 1024) },
+        "chunk_checksums": append_only_segment_chunk_checksums(&body)
+    }))
+    .expect("large header");
+    assert!(header.len() > 16 * 1024 * 1024);
+    let mut bytes = b"RDBAOS01".to_vec();
+    bytes.extend_from_slice(
+        &u32::try_from(header.len())
+            .expect("header length")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&crc32fast::hash(&header).to_le_bytes());
+    bytes.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&body);
+    let directory = tempfile::tempdir().expect("temp");
+    let path = directory.path().join("large.raos");
+    std::fs::write(&path, &bytes).expect("segment");
+    // Drop in the middle of the header, then reopen as a cold boot would.
+    for interrupted in [true, false] {
+        let file = StdVfs.open(&path, OpenMode::read_only()).expect("open");
+        let mut reader = StreamingAppendOnlySegment::new(
+            file,
+            append_only_segment_chunk_checksums(&bytes),
+            2 * reddb_file::BTREE_VALUE_MAX_SIZE + 1024,
+        )
+        .expect("reader");
+        let mut rows = 0;
+        let mut completed = false;
+        for _ in 0..100 {
+            let progress = reader
+                .step(1024 * 1024, 1024 * 1024, 1, |row| {
+                    assert_eq!(row.primary_key, [1]);
+                    assert_eq!(row.payload, payload);
+                    rows += 1;
+                    Ok(())
+                })
+                .expect("bounded validation");
+            assert!(progress.file_bytes <= 1024 * 1024);
+            assert!(progress.plain_bytes <= 1024 * 1024);
+            if interrupted {
+                assert!(!progress.complete);
+                break;
+            }
+            if progress.complete {
+                completed = true;
+                break;
+            }
+        }
+        if !interrupted {
+            assert!(completed);
+            assert_eq!(rows, 1);
+        }
+    }
+}

@@ -228,7 +228,7 @@ impl VfsFile for RecordingFile {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.vfs.record(format!("write:{}", self.path));
-        if self.path.ends_with("manifest.json.next") {
+        if self.path.ends_with("manifest.records") {
             let attempt = self.vfs.manifest_writes.fetch_add(1, Ordering::SeqCst) + 1;
             if self.vfs.fail_manifest_write_at.load(Ordering::SeqCst) == attempt {
                 return Err(io::Error::new(
@@ -241,7 +241,7 @@ impl VfsFile for RecordingFile {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.path.ends_with("manifest.json") {
+        if self.path.ends_with("manifest.records") {
             let attempt = self.vfs.manifest_reads.fetch_add(1, Ordering::SeqCst) + 1;
             if self.vfs.fail_manifest_read_at.load(Ordering::SeqCst) == attempt {
                 return Err(io::Error::new(
@@ -277,7 +277,13 @@ fn interrupted_streamed_manifest_write_preserves_previous_generation_on_recovery
     }
     let current_path = manifest.current_manifest_path_for_test();
     let previous = std::fs::read(&current_path).unwrap();
-    assert!(previous.len() > 8192);
+    assert!(previous.len() < 256);
+    assert!(
+        std::fs::metadata(current_path.with_file_name("manifest.records"))
+            .unwrap()
+            .len()
+            > 8192
+    );
     let previous_generation = manifest.read_generation_for_test().unwrap();
     let current = vfs.manifest_writes.load(Ordering::SeqCst);
     vfs.fail_manifest_write_at
@@ -422,7 +428,7 @@ fn interrupted_collection_rename_keeps_old_manifest_and_can_retry() {
         .recover_or_bootstrap(&["red.config".into()])
         .unwrap();
     let published: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
     assert!(published["collections"].get("red_config").is_none());
     assert_eq!(
         published["collections"]["red.config"]["path"],
