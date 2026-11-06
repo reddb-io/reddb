@@ -56,6 +56,7 @@ use reddb_types::Value;
 /// metadata support and cross-referencing.
 pub struct RedDB {
     store: Arc<UnifiedStore>,
+    pub(crate) runtime: std::sync::OnceLock<crate::runtime::WeakRuntime>,
     /// Preprocessing hooks
     preprocessors: SharedPreprocessors,
     /// Index configuration

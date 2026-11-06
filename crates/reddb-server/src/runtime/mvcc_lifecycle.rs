@@ -550,12 +550,18 @@ impl RedDBRuntime {
         previous_xmax: u64,
         _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<()> {
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let store = self.inner.db.store();
         if let Some(new) = store.get(collection, new_id) {
             let fields = crate::application::ports::entity_row_fields_snapshot(&new);
             self.index_store_ref()
                 .index_entity_delete(collection, new_id, &fields)
                 .map_err(RedDBError::Internal)?;
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                super::index_store::MutationTestPhase::UndoIndexRemoved,
+            );
         }
         store
             .delete_batch(collection, &[new_id])
