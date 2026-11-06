@@ -312,6 +312,66 @@ fn wire_unix_uses_bootstrapped_authentication() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn wire_unix_explicit_no_auth_remains_available() {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+
+    let dir = support::temp_data_dir("wire-no-auth");
+    let socket = dir.join("wire.sock");
+    let db_path = dir.join("data.rdb");
+    let mut server = spawn_server(
+        &[
+            "server",
+            "--path",
+            db_path.to_str().expect("database path"),
+            "--wire-bind",
+            socket.to_str().expect("socket path"),
+            "--no-auth",
+        ],
+        &dir.join("server.stderr"),
+    );
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) && !socket.exists() {
+        assert!(
+            server.child.try_wait().expect("child status").is_none(),
+            "server exited: {}",
+            server.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(socket.exists(), "server did not start: {}", server.stderr());
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let bridge = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bridge");
+        let port = bridge.local_addr().expect("bridge address").port();
+        let task = tokio::spawn(async move {
+            let (mut tcp, _) = bridge.accept().await.expect("accept bridge");
+            let mut unix = tokio::net::UnixStream::connect(socket)
+                .await
+                .expect("unix socket");
+            let _ = tokio::io::copy_bidirectional(&mut tcp, &mut unix).await;
+        });
+        let mut client = RedWireClient::connect(
+            ConnectOptions::new("127.0.0.1", port).with_auth(Auth::Anonymous),
+        )
+        .await
+        .expect("explicit anonymous mode must work");
+        client
+            .query("CREATE TABLE development_probe (id INT)")
+            .await
+            .expect("create");
+        client
+            .query("INSERT INTO development_probe (id) VALUES (1)")
+            .await
+            .expect("insert");
+        client.close().await.expect("close");
+        task.abort();
+    });
+}
+
 /// Wait until the spawned server process exits. Returns `true` if it
 /// exited within the timeout, `false` if it was still running.
 fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> bool {
