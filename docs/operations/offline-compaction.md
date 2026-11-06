@@ -100,9 +100,16 @@ Recovery refuses missing or mismatched vector entities, unsupported support
 files, malformed deltas and unclassified non-vector pages. Records already
 lost before recovery cannot be reconstructed from the WAL. Supported physical metadata
 is verified and copied with its sidecars, and saved Vaults must authenticate
-before publication. Incomplete or corrupt WAL and double-write frames are
-refused. The replayed copy must have readable data trees; this command does not
-combine replay with salvage of damaged trees.
+before publication. A populated adjacent audit log and its rotated archives
+are accepted only when their JSONL hash chain verifies across file boundaries;
+they are copied byte-for-byte outside the writable replay stage, restored after
+scrub, and read back for exact parity before publication. The first retained
+event may carry a valid external hash anchor when older archives were pruned.
+Individual audit events are capped at 1 MiB during verification.
+Logical WAL and slot sidecars must still be empty. Incomplete or corrupt WAL,
+audit chains and double-write frames are refused. The replayed copy must have
+readable data trees; this command does not combine replay with salvage of
+damaged trees.
 
 Internal storage checkpoints retain vector and probabilistic WAL records until
 a runtime checkpoint publishes the corresponding state. They rewrite the WAL

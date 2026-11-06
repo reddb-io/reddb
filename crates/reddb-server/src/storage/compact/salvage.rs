@@ -238,6 +238,14 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
 }
 
 pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
+    verify_standalone_sidecars_inner(source, false)
+}
+
+pub(super) fn verify_wal_recovery_sidecars(source: &Path) -> Result<()> {
+    verify_standalone_sidecars_inner(source, true)
+}
+
+fn verify_standalone_sidecars_inner(source: &Path, preserve_audit: bool) -> Result<()> {
     let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     if operational.exists() {
         f::OperationalManifest::for_db_path(source).verify_owned_for_copy()?;
@@ -246,7 +254,6 @@ pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
     for path in [
         f::logical_wal_path(source),
         f::legacy_logical_slots_path(source),
-        f::legacy_audit_log_path(source),
     ] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => ensure(
@@ -256,6 +263,22 @@ pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    let audit = f::legacy_audit_log_path(source);
+    match std::fs::symlink_metadata(&audit) {
+        Ok(metadata) if preserve_audit => {
+            ensure(metadata.is_file(), "audit log must be a regular file")?;
+            super::verify_audit_log_family(source)?;
+        }
+        Ok(metadata) => ensure(
+            metadata.is_file() && metadata.len() == 0,
+            "logical WAL, slot or audit data requires separate recovery verification",
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && preserve_audit => {
+            super::verify_audit_log_family(source)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }

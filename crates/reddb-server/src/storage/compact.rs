@@ -11,8 +11,8 @@ use reddb_file as f;
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    io::{Read, Write},
-    path::Path,
+    io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 mod assets;
@@ -102,7 +102,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     }
     let guard = Source::open_for_wal_recovery(&source)?;
     guard.verify_superblocks()?;
-    salvage::verify_standalone_sidecars(&source)?;
+    salvage::verify_wal_recovery_sidecars(&source)?;
     let wal = f::unified_wal_path(&source);
     let engine_wal = f::engine_wal_path(&source);
     let pending_unified = wal_has_records(&wal)?;
@@ -186,6 +186,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     guard.copy_snapshot(&staged_source)?;
     copy_sidecars(&source, &staged_source, true)?;
     copy_physical_metadata_files(&source, &staged_source)?;
+    let preserved_audit = detach_recovery_audit_logs(&staged_source, &stage)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
         resident_memory_bytes_max: (guard.header.version
             >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION)
@@ -320,6 +321,9 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
             && verified.unclassified_pages == 0,
         "replayed store failed scrub",
     )?;
+    if let Some(audit) = preserved_audit {
+        restore_recovery_audit_logs(&audit, &validated_dir.join(name))?;
+    }
     let final_path = destination.join(name);
     copy_sidecars(&validated_dir.join(name), &final_path, false)?;
     copy_physical_metadata_files(&validated_dir.join(name), &final_path)?;
@@ -1030,22 +1034,14 @@ fn copy_sidecars(source: &Path, destination: &Path, recovery: bool) -> Result<()
             f::legacy_logical_slots_path(source),
             f::legacy_logical_slots_path(destination),
         ),
-        (
-            f::legacy_audit_log_path(source),
-            f::legacy_audit_log_path(destination),
-        ),
     ] {
         match File::open(&old) {
-            Ok(mut input) => {
-                let mut output = create_new(&new)?;
-                std::io::copy(&mut input, &mut output)?;
-                output.sync_all()?;
-                verify_file_copy(&old, &new)?;
-            }
+            Ok(_) => copy_file_verified(&old, &new)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
+    copy_audit_log_family(source, destination)?;
     let support = f::support_dir_for(source);
     if support.exists() {
         if recovery {
@@ -1063,6 +1059,182 @@ fn copy_sidecars(source: &Path, destination: &Path, recovery: bool) -> Result<()
     }
     Ok(())
 }
+
+fn detach_recovery_audit_logs(source: &Path, stage: &Path) -> Result<Option<PathBuf>> {
+    let family = audit_log_family(source)?;
+    if family.is_empty() {
+        return Ok(None);
+    }
+    let preserved = stage.join("preserved-audit");
+    std::fs::create_dir(&preserved)?;
+    for audit in family {
+        let name = audit.file_name().ok_or("audit log filename is missing")?;
+        std::fs::rename(&audit, preserved.join(name))?;
+    }
+    sync_directory(&preserved)?;
+    sync_directory(stage)?;
+    Ok(Some(preserved))
+}
+
+fn restore_recovery_audit_logs(preserved: &Path, destination: &Path) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or("destination parent is missing")?;
+    for entry in std::fs::read_dir(preserved)? {
+        let entry = entry?;
+        ensure(
+            entry.file_type()?.is_file(),
+            "preserved audit log must be a regular file",
+        )?;
+        copy_file_verified(&entry.path(), &parent.join(entry.file_name()))?;
+    }
+    sync_directory(parent)
+}
+
+fn copy_file_verified(source: &Path, destination: &Path) -> Result<()> {
+    let mut input = File::open(source)?;
+    let mut output = create_new(destination)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    verify_file_copy(source, destination)
+}
+
+fn audit_log_family(data_path: &Path) -> Result<Vec<PathBuf>> {
+    let active = f::legacy_audit_log_path(data_path);
+    let parent = active.parent().ok_or("audit log parent is missing")?;
+    let mut rotated = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(timestamp) = f::parse_audit_log_rotated_timestamp(&active, name) else {
+            continue;
+        };
+        ensure(
+            entry.file_type()?.is_file(),
+            "rotated audit log must be a regular file",
+        )?;
+        rotated.push((timestamp, entry.path()));
+    }
+    rotated.sort_by_key(|(timestamp, _)| *timestamp);
+    for pair in rotated.windows(2) {
+        ensure(
+            pair[0].0 != pair[1].0,
+            "duplicate rotated audit log timestamp",
+        )?;
+    }
+    let mut family: Vec<PathBuf> = rotated.into_iter().map(|(_, path)| path).collect();
+    match std::fs::symlink_metadata(&active) {
+        Ok(metadata) => {
+            ensure(metadata.is_file(), "audit log must be a regular file")?;
+            family.push(active);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(family)
+}
+
+fn copy_audit_log_family(source: &Path, destination: &Path) -> Result<()> {
+    let destination_parent = destination
+        .parent()
+        .ok_or("audit log destination parent is missing")?;
+    for old in audit_log_family(source)? {
+        let name = old.file_name().ok_or("audit log filename is missing")?;
+        copy_file_verified(&old, &destination_parent.join(name))?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_audit_log_family(data_path: &Path) -> Result<()> {
+    let mut previous = None;
+    let mut has_events = false;
+    for path in audit_log_family(data_path)? {
+        let input = File::open(&path)?;
+        if path
+            .extension()
+            .is_some_and(|extension| extension == f::layout::AUDIT_LOG_ROTATED_COMPRESSED_EXTENSION)
+        {
+            let decoder = zstd::stream::read::Decoder::new(input)?;
+            (previous, has_events) = verify_audit_log_chain(decoder, previous, has_events)?;
+        } else {
+            (previous, has_events) = verify_audit_log_chain(input, previous, has_events)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_audit_log_chain(
+    input: impl Read,
+    mut previous: Option<String>,
+    mut has_events: bool,
+) -> Result<(Option<String>, bool)> {
+    const MAX_EVENT_BYTES: usize = 1024 * 1024;
+    let mut reader = BufReader::new(input);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        loop {
+            let buffer = reader.fill_buf()?;
+            if buffer.is_empty() {
+                if line.is_empty() {
+                    return Ok((previous, has_events));
+                }
+                break;
+            }
+            let count = buffer
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(buffer.len(), |position| position + 1);
+            ensure(
+                line.len().saturating_add(count) <= MAX_EVENT_BYTES,
+                "audit log event exceeds recovery verification budget",
+            )?;
+            line.extend_from_slice(&buffer[..count]);
+            let ended = buffer[count - 1] == b'\n';
+            reader.consume(count);
+            if ended {
+                break;
+            }
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        ensure(!line.is_empty(), "audit log contains an empty event")?;
+        let value: crate::serde_json::Value = crate::serde_json::from_slice(&line)?;
+        ensure(
+            value.as_object().is_some(),
+            "audit log event must be a JSON object",
+        )?;
+        let declared = match value.get("prev_hash") {
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or("audit log prev_hash must be a string")?,
+            ),
+            None => None,
+        };
+        if has_events {
+            ensure(
+                declared == previous.as_deref(),
+                "audit log hash chain verification failed",
+            )?;
+        } else if let Some(anchor) = declared {
+            ensure(
+                anchor.len() == 64 && anchor.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "audit log initial prev_hash is invalid",
+            )?;
+        }
+        previous = Some(crate::utils::to_hex(&crate::crypto::sha256(&line)));
+        has_events = true;
+    }
+}
+
 fn copy_directory(source: &Path, destination: &Path, depth: usize) -> Result<()> {
     ensure(depth < 32, "operational directory nesting exceeds limit")?;
     ensure(
