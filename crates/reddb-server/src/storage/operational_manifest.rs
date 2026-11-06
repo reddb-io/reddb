@@ -32,6 +32,35 @@ mod tests {
         assert!(!reader.step(512).expect("cold bounded replay").complete);
     }
 
+    #[test]
+    fn imported_manifest_is_not_replayed_on_subsequent_boots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).unwrap();
+            store.create_collection("kept").unwrap();
+            store.persist().unwrap();
+        }
+        let legacy = OperationalManifest::for_db_path(&path);
+        legacy.recover_or_bootstrap(&["kept".into()]).unwrap();
+        {
+            let store = UnifiedStore::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .try_get_config("red.storage.legacy_manifest_imported")
+                    .unwrap(),
+                Some(reddb_types::Value::Boolean(true))
+            );
+            store.persist().unwrap();
+        }
+        // A retired source is neither read nor repaired after import.
+        let manifest_path = legacy.current_manifest_path_for_test();
+        fs::write(&manifest_path, b"retired source").unwrap();
+        let cold = UnifiedStore::open(&path).unwrap();
+        assert!(cold.get_collection("kept").is_some());
+        assert_eq!(fs::read(manifest_path).unwrap(), b"retired source");
+    }
+
     fn temp_db_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

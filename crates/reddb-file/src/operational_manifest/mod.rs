@@ -279,16 +279,27 @@ impl<V: Vfs> OperationalManifest<V> {
     /// Validate the published view without bootstrap, rename, quarantine or
     /// cleanup. Pending drops are applied only to the reader's resident view.
     pub fn read_only_pending_drops(&self) -> io::Result<Vec<String>> {
+        Ok(self
+            .read_only_pending_drops_if_present()?
+            .unwrap_or_default())
+    }
+
+    /// Distinguish an absent manifest from an imported manifest with no drops.
+    /// Importers can record completion without replaying an old manifest on
+    /// every subsequent cold boot.
+    pub fn read_only_pending_drops_if_present(&self) -> io::Result<Option<Vec<String>>> {
         let Some(manifest) = self.load_current()? else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         self.validate_manifest_artifacts(&manifest)?;
-        Ok(manifest
-            .collections
-            .iter()
-            .filter(|(_, entry)| entry.state == CollectionState::PendingDrop)
-            .map(|(name, _)| name.clone())
-            .collect())
+        Ok(Some(
+            manifest
+                .collections
+                .iter()
+                .filter(|(_, entry)| entry.state == CollectionState::PendingDrop)
+                .map(|(name, _)| name.clone())
+                .collect(),
+        ))
     }
 
     pub fn create_collection(&self, name: &str) -> io::Result<()> {

@@ -160,13 +160,15 @@ fn legacy_metadata_is_imported_before_its_sidecars_are_removed() {
             },
         )
         .expect("fixture editor");
-        let manager = store.get_collection("red.config").expect("config");
+        let manager = store
+            .get_collection("red.storage.metadata")
+            .expect("config");
         for entity in manager.query_all(|entity| {
             entity.data.as_row().and_then(|row| row.get_field("key"))
-                == Some(&reddb_types::Value::text("red.storage.physical_metadata"))
+                == Some(&reddb_types::Value::text("physical"))
         }) {
             store
-                .delete("red.config", entity.id)
+                .delete("red.storage.metadata", entity.id)
                 .expect("remove new representation");
         }
         store.persist().expect("legacy fixture checkpoint");
@@ -240,8 +242,8 @@ fn corrupt_internal_metadata_cannot_fall_back_to_a_stale_sidecar() {
         )
         .expect("fixture editor");
         store
-            .try_set_config_tree(
-                "red.storage.physical_metadata",
+            .try_set_storage_metadata(
+                "physical",
                 &reddb_server::serde_json::Value::String("corrupt".into()),
             )
             .expect("corrupt record");

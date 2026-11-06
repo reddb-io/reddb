@@ -4,7 +4,7 @@
 > `.rdb` and participate in its WAL/checkpoint recovery boundary in every
 > profile. The historical profile exceptions below do not authorize external
 > metadata files. Physical catalog documents now use the internal
-> `red.storage.physical_metadata` config record. Automatic `.meta.rdbx`, JSON,
+> `physical` record in `red.storage.metadata`. Automatic `.meta.rdbx`, JSON,
 > journal-shadow and operational-manifest publication is rolled back. Legacy
 > physical sidecars are import sources and are removed only after the imported
 > record is checkpointed. Legacy operational artifacts, including forks, are

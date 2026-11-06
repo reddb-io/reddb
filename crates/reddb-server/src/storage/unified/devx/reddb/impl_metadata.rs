@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
-const PHYSICAL_METADATA_CONFIG_KEY: &str = "red.storage.physical_metadata";
+const PHYSICAL_METADATA_KEY: &str = "physical";
 
 #[cfg(test)]
 fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
@@ -25,14 +25,14 @@ impl RedDB {
         }
         let value = crate::serde_json::Value::String(metadata.to_document_json(false)?);
         self.store
-            .try_set_config_tree(PHYSICAL_METADATA_CONFIG_KEY, &value)?;
+            .try_set_storage_metadata(PHYSICAL_METADATA_KEY, &value)?;
         Ok(())
     }
 
     fn load_internal_physical_metadata(
         &self,
     ) -> Result<Option<PhysicalMetadataFile>, Box<dyn std::error::Error>> {
-        let Some(value) = self.store.try_get_config(PHYSICAL_METADATA_CONFIG_KEY)? else {
+        let Some(value) = self.store.try_get_storage_metadata(PHYSICAL_METADATA_KEY)? else {
             return Ok(None);
         };
         let Value::Text(document) = value else {
@@ -68,16 +68,7 @@ impl RedDB {
         if self.options.read_only || self.load_internal_physical_metadata()?.is_none() {
             return Ok(());
         }
-        let mut paths = PhysicalMetadataFile::journal_paths_for_data_path(path)?;
-        paths.push(PhysicalMetadataFile::metadata_binary_path_for(path));
-        paths.push(PhysicalMetadataFile::metadata_path_for(path));
-        for legacy in paths {
-            match std::fs::remove_file(legacy) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        reddb_file::physical_metadata::remove_imported_physical_metadata_sidecars(path)?;
         Ok(())
     }
 
@@ -1760,7 +1751,7 @@ mod catalog_observation_tests {
 
         let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
         let json = PhysicalMetadataFile::metadata_path_for(&path);
-        db.delete_kv("red.config", PHYSICAL_METADATA_CONFIG_KEY)
+        db.delete_kv("red.storage.metadata", PHYSICAL_METADATA_KEY)
             .expect("legacy fixture");
         if binary.exists() {
             std::fs::remove_file(binary).expect("remove binary sidecar");

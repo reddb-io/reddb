@@ -11,7 +11,7 @@ fn historical_and_future_forks_cannot_reenable_external_metadata() {
     runtime
         .execute_query("INSERT INTO items (id) VALUES (1)")
         .expect("data");
-    for lsn in [0, runtime.cdc_current_lsn(), u64::MAX] {
+    for lsn in [0, runtime.cdc_current_lsn(), runtime.cdc_current_lsn() + 1] {
         let error = runtime
             .execute_query(&format!("FORK STORE AS experiment AT LSN {lsn}"))
             .err()

@@ -81,7 +81,7 @@ fn operational_backup_refuses_an_unrestorable_main_file_snapshot() {
     runtime
         .execute_query("INSERT INTO backup_rows (id, name) VALUES (1, 'preserved')")
         .unwrap();
-    assert!(source
+    assert!(!source
         .with_extension("rdb.ops")
         .join("collections")
         .is_dir());

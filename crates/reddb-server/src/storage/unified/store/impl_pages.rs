@@ -1143,7 +1143,7 @@ impl UnifiedStore {
             .map_err(StoreError::Io)?;
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
-        let pending_drops = store.legacy_pending_collection_drops()?;
+        let pending_drops = store.legacy_pending_collection_drops()?.unwrap_or_default();
         for name in pending_drops {
             if !catalog
                 .collisions
@@ -1425,18 +1425,21 @@ impl UnifiedStore {
         Ok(())
     }
 
-    fn legacy_pending_collection_drops(&self) -> Result<Vec<String>, StoreError> {
-        if self
-            .try_get_config("red.storage.legacy_manifest_imported")?
-            .is_some()
-        {
-            return Ok(Vec::new());
+    fn legacy_pending_collection_drops(&self) -> Result<Option<Vec<String>>, StoreError> {
+        match self.try_get_config("red.storage.legacy_manifest_imported")? {
+            Some(Value::Boolean(true)) => return Ok(None),
+            None => {}
+            Some(_) => {
+                return Err(StoreError::Serialization(
+                    "invalid legacy manifest import marker".into(),
+                ))
+            }
         }
         let Some(path) = &self.db_path else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         self.operational_manifest_for_path(path)
-            .read_only_pending_drops()
+            .read_only_pending_drops_if_present()
             .map_err(StoreError::Io)
     }
 
@@ -1444,10 +1447,9 @@ impl UnifiedStore {
         &self,
         collisions: &[SystemCollectionCollision],
     ) -> Result<(), StoreError> {
-        let pending = self.legacy_pending_collection_drops()?;
-        if pending.is_empty() {
+        let Some(pending) = self.legacy_pending_collection_drops()? else {
             return Ok(());
-        }
+        };
         // Consume legacy drop intents once, without rewriting their manifest.
         // WAL replay restores both the drops and this marker after a crash.
         for name in pending {

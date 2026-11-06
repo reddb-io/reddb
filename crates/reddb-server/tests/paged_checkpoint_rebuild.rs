@@ -220,7 +220,7 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
     let metadata_before = runtime
         .db()
         .store()
-        .try_get_config("red.storage.physical_metadata")
+        .try_get_storage_metadata("physical")
         .expect("internal metadata");
     let store = runtime.db().store();
     let pager = store.pager().expect("paged store");
@@ -246,7 +246,7 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
             runtime
                 .db()
                 .store()
-                .try_get_config("red.storage.physical_metadata")
+                .try_get_storage_metadata("physical")
                 .expect("internal metadata")
                 == metadata_before,
             "inspection published metadata"
@@ -262,7 +262,7 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
         runtime
             .db()
             .store()
-            .try_get_config("red.storage.physical_metadata")
+            .try_get_storage_metadata("physical")
             .expect("maintained metadata")
             != metadata_before,
         "explicit maintenance did not publish metadata"
@@ -290,7 +290,7 @@ fn metadata_inspection_reads_a_journal_without_healing_the_primary() {
         PhysicalMetadataFile::metadata_journal_path_for(&path, metadata.superblock.sequence);
     runtime
         .db()
-        .delete_kv("red.config", "red.storage.physical_metadata")
+        .delete_kv("red.storage.metadata", "physical")
         .expect("legacy representation");
     metadata
         .save_to_binary_path(&journal)
@@ -326,7 +326,7 @@ fn metadata_inspection_reads_a_journal_without_healing_the_primary() {
     assert!(runtime
         .db()
         .store()
-        .try_get_config("red.storage.physical_metadata")
+        .try_get_storage_metadata("physical")
         .expect("internal metadata")
         .is_some());
 }
