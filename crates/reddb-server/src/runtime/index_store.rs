@@ -1093,6 +1093,7 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 pub(crate) enum MutationTestPhase {
     DmlTargetScanCandidate,
     DmlIndexLookupStarted,
+    DirectWireQueryStarted,
     DmlPostImageCandidate,
     StoragePublished,
     BeforeEvents,
