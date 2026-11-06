@@ -18,10 +18,12 @@ use crate::append_only_segment::{
 
 mod append_only;
 mod fork;
+mod incremental;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
 // path (`operational_manifest::ForkInfo`, etc.) is unchanged.
 pub use fork::{ForkHydrationState, ForkInfo, ForkOrigin, PromoteForkOutcome};
+pub use incremental::{IncrementalManifest, ManifestReadStep};
 
 const FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";

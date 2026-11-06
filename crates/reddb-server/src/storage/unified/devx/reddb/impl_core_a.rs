@@ -796,50 +796,55 @@ impl RedDB {
     }
 
     /// Recompute bounds only when every row has one unambiguous timestamp.
+    #[cfg(test)]
     pub(crate) fn revalidate_append_only_bounds(
         &self,
         collection: &str,
         column: &str,
         segment: &reddb_file::AppendOnlySegment,
     ) -> Option<(i64, i64)> {
-        let manager = self.store.get_collection(collection)?;
         let mut bounds: Option<(i64, i64)> = None;
         for row in &segment.rows {
-            let raw_id: [u8; 8] = row.primary_key.as_slice().try_into().ok()?;
-            let expected_id = u64::from_be_bytes(raw_id);
-            let mut timestamp = None;
-            let mut matched = false;
-            for version in reddb_file::STORE_VERSION_V1..=reddb_file::STORE_VERSION_CURRENT {
-                let Ok((mut entity, metadata)) =
-                    UnifiedStore::deserialize_entity_record(&row.payload, version)
-                else {
-                    continue;
-                };
-                if UnifiedStore::serialize_entity_record(&entity, metadata.as_ref(), version)
-                    != row.payload
-                {
-                    continue;
-                }
-                if entity.id.raw() != expected_id || entity.kind.collection() != collection {
-                    return None;
-                }
-                manager.restore_owned_row_schemas(std::iter::once(&mut entity));
-                let current = append_only_entity_timestamp_ms(&entity, column)?;
-                if timestamp.is_some_and(|previous| previous != current) {
-                    return None;
-                }
-                timestamp = Some(current);
-                matched = true;
-            }
-            if !matched {
-                return None;
-            }
-            let timestamp = timestamp?;
+            let timestamp = self.revalidate_append_only_row(collection, column, row)?;
             bounds = Some(bounds.map_or((timestamp, timestamp), |(min, max)| {
                 (min.min(timestamp), max.max(timestamp))
             }));
         }
         bounds
+    }
+
+    pub(crate) fn revalidate_append_only_row(
+        &self,
+        collection: &str,
+        column: &str,
+        row: &reddb_file::AppendOnlySegmentRow,
+    ) -> Option<i64> {
+        let manager = self.store.get_collection(collection)?;
+        let raw_id: [u8; 8] = row.primary_key.as_slice().try_into().ok()?;
+        let expected_id = u64::from_be_bytes(raw_id);
+        let mut timestamp = None;
+        for version in reddb_file::STORE_VERSION_V1..=reddb_file::STORE_VERSION_CURRENT {
+            let Ok((mut entity, metadata)) =
+                UnifiedStore::deserialize_entity_record(&row.payload, version)
+            else {
+                continue;
+            };
+            if UnifiedStore::serialize_entity_record(&entity, metadata.as_ref(), version)
+                != row.payload
+            {
+                continue;
+            }
+            if entity.id.raw() != expected_id || entity.kind.collection() != collection {
+                return None;
+            }
+            manager.restore_owned_row_schemas(std::iter::once(&mut entity));
+            let current = append_only_entity_timestamp_ms(&entity, column)?;
+            if timestamp.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            timestamp = Some(current);
+        }
+        timestamp
     }
 
     pub fn embedded_pending_wal_records(&self) -> Option<u64> {

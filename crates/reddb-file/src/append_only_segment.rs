@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{RdbFileError, RdbFileResult};
 
+pub mod streaming;
+
 pub const APPEND_ONLY_SEGMENT_VERSION: u32 = 1;
 pub const APPEND_ONLY_SEGMENT_CHUNK_BYTES: u32 = 512 * 1024;
 

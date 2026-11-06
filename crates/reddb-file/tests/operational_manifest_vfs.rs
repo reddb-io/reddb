@@ -12,7 +12,7 @@ fn retention_batch_recovers_at_both_manifest_publication_boundaries() {
         encode_append_only_segment, AppendOnlySegmentCodec, AppendOnlySegmentRow,
         AppendOnlySegmentState,
     };
-    for failed_phase in [1, 2] {
+    for (failed_phase, incremental) in [(1, false), (2, false), (1, true), (2, true)] {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("data.rdb");
         let vfs = RecordingVfs::default();
@@ -52,9 +52,18 @@ fn retention_batch_recovers_at_both_manifest_publication_boundaries() {
         let current = vfs.manifest_rename_attempts.load(Ordering::SeqCst);
         vfs.fail_manifest_rename_at
             .store(current + failed_phase, Ordering::SeqCst);
-        assert!(manifest
-            .retire_append_only_retention_batch(&cutoffs, 1)
-            .is_err());
+        if incremental {
+            let mut snapshot = manifest.begin_incremental_read().unwrap().unwrap();
+            while !snapshot.step(17).unwrap().complete {}
+            assert!(snapshot
+                .retire_append_only_retention_batch(&cutoffs, 1)
+                .is_err());
+            assert!(!snapshot.is_current().unwrap());
+        } else {
+            assert!(manifest
+                .retire_append_only_retention_batch(&cutoffs, 1)
+                .is_err());
+        }
         let pending = manifest
             .append_only_segments_with_pending_for_test()
             .unwrap();
@@ -199,6 +208,10 @@ impl VfsFile for RecordingFile {
             path: self.path.clone(),
             vfs: self.vfs.clone(),
         })
+    }
+
+    fn same_file(&self, other: &Self) -> io::Result<bool> {
+        self.file.same_file(&other.file)
     }
 
     fn file_len(&self) -> io::Result<u64> {

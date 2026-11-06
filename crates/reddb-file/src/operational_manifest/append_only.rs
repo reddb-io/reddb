@@ -6,7 +6,7 @@ use std::io;
 use super::{
     active_append_only_segments, append_only_published_rows, empty_manifest, invalid_data,
     next_append_only_segment_id, record_retired_append_only_segment,
-    AppendOnlySegmentManifestEntry, AppendOnlySegmentState, OperationalManifest,
+    AppendOnlySegmentManifestEntry, AppendOnlySegmentState, Manifest, OperationalManifest,
 };
 use crate::append_only_segment::{
     append_only_segment_chunk_checksums, decode_append_only_segment,
@@ -214,6 +214,18 @@ impl<V: Vfs> OperationalManifest<V> {
         let Some(mut manifest) = self.load_current()? else {
             return Ok(Vec::new());
         };
+        self.retire_append_only_retention_loaded(&mut manifest, cutoffs, limit)
+    }
+
+    pub(super) fn retire_append_only_retention_loaded(
+        &self,
+        manifest: &mut Manifest,
+        cutoffs: &BTreeMap<String, (i64, String)>,
+        limit: usize,
+    ) -> io::Result<Vec<(String, u64)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut selected = Vec::new();
         let mut changed = false;
         for entry in &mut manifest.append_only_segments {
@@ -241,7 +253,7 @@ impl<V: Vfs> OperationalManifest<V> {
         }
         if changed {
             manifest.generation += 1;
-            self.publish(&manifest)?;
+            self.publish(manifest)?;
         }
         let mut selected_set: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
         for (collection, segment_id) in &selected {
@@ -271,10 +283,10 @@ impl<V: Vfs> OperationalManifest<V> {
             .append_only_segments
             .retain(|entry| !is_selected(entry));
         for entry in &removed {
-            record_retired_append_only_segment(&mut manifest, entry);
+            record_retired_append_only_segment(manifest, entry);
         }
         manifest.generation += 1;
-        self.publish(&manifest)?;
+        self.publish(manifest)?;
         Ok(selected)
     }
 
@@ -300,32 +312,7 @@ impl<V: Vfs> OperationalManifest<V> {
         let Some(manifest) = self.load_current_bounded(max_manifest_bytes)? else {
             return Ok(None);
         };
-        let eligible = |entry: &&AppendOnlySegmentManifestEntry| {
-            entry.state == AppendOnlySegmentState::Active
-                && columns.get(&entry.collection).is_some_and(|(_, column)| {
-                    entry.retention_timestamp_column.as_ref() != Some(column)
-                })
-        };
-        let mut entries = manifest.append_only_segments.iter().filter(eligible);
-        let first = entries.next();
-        let Some(first) = first else { return Ok(None) };
-        let mut earliest = first;
-        let mut next = after
-            .filter(|cursor| (first.collection.as_str(), first.segment_id) > *cursor)
-            .map(|_| first);
-        for entry in entries {
-            let key = (entry.collection.as_str(), entry.segment_id);
-            if key < (earliest.collection.as_str(), earliest.segment_id) {
-                earliest = entry;
-            }
-            if after.is_some_and(|cursor| key > cursor)
-                && next
-                    .is_none_or(|current| key < (current.collection.as_str(), current.segment_id))
-            {
-                next = Some(entry);
-            }
-        }
-        Ok(Some(next.unwrap_or(earliest).clone()))
+        Ok(next_unverified_from_manifest(&manifest, columns, after))
     }
 
     /// Read one immutable segment within explicit compressed and decoded limits.
@@ -359,6 +346,22 @@ impl<V: Vfs> OperationalManifest<V> {
         Ok(Some(decoded))
     }
 
+    /// Open an immutable artifact for resumable, checksum-verified reading.
+    pub fn open_append_only_segment_stream(
+        &self,
+        entry: &AppendOnlySegmentManifestEntry,
+        max_row_bytes: usize,
+    ) -> io::Result<crate::append_only_segment::streaming::StreamingAppendOnlySegment<V::File>>
+    {
+        let path = self.append_only_segments_dir().join(&entry.path);
+        let file = self.vfs.open(&path, OpenMode::read_only())?;
+        crate::append_only_segment::streaming::StreamingAppendOnlySegment::new(
+            file,
+            entry.chunk_checksums.clone(),
+            max_row_bytes,
+        )
+    }
+
     /// Publish bounds derived from every row of this exact immutable entry.
     /// The caller must fence manifest writers while validating and publishing.
     pub fn publish_revalidated_append_only_bounds(
@@ -374,6 +377,19 @@ impl<V: Vfs> OperationalManifest<V> {
         let Some(mut manifest) = self.load_current_bounded(max_manifest_bytes)? else {
             return Ok(false);
         };
+        self.publish_revalidated_append_only_bounds_loaded(&mut manifest, expected, column, bounds)
+    }
+
+    pub(super) fn publish_revalidated_append_only_bounds_loaded(
+        &self,
+        manifest: &mut Manifest,
+        expected: &AppendOnlySegmentManifestEntry,
+        column: &str,
+        bounds: (i64, i64),
+    ) -> io::Result<bool> {
+        if bounds.0 > bounds.1 {
+            return Err(invalid_data("invalid retention bounds"));
+        }
         let Some(entry) = manifest
             .append_only_segments
             .iter_mut()
@@ -388,7 +404,7 @@ impl<V: Vfs> OperationalManifest<V> {
         entry.retention_max_ms = Some(bounds.1);
         entry.retention_timestamp_column = Some(column.to_owned());
         manifest.generation += 1;
-        self.publish(&manifest)?;
+        self.publish(manifest)?;
         Ok(true)
     }
 
@@ -448,4 +464,35 @@ impl<V: Vfs> OperationalManifest<V> {
             .map(|manifest| next_append_only_segment_id(&manifest, collection))
             .unwrap_or(1))
     }
+}
+
+pub(super) fn next_unverified_from_manifest(
+    manifest: &Manifest,
+    columns: &BTreeMap<String, (i64, String)>,
+    after: Option<(&str, u64)>,
+) -> Option<AppendOnlySegmentManifestEntry> {
+    let eligible = |entry: &&AppendOnlySegmentManifestEntry| {
+        entry.state == AppendOnlySegmentState::Active
+            && columns.get(&entry.collection).is_some_and(|(_, column)| {
+                entry.retention_timestamp_column.as_ref() != Some(column)
+            })
+    };
+    let mut entries = manifest.append_only_segments.iter().filter(eligible);
+    let first = entries.next()?;
+    let mut earliest = first;
+    let mut next = after
+        .filter(|cursor| (first.collection.as_str(), first.segment_id) > *cursor)
+        .map(|_| first);
+    for entry in entries {
+        let key = (entry.collection.as_str(), entry.segment_id);
+        if key < (earliest.collection.as_str(), earliest.segment_id) {
+            earliest = entry;
+        }
+        if after.is_some_and(|cursor| key > cursor)
+            && next.is_none_or(|current| key < (current.collection.as_str(), current.segment_id))
+        {
+            next = Some(entry);
+        }
+    }
+    Some(next.unwrap_or(earliest).clone())
 }
