@@ -108,6 +108,15 @@ impl Catalog {
         })
     }
 
+    pub(super) fn verify_alias_has_no_references(&self, legacy: &str) -> Result<()> {
+        ensure(
+            self.references
+                .iter()
+                .all(|r| r.target_collection != legacy),
+            "legacy runtime metadata has incoming references",
+        )
+    }
+
     pub fn retain_canonical_system_config(&mut self) -> Result<()> {
         let legacy_roots = self
             .roots

@@ -102,6 +102,17 @@ at their original positions. Other actions in the same transaction and page
 ownership records retain their order and behavior. Consumed identity counters
 are preserved. The JSON report exposes `retired_boot_system_wal_actions`;
 canonical process values remain unchanged until runtime boot reseeds them.
+Explicit canonical-config recovery also reconciles duplicate runtime catalogs
+for planner statistics, index descriptors, queue groups and materialized-view
+definitions on the isolated copy. It retains canonical planner observations,
+requires equal definitions for existing index/view keys, and imports definitions
+missing from the canonical catalog. Queue groups match by queue and group; their
+creation observations may differ. Legacy pending deliveries, acknowledgments,
+queue configurations, conflicting definitions, unknown row shapes, references,
+nontrivial MVCC/typed metadata and WAL targeting either side of these catalog
+pairs are refused. Consumed identities are retained. These checks cover the
+whole supported catalog before opening its recovered writer.
+
 The normal recovery command continues to reject the ambiguous catalog.
 
 The source read lock excludes normal writers; the original file and sidecars
