@@ -687,56 +687,52 @@ mod tests {
     #[test]
     fn config_snapshot_does_not_copy_superseded_values() {
         use crate::storage::no_malloc_hot_paths::measure_allocations;
-        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+
+        // Drive the selection in a known order. Two traversals of the live
+        // store need not have the same order (or see the same compaction), so
+        // counting replacements in a separate traversal is not a stable bound.
         let observe = |payload_bytes| {
-            let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
-            let manager = runtime.db().store().get_or_create_collection("red_config");
-            // Insertion and segment traversal can disagree. Only candidates
-            // that advance the selected version may copy the value.
-            for id in (1..=64).rev() {
-                let mut entity = UnifiedEntity::table_row(
-                    EntityId::new(1_000_000 + id),
-                    "red_config",
-                    id,
-                    vec![],
-                );
-                entity.data = EntityData::Row(RowData {
-                    columns: vec![],
-                    schema: None,
-                    named: Some(HashMap::from([
-                        ("key".into(), Value::text("fixture.copy")),
-                        ("value".into(), Value::Blob(vec![id as u8; payload_bytes])),
-                    ])),
-                });
-                manager.insert(entity).expect("config history");
-            }
-            let mut newest = 0;
-            let mut replacements = 0;
-            manager.try_for_each_entity(usize::MAX, |entity| {
-                if matches!(entity.data.as_row().and_then(|row| row.get_field("key")), Some(Value::Text(key)) if key.as_ref() == "fixture.copy")
-                    && entity.id.raw() >= newest {
-                    newest = entity.id.raw();
-                    replacements += 1;
+            let values: Vec<_> = (1..=64)
+                .rev()
+                .map(|id| (id, Value::Blob(vec![id as u8; payload_bytes])))
+                .collect();
+            let (latest, allocations) = measure_allocations(|| {
+                let mut latest = HashMap::new();
+                for (id, value) in &values {
+                    let mut shared = None;
+                    insert_latest_config_value(
+                        &mut latest,
+                        "fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
+                    insert_latest_config_value(
+                        &mut latest,
+                        "red.config/fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
                 }
-                true
-            }).expect("scan order");
-            let (snapshot, allocations) =
-                measure_allocations(|| latest_config_snapshot(runtime.db().as_ref()));
+                latest
+            });
+            assert_eq!(latest["fixture.copy"].0, 64);
             assert_eq!(
-                snapshot.expect("snapshot").get("fixture.copy"),
-                Some(&Value::Blob(vec![64; payload_bytes]))
+                *latest["fixture.copy"].1,
+                Value::Blob(vec![64; payload_bytes])
             );
-            (allocations, replacements)
+            assert!(Arc::ptr_eq(
+                &latest["fixture.copy"].1,
+                &latest["red.config/fixture.copy"].1
+            ));
+            allocations
         };
-        let (empty, _) = observe(0);
-        let (large, replacements) = observe(64 * 1024);
+        let empty = observe(0);
+        let large = observe(64 * 1024);
         assert!(
-            large.allocated_bytes <= empty.allocated_bytes + replacements * 64 * 1024 + 64 * 1024,
+            large.allocated_bytes <= empty.allocated_bytes + 2 * 64 * 1024,
             "superseded config payload copies: {empty:?} -> {large:?}"
-        );
-        eprintln!(
-            "config snapshot allocated bytes, empty/64 KiB values: {} / {}",
-            empty.allocated_bytes, large.allocated_bytes
         );
     }
 
