@@ -54,8 +54,9 @@ impl RedDBRuntime {
 
     /// Drive one tick of the retention sweeper. Mutable collections
     /// physically delete at most `batch_size` expired rows; append-only
-    /// collections retire whole expired segments through the operational
-    /// manifest. Records the counters that `red.retention` exposes.
+    /// collections retire at most `batch_size` whole expired segments across
+    /// collections through the operational manifest. Records the counters that
+    /// `red.retention` exposes.
     /// Called from the background sweeper thread; safe to invoke directly
     /// from tests with a small batch size to drain rows deterministically.
     /// Issue #584 slice 12.
@@ -84,6 +85,7 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let collections = store.list_collections();
+        let mut append_only_checked = false;
         for name in collections {
             let Some(contract) = self.inner.db.collection_contract(&name) else {
                 continue;
@@ -92,7 +94,10 @@ impl RedDBRuntime {
                 continue;
             };
             if contract.append_only {
-                let _ = self.retire_expired_append_only_segments(now_ms);
+                if !append_only_checked {
+                    append_only_checked = true;
+                    let _ = self.retire_expired_append_only_segments(now_ms, batch_size);
+                }
                 continue;
             }
             let Some(ts_column) =
