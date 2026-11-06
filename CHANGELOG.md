@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.15
+
+### Patch Changes
+
+- [#2679](https://github.com/reddb-io/reddb/pull/2679) [`b41962a`](https://github.com/reddb-io/reddb/commit/b41962ad17db4863a97ee20f5d17fde7531c49df) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Enforce configured authentication for native wire transports.
+
 ## 1.28.14
 
 ### Patch Changes
