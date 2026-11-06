@@ -183,6 +183,8 @@ struct RecordingVfs {
     fail_manifest_write_at: Arc<AtomicUsize>,
     manifest_reads: Arc<AtomicUsize>,
     fail_manifest_read_at: Arc<AtomicUsize>,
+    fail_journal_sync: Arc<AtomicBool>,
+    fail_head_write: Arc<AtomicBool>,
     fail_after_manifest_rename: Arc<AtomicBool>,
     manifest_renamed: Arc<AtomicBool>,
     segment_removals: Arc<AtomicUsize>,
@@ -228,6 +230,11 @@ impl VfsFile for RecordingFile {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.vfs.record(format!("write:{}", self.path));
+        if self.path.ends_with("manifest.json.next")
+            && self.vfs.fail_head_write.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected head write failure"));
+        }
         if self.path.ends_with("manifest.records") {
             let attempt = self.vfs.manifest_writes.fetch_add(1, Ordering::SeqCst) + 1;
             if self.vfs.fail_manifest_write_at.load(Ordering::SeqCst) == attempt {
@@ -259,7 +266,48 @@ impl VfsFile for RecordingFile {
 
     fn sync_all(&self) -> io::Result<()> {
         self.vfs.record(format!("sync_file:{}", self.path));
+        if self.path.ends_with("manifest.records")
+            && self.vfs.fail_journal_sync.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected journal sync failure"));
+        }
         self.file.sync_all()
+    }
+}
+
+#[test]
+fn journal_and_head_failures_preserve_legacy_and_current_generations() {
+    for legacy in [true, false] {
+        for fail_sync in [true, false] {
+            let directory = tempfile::tempdir().expect("temp directory");
+            let path = directory.path().join("data.rdb");
+            let vfs = RecordingVfs::default();
+            let manifest = OperationalManifest::with_vfs(&path, vfs.clone());
+            manifest.create_collection("live").expect("create");
+            let head = manifest.current_manifest_path_for_test();
+            if legacy {
+                std::fs::write(
+                    &head,
+                    manifest.legacy_manifest_bytes_for_test().expect("fixture"),
+                )
+                .expect("legacy head");
+            }
+            let before = std::fs::read(&head).expect("head");
+            vfs.fail_journal_sync.store(fail_sync, Ordering::SeqCst);
+            vfs.fail_head_write.store(!fail_sync, Ordering::SeqCst);
+            assert!(manifest.create_collection("new").is_err());
+            assert_eq!(std::fs::read(&head).expect("head"), before);
+            drop(manifest);
+            let cold = OperationalManifest::with_vfs(&path, vfs);
+            cold.recover_or_bootstrap(&[]).expect("cold recovery");
+            assert!(cold.collection_path_for_test("live").exists());
+            cold.create_collection("new").expect("retry");
+            let cold = OperationalManifest::for_db_path(&path);
+            cold.recover_or_bootstrap(&[])
+                .expect("second cold recovery");
+            assert!(cold.collection_path_for_test("live").exists());
+            assert!(cold.collection_path_for_test("new").exists());
+        }
     }
 }
 
