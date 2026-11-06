@@ -235,3 +235,63 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
         "boot must succeed and rebuild from extent when .tv is corrupt"
     );
 }
+
+#[test]
+fn stale_snapshot_includes_newer_persisted_vectors_after_restart() {
+    let dir = db_dir("stale-snapshot");
+    let path = dir.path().join("data.rdb");
+    let snapshot = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_stale").unwrap();
+    {
+        let rt = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+        )
+        .unwrap();
+        rt.execute_query("CREATE COLLECTION turbo_stale KIND vector.turbo DIM 8 METRIC cosine")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO turbo_stale VECTOR (embedding, content) VALUES ([1,0,0,0,0,0,0,0], 'old')",
+        )
+        .unwrap();
+        rt.checkpoint().unwrap();
+    }
+    assert_eq!(
+        reddb_file::read_turboquant_snapshot(&snapshot, 8, 0x7155_8807_FED4_2913)
+            .unwrap()
+            .vectors
+            .len(),
+        1
+    );
+    {
+        let rt = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+        )
+        .unwrap();
+        // Persist a vector without updating the existing derived snapshot.
+        rt.db()
+            .vector("turbo_stale")
+            .dense(vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .content("new")
+            .save()
+            .unwrap();
+        rt.checkpoint().unwrap();
+    }
+    assert_eq!(
+        reddb_file::read_turboquant_snapshot(&snapshot, 8, 0x7155_8807_FED4_2913)
+            .unwrap()
+            .vectors
+            .len(),
+        1
+    );
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+    )
+    .unwrap();
+    let result = rt
+        .execute_query(
+            "VECTOR SEARCH turbo_stale SIMILAR TO [0,1,0,0,0,0,0,0] MODE APPROXIMATE LIMIT 1",
+        )
+        .unwrap();
+    assert!(
+        matches!(result.result.records[0].get("content"), Some(reddb_types::Value::Text(content)) if content.as_ref() == "new")
+    );
+}
