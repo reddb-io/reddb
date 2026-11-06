@@ -1451,6 +1451,75 @@ mod tests {
     }
 
     #[test]
+    fn dml_index_lookup_retries_when_publication_races_target_selection() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE dml_lookup_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO dml_lookup_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX dml_lookup_status ON dml_lookup_race (status) USING HASH")
+            .expect("create index");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("DELETE FROM dml_lookup_race WHERE status = 'old'"),
+        )
+        .expect("capture snapshot");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM dml_lookup_race WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (published_tx, published_rx) = mpsc::channel();
+        let published_rx = Mutex::new(published_rx);
+        let first = std::sync::atomic::AtomicBool::new(true);
+        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+            if collection == "dml_lookup_race"
+                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+                && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                started_tx.send(()).expect("notify writer");
+                published_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("writer published");
+            }
+        }));
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                started_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("lookup started");
+                rt.execute_query("UPDATE dml_lookup_race SET status = 'new' WHERE id = 1")
+                    .expect("publish update");
+                published_tx.send(()).expect("release lookup");
+            });
+            let _guards = frame.install(&rt);
+            let ids = super::super::dml_target_scan::DmlTargetScan::new(
+                &rt,
+                "dml_lookup_race",
+                Some(&filter),
+                None,
+            )
+            .find_target_ids()
+            .expect("find DML targets");
+            writer.join().expect("writer thread");
+            assert_eq!(
+                ids.len(),
+                2,
+                "racing publication must not omit a snapshot-visible row"
+            );
+        });
+        *rt.index_store_ref().mutation_hook.lock() = None;
+    }
+
+    #[test]
     fn captured_snapshot_survives_indexed_update_and_delete_for_range_queries() {
         reset_thread_locals();
         let rt = fresh_runtime();
