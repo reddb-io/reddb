@@ -184,25 +184,7 @@ pub fn salvage_paged_collections(
 
 pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<()> {
     guard.verify_superblocks()?;
-    let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
-    if operational.exists() {
-        validate_operational(&operational)?;
-        f::OperationalManifest::for_db_path(source).verify_marker_only_for_recovery()?;
-    }
-    for path in [
-        f::logical_wal_path(source),
-        f::legacy_logical_slots_path(source),
-        f::legacy_audit_log_path(source),
-    ] {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => ensure(
-                metadata.is_file() && metadata.len() == 0,
-                "logical WAL, slot or audit data requires separate recovery verification",
-            )?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
+    verify_standalone_sidecars(source)?;
     let physical = guard.header.physical;
     for (page_id, expected) in [
         (physical.manifest_page, physical.manifest_checksum),
@@ -252,6 +234,29 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
         )?;
     }
     verify_vault(source, guard)?;
+    Ok(())
+}
+
+pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
+    let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
+    if operational.exists() {
+        validate_operational(&operational)?;
+        f::OperationalManifest::for_db_path(source).verify_marker_only_for_recovery()?;
+    }
+    for path in [
+        f::logical_wal_path(source),
+        f::legacy_logical_slots_path(source),
+        f::legacy_audit_log_path(source),
+    ] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => ensure(
+                metadata.is_file() && metadata.len() == 0,
+                "logical WAL, slot or audit data requires separate recovery verification",
+            )?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
