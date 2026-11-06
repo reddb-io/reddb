@@ -45,7 +45,20 @@ pub(crate) fn try_handle_query_binary_direct(
 ) -> Option<BinaryQueryResponse> {
     let index_store = runtime.index_store_ref();
     let generation = index_store.indexed_mutation_generation();
-    if index_store.indexed_mutation_active() {
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let snapshot_unsafe = || {
+        let manager = runtime.snapshot_manager();
+        if manager.oldest_active_xid().is_some() {
+            return true;
+        }
+        snapshot.as_ref().is_some_and(|snapshot| {
+            let current = manager.fresh_read_snapshot();
+            snapshot.requires_index_fallback
+                || snapshot.snapshot.xid != current.xid
+                || snapshot.snapshot.in_progress != current.in_progress
+        })
+    };
+    if index_store.indexed_mutation_active() || snapshot_unsafe() {
         return None;
     }
     #[cfg(test)]
@@ -56,6 +69,7 @@ pub(crate) fn try_handle_query_binary_direct(
     let response = try_handle_query_binary_direct_inner(runtime, sql);
     if index_store.indexed_mutation_active()
         || generation != index_store.indexed_mutation_generation()
+        || snapshot_unsafe()
     {
         return None;
     }

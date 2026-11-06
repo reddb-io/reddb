@@ -1727,6 +1727,55 @@ mod tests {
     }
 
     #[test]
+    fn autocommit_index_reads_keep_old_rows_while_another_transaction_is_open() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        let execute = |connection, sql: &str| {
+            set_current_connection_id(connection);
+            let result = rt.execute_query(sql);
+            clear_current_connection_id();
+            result.expect("statement")
+        };
+        execute(1, "CREATE TABLE active_writer_rows (id INT, status TEXT)");
+        execute(
+            1,
+            "INSERT INTO active_writer_rows (id, status) VALUES (1, 'old')",
+        );
+        execute(
+            1,
+            "CREATE INDEX active_writer_status ON active_writer_rows (status) USING HASH",
+        );
+        execute(2, "BEGIN");
+        execute(
+            2,
+            "UPDATE active_writer_rows SET status = 'new' WHERE id = 1",
+        );
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'old'")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'new'")
+                .result
+                .records
+                .len(),
+            0
+        );
+        execute(2, "ROLLBACK");
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'old'")
+                .result
+                .records
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn frame_captures_identity_and_scope() {
         reset_thread_locals();
         set_current_tenant("acme".to_string());

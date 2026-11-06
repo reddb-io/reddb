@@ -379,3 +379,92 @@ fn read_only_native_pager_is_rejected_before_recovery_writes() {
     );
     assert_eq!(std::fs::read(&path).expect("unchanged bytes"), before);
 }
+
+#[test]
+fn promoted_legacy_snapshot_keeps_new_writes_in_wal() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("legacy.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("create");
+        runtime
+            .execute_query("CREATE TABLE promoted_rows (id INT)")
+            .expect("schema");
+        runtime
+            .execute_query("INSERT INTO promoted_rows (id) VALUES (1)")
+            .expect("seed");
+        runtime.flush().expect("checkpoint");
+    }
+    let artifact = reddb_server::storage::EmbeddedRdbArtifact::open(&path).expect("artifact");
+    let snapshot = reddb_server::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)
+        .expect("read")
+        .expect("snapshot");
+    std::fs::write(&path, snapshot).expect("legacy image");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("promote");
+    runtime
+        .execute_query("INSERT INTO promoted_rows (id) VALUES (2)")
+        .expect("durable insert");
+    let crash_path = directory.path().join("crash.rdb");
+    std::fs::copy(&path, &crash_path).expect("copy before drop/checkpoint");
+    let recovered =
+        RedDBRuntime::with_options(RedDBOptions::persistent(crash_path)).expect("recover");
+    assert_eq!(
+        recovered
+            .execute_query("SELECT id FROM promoted_rows")
+            .expect("rows")
+            .result
+            .records
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn rejected_replica_payload_does_not_publish_data_or_advance_frontier() {
+    use reddb_server::replication::cdc::{change_record_from_entity, ChangeOperation};
+    use reddb_server::replication::logical::{ApplyMode, LogicalChangeApplier};
+    use reddb_server::storage::{EntityId, UnifiedEntity};
+    let replica = RedDBRuntime::in_memory().expect("replica");
+    replica
+        .execute_query("CREATE TABLE validated_replay (id INT)")
+        .expect("schema");
+    let row = UnifiedEntity::table_row(
+        EntityId::new(91000),
+        "validated_replay",
+        1,
+        vec![reddb_types::Value::Integer(1)],
+    );
+    let record = change_record_from_entity(
+        1,
+        1,
+        ChangeOperation::Insert,
+        "validated_replay",
+        "table",
+        &row,
+        12,
+        None,
+    );
+    let applier = LogicalChangeApplier::new(0);
+    let mut invalid_metadata = record.clone();
+    invalid_metadata.metadata = Some(reddb_wire::replication::ChangeRecordJsonValue::Null);
+    let mut invalid_identity = record.clone();
+    invalid_identity.entity_id += 1;
+    for invalid in [invalid_metadata, invalid_identity] {
+        assert!(applier
+            .apply(&replica.db(), &invalid, ApplyMode::Replica)
+            .is_err());
+        assert_eq!(applier.last_applied_lsn(), 0);
+        assert_eq!(
+            replica
+                .execute_query("SELECT id FROM validated_replay")
+                .expect("read")
+                .result
+                .records
+                .len(),
+            0
+        );
+    }
+    applier
+        .apply(&replica.db(), &record, ApplyMode::Replica)
+        .expect("valid retry");
+    assert_eq!(applier.last_applied_lsn(), 1);
+}

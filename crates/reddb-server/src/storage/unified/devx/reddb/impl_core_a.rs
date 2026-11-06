@@ -568,7 +568,7 @@ impl RedDB {
                         })?;
                         let store = UnifiedStore::load_from_bytes_with_config(
                             &snapshot,
-                            store_config.clone(),
+                            embedded_store_config.clone(),
                         )
                         .map_err(|err| format!("load legacy embedded snapshot: {err}"))?;
                         if !options.read_only {

@@ -30,7 +30,9 @@ pub(super) struct DmlTargetScan<'a> {
 
 fn dml_snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
     let current = snapshot.manager.fresh_read_snapshot();
-    snapshot.snapshot.xid != current.xid || snapshot.snapshot.in_progress != current.in_progress
+    snapshot.manager.oldest_active_xid().is_some()
+        || snapshot.snapshot.xid != current.xid
+        || snapshot.snapshot.in_progress != current.in_progress
 }
 
 fn dml_filter_can_retry(filter: &Filter) -> bool {

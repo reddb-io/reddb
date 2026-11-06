@@ -299,6 +299,7 @@ pub struct LogicalChangeApplier {
     received_frontier_lsn: AtomicU64,
     last_payload_hash: Mutex<Option<[u8; 32]>>,
     apply_wait: (Mutex<()>, Condvar),
+    apply_lock: Mutex<()>,
     /// Issue #814 — metrics the apply path bumps when a record runs
     /// against a missing target. The production replica loop shares the
     /// runtime's `ReplicaApplyMetrics` here so `/metrics` surfaces misses;
@@ -330,6 +331,7 @@ impl LogicalChangeApplier {
             received_frontier_lsn: AtomicU64::new(starting_lsn),
             last_payload_hash: Mutex::new(None),
             apply_wait: (Mutex::new(()), Condvar::new()),
+            apply_lock: Mutex::new(()),
             metrics,
         }
     }
@@ -428,10 +430,9 @@ impl LogicalChangeApplier {
         mode: ApplyMode,
         range_fence: Option<&RangeAuthority>,
     ) -> Result<ApplyOutcome, LogicalApplyError> {
-        // Serialize validation, publication and frontier advancement. The same
-        // mutex also prevents a bookmark notification from being lost between
-        // checking its frontier and entering the condition-variable wait.
-        let _apply = self.apply_wait.0.lock().expect("apply wait mutex");
+        // Serialize validation, publication and frontier advancement. Keep this
+        // separate from bookmark waits so their deadlines still work during I/O.
+        let _apply = self.apply_lock.lock().expect("apply mutex");
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
 
@@ -473,10 +474,7 @@ impl LogicalChangeApplier {
 
         if last == 0 && record.lsn > 0 {
             self.do_apply(db, record, mode)?;
-            self.last_applied_term.store(record.term, Ordering::Release);
-            self.last_applied_lsn.store(record.lsn, Ordering::Release);
-            *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
-            self.apply_wait.1.notify_all();
+            self.publish_applied(record, payload_hash);
             return Ok(ApplyOutcome::Applied);
         }
 
@@ -505,11 +503,17 @@ impl LogicalChangeApplier {
         }
 
         self.do_apply(db, record, mode)?;
+        self.publish_applied(record, payload_hash);
+        Ok(ApplyOutcome::Applied)
+    }
+
+    fn publish_applied(&self, record: &ChangeRecord, payload_hash: [u8; 32]) {
+        // Coordinate the predicate and notification with Condvar::wait_timeout.
+        let _wait = self.apply_wait.0.lock().expect("apply wait mutex");
         self.last_applied_term.store(record.term, Ordering::Release);
         self.last_applied_lsn.store(record.lsn, Ordering::Release);
         *self.last_payload_hash.lock().expect("payload hash mutex") = Some(payload_hash);
         self.apply_wait.1.notify_all();
-        Ok(ApplyOutcome::Applied)
     }
 
     fn do_apply(
@@ -586,6 +590,19 @@ impl LogicalChangeApplier {
                 UnifiedStore::deserialize_entity(bytes, store.format_version())
                     .map_err(|err| RedDBError::Internal(err.to_string()))
             })
+            .transpose()?;
+        if incoming
+            .as_ref()
+            .is_some_and(|entity| entity.id.raw() != record.entity_id)
+        {
+            return Err(RedDBError::Internal(
+                "replication entity identity does not match its payload".into(),
+            ));
+        }
+        let metadata = record
+            .metadata
+            .as_ref()
+            .map(|json| metadata_from_json(&wire_json_to_server_json(json)))
             .transpose()?;
         let mut previous = match record.operation {
             ChangeOperation::Refresh => store
@@ -696,13 +713,9 @@ impl LogicalChangeApplier {
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
             }
             ChangeOperation::Insert | ChangeOperation::Update => {
-                let Some(bytes) = &record.entity_bytes else {
-                    return Err(RedDBError::Internal(
-                        "replication record missing entity payload".to_string(),
-                    ));
-                };
-                let mut entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                let mut entity = incoming.clone().ok_or_else(|| {
+                    RedDBError::Internal("replication record missing entity payload".to_string())
+                })?;
                 if matches!(entity.kind, EntityKind::TableRow { .. }) && entity.xmax == 0 {
                     if let Some(runtime) = &runtime {
                         // Source and replica allocators are independent. A source
@@ -786,10 +799,7 @@ impl LogicalChangeApplier {
                         .insert_auto(&record.collection, entity.clone())
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 }
-                if let Some(metadata_json) = &record.metadata {
-                    let metadata_json = wire_json_to_server_json(metadata_json);
-                    let metadata = metadata_from_json(&metadata_json)
-                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if let Some(metadata) = metadata {
                     store
                         .set_metadata(&record.collection, entity.id, metadata)
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -797,9 +807,8 @@ impl LogicalChangeApplier {
                 store
                     .context_index()
                     .index_entity(&record.collection, &entity);
-                // The runtime owns the read snapshot allocator. Logical
-                // replay preserves source xids, so publish their floor only
-                // after the entity and its metadata have been installed.
+                // Publish the visibility floor only after this record's WAL
+                // batch and metadata have become durable.
                 replayed_xid = entity.xmin.max(entity.xmax);
             }
         }
@@ -1186,6 +1195,28 @@ mod tests {
         );
         assert_eq!(applier.last_applied_lsn(), 2);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bookmark_timeout_does_not_wait_for_inflight_apply_lock() {
+        let applier = std::sync::Arc::new(LogicalChangeApplier::new(0));
+        let apply = applier.apply_lock.lock().expect("inflight apply");
+        let reader = std::sync::Arc::clone(&applier);
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            send.send(reader.wait_for_bookmark(
+                &crate::replication::CausalBookmark::new(1, 1),
+                std::time::Duration::from_millis(20),
+            ))
+            .expect("send result");
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(apply);
+        thread.join().expect("waiter");
+        assert!(matches!(
+            result.expect("bookmark respects its deadline during apply"),
+            Err(BookmarkWaitError::Timeout { .. })
+        ));
     }
 
     #[test]

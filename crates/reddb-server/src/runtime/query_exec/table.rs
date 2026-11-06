@@ -709,7 +709,9 @@ fn indexed_pure_expr(expr: &reddb_rql::ast::Expr) -> bool {
 
 fn snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
     let current = snapshot.manager.fresh_read_snapshot();
-    snapshot.snapshot.xid != current.xid || snapshot.snapshot.in_progress != current.in_progress
+    snapshot.manager.oldest_active_xid().is_some()
+        || snapshot.snapshot.xid != current.xid
+        || snapshot.snapshot.in_progress != current.in_progress
 }
 
 fn execute_runtime_canonical_table_query_inner(
