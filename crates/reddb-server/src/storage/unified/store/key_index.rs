@@ -17,23 +17,54 @@ impl UnifiedStore {
                 .get_collection(name)
                 .ok_or_else(|| StoreError::CollectionNotFound(name.clone()))?;
             let root = tree.root_page_id();
-            if root != 0 && manager.backing_count_at_root(root).is_none() {
+            if root == 0 {
+                continue;
+            }
+            if manager.backing_count_at_root(root).is_none() {
                 return Err(StoreError::Io(std::io::Error::other(
                     "physical recovery cannot verify the collection backing",
                 )));
             }
             if manager.backing_count_at_root(root).is_some() {
-                let mut cursor = tree
-                    .cursor_first()
+                let pages = tree
+                    .retired_pages()
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                let pager = self.pager.as_ref().ok_or_else(|| {
+                    StoreError::Io(std::io::Error::other("recovered pager missing"))
+                })?;
+                let mut leaves = Vec::new();
                 let mut count = 0u64;
-                while cursor
-                    .skip_next()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                {
-                    count = count.checked_add(1).ok_or_else(|| {
-                        StoreError::Io(std::io::Error::other("recovered count overflow"))
+                for id in pages.into_iter().rev() {
+                    let page = pager.read_page(id).map_err(|error| {
+                        StoreError::Io(std::io::Error::other(error.to_string()))
                     })?;
+                    if page
+                        .page_type()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                        == crate::storage::engine::PageType::BTreeLeaf
+                    {
+                        let next = u32::from_le_bytes(
+                            page.content()[4..8].try_into().expect("leaf header"),
+                        );
+                        count =
+                            count
+                                .checked_add(u64::from(page.cell_count()))
+                                .ok_or_else(|| {
+                                    StoreError::Io(std::io::Error::other(
+                                        "recovered count overflow",
+                                    ))
+                                })?;
+                        leaves.push((id, next));
+                    }
+                }
+                if leaves.is_empty()
+                    || leaves.iter().enumerate().any(|(index, (_, next))| {
+                        *next != leaves.get(index + 1).map_or(0, |leaf| leaf.0)
+                    })
+                {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "recovered leaf chain differs from tree ownership",
+                    )));
                 }
                 if !manager.set_recovered_backing_count(root, count) {
                     return Err(StoreError::Io(std::io::Error::other(

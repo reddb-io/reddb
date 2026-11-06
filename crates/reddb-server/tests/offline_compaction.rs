@@ -243,6 +243,18 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     assert_eq!(std::fs::read(&combined_source).unwrap(), combined);
     assert_eq!(std::fs::read(&combined_wal).unwrap(), wal_before);
     assert_recovered_fixture(&combined_output.join("combined.rdb"));
+    assert_eq!(u64::from(root) + 1, before.len() as u64 / 16384);
+    let mut partial = before.clone();
+    partial.truncate(root as usize * 16384 + 1024);
+    let partial_source = directory.path().join("partial-checkpoint.rdb");
+    let partial_wal = reddb_file::engine_wal_path(&partial_source);
+    std::fs::write(&partial_source, &partial).unwrap();
+    std::fs::write(&partial_wal, &wal_before).unwrap();
+    let partial_output = directory.path().join("partial-checkpoint-recovery");
+    recover_paged_wal(&partial_source, &partial_output).unwrap();
+    assert_eq!(std::fs::read(&partial_source).unwrap(), partial);
+    assert_eq!(std::fs::read(&partial_wal).unwrap(), wal_before);
+    assert_recovered_fixture(&partial_output.join("partial-checkpoint.rdb"));
     let missing_target = &wal_before[..checkpoint_lsn as usize];
     std::fs::write(&wal, missing_target).unwrap();
     let output = directory.path().join("missing-checkpoint-target");
@@ -273,7 +285,7 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
         ..Default::default()
     };
     {
-        let store = UnifiedStore::open_with_config(&source, config).unwrap();
+        let store = UnifiedStore::open_with_config(&source, config.clone()).unwrap();
         store
             .insert_auto(
                 "rows",
@@ -364,6 +376,12 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
     assert!(resume.collections["rows"].row_id_next > 60_000);
     assert!(resume.collections["rows"].sequence_id_next > 70_000);
     assert_eq!(resume.collections["rows"].entities, 3);
+    drop(pager);
+    let store = UnifiedStore::open_with_config(output.join("xid.rdb"), config).unwrap();
+    assert!(store.next_entity_id().raw() > 50_000);
+    let rows = store.get_collection("rows").unwrap();
+    assert!(rows.next_row_id() > 60_000);
+    assert!(rows.sequence_id_next() > 70_000);
 }
 
 #[test]
