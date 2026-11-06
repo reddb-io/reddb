@@ -940,6 +940,167 @@ fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
 }
 
 #[test]
+fn recover_pending_wal_preserves_and_continues_the_audit_chain() {
+    use reddb_server::runtime::audit_log::AuditLogger;
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("audited.rdb");
+    {
+        let store = UnifiedStore::open(&source).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(10)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(20)]),
+            )
+            .unwrap();
+    }
+    let audit = reddb_file::legacy_audit_log_path(&source);
+    {
+        let logger = AuditLogger::for_data_path(&source);
+        logger.record(
+            "admin/checkpoint",
+            "operator",
+            "audited.rdb",
+            "ok",
+            reddb_server::serde_json::Value::Null,
+        );
+        logger.record(
+            "admin/recover",
+            "operator",
+            "audited.rdb",
+            "ok",
+            reddb_server::serde_json::Value::Null,
+        );
+        assert!(logger.wait_idle(Duration::from_secs(2)));
+    }
+    let archived_plain = std::fs::read_to_string(&audit).unwrap();
+    let archived_tip = archived_plain.lines().next_back().unwrap();
+    let archived_hash =
+        reddb_server::utils::to_hex(&reddb_server::crypto::sha256(archived_tip.as_bytes()));
+    let rotation = reddb_file::rotate_audit_log(&audit, 42).unwrap();
+    let rotated_audit = rotation.compressed_path.unwrap();
+    let rotated_before = std::fs::read(&rotated_audit).unwrap();
+    let boundary = format!(r#"{{"event":"rotation-boundary","prev_hash":"{archived_hash}"}}"#);
+    let boundary_hash =
+        reddb_server::utils::to_hex(&reddb_server::crypto::sha256(boundary.as_bytes()));
+    let active =
+        format!("{boundary}\n{{\"event\":\"active\",\"prev_hash\":\"{boundary_hash}\"}}\n");
+    std::fs::write(&audit, active).unwrap();
+    let audit_before = std::fs::read(&audit).unwrap();
+    let source_before = std::fs::read(&source).unwrap();
+    let wal = reddb_file::unified_wal_path(&source);
+    let wal_before = std::fs::read(&wal).unwrap();
+    let output = directory.path().join("recovered");
+
+    recover_paged_wal(&source, &output).expect("recover a store with audit evidence");
+
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(std::fs::read(&audit).unwrap(), audit_before);
+    assert_eq!(std::fs::read(&rotated_audit).unwrap(), rotated_before);
+    let recovered = output.join("audited.rdb");
+    let recovered_audit = reddb_file::legacy_audit_log_path(&recovered);
+    let recovered_rotated = output.join(rotated_audit.file_name().unwrap());
+    assert_eq!(std::fs::read(&recovered_audit).unwrap(), audit_before);
+    assert_eq!(std::fs::read(&recovered_rotated).unwrap(), rotated_before);
+    let report = scrub_paged(&recovered).expect("scrub recovered store with verified audit");
+    assert!(report.assets_verified);
+    assert!(report.trees.findings.is_empty());
+    assert_eq!(report.unclassified_pages, 0);
+    assert_eq!(std::fs::read(&recovered_audit).unwrap(), audit_before);
+    assert_eq!(std::fs::read(&recovered_rotated).unwrap(), rotated_before);
+
+    let previous_line = String::from_utf8(audit_before)
+        .unwrap()
+        .lines()
+        .next_back()
+        .unwrap()
+        .to_string();
+    {
+        let logger = AuditLogger::for_data_path(&recovered);
+        logger.record(
+            "admin/reopen",
+            "operator",
+            "audited.rdb",
+            "ok",
+            reddb_server::serde_json::Value::Null,
+        );
+        assert!(logger.wait_idle(Duration::from_secs(2)));
+    }
+    let body = std::fs::read_to_string(&recovered_audit).unwrap();
+    let appended: reddb_server::serde_json::Value =
+        reddb_server::serde_json::from_str(body.lines().next_back().unwrap()).unwrap();
+    let expected =
+        reddb_server::utils::to_hex(&reddb_server::crypto::sha256(previous_line.as_bytes()));
+    assert_eq!(
+        appended.get("prev_hash").and_then(|value| value.as_str()),
+        Some(expected.as_str())
+    );
+    assert!(scrub_paged(&recovered).is_ok());
+    let mut damaged = body.clone();
+    let marker = "\"prev_hash\":\"";
+    let offset = damaged.find(marker).unwrap() + marker.len();
+    damaged.replace_range(
+        offset..offset + 1,
+        if &damaged[offset..offset + 1] == "0" {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    std::fs::write(&recovered_audit, damaged).unwrap();
+    let error = scrub_paged(&recovered).expect_err("scrub must reject a broken audit chain");
+    assert!(
+        error.to_string().contains("audit log hash chain"),
+        "{error}"
+    );
+    std::fs::write(&recovered_audit, body).unwrap();
+
+    let mut tampered = std::fs::read_to_string(&audit).unwrap();
+    let prefix = "\"prev_hash\":\"";
+    let position = tampered.find(prefix).unwrap() + prefix.len();
+    let replacement = if &tampered[position..position + 1] == "0" {
+        "1"
+    } else {
+        "0"
+    };
+    tampered.replace_range(position..position + 1, replacement);
+    std::fs::write(&audit, tampered).unwrap();
+    let rejected = directory.path().join("rejected-audit");
+    let error = recover_paged_wal(&source, &rejected).expect_err("reject a broken audit chain");
+    assert!(
+        error.to_string().contains("audit log hash chain"),
+        "{error}"
+    );
+    assert!(!rejected.join("audited.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+
+    let oversized = format!(
+        r#"{{"detail":"{}","prev_hash":"{archived_hash}"}}"#,
+        "x".repeat(1024 * 1024)
+    );
+    std::fs::write(&audit, oversized).unwrap();
+    let rejected = directory.path().join("rejected-large-audit");
+    let error = recover_paged_wal(&source, &rejected).expect_err("reject an oversized audit event");
+    assert!(
+        error.to_string().contains("audit log event exceeds"),
+        "{error}"
+    );
+    assert!(!rejected.join("audited.rdb").exists());
+}
+
+#[test]
 fn recover_pending_wal_for_disk_resident_store() {
     use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore, UnifiedStoreConfig};
     use reddb_types::Value;

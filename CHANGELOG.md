@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.28.24
+
+### Patch Changes
+
+- [#2703](https://github.com/reddb-io/reddb/pull/2703) [`0181217`](https://github.com/reddb-io/reddb/commit/0181217b2c856bc3140d7438b51064f866ca8438) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow explicit recovery of pending WAL on an isolated copy while retaining the canonical system configuration. Reject WAL actions and cross-references targeting the divergent legacy identity instead of silently redirecting them.
+
+## 1.28.23
+
+### Patch Changes
+
+- [#2700](https://github.com/reddb-io/reddb/pull/2700) [`d2a71da`](https://github.com/reddb-io/reddb/commit/d2a71da5655d58fe819cb098b951945b510d545f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a closed store with pending WAL without dropping its verified active or rotated audit logs, preserving byte parity and hash-chain continuity in the published copy.
+
+- [#2694](https://github.com/reddb-io/reddb/pull/2694) [`2e92525`](https://github.com/reddb-io/reddb/commit/2e92525373fe8bc08d73de82f206a4d7eb2b1457) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve probabilistic and vector WAL records across internal checkpoints until their runtime state is durable, and recover supported multimodel WAL on an isolated verified copy.
+
 ## 1.28.22
 
 ### Patch Changes

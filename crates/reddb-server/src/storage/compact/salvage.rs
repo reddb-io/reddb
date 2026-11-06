@@ -183,8 +183,20 @@ pub fn salvage_paged_collections(
 }
 
 pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<()> {
+    verify_supported_source_inner(source, guard, false)
+}
+
+pub(super) fn verify_supported_source_with_audit(source: &Path, guard: &Source) -> Result<()> {
+    verify_supported_source_inner(source, guard, true)
+}
+
+fn verify_supported_source_inner(
+    source: &Path,
+    guard: &Source,
+    preserve_audit: bool,
+) -> Result<()> {
     guard.verify_superblocks()?;
-    verify_standalone_sidecars(source)?;
+    verify_standalone_sidecars_inner(source, preserve_audit)?;
     let physical = guard.header.physical;
     for (page_id, expected) in [
         (physical.manifest_page, physical.manifest_checksum),
@@ -237,7 +249,11 @@ pub(super) fn verify_supported_source(source: &Path, guard: &Source) -> Result<(
     Ok(())
 }
 
-pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
+pub(super) fn verify_wal_recovery_sidecars(source: &Path) -> Result<()> {
+    verify_standalone_sidecars_inner(source, true)
+}
+
+fn verify_standalone_sidecars_inner(source: &Path, preserve_audit: bool) -> Result<()> {
     let operational = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     if operational.exists() {
         f::OperationalManifest::for_db_path(source).verify_owned_for_copy()?;
@@ -246,7 +262,6 @@ pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
     for path in [
         f::logical_wal_path(source),
         f::legacy_logical_slots_path(source),
-        f::legacy_audit_log_path(source),
     ] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => ensure(
@@ -256,6 +271,22 @@ pub(super) fn verify_standalone_sidecars(source: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    let audit = f::legacy_audit_log_path(source);
+    match std::fs::symlink_metadata(&audit) {
+        Ok(metadata) if preserve_audit => {
+            ensure(metadata.is_file(), "audit log must be a regular file")?;
+            super::verify_audit_log_family(source)?;
+        }
+        Ok(metadata) => ensure(
+            metadata.is_file() && metadata.len() == 0,
+            "logical WAL, slot or audit data requires separate recovery verification",
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && preserve_audit => {
+            super::verify_audit_log_family(source)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }

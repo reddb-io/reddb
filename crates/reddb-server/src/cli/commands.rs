@@ -145,6 +145,7 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: vec![
         FlagSchema::new("source").with_description("Closed source .rdb; preserved unchanged"),
         FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+        FlagSchema::boolean("retain-canonical-system-config").with_description("On the isolated copy, retain red.config and reject WAL actions for red_config"),
       ],
     },
     CommandDef {
