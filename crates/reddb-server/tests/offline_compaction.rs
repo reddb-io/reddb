@@ -105,6 +105,58 @@ fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
 }
 
 #[test]
+fn recover_pending_wal_for_disk_resident_store() {
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore, UnifiedStoreConfig};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("resident.rdb");
+    let config = UnifiedStoreConfig {
+        resident_memory_bytes_max: Some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+    {
+        let store = UnifiedStore::open_with_config(&source, config.clone()).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(10)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(20)]),
+            )
+            .unwrap();
+    }
+    let source_image = std::fs::read(&source).unwrap();
+    let wal = reddb_file::unified_wal_path(&source);
+    let wal_image = std::fs::read(&wal).unwrap();
+    let destination = directory.path().join("resident-recovered");
+    recover_paged_wal(&source, &destination).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_image);
+    for _ in 0..2 {
+        let store =
+            UnifiedStore::open_with_config(destination.join("resident.rdb"), config.clone())
+                .unwrap();
+        for (id, expected) in [(1, 10), (2, 20)] {
+            assert_eq!(
+                store
+                    .get("rows", EntityId::new(id))
+                    .unwrap()
+                    .data
+                    .as_row()
+                    .unwrap()
+                    .columns,
+                vec![Value::Integer(expected)]
+            );
+        }
+    }
+}
+
+#[test]
 fn recover_wal_child_process() {
     let Some(source) = std::env::var_os("REDDB_WAL_RECOVERY_TEST_SOURCE") else {
         return;
@@ -114,6 +166,110 @@ fn recover_wal_child_process() {
         std::path::Path::new(&source),
         std::path::Path::new(&destination),
     );
+}
+
+#[test]
+fn recover_wal_with_vault_child() {
+    use reddb_server::auth::vault::Vault;
+    use reddb_server::storage::{EntityId, UnifiedStore};
+    let Some(source) = std::env::var_os("REDDB_WAL_VAULT_TEST_SOURCE") else {
+        return;
+    };
+    let destination =
+        std::path::PathBuf::from(std::env::var_os("REDDB_WAL_VAULT_TEST_DEST").unwrap());
+    if std::env::var_os("REDDB_WAL_VAULT_EXPECT_DENIAL").is_some() {
+        let error = recover_paged_wal(std::path::Path::new(&source), &destination)
+            .expect_err("vault must be authenticated");
+        assert!(error.to_string().contains("vault"), "{error}");
+        assert!(!destination.exists());
+        return;
+    }
+    recover_paged_wal(std::path::Path::new(&source), &destination).expect("replay with vault");
+    let output = destination.join("source.rdb");
+    {
+        let pager = Pager::open(
+            &output,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap();
+        let state = Vault::open(&pager).unwrap().load(&pager).unwrap().unwrap();
+        assert_eq!(state.kv["red.secret"], "preserved-secret");
+    }
+    let store = UnifiedStore::open(&output).unwrap();
+    assert!(store.get("rows", EntityId::new(1)).is_some());
+    assert!(store.get("rows", EntityId::new(2)).is_some());
+}
+
+#[test]
+fn recover_pending_wal_authenticates_and_preserves_vault() {
+    use reddb_server::auth::vault::{KeyPair, Vault, VaultState};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let certificate = KeyPair::generate().certificate_hex();
+    {
+        let store = UnifiedStore::open(&source).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(10)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        let pager = store.pager().unwrap();
+        let vault = Vault::with_certificate(&pager, &certificate).unwrap();
+        let mut state = VaultState {
+            bootstrapped: true,
+            ..VaultState::default()
+        };
+        state
+            .kv
+            .insert("red.secret".into(), "preserved-secret".into());
+        vault.save(&pager, &state).unwrap();
+        pager.sync().unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(20)]),
+            )
+            .unwrap();
+    }
+    let original = std::fs::read(&source).unwrap();
+    let wal = reddb_file::unified_wal_path(&source);
+    let wal_original = std::fs::read(&wal).unwrap();
+    for mode in ["missing", "wrong", "correct"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "recover_wal_with_vault_child", "--nocapture"])
+            .env("REDDB_WAL_VAULT_TEST_SOURCE", &source)
+            .env("REDDB_WAL_VAULT_TEST_DEST", directory.path().join(mode))
+            .env_remove("REDDB_WAL_VAULT_EXPECT_DENIAL")
+            .env_remove("REDDB_CERTIFICATE")
+            .env_remove("REDDB_CERTIFICATE_FILE")
+            .env_remove("REDDB_VAULT_PASSPHRASE")
+            .env_remove("REDDB_VAULT_PASSPHRASE_FILE");
+        if mode == "wrong" {
+            child.env("REDDB_CERTIFICATE", KeyPair::generate().certificate_hex());
+        }
+        if mode == "correct" {
+            child.env("REDDB_CERTIFICATE", &certificate);
+        } else {
+            child.env("REDDB_WAL_VAULT_EXPECT_DENIAL", "1");
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_original);
+    }
 }
 
 #[test]

@@ -101,12 +101,6 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
             && !f::physical_metadata_json_path(&source).exists(),
         "physical metadata sidecar requires separate WAL recovery qualification",
     )?;
-    let vault = guard.raw_page(2, false)?;
-    ensure(
-        vault.as_bytes().iter().all(|b| *b == 0)
-            || (vault.page_type()? == PageType::Vault && vault.content().iter().all(|b| *b == 0)),
-        "WAL recovery with a saved vault is not yet supported",
-    )?;
     let wal = f::unified_wal_path(&source);
     let length = std::fs::metadata(&wal)?.len();
     ensure(

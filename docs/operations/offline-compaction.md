@@ -90,8 +90,9 @@ then rewrites and scrubs it before publishing the final filename. A private
 `.wal-replay` subdirectory retains the copied source and validation artifacts;
 do not use its intermediate files as a database.
 The current qualification excludes interrupted checkpoints, pending
-double-write or non-unified WALs, saved Vaults, physical metadata, WALs larger
-than 256 MiB, and runtime-owned vector or probabilistic records. Incomplete or
+double-write or non-unified WALs, physical metadata, WALs larger than 256 MiB,
+and runtime-owned vector or probabilistic records. A saved Vault must
+authenticate before replay and after recovery. Incomplete or
 corrupt WAL frames are refused. This command requires readable data trees; it
 does not combine WAL replay with salvage of damaged trees.
 
