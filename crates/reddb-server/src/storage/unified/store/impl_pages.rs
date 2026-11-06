@@ -2502,6 +2502,7 @@ impl UnifiedStore {
 #[cfg(test)]
 mod checkpoint_work_tests {
     use super::*;
+    use reddb_file::PAGED_PAGE_SIZE as PAGE_SIZE;
 
     struct SystemNameProjection;
 
