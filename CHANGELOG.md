@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.22
+
+### Patch Changes
+
+- [#2697](https://github.com/reddb-io/reddb/pull/2697) [`4ae7e01`](https://github.com/reddb-io/reddb/commit/4ae7e01acd86babb481c755a0647f76d88327b4d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore snapshots containing an empty system collection alias alongside its populated predecessor, preserving all records while continuing to reject collisions between populated aliases.
+
 ## 1.28.21
 
 ### Patch Changes
