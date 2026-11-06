@@ -37,6 +37,40 @@ fn manifest_round_trip_validates_checksum() {
 }
 
 #[test]
+fn streamed_manifest_preserves_the_previous_encoding_and_write_errors() {
+    let mut manifest = empty_manifest();
+    manifest.generation = 7;
+    manifest.collections.insert(
+        "tenant/á\"".to_string(),
+        CollectionEntry {
+            state: CollectionState::Active,
+            path: "a\\b.rcol".to_string(),
+            source: None,
+        },
+    );
+    let mut body = manifest_body_json(&manifest);
+    let checksum = crc32fast::hash(&serde_json::to_vec(&Value::Object(body.clone())).unwrap());
+    body.insert("checksum".into(), Value::String(format!("{checksum:08x}")));
+    let previous = serde_json::to_vec_pretty(&Value::Object(body)).unwrap();
+    assert_eq!(manifest_to_bytes(&manifest).unwrap(), previous);
+    assert_eq!(manifest_from_bytes(&previous).unwrap().generation, 7);
+
+    struct FailedWriter;
+    impl io::Write for FailedWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    assert_eq!(
+        write_manifest(FailedWriter, &manifest).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
 fn checksum_rejects_corruption() {
     let mut manifest = empty_manifest();
     manifest.generation = 1;

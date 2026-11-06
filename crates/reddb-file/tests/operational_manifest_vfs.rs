@@ -179,6 +179,8 @@ struct RecordingVfs {
     fail_manifest_rename: Arc<AtomicBool>,
     manifest_rename_attempts: Arc<AtomicUsize>,
     fail_manifest_rename_at: Arc<AtomicUsize>,
+    manifest_writes: Arc<AtomicUsize>,
+    fail_manifest_write_at: Arc<AtomicUsize>,
     fail_after_manifest_rename: Arc<AtomicBool>,
     manifest_renamed: Arc<AtomicBool>,
     segment_removals: Arc<AtomicUsize>,
@@ -224,6 +226,15 @@ impl VfsFile for RecordingFile {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.vfs.record(format!("write:{}", self.path));
+        if self.path.ends_with("manifest.json.next") {
+            let attempt = self.vfs.manifest_writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.vfs.fail_manifest_write_at.load(Ordering::SeqCst) == attempt {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected manifest write failure",
+                ));
+            }
+        }
         self.file.write_all(buf)
     }
 
@@ -239,6 +250,42 @@ impl VfsFile for RecordingFile {
         self.vfs.record(format!("sync_file:{}", self.path));
         self.file.sync_all()
     }
+}
+
+#[test]
+fn interrupted_streamed_manifest_write_preserves_previous_generation_on_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.create_collection("existing").unwrap();
+    for id in 0..150 {
+        manifest
+            .create_collection(&format!("collection-{id:04}"))
+            .unwrap();
+    }
+    let current_path = manifest.current_manifest_path_for_test();
+    let previous = std::fs::read(&current_path).unwrap();
+    assert!(previous.len() > 8192);
+    let previous_generation = manifest.read_generation_for_test().unwrap();
+    let current = vfs.manifest_writes.load(Ordering::SeqCst);
+    vfs.fail_manifest_write_at
+        .store(current + 2, Ordering::SeqCst);
+    let error = manifest.create_collection("new").unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read(&current_path).unwrap(), previous);
+    vfs.fail_manifest_write_at.store(0, Ordering::SeqCst);
+    drop(manifest);
+
+    let reopened = OperationalManifest::with_vfs(&db_path, vfs);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert_eq!(
+        reopened.read_generation_for_test().unwrap(),
+        previous_generation
+    );
+    assert!(reopened.collection_path_for_test("existing").exists());
+    reopened.create_collection("new").unwrap();
+    assert!(reopened.collection_path_for_test("new").exists());
 }
 
 impl Vfs for RecordingVfs {

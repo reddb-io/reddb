@@ -648,10 +648,13 @@ impl<V: Vfs> OperationalManifest<V> {
         self.ensure_dirs()?;
         let current = self.root.join(MANIFEST_FILE);
         let next = self.root.join(NEXT_MANIFEST_FILE);
-        let bytes = manifest_to_bytes(manifest)?;
         {
             let mut file = self.vfs.open(&next, OpenMode::create_truncate())?;
-            file.write_all(&bytes)?;
+            {
+                let mut writer = io::BufWriter::new(ManifestFileWriter(&mut file));
+                write_manifest(&mut writer, manifest)?;
+                io::Write::flush(&mut writer)?;
+            }
             file.sync_all()?;
         }
         self.vfs.rename(&next, &current)?;
@@ -892,31 +895,72 @@ fn next_append_only_segment_id(manifest: &Manifest, collection: &str) -> u64 {
     active_high_water.max(retired_high_water).saturating_add(1)
 }
 
-fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
-    let checksum = checksum_manifest(manifest);
+struct ManifestFileWriter<'a, F: VfsFile>(&'a mut F);
+
+impl<F: VfsFile> io::Write for ManifestFileWriter<'_, F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ManifestChecksumWriter(crc32fast::Hasher);
+
+impl io::Write for ManifestChecksumWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn checksum_manifest_body(body: &Map<String, Value>) -> io::Result<u32> {
+    let mut writer = ManifestChecksumWriter(crc32fast::Hasher::new());
+    serde_json::to_writer(&mut writer, body).map_err(invalid_data)?;
+    Ok(writer.0.finalize())
+}
+
+fn write_manifest(writer: impl io::Write, manifest: &Manifest) -> io::Result<()> {
     let mut object = manifest_body_json(manifest);
+    let checksum = checksum_manifest_body(&object)?;
     object.insert(
         "checksum".to_string(),
         Value::String(format!("{checksum:08x}")),
     );
-    serde_json::to_vec_pretty(&Value::Object(object)).map_err(invalid_data)
+    serde_json::to_writer_pretty(writer, &object).map_err(|error| {
+        if let Some(kind) = error.io_error_kind() {
+            io::Error::new(kind, error)
+        } else {
+            invalid_data(error)
+        }
+    })
+}
+
+fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_manifest(&mut bytes, manifest)?;
+    Ok(bytes)
 }
 
 fn manifest_from_bytes(bytes: &[u8]) -> io::Result<Manifest> {
-    let value: Value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    let mut value: Value = serde_json::from_slice(bytes).map_err(invalid_data)?;
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| invalid_data("manifest root must be an object"))?;
     let checksum = object
-        .get("checksum")
-        .and_then(Value::as_str)
+        .remove("checksum")
+        .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| invalid_data("manifest checksum is missing"))?;
     // Check the persisted shape before adding defaults for older formats.
     // Historical manifests did not contain segment state or retirement data.
-    let mut body = object.clone();
-    body.remove("checksum");
-    let body = serde_json::to_vec(&Value::Object(body)).map_err(invalid_data)?;
-    let expected = format!("{:08x}", crc32fast::hash(&body));
+    let expected = format!("{:08x}", checksum_manifest_body(object)?);
     if checksum != expected {
         return Err(invalid_data(format!(
             "manifest checksum mismatch: expected {expected}, got {checksum}"
@@ -1206,12 +1250,6 @@ fn fork_origin_from_object(object: &Map<String, Value>) -> io::Result<ForkOrigin
         parent_store,
         fork_lsn,
     })
-}
-
-fn checksum_manifest(manifest: &Manifest) -> u32 {
-    let body = serde_json::to_vec(&Value::Object(manifest_body_json(manifest)))
-        .expect("manifest body is JSON encodable");
-    crc32fast::hash(&body)
 }
 
 fn manifest_body_json(manifest: &Manifest) -> Map<String, Value> {
