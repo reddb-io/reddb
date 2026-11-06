@@ -16,6 +16,7 @@ use std::{
     sync::Arc,
 };
 mod assets;
+pub(crate) mod boot_system_wal;
 mod catalog;
 mod salvage;
 mod scrub;
@@ -42,17 +43,20 @@ pub struct CompactionReport {
     pub trees: usize,
     /// Historical stale backlinks reconstructed from validated forward/owner order.
     pub repaired_leaf_backlinks: u64,
+    /// Only operator-selected canonical recovery can retire boot-derived WAL actions.
+    pub retired_boot_system_wal_actions: usize,
 }
 
 impl CompactionReport {
     pub fn machine_json(&self) -> String {
         format!(
-            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"repaired_leaf_backlinks":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
+            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"repaired_leaf_backlinks":{},"retired_boot_system_wal_actions":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
             self.source_bytes,
             self.destination_bytes,
             self.records,
             self.trees,
             self.repaired_leaf_backlinks,
+            self.retired_boot_system_wal_actions,
             self.source_allocated_bytes
                 .map_or_else(|| "null".into(), |n| n.to_string()),
             self.destination_allocated_bytes
@@ -86,8 +90,9 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
 }
 
 /// Recover an isolated copy while explicitly retaining `red.config`.
-/// WAL actions targeting the divergent `red_config` are refused rather than
-/// silently replayed against the canonical collection.
+/// WAL actions targeting the divergent `red_config` are refused, except for
+/// proven process metadata recreated at boot. Those actions are retired without
+/// retargeting their entity IDs; every other committed action is replayed.
 pub fn recover_paged_wal_canonical_system_config(
     source: &Path,
     destination: &Path,
@@ -118,7 +123,7 @@ fn recover_paged_wal_inner(
             )?;
         }
     }
-    let guard = Source::open_for_wal_recovery(&source)?;
+    let guard = Arc::new(Source::open_for_wal_recovery(&source)?);
     guard.verify_superblocks()?;
     salvage::verify_wal_recovery_sidecars(&source)?;
     let wal = f::unified_wal_path(&source);
@@ -136,37 +141,21 @@ fn recover_paged_wal_inner(
         !guard.header.checkpoint_in_progress || pending_engine,
         "interrupted page checkpoint requires its engine WAL",
     )?;
-    let mut pending_ownership = false;
-    if pending_unified {
-        for entry in WalReader::open(&wal)?.iter() {
-            match entry?.1 {
-                WalRecord::PageWrite { data, .. } => {
-                    verify_wal_recovery_action(&data, retain_canonical_system_config)?
-                }
-                WalRecord::TxCommitBatch { actions, .. } => {
-                    for action in actions {
-                        verify_wal_recovery_action(&action, retain_canonical_system_config)?;
-                    }
-                }
-                WalRecord::VectorInsert { collection, .. } => {
-                    ensure(
-                        !retain_canonical_system_config || collection != "red_config",
-                        "WAL references divergent legacy red_config",
-                    )?;
-                }
-                WalRecord::ProbabilisticDelta { name, .. } => {
-                    ensure(
-                        !retain_canonical_system_config || name != "red_config",
-                        "WAL references divergent legacy red_config",
-                    )?;
-                }
-                WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. } => {
-                    pending_ownership = true
-                }
-                _ => {}
-            }
-        }
-    }
+    let mut boot_wal =
+        if retain_canonical_system_config && pending_unified && !guard.pending_double_write {
+            boot_system_wal::BootSystemWalPlan::prepare(&guard, &wal, pending_engine)?
+        } else {
+            boot_system_wal::BootSystemWalPlan::default()
+        };
+    let pending_ownership = if pending_unified {
+        verify_wal_recovery_records(
+            &wal,
+            retain_canonical_system_config && !guard.pending_double_write,
+            &boot_wal,
+        )?
+    } else {
+        false
+    };
     if !guard.pending_double_write
         && !guard.header.checkpoint_in_progress
         && !pending_ownership
@@ -238,6 +227,25 @@ fn recover_paged_wal_inner(
         writer.truncate()?;
         writer.sync()?;
     }
+    if retain_canonical_system_config && pending_unified && guard.pending_double_write {
+        // Restore the copy's DWB before trusting catalog roots or deletion IDs.
+        // The preserved source and its pending frame remain untouched.
+        {
+            let pager = Pager::open(
+                &staged_source,
+                PagerConfig {
+                    disk_residency: config.resident_memory_bytes_max.is_some(),
+                    ..PagerConfig::default()
+                },
+            )?;
+            pager.sync()?;
+        }
+        let checkpoint = Arc::new(Source::open_for_wal_recovery(&staged_source)?);
+        let staged_wal = f::unified_wal_path(&staged_source);
+        boot_wal =
+            boot_system_wal::BootSystemWalPlan::prepare(&checkpoint, &staged_wal, pending_engine)?;
+        verify_wal_recovery_records(&staged_wal, true, &boot_wal)?;
+    }
     let probabilistic_deltas;
     let mut has_vector_cache = false;
     {
@@ -245,7 +253,9 @@ fn recover_paged_wal_inner(
             &staged_source,
             config,
             retain_canonical_system_config,
+            Some(&boot_wal),
         )?;
+        boot_wal.preserve_identity_floors(&store)?;
         if pending_engine || guard.pending_double_write {
             store.reconcile_physical_recovery()?;
         }
@@ -347,7 +357,8 @@ fn recover_paged_wal_inner(
         scrub::verify_recovery_vector_pages(&staged_source)?;
     }
     let validated_dir = stage.join("validated");
-    let report = compact_paged(&staged_source, &validated_dir)?;
+    let mut report = compact_paged(&staged_source, &validated_dir)?;
+    report.retired_boot_system_wal_actions = boot_wal.action_count();
     let verified = scrub_paged(&validated_dir.join(name))?;
     ensure(
         verified.assets_verified
@@ -373,6 +384,47 @@ fn recover_paged_wal_inner(
     std::fs::remove_file(validated_dir.join(name))?;
     sync_directory(&validated_dir)?;
     Ok(report)
+}
+
+fn verify_wal_recovery_records(
+    wal: &Path,
+    retain_canonical_system_config: bool,
+    boot_wal: &boot_system_wal::BootSystemWalPlan,
+) -> Result<bool> {
+    use crate::storage::wal::{WalReader, WalRecord};
+    let mut pending_ownership = false;
+    for entry in WalReader::open(wal)?.iter() {
+        let (lsn, record) = entry?;
+        match record {
+            WalRecord::PageWrite { data, .. } => {
+                verify_wal_recovery_action(&data, retain_canonical_system_config)?
+            }
+            WalRecord::TxCommitBatch { actions, .. } => {
+                for (index, action) in actions.iter().enumerate() {
+                    if !boot_wal.skips_action(lsn, index) {
+                        verify_wal_recovery_action(action, retain_canonical_system_config)?;
+                    }
+                }
+            }
+            WalRecord::VectorInsert { collection, .. } => {
+                ensure(
+                    !retain_canonical_system_config || collection != "red_config",
+                    "WAL references divergent legacy red_config",
+                )?;
+            }
+            WalRecord::ProbabilisticDelta { name, .. } => {
+                ensure(
+                    !retain_canonical_system_config || name != "red_config",
+                    "WAL references divergent legacy red_config",
+                )?;
+            }
+            WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. } => {
+                pending_ownership = true
+            }
+            _ => {}
+        }
+    }
+    Ok(pending_ownership)
 }
 
 fn verify_wal_recovery_action(bytes: &[u8], retain_canonical_system_config: bool) -> Result<()> {
@@ -910,6 +962,7 @@ fn compact_paged_inner(
         )?;
     }
     let report = CompactionReport {
+        retired_boot_system_wal_actions: 0,
         source_bytes: source.bytes,
         destination_bytes: reopened.bytes,
         source_allocated_bytes: allocated_bytes(&source_path)?,
