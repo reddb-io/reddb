@@ -1096,15 +1096,16 @@ impl UnifiedStore {
         path: impl AsRef<Path>,
         config: UnifiedStoreConfig,
     ) -> Result<Self, StoreError> {
-        Self::open_with_config_for_recovery(path, config, false)
+        Self::open_with_config_for_recovery(path, config, false, None)
     }
 
     /// Only for an isolated, operator-selected recovery copy. The caller must
-    /// first validate that the WAL does not address the discarded identity.
+    /// first validate every WAL action addressing the discarded identity.
     pub(crate) fn open_with_config_for_recovery(
         path: impl AsRef<Path>,
         config: UnifiedStoreConfig,
         retain_canonical_system_config: bool,
+        boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
     ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let mut pager_config = PagerConfig {
@@ -1210,7 +1211,9 @@ impl UnifiedStore {
         store.migrate_operational_manifest(&catalog_load.collisions)?;
         let wal_replay_started = std::time::Instant::now();
         if let Some(commit) = &store.commit {
-            commit.replay_into(&store).map_err(StoreError::Io)?;
+            commit
+                .replay_into(&store, boot_wal)
+                .map_err(StoreError::Io)?;
         }
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
         if catalog_load.migrated {
@@ -3376,6 +3379,36 @@ mod checkpoint_work_tests {
         index_legacy: bool,
         cross_reference_legacy: bool,
     ) -> DuplicateSystemCatalogFixture {
+        duplicate_system_catalog_fixture_with_key(
+            legacy_populated,
+            canonical_populated,
+            index_legacy,
+            cross_reference_legacy,
+            None,
+        )
+    }
+
+    fn config_recovery_row(id: u64, key: &str, value: i64) -> UnifiedEntity {
+        UnifiedEntity::new(
+            EntityId::new(id),
+            EntityKind::TableRow {
+                table: Arc::from("red.config"),
+                row_id: id,
+            },
+            EntityData::Row(crate::storage::RowData::with_names(
+                vec![Value::text(key), Value::Integer(value)],
+                vec!["key".into(), "value".into()],
+            )),
+        )
+    }
+
+    fn duplicate_system_catalog_fixture_with_key(
+        legacy_populated: bool,
+        canonical_populated: bool,
+        index_legacy: bool,
+        cross_reference_legacy: bool,
+        config_key: Option<&str>,
+    ) -> DuplicateSystemCatalogFixture {
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");
         let config = UnifiedStoreConfig {
@@ -3397,11 +3430,16 @@ mod checkpoint_work_tests {
                 store
                     .insert_auto(
                         "cfg_legacy",
-                        UnifiedEntity::table_row(
-                            EntityId::new(1),
-                            "red_config",
-                            1,
-                            vec![Value::text("legacy")],
+                        config_key.map_or_else(
+                            || {
+                                UnifiedEntity::table_row(
+                                    EntityId::new(1),
+                                    "red_config",
+                                    1,
+                                    vec![Value::text("legacy")],
+                                )
+                            },
+                            |key| config_recovery_row(1, key, 1),
                         ),
                     )
                     .expect("legacy row");
@@ -3413,11 +3451,16 @@ mod checkpoint_work_tests {
                 store
                     .insert_auto(
                         "cfg.canon_",
-                        UnifiedEntity::table_row(
-                            EntityId::new(2),
-                            "red.config",
-                            2,
-                            vec![Value::text("canonical")],
+                        config_key.map_or_else(
+                            || {
+                                UnifiedEntity::table_row(
+                                    EntityId::new(2),
+                                    "red.config",
+                                    2,
+                                    vec![Value::text("canonical")],
+                                )
+                            },
+                            |key| config_recovery_row(2, key, 2),
                         ),
                     )
                     .expect("canonical row");
@@ -3794,6 +3837,262 @@ mod checkpoint_work_tests {
             assert!(recovered.get("red.config", EntityId::new(1)).is_none());
             assert!(recovered.get("red.config", EntityId::new(2)).is_some());
             assert!(recovered.get("red.config", EntityId::new(3)).is_some());
+        }
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_retires_boot_wal_without_losing_other_actions() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+        use reddb_file::StoreWalActionFrame as Action;
+        for pending_dwb in [false, true] {
+            let fixture = duplicate_system_catalog_fixture_with_key(
+                true,
+                true,
+                true,
+                false,
+                Some("red.system.pid"),
+            );
+            let encode = |action| reddb_file::encode_store_wal_action_frame(&action).unwrap();
+            let upsert = |id, value| {
+                encode(Action::UpsertEntityRecord {
+                    collection: "red_config".into(),
+                    record: UnifiedStore::serialize_entity_record(
+                        &config_recovery_row(id, "red.system.pid", value),
+                        None,
+                        STORE_VERSION_CURRENT,
+                    ),
+                })
+            };
+            let delete = |id| {
+                encode(Action::DeleteEntityRecord {
+                    collection: "red_config".into(),
+                    entity_id: id,
+                })
+            };
+            let wal = reddb_file::unified_wal_path(&fixture.path);
+            {
+                let mut writer = WalWriter::open(&wal).unwrap();
+                writer
+                    .append(&WalRecord::TxCommitBatch {
+                        tx_id: 1001,
+                        actions: vec![
+                            upsert(10000, 3),
+                            delete(1),
+                            encode(Action::CreateCollection {
+                                name: "durable_rows".into(),
+                            }),
+                        ],
+                    })
+                    .unwrap();
+                writer
+                    .append(&WalRecord::TxCommitBatch {
+                        tx_id: 1002,
+                        actions: vec![
+                            upsert(10001, 4),
+                            delete(10000),
+                            encode(Action::UpsertEntityRecord {
+                                collection: "durable_rows".into(),
+                                record: UnifiedStore::serialize_entity_record(
+                                    &UnifiedEntity::table_row(
+                                        EntityId::new(3),
+                                        "durable_rows",
+                                        1,
+                                        vec![Value::text("must survive")],
+                                    ),
+                                    None,
+                                    STORE_VERSION_CURRENT,
+                                ),
+                            }),
+                        ],
+                    })
+                    .unwrap();
+                writer.sync().unwrap();
+            }
+            if pending_dwb {
+                use std::io::{Seek, SeekFrom, Write};
+                let bytes = std::fs::read(&fixture.path).unwrap();
+                let root = fixture.legacy_root.unwrap();
+                let offset = root as usize * PAGE_SIZE;
+                let page: &[u8; PAGE_SIZE] = bytes[offset..offset + PAGE_SIZE].try_into().unwrap();
+                let frame = reddb_file::encode_paged_dwb_frame([(root, page)]);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&fixture.path)
+                    .unwrap();
+                file.seek(SeekFrom::Start(3 * PAGE_SIZE as u64)).unwrap();
+                file.write_all(&frame).unwrap();
+                // Make raw-source identity inspection impossible: only the staged
+                // DWB replay can restore the legacy configuration leaf.
+                file.seek(SeekFrom::Start(offset as u64)).unwrap();
+                file.write_all(&[0u8; PAGE_SIZE]).unwrap();
+                file.sync_all().unwrap();
+            }
+            let original = std::fs::read(&fixture.path).unwrap();
+            let original_wal = std::fs::read(&wal).unwrap();
+            let destination = fixture._directory.path().join("boot-config-recovered");
+            let report = crate::storage::compact::recover_paged_wal_canonical_system_config(
+                &fixture.path,
+                &destination,
+            )
+            .expect("retire only proved boot metadata actions on the isolated copy");
+            assert_eq!(report.retired_boot_system_wal_actions, 4);
+            assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+            assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+            for _ in 0..2 {
+                let recovered = UnifiedStore::open_with_config(
+                    destination.join("data.rdb"),
+                    fixture.config.clone(),
+                )
+                .unwrap();
+                let manager = recovered.get_collection("red.config").unwrap();
+                assert!(manager.identity_counters().0 > 10001);
+                assert!(manager.identity_counters().1 > 10001);
+                assert_eq!(
+                    recovered.get_config("red.system.pid"),
+                    Some(Value::Integer(2))
+                );
+                assert!(recovered.get("red.config", EntityId::new(1)).is_none());
+                assert!(recovered.get("red.config", EntityId::new(10000)).is_none());
+                assert!(recovered.get("red.config", EntityId::new(10001)).is_none());
+                assert_eq!(
+                    recovered
+                        .get("durable_rows", EntityId::new(3))
+                        .unwrap()
+                        .data
+                        .as_row()
+                        .unwrap()
+                        .columns,
+                    vec![Value::text("must survive")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_requires_stable_boot_identity_evidence() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+        let fixture = duplicate_system_catalog_fixture_with_key(
+            true,
+            true,
+            false,
+            false,
+            Some("red.system.pid"),
+        );
+        let original = std::fs::read(&fixture.path).unwrap();
+        let wal = reddb_file::unified_wal_path(&fixture.path);
+        {
+            let mut writer = WalWriter::open(&wal).unwrap();
+            writer
+                .append(&WalRecord::TxCommitBatch {
+                    tx_id: 1004,
+                    actions: vec![reddb_file::encode_store_wal_action_frame(
+                        &reddb_file::StoreWalActionFrame::DeleteEntityRecord {
+                            collection: "red_config".into(),
+                            entity_id: 1,
+                        },
+                    )
+                    .unwrap()],
+                })
+                .unwrap();
+            writer
+                .append(&WalRecord::FullPageImage {
+                    tx_id: 1004,
+                    page_id: 1,
+                    ckpt_epoch: 1,
+                    data: original[PAGE_SIZE..2 * PAGE_SIZE].to_vec(),
+                })
+                .unwrap();
+            writer.sync().unwrap();
+        }
+        let original_wal = std::fs::read(&wal).unwrap();
+        let destination = fixture._directory.path().join("unproved-checkpoint");
+        let error = crate::storage::compact::recover_paged_wal_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect_err("undo images must be recovered before proving legacy identities");
+        assert!(error
+            .to_string()
+            .contains("requires a stable checkpoint image"));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+        assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_rejects_unproved_boot_wal() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+        use reddb_file::StoreWalActionFrame as Action;
+        for (case, checkpoint_key, wal_key, delete_id) in [
+            (
+                "unknown-delete",
+                "red.system.pid",
+                "red.system.pid",
+                Some(90000),
+            ),
+            (
+                "user-key",
+                "red.system.customer_setting",
+                "red.system.customer_setting",
+                None,
+            ),
+            (
+                "identity-reuse",
+                "red.config.customer_setting",
+                "red.system.pid",
+                None,
+            ),
+        ] {
+            let fixture = duplicate_system_catalog_fixture_with_key(
+                true,
+                true,
+                false,
+                false,
+                Some(checkpoint_key),
+            );
+            let action = if let Some(entity_id) = delete_id {
+                Action::DeleteEntityRecord {
+                    collection: "red_config".into(),
+                    entity_id,
+                }
+            } else {
+                Action::UpsertEntityRecord {
+                    collection: "red_config".into(),
+                    record: UnifiedStore::serialize_entity_record(
+                        &config_recovery_row(1, wal_key, 99),
+                        None,
+                        STORE_VERSION_CURRENT,
+                    ),
+                }
+            };
+            let wal = reddb_file::unified_wal_path(&fixture.path);
+            {
+                let mut writer = WalWriter::open(&wal).unwrap();
+                writer
+                    .append(&WalRecord::TxCommitBatch {
+                        tx_id: 1003,
+                        actions: vec![reddb_file::encode_store_wal_action_frame(&action).unwrap()],
+                    })
+                    .unwrap();
+                writer.sync().unwrap();
+            }
+            let original = std::fs::read(&fixture.path).unwrap();
+            let original_wal = std::fs::read(&wal).unwrap();
+            let destination = fixture._directory.path().join(case);
+            let error = crate::storage::compact::recover_paged_wal_canonical_system_config(
+                &fixture.path,
+                &destination,
+            )
+            .expect_err(case);
+            assert!(
+                error
+                    .to_string()
+                    .contains("WAL references divergent legacy red_config"),
+                "{case}: {error}"
+            );
+            assert!(!destination.exists());
+            assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+            assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
         }
     }
 
