@@ -25,7 +25,103 @@ pub const CASES: &[(&str, fn())] = &[
         "snapshot_native_committed_projection",
         native_committed_projection,
     ),
+    (
+        "snapshot_system_aliases_with_empty_peer",
+        system_aliases_with_empty_peer,
+    ),
 ];
+
+fn system_aliases_with_empty_peer() {
+    use reddb_types::Value;
+    use std::collections::HashSet;
+
+    fn fixture(entries: &[(&str, bool)]) -> Vec<u8> {
+        let mut bytes = reddb_file::encode_native_store_header(12);
+        reddb_file::encode_native_dump_count(&mut bytes, entries.len() as u32);
+        for (index, (name, populated)) in entries.iter().enumerate() {
+            reddb_file::encode_native_dump_collection_header(
+                &mut bytes,
+                name,
+                u32::from(*populated),
+            );
+            if *populated {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(100 + index as u64),
+                    *name,
+                    200 + index as u64,
+                    vec![Value::text(format!("value-{name}"))],
+                );
+                let record = reddb_engine::storage::metadata_codec::serialize_entity_record(
+                    &entity, None, 12,
+                );
+                reddb_file::encode_native_dump_entity_record(&mut bytes, &record);
+            }
+        }
+        reddb_file::encode_native_dump_count(&mut bytes, 0);
+        reddb_file::encode_native_dump_entity_record(&mut bytes, &[]);
+        reddb_file::append_native_store_crc32_footer(&mut bytes);
+        bytes
+    }
+    for entries in [
+        [("red.config", false), ("red_config", true)],
+        [("red_config", true), ("red.config", false)],
+        [("red.config", true), ("red_config", false)],
+        [("red_config", false), ("red.config", true)],
+        [("red_config", false), ("red.config", false)],
+    ] {
+        let (store, _) =
+            ResidentStore::from_snapshot(&fixture(&entries), &ManagerConfig::default(), true, 1000)
+                .expect("an empty alias must not block migration");
+        let manager = store
+            .get_collection("red.config")
+            .expect("canonical collection");
+        assert_eq!(
+            manager.count(),
+            entries.iter().filter(|(_, populated)| *populated).count()
+        );
+        for (index, (name, populated)) in entries.iter().enumerate() {
+            if *populated {
+                let entity = manager
+                    .get(EntityId::new(100 + index as u64))
+                    .expect("original row");
+                assert_eq!(entity.kind.collection(), "red.config");
+                assert_eq!(
+                    entity.data.as_row().unwrap().columns,
+                    vec![Value::text(format!("value-{name}"))]
+                );
+            }
+        }
+        let image = store.snapshot_bytes(&HashSet::new(), &HashSet::new(), || {});
+        let mut decoded = Restored::default();
+        visit_snapshot(&image, &mut decoded).unwrap();
+        assert!(!decoded.collections.contains_key("red_config"));
+        assert_eq!(decoded.collections["red.config"].len(), manager.count());
+        let (reopened, _) =
+            ResidentStore::from_snapshot(&image, &ManagerConfig::default(), true, 1000).unwrap();
+        assert_eq!(
+            reopened.get_collection("red.config").unwrap().count(),
+            manager.count()
+        );
+    }
+    for entries in [
+        [("red.config", true), ("red_config", true)],
+        [("red_config", true), ("red.config", true)],
+    ] {
+        let error = match ResidentStore::from_snapshot(
+            &fixture(&entries),
+            &ManagerConfig::default(),
+            true,
+            1000,
+        ) {
+            Ok(_) => panic!("two populated aliases must remain ambiguous"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("red_config") && error.contains("red.config"),
+            "{error}"
+        );
+    }
+}
 
 fn native_store_fixture() {
     verify_native_snapshot(include_bytes!("../fixtures/native-store-v12.rdst"));

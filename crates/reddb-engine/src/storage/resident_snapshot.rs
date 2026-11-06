@@ -27,20 +27,32 @@ impl ResidentStore {
             manager_config: &'a ManagerConfig,
             auto_index_refs: bool,
             max_cross_refs: usize,
-            source_names: HashMap<String, String>,
+            source_names: HashMap<String, (String, bool)>,
         }
         impl SnapshotVisitor for Restore<'_> {
             fn collection(&mut self, name: &str) -> Result<(), String> {
+                self.collection_with_count(name, 1)
+            }
+
+            fn collection_with_count(
+                &mut self,
+                name: &str,
+                entity_count: u32,
+            ) -> Result<(), String> {
                 let canonical = super::system_collection_names::canonical_or_self(name);
-                if let Some(previous) = self.source_names.get(canonical) {
-                    if previous != name {
+                if let Some((previous, populated)) = self.source_names.get_mut(canonical) {
+                    if previous != name && *populated && entity_count > 0 {
                         return Err(format!(
-                            "snapshot contains both legacy collection '{previous}' and canonical collection '{canonical}'"
+                            "snapshot contains both populated system collection aliases '{previous}' and '{name}'"
                         ));
+                    }
+                    if entity_count > 0 {
+                        *previous = name.to_owned();
+                        *populated = true;
                     }
                 } else {
                     self.source_names
-                        .insert(canonical.to_owned(), name.to_owned());
+                        .insert(canonical.to_owned(), (name.to_owned(), entity_count > 0));
                 }
                 self.store
                     .get_or_create_collection(canonical, self.manager_config);
@@ -130,6 +142,7 @@ impl ResidentStore {
         auto_index_refs: bool,
     ) -> Result<EntityId, StoreError> {
         let collection = super::system_collection_names::canonical_or_self(collection);
+        entity.canonicalize_system_collection_names();
         let manager = self.get_or_create_collection(collection, manager_config);
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
