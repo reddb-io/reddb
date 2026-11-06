@@ -87,7 +87,7 @@ struct ProbabilisticStateEntry {
 
 impl RedDBRuntime {
     pub(crate) fn load_probabilistic_state(&self) -> RedDBResult<()> {
-        let reject_legacy_hex = self.probabilistic_raw_encoding_marker();
+        let reject_legacy_hex = self.probabilistic_raw_encoding_marker()?;
         let mut migrated_legacy_hex = false;
         {
             let entries = self.latest_probabilistic_state_entries(
@@ -184,7 +184,7 @@ impl RedDBRuntime {
         }
 
         if migrated_legacy_hex {
-            self.persist_probabilistic_encoding_marker();
+            self.persist_probabilistic_encoding_marker()?;
         }
         self.apply_replayed_probabilistic_deltas()?;
         Ok(())
@@ -201,24 +201,24 @@ impl RedDBRuntime {
         };
         let mut latest: std::collections::HashMap<String, (u64, Option<Value>)> =
             std::collections::HashMap::new();
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             let EntityData::Row(row) = &entity.data else {
-                continue;
+                return true;
             };
             let Some(named) = &row.named else {
-                continue;
+                return true;
             };
             let Some(Value::Text(key)) = named.get("key") else {
-                continue;
+                return true;
             };
             let Some(encoded_name) = key.strip_prefix(prefix) else {
-                continue;
+                return true;
             };
             let value = match named.get("value") {
                 Some(Value::Blob(value)) => Some(Value::Blob(value.clone())),
                 Some(Value::Text(value)) => Some(Value::Text(value.clone())),
                 Some(Value::Null) => None,
-                _ => continue,
+                _ => return true,
             };
             let entity_id = entity.id.raw();
             match latest.get(encoded_name) {
@@ -227,7 +227,8 @@ impl RedDBRuntime {
                     latest.insert(encoded_name.to_string(), (entity_id, value));
                 }
             }
-        }
+            true
+        })?;
 
         let mut entries = Vec::new();
         for (encoded_name, (_, value)) in latest {
@@ -269,23 +270,23 @@ impl RedDBRuntime {
         Ok(entries)
     }
 
-    fn probabilistic_raw_encoding_marker(&self) -> bool {
+    fn probabilistic_raw_encoding_marker(&self) -> RedDBResult<bool> {
         let Some(manager) = self.inner.db.store().get_collection("red_config") else {
-            return false;
+            return Ok(false);
         };
         let mut latest: Option<(u64, bool)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             let EntityData::Row(row) = &entity.data else {
-                continue;
+                return true;
             };
             let Some(named) = &row.named else {
-                continue;
+                return true;
             };
             let Some(Value::Text(key)) = named.get("key") else {
-                continue;
+                return true;
             };
             if key.as_ref() != PROB_ENCODING_MARKER_KEY {
-                continue;
+                return true;
             }
             let is_raw = matches!(
                 named.get("value"),
@@ -296,8 +297,9 @@ impl RedDBRuntime {
                 Some((existing_id, _)) if existing_id > entity_id => {}
                 _ => latest = Some((entity_id, is_raw)),
             }
-        }
-        latest.map(|(_, is_raw)| is_raw).unwrap_or(false)
+            true
+        })?;
+        Ok(latest.map(|(_, is_raw)| is_raw).unwrap_or(false))
     }
 
     fn persist_probabilistic_blob(
@@ -307,15 +309,15 @@ impl RedDBRuntime {
         bytes: &[u8],
     ) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.compact_config_key(&key);
+        self.compact_config_key(&key)?;
         self.insert_config_value(&key, Value::Blob(bytes.to_vec()))?;
-        self.persist_probabilistic_encoding_marker();
+        self.persist_probabilistic_encoding_marker()?;
         Ok(())
     }
 
     fn delete_probabilistic_blob(&self, prefix: &str, name: &str) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.compact_config_key(&key);
+        self.compact_config_key(&key)?;
         self.insert_config_value(&key, Value::Null)?;
         Ok(())
     }
@@ -415,6 +417,95 @@ impl RedDBRuntime {
         let deltas = self.inner.db.store().take_replayed_probabilistic_deltas();
         for (kind, operation, name, operands) in deltas {
             self.apply_replayed_probabilistic_delta(kind, operation, &name, operands)?;
+        }
+        Ok(())
+    }
+
+    /// Materialize runtime-owned WAL state on an isolated offline recovery copy.
+    pub(crate) fn persist_offline_probabilistic_recovery(
+        &self,
+        deltas: Vec<(u8, u8, String, Vec<Vec<u8>>)>,
+    ) -> RedDBResult<()> {
+        let mut touched = std::collections::BTreeSet::new();
+        for (kind, operation, name, operands) in deltas {
+            let present = match kind {
+                PROB_WAL_KIND_HLL => self.inner.probabilistic.hlls.read().contains_key(&name),
+                PROB_WAL_KIND_SKETCH => {
+                    self.inner.probabilistic.sketches.read().contains_key(&name)
+                }
+                PROB_WAL_KIND_FILTER => self.inner.probabilistic.filters.read().contains_key(&name),
+                _ => {
+                    return Err(RedDBError::Internal(
+                        "unknown probabilistic WAL kind".into(),
+                    ))
+                }
+            };
+            if matches!(operation, PROB_WAL_OP_ADD | PROB_WAL_OP_DELETE) && !present {
+                return Err(RedDBError::Internal(format!(
+                    "probabilistic WAL mutation has no base state for '{name}'"
+                )));
+            }
+            if operation == PROB_WAL_OP_DROP && !operands.is_empty() {
+                return Err(RedDBError::Internal(
+                    "invalid probabilistic WAL drop".into(),
+                ));
+            }
+            let filter_add = (kind == PROB_WAL_KIND_FILTER && operation == PROB_WAL_OP_ADD)
+                .then(|| operands.first().cloned())
+                .flatten();
+            self.apply_replayed_probabilistic_delta(kind, operation, &name, operands)?;
+            if let Some(element) = filter_add {
+                if !self
+                    .inner
+                    .probabilistic
+                    .filters
+                    .read()
+                    .get(&name)
+                    .is_some_and(|filter| filter.contains(&element))
+                {
+                    return Err(RedDBError::Internal(
+                        "probabilistic WAL filter insert failed".into(),
+                    ));
+                }
+            }
+            touched.insert((kind, name));
+        }
+        for (kind, name) in touched {
+            let (prefix, bytes) = match kind {
+                PROB_WAL_KIND_HLL => (
+                    PROB_HLL_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .hlls
+                        .read()
+                        .get(&name)
+                        .map(|h| h.as_bytes().to_vec()),
+                ),
+                PROB_WAL_KIND_SKETCH => (
+                    PROB_SKETCH_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .sketches
+                        .read()
+                        .get(&name)
+                        .map(|s| s.as_bytes()),
+                ),
+                PROB_WAL_KIND_FILTER => (
+                    PROB_FILTER_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .filters
+                        .read()
+                        .get(&name)
+                        .map(|f| f.as_bytes()),
+                ),
+                _ => unreachable!("kind validated above"),
+            };
+            if let Some(bytes) = bytes {
+                self.persist_probabilistic_blob(prefix, &name, &bytes)?;
+            } else {
+                self.delete_probabilistic_blob(prefix, &name)?;
+            }
         }
         Ok(())
     }
@@ -534,36 +625,32 @@ impl RedDBRuntime {
         Ok(())
     }
 
-    fn persist_probabilistic_encoding_marker(&self) {
-        self.compact_config_key(PROB_ENCODING_MARKER_KEY);
-        let _ = self.insert_config_value(
+    fn persist_probabilistic_encoding_marker(&self) -> RedDBResult<()> {
+        self.compact_config_key(PROB_ENCODING_MARKER_KEY)?;
+        self.insert_config_value(
             PROB_ENCODING_MARKER_KEY,
             Value::text(PROB_ENCODING_RAW_V1.to_string()),
-        );
+        )
     }
 
-    fn compact_config_key(&self, key: &str) {
+    fn compact_config_key(&self, key: &str) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection("red_config") else {
-            return;
+            return Ok(());
         };
-        let ids: Vec<EntityId> = manager
-            .query_all(|_| true)
-            .into_iter()
-            .filter_map(|entity| {
-                let EntityData::Row(row) = &entity.data else {
-                    return None;
-                };
-                let named = row.named.as_ref()?;
-                let Some(Value::Text(candidate)) = named.get("key") else {
-                    return None;
-                };
-                (candidate.as_ref() == key).then_some(entity.id)
-            })
-            .collect();
+        let mut ids = Vec::new();
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            if let EntityData::Row(row) = &entity.data {
+                if matches!(row.named.as_ref().and_then(|named| named.get("key")), Some(Value::Text(candidate)) if candidate.as_ref() == key) {
+                    ids.push(entity.id);
+                }
+            }
+            true
+        })?;
         for id in ids {
-            let _ = store.delete("red_config", id);
+            store.delete("red_config", id)?;
         }
+        Ok(())
     }
 
     fn insert_config_value(&self, key: &str, value: Value) -> RedDBResult<()> {

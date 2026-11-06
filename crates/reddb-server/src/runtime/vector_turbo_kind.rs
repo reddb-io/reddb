@@ -190,16 +190,20 @@ impl TurboCollectionState {
     /// boot. `#673` wires the per-collection `ready: bool` flag on
     /// top of this hook to keep vector traffic from observing a
     /// half-built index while the rebuild is in flight.
-    pub fn ensure_populated(&self, store: &UnifiedStore, collection: &str) {
+    pub fn ensure_populated(
+        &self,
+        store: &UnifiedStore,
+        collection: &str,
+    ) -> Result<(), crate::storage::StoreError> {
         use std::sync::atomic::Ordering;
         if self.populated.load(Ordering::Acquire) {
-            return;
+            return Ok(());
         }
         let mut index = self.index.lock();
         // Double-checked: another writer may have populated while we
         // were waiting for the lock.
         if self.populated.load(Ordering::Acquire) {
-            return;
+            return Ok(());
         }
         // Snapshot-first boot (#674). When a valid `.tv` exists at
         // the layout-derived path, replay its `(id, vector)` pairs in
@@ -235,13 +239,14 @@ impl TurboCollectionState {
 
         if !snapshot_loaded {
             if let Some(manager) = store.get_collection(collection) {
-                for entity in manager.query_all(|_| true) {
+                manager.try_for_each_entity(usize::MAX, |entity| {
                     if let EntityData::Vector(data) = &entity.data {
                         if data.dense.len() == self.dim {
                             index.insert(entity.id, data.dense.clone());
                         }
                     }
-                }
+                    true
+                })?;
             }
         }
         // Drain WAL-replayed VectorInsert records (#694). Apply in WAL
@@ -259,6 +264,7 @@ impl TurboCollectionState {
         }
         self.populated.store(true, Ordering::Release);
         self.mark_ready();
+        Ok(())
     }
 
     /// Capture the current in-memory index state and dump it to the
@@ -341,8 +347,12 @@ impl TurboCollectionState {
     /// path as `ensure_populated`; safe to call from a worker thread.
     /// On completion the per-collection readiness flag flips and any
     /// SEARCH callers parked on `wait_until_ready` are woken.
-    pub fn background_rebuild(&self, store: &UnifiedStore, collection: &str) {
-        self.ensure_populated(store, collection);
+    pub fn background_rebuild(
+        &self,
+        store: &UnifiedStore,
+        collection: &str,
+    ) -> Result<(), crate::storage::StoreError> {
+        self.ensure_populated(store, collection)
     }
 }
 
@@ -370,7 +380,10 @@ pub fn spawn_background_rebuild(
             let Some(store) = store_weak.upgrade() else {
                 return;
             };
-            state.background_rebuild(&store, &collection);
+            if let Err(error) = state.background_rebuild(&store, &collection) {
+                tracing::warn!(collection, %error, "vector.turbo rebuild failed");
+                return;
+            }
             store.set_config_tree(
                 &format!("red.collection.{collection}.vector.turbo.ready"),
                 &crate::serde_json::Value::Bool(true),
