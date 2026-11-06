@@ -312,7 +312,6 @@ fn recover_multimodel_wal_survives_checkpoint_and_reopening() {
 }
 
 #[test]
-#[ignore = "pending probabilistic deltas are truncated by a later catalog checkpoint"]
 fn recover_multimodel_wal_after_catalog_checkpoint() {
     run_multimodel_wal_recovery(true);
 }

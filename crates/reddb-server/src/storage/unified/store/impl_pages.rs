@@ -2069,6 +2069,14 @@ impl UnifiedStore {
     /// Writes all entities to B-tree pages and flushes to disk.
     /// This provides ACID durability guarantees.
     pub fn persist(&self) -> Result<(), StoreError> {
+        self.persist_inner(false)
+    }
+
+    pub(crate) fn persist_after_runtime_snapshots(&self) -> Result<(), StoreError> {
+        self.persist_inner(true)
+    }
+
+    fn persist_inner(&self, runtime_snapshots_durable: bool) -> Result<(), StoreError> {
         let _vault_guard = self.vault_publication_lock.lock();
         let pending_vault_versions = self.pending_vault_versions.read();
         let pager = match &self.pager {
@@ -2316,7 +2324,13 @@ impl UnifiedStore {
                 .finish_page_ownership_epoch(self, epoch.expect("WAL ownership epoch"))
                 .map_err(StoreError::Io)?;
             ownership.active = false;
-            commit.truncate().map_err(StoreError::Io)?;
+            if runtime_snapshots_durable {
+                commit
+                    .truncate_after_runtime_checkpoint()
+                    .map_err(StoreError::Io)?;
+            } else {
+                commit.truncate().map_err(StoreError::Io)?;
+            }
         }
         *self.checkpoint_durable_rows.write() = Default::default();
 

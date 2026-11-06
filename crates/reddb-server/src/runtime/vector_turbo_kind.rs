@@ -209,12 +209,10 @@ impl TurboCollectionState {
         // the layout-derived path, replay its `(id, vector)` pairs in
         // stored order. The deterministic codec seed reproduces
         // byte-identical block/lane placement, so the index ends up
-        // identical to what a from-scratch entity scan would build —
-        // without walking the entity manager. Snapshots are purely a
+        // consistent with a from-scratch entity scan. Snapshots are purely a
         // cache: any failure (missing, truncated, crc-bad, dim/seed
         // drift) falls through to the legacy entity-scan path so
         // boot still succeeds.
-        let mut snapshot_loaded = false;
         if let Some(path) = self.snapshot_path.lock().clone() {
             if path.exists() {
                 match read_snapshot(&path, self.dim as u32, TURBO_CODEC_SEED) {
@@ -222,7 +220,6 @@ impl TurboCollectionState {
                         for (raw_id, vector) in payload.vectors {
                             index.insert(EntityId::new(raw_id), vector);
                         }
-                        snapshot_loaded = true;
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -237,17 +234,17 @@ impl TurboCollectionState {
             }
         }
 
-        if !snapshot_loaded {
-            if let Some(manager) = store.get_collection(collection) {
-                manager.try_for_each_entity(usize::MAX, |entity| {
-                    if let EntityData::Vector(data) = &entity.data {
-                        if data.dense.len() == self.dim {
-                            index.insert(entity.id, data.dense.clone());
-                        }
+        // A snapshot can lag a successfully checkpointed entity. Complete the
+        // projection from the durable base before discarding its WAL records.
+        if let Some(manager) = store.get_collection(collection) {
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                if let EntityData::Vector(data) = &entity.data {
+                    if data.dense.len() == self.dim {
+                        index.insert(entity.id, data.dense.clone());
                     }
-                    true
-                })?;
-            }
+                }
+                true
+            })?;
         }
         // Drain WAL-replayed VectorInsert records (#694). Apply in WAL
         // order so the resulting block/lane placement matches the

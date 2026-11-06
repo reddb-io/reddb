@@ -104,6 +104,13 @@ before publication. Incomplete or corrupt WAL and double-write frames are
 refused. The replayed copy must have readable data trees; this command does not
 combine replay with salvage of damaged trees.
 
+Internal storage checkpoints retain vector and probabilistic WAL records until
+a runtime checkpoint publishes the corresponding state. They rewrite the WAL
+through a synced temporary file and atomic replacement; the original frames and
+their authority are preserved. Runtime checkpoints serialize probabilistic
+snapshots before discarding these records. A turbo index rebuild also scans the
+durable vector entities because an existing snapshot may be older than the WAL.
+
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim
 historical physical allocation:

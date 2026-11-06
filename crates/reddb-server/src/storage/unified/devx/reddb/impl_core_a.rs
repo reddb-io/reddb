@@ -695,6 +695,19 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.flush_local_only_inner(false)
+    }
+
+    pub(crate) fn flush_local_after_runtime_snapshots(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.flush_local_only_inner(true)
+    }
+
+    fn flush_local_only_inner(
+        &self,
+        runtime_snapshots_durable: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(test)]
         let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
@@ -705,7 +718,11 @@ impl RedDB {
         flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
-                self.store.persist()?;
+                if runtime_snapshots_durable {
+                    self.store.persist_after_runtime_snapshots()?;
+                } else {
+                    self.store.persist()?;
+                }
             } else if embedded_single_file_selected(&self.options) {
                 let snapshot = self.store.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot)?;
