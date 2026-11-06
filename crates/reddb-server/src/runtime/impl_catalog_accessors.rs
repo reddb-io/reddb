@@ -259,6 +259,7 @@ impl RedDBRuntime {
     pub(crate) fn try_catalog_for_collections(
         &self,
         collection_names: &std::collections::HashSet<String>,
+        observe_legacy_payloads: bool,
     ) -> RedDBResult<CatalogModelSnapshot> {
         if self
             .inner
@@ -268,10 +269,11 @@ impl RedDBRuntime {
             .resident_memory_bytes_max
             .is_none()
         {
-            return Ok(self
-                .inner
-                .db
-                .try_catalog_model_snapshot_for_collections(collection_names, usize::MAX)?);
+            return Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+                collection_names,
+                observe_legacy_payloads,
+                usize::MAX,
+            )?);
         }
         let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
             .unwrap_or(usize::MAX)
@@ -289,10 +291,11 @@ impl RedDBRuntime {
                         .saturating_add(1),
                 }
             })?;
-        Ok(self
-            .inner
-            .db
-            .try_catalog_model_snapshot_for_collections(collection_names, read_bytes)?)
+        Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+            collection_names,
+            observe_legacy_payloads,
+            read_bytes,
+        )?)
     }
 
     pub fn catalog_consistency_report(&self) -> crate::catalog::CatalogConsistencyReport {

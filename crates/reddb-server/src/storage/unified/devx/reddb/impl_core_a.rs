@@ -1432,6 +1432,7 @@ impl RedDB {
     pub fn try_catalog_model_snapshot_for_collections(
         &self,
         collection_names: &std::collections::HashSet<String>,
+        observe_legacy_payloads: bool,
         read_bytes_max: usize,
     ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
         let catalog = self.runtime_index_catalog();
@@ -1454,6 +1455,7 @@ impl RedDB {
             declarations.as_ref(),
             Some(contracts.as_slice()),
             collection_names,
+            observe_legacy_payloads,
             read_bytes_max,
         )
     }

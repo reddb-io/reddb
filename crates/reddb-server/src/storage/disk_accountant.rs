@@ -4,6 +4,11 @@ use crate::storage::engine::{PageType, HEADER_SIZE, PAGE_SIZE};
 use crate::storage::unified::UnifiedStore;
 
 const INTERIOR_DATA_OFFSET: usize = HEADER_SIZE;
+// `red.collections` is an online metadata surface. Walking an unbounded tree
+// here turns one catalog row into a full collection scan and can hold an HTTP
+// handler for seconds. Small trees remain exact; large trees report unknown
+// until their page accounting is persisted incrementally.
+const MAX_SYNCHRONOUS_ACCOUNTING_PAGES: usize = 64;
 
 pub(crate) fn bytes_on_disk_for(store: &UnifiedStore, collection: &str) -> Option<u64> {
     estimate_bytes_on_disk(store, collection)
@@ -25,9 +30,13 @@ fn reachable_btree_pages(store: &UnifiedStore, root_page: u32) -> Option<u64> {
     let mut visited = HashSet::new();
 
     while let Some(page_id) = stack.pop() {
-        if page_id == 0 || !visited.insert(page_id) {
+        if page_id == 0 || visited.contains(&page_id) {
             continue;
         }
+        if visited.len() >= MAX_SYNCHRONOUS_ACCOUNTING_PAGES {
+            return None;
+        }
+        visited.insert(page_id);
 
         let page = pager.read_page(page_id).ok()?;
         match page.page_type().ok()? {

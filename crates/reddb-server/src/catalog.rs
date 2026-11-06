@@ -301,6 +301,7 @@ pub fn try_snapshot_store_inventory_with_declarations(
     declarations: Option<&CatalogDeclarations>,
     contracts: Option<&[CollectionContract]>,
     collection_names: &HashSet<String>,
+    observe_legacy_payloads: bool,
     read_bytes_max: usize,
 ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
     let _publication = store.vault_publication_lock.lock();
@@ -325,6 +326,10 @@ pub fn try_snapshot_store_inventory_with_declarations(
             if let Some(contract) = collection_contract(manager.collection(), contracts) {
                 let stats = manager.stats();
                 return Ok((contract.declared_model, stats.total_entities, 0));
+            }
+            if !observe_legacy_payloads {
+                let stats = manager.stats();
+                return Ok((CollectionModel::Mixed, stats.total_entities, 0));
             }
             let mut observations = CollectionObservations::default();
             manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
