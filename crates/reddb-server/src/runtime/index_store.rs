@@ -10,6 +10,7 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
@@ -1095,6 +1096,8 @@ pub(crate) enum MutationTestPhase {
     StoragePublished,
     BeforeEvents,
     BeforeUndoTopology,
+    UndoIndexRemoved,
+    DeleteVisibilityCommitted,
 }
 
 type PagedBtreeProviders =
@@ -1111,10 +1114,27 @@ pub struct IndexStore {
     // Keep identities stable across DROP/recreate, including queued writers.
     // The memory sampler never takes a topology lock.
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
+    indexed_mutations_active: AtomicUsize,
+    indexed_mutation_generation: AtomicU64,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(super) mutation_hook: parking_lot::Mutex<Option<MutationTestHook>>,
+}
+
+/// Covers the interval in which storage and secondary indexes are published.
+/// Scoped to one runtime so unrelated databases do not affect each other.
+pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore);
+
+impl Drop for IndexedMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        self.0
+            .indexed_mutations_active
+            .fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl IndexStore {
@@ -1126,11 +1146,28 @@ impl IndexStore {
             paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
             topology: RwLock::new(HashMap::new()),
+            indexed_mutations_active: AtomicUsize::new(0),
+            indexed_mutation_generation: AtomicU64::new(0),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
             #[cfg(test)]
             mutation_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn begin_indexed_mutation(&self) -> IndexedMutationGuard<'_> {
+        self.indexed_mutations_active.fetch_add(1, Ordering::SeqCst);
+        self.indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        IndexedMutationGuard(self)
+    }
+
+    pub(crate) fn indexed_mutation_active(&self) -> bool {
+        self.indexed_mutations_active.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn indexed_mutation_generation(&self) -> u64 {
+        self.indexed_mutation_generation.load(Ordering::SeqCst)
     }
 
     /// The caller exclusively fences collection topology until publication.

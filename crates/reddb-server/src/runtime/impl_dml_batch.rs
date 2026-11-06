@@ -36,7 +36,7 @@ impl RedDBRuntime {
             return Ok(DeleteBatchResult::default());
         }
 
-        let _indexed_mutation = super::execution_context::IndexedMutationGuard::begin();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
 
         let store = self.db().store();
         let Some(manager) = store.get_collection(collection) else {

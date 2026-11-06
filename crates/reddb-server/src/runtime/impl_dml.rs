@@ -444,7 +444,7 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let _indexed_mutation = super::execution_context::IndexedMutationGuard::begin();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -2264,7 +2264,7 @@ impl RedDBRuntime {
 
         // Cover the interval from post-image preparation through storage and
         // secondary-index publication. Target selection above remains indexed.
-        let _indexed_mutation = super::execution_context::IndexedMutationGuard::begin();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         if needs_rmw_lock {
             let result = self.execute_update_inner_tracked_locked(
                 raw_query,

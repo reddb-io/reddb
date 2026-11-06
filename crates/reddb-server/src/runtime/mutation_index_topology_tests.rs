@@ -105,15 +105,17 @@ fn native_patch_marks_the_storage_index_publication_window() {
     create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
     let seen = Arc::new(AtomicBool::new(false));
     let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
     *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
         if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
             marked.store(
-                super::execution_context::indexed_mutation_active(),
+                probe.index_store_ref().indexed_mutation_active(),
                 Ordering::SeqCst,
             );
         }
     }));
     mutate(&runtime, "native_patch", id).expect("patch");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
     assert!(
         seen.load(Ordering::SeqCst),
         "native patch publication must be guarded"
@@ -127,18 +129,97 @@ fn native_delete_marks_the_storage_index_publication_window() {
     create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
     let seen = Arc::new(AtomicBool::new(false));
     let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
     *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
         if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
             marked.store(
-                super::execution_context::indexed_mutation_active(),
+                probe.index_store_ref().indexed_mutation_active(),
                 Ordering::SeqCst,
             );
         }
     }));
     mutate(&runtime, "native_delete", id).expect("delete");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
     assert!(
         seen.load(Ordering::SeqCst),
         "native delete publication must be guarded"
+    );
+}
+
+#[test]
+fn index_publication_guard_is_scoped_to_one_database() {
+    let first = RedDBRuntime::in_memory().expect("first runtime");
+    let second = RedDBRuntime::in_memory().expect("second runtime");
+    let first_index = first.index_store_ref();
+    let second_index = second.index_store_ref();
+    let initial_generation = second_index.indexed_mutation_generation();
+    {
+        let _guard = first_index.begin_indexed_mutation();
+        assert!(first_index.indexed_mutation_active());
+        assert!(!second_index.indexed_mutation_active());
+        assert_eq!(
+            second_index.indexed_mutation_generation(),
+            initial_generation
+        );
+    }
+    assert!(!first_index.indexed_mutation_active());
+    assert_eq!(
+        second_index.indexed_mutation_generation(),
+        initial_generation
+    );
+}
+
+#[test]
+fn rollback_guards_the_index_undo_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    runtime.execute_query("BEGIN").expect("begin");
+    mutate(&runtime, "sql_update", id).expect("update");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::UndoIndexRemoved {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime.execute_query("ROLLBACK").expect("rollback");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "rollback index undo must be guarded"
+    );
+}
+
+#[test]
+fn deferred_delete_guards_commit_and_index_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::DeleteVisibilityCommitted {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            runtime.execute_query("DELETE FROM mutation_records WHERE record_key = 1")
+        })
+        .expect("deferred delete");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "deferred delete commit must be guarded"
     );
 }
 

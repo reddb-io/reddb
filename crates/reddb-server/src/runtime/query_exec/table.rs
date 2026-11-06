@@ -619,24 +619,27 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     if snapshot.requires_index_fallback {
         return execute_runtime_canonical_table_query_inner(db, query, index_store);
     }
-    let start = crate::runtime::execution_context::indexed_mutation_generation();
+    let Some(index_store) = index_store else {
+        return execute_runtime_canonical_table_query_inner(db, query, None);
+    };
+    let start = index_store.indexed_mutation_generation();
     if !indexed_query_can_retry(query)
         || crate::runtime::function_budget::active()
-        || crate::runtime::execution_context::indexed_mutation_active()
+        || index_store.indexed_mutation_active()
         || snapshot_index_is_stale(&snapshot)
     {
         snapshot.requires_index_fallback = true;
         let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
-        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
     }
-    let result = execute_runtime_canonical_table_query_inner(db, query, index_store);
-    if crate::runtime::execution_context::indexed_mutation_active()
-        || start != crate::runtime::execution_context::indexed_mutation_generation()
+    let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    if index_store.indexed_mutation_active()
+        || start != index_store.indexed_mutation_generation()
         || snapshot_index_is_stale(&snapshot)
     {
         snapshot.requires_index_fallback = true;
         let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
-        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
     }
     result
 }

@@ -137,7 +137,7 @@ impl<'rt> MutationEngine<'rt> {
 
         // Storage and secondary-index publication must be observed as a
         // single generation by concurrent indexed SQL and wire readers.
-        let _indexed_mutation = super::execution_context::IndexedMutationGuard::begin();
+        let _indexed_mutation = self.runtime.index_store_ref().begin_indexed_mutation();
 
         let topology_lock = self
             .runtime
