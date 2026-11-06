@@ -188,6 +188,21 @@ impl EmbeddedRdbArtifact {
         path: &Path,
         validate_snapshot_refs: bool,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
+        Self::open_inner_selected(file, path, validate_snapshot_refs).map(|(open, _)| open)
+    }
+
+    fn open_inner_with_snapshot(
+        file: &mut impl VfsFile,
+        path: &Path,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
+        Self::open_inner_selected(file, path, true)
+    }
+
+    fn open_inner_selected(
+        file: &mut impl VfsFile,
+        path: &Path,
+        validate_snapshot_refs: bool,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
         // An I/O error propagates as an I/O error; only bytes that were read
         // and failed to decode count towards "the zone is unrecoverable".
         let mut superblocks: Vec<EmbeddedRdbSuperblock> = [
@@ -220,14 +235,22 @@ impl EmbeddedRdbArtifact {
             })?;
             manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
             manifest.wal_live_bytes = selected_superblock.wal_live_bytes;
-            if validate_snapshot_refs && !snapshot_reference_valid(file, &manifest)? {
-                continue;
-            }
-            return Ok(EmbeddedRdbOpen {
-                path: path.to_path_buf(),
-                selected_superblock,
-                manifest,
-            });
+            let snapshot = if validate_snapshot_refs {
+                let Some(snapshot) = read_valid_snapshot_reference(file, &manifest)? else {
+                    continue;
+                };
+                (manifest.snapshot_bytes != 0).then_some(snapshot)
+            } else {
+                None
+            };
+            return Ok((
+                EmbeddedRdbOpen {
+                    path: path.to_path_buf(),
+                    selected_superblock,
+                    manifest,
+                },
+                snapshot,
+            ));
         }
 
         Err(RdbFileError::ZoneUnrecoverable {
@@ -315,33 +338,33 @@ fn read_manifest(
     decode_manifest(&bytes)
 }
 
-fn snapshot_reference_valid(
+fn read_valid_snapshot_reference(
     file: &mut impl VfsFile,
     manifest: &EmbeddedRdbManifest,
-) -> RdbFileResult<bool> {
+) -> RdbFileResult<Option<Vec<u8>>> {
     if manifest.snapshot_bytes == 0 {
-        return Ok(true);
+        return Ok(Some(Vec::new()));
     }
     let snapshot_end = manifest
         .snapshot_offset
         .checked_add(manifest.snapshot_bytes)
         .ok_or_else(|| RdbFileError::InvalidOperation("embedded snapshot end overflow".into()))?;
     if snapshot_end > file.file_len()? {
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut bytes = vec![0u8; manifest.snapshot_bytes as usize];
     file.seek(SeekFrom::Start(manifest.snapshot_offset))?;
     if file.read_exact(&mut bytes).is_err() {
-        return Ok(false);
+        return Ok(None);
     }
     if crc32(&bytes) != manifest.snapshot_checksum {
-        return Ok(false);
+        return Ok(None);
     }
     if bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(true)
+    Ok(Some(bytes))
 }
 
 /// Byte-for-byte comparison with the published image; the checksum match
@@ -1276,4 +1299,67 @@ fn write_superblock_copy(
     let offset = superblock_offset(superblock.copy_index)?;
     write_at(file, offset, &encode_superblock(*superblock)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_read_tests {
+    use super::*;
+    use std::io::{self, Read, Seek, Write};
+
+    struct CountingFile {
+        file: std::fs::File,
+        bytes_read: u64,
+    }
+
+    impl VfsFile for CountingFile {
+        fn try_clone(&self) -> io::Result<Self> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+        fn file_len(&self) -> io::Result<u64> {
+            Ok(self.file.metadata()?.len())
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.file.set_len(len)
+        }
+        fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.file.write_all(bytes)
+        }
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let count = self.file.read(bytes)?;
+            self.bytes_read += count as u64;
+            Ok(count)
+        }
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.file.seek(pos)
+        }
+        fn sync_all(&self) -> io::Result<()> {
+            self.file.sync_all()
+        }
+    }
+
+    #[test]
+    fn opening_embedded_snapshot_reads_its_bytes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snapshot.rdb");
+        let mut snapshot = vec![42u8; 8 * 1024 * 1024];
+        snapshot[..4].copy_from_slice(b"RDST");
+        EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot).unwrap();
+        let mut file = CountingFile {
+            file: std::fs::File::open(&path).unwrap(),
+            bytes_read: 0,
+        };
+        let (_, loaded) = EmbeddedRdbArtifact::open_inner_with_snapshot(&mut file, &path).unwrap();
+        assert_eq!(loaded.as_deref(), Some(snapshot.as_slice()));
+        eprintln!(
+            "embedded startup: snapshot_bytes={} read_bytes={}",
+            snapshot.len(),
+            file.bytes_read
+        );
+        assert!(
+            file.bytes_read <= snapshot.len() as u64 + 128 * 1024,
+            "embedded open read {} bytes for a {}-byte snapshot",
+            file.bytes_read,
+            snapshot.len()
+        );
+    }
 }

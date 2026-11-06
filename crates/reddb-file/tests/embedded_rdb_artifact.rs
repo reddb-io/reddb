@@ -18,6 +18,19 @@ fn temp_dir(label: &str) -> tempfile::TempDir {
         .expect("temp dir")
 }
 
+#[test]
+fn embedded_combined_open_supports_empty_snapshot() {
+    let directory = temp_dir("combined-empty");
+    let path = directory.path().join("data.rdb");
+    let expected = EmbeddedRdbArtifact::create(&path).expect("create empty database");
+    let (open, snapshot) = EmbeddedRdbArtifact::open_with_snapshot(&path).expect("open");
+    assert_eq!(
+        open.selected_superblock.generation,
+        expected.selected_superblock.generation
+    );
+    assert_eq!(snapshot, None);
+}
+
 // Count actual bytes read by this thread, independently of disk/page-cache
 // latency. A warm append should read roots, not the whole immutable snapshot.
 #[cfg(target_os = "linux")]
@@ -723,6 +736,13 @@ fn embedded_open_skips_newer_superblock_when_snapshot_checksum_fails() {
             .unwrap(),
         v1
     );
+    let (combined, snapshot) =
+        EmbeddedRdbArtifact::open_with_snapshot(&path).expect("combined open falls back");
+    assert_eq!(
+        combined.selected_superblock.generation,
+        recovered.selected_superblock.generation
+    );
+    assert_eq!(snapshot.as_deref(), Some(v1.as_slice()));
 }
 
 #[test]
