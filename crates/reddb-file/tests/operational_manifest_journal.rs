@@ -126,3 +126,36 @@ fn legacy_manifest_migrates_once_and_preserves_renamed_files() {
     assert!(cold.collection_path_for_test("red_config").exists());
     assert!(document["collections"].get("red_config").is_none());
 }
+
+#[test]
+fn retention_proof_does_not_rewrite_large_segment_metadata() {
+    use reddb_file::{encode_append_only_segment, AppendOnlySegmentCodec, AppendOnlySegmentRow};
+    let directory = tempfile::tempdir().expect("temp directory");
+    let path = directory.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&path);
+    let bytes = encode_append_only_segment(AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow { primary_key: vec![1], payload: vec![1] }]).expect("segment");
+    manifest.publish_append_only_segment("events", 1, AppendOnlySegmentCodec::None, &bytes).expect("publish");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().expect("fixture")).expect("JSON");
+    legacy["append_only_segments"][0]["primary_bloom"]["bits_hex"] = "ab".repeat(600_000).into();
+    legacy.as_object_mut().expect("object").remove("checksum");
+    let checksum = crc32fast::hash(&serde_json::to_vec(&legacy).expect("canonical"));
+    legacy["checksum"] = format!("{checksum:08x}").into();
+    let head_path = manifest.current_manifest_path_for_test();
+    std::fs::write(&head_path, serde_json::to_vec(&legacy).expect("legacy")).expect("fixture");
+    manifest.create_collection("other").expect("migrate");
+    let before = std::fs::read(head_path.with_file_name("manifest.records")).expect("journal");
+    assert!(before.len() > 1024 * 1024);
+    let expected = manifest.append_only_segments().expect("segments").remove(0);
+    let mut snapshot = manifest.begin_incremental_read().expect("open").expect("manifest");
+    while !snapshot.step(8192).expect("read").complete {}
+    assert!(snapshot.publish_revalidated_append_only_bounds(&expected, "ts", (1, 1)).expect("proof"));
+    let after = std::fs::read(head_path.with_file_name("manifest.records")).expect("journal");
+    assert!(after.starts_with(&before));
+    assert!(after.len() - before.len() < 512);
+    let cold = OperationalManifest::for_db_path(&path);
+    cold.recover_or_bootstrap(&[]).expect("recovery");
+    let entries = cold.append_only_segments().expect("segments");
+    assert_eq!(entries[0].retention_timestamp_column.as_deref(), Some("ts"));
+    assert_eq!(entries[0].primary_bloom, expected.primary_bloom);
+}
