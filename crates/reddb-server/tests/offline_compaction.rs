@@ -3339,7 +3339,10 @@ fn compact_repeat_has_stable_size() {
             report.source_allocated_bytes,
             compacted.destination_allocated_bytes,
         ) {
-            assert!(allocated < original, "compaction must reclaim abandoned pages");
+            assert!(
+                allocated < original,
+                "compaction must reclaim abandoned pages"
+            );
         }
     }
     eprintln!("compaction size evidence: {}", report.machine_json());
