@@ -289,6 +289,14 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         &[("REDDB_VAULT_PASSPHRASE", TEST_VAULT_PASSPHRASE)],
     );
 
+    // A freed ephemeral port can be claimed by another parallel test. First
+    // require the artifact owned by this child, rather than accepting a TCP
+    // connection to an unrelated listener and killing our child before boot.
+    assert!(
+        wait_for_file(&mut server, &db_path, Duration::from_secs(30)),
+        "child did not create its database: {}",
+        server.stderr()
+    );
     let serving = wait_until_serving(&mut server, &http_addr, Duration::from_secs(30));
     let stderr = server.stderr();
     assert!(
@@ -299,14 +307,16 @@ fn first_boot_cloud_intent_creates_vault_then_idempotent_reboot() {
         !stderr.contains("vault requires a paged database"),
         "first boot must NOT abort at the vault gate.\nstderr:\n{stderr}"
     );
-    // Stop and reap so Windows releases and flushes the DB file.
-    drop(server);
+    // Verify durable creation while the writer is alive. Killing the child
+    // first cannot flush pages that have not yet been published.
     // The paged vault was created in place (operational-directory layout).
     assert!(
         wait_for_paged_vault(&db_path),
         "expected paged vault created in place ({} lacks the page-0/superblock magic).\nstderr:\n{stderr}",
         db_path.display()
     );
+    // Stop and reap so Windows releases the DB file before the cold restart.
+    drop(server);
 
     // ---- Idempotent re-boot against the now-existing paged vault. ----
     // If the preset were re-applied, re-creating the head/customer admins
