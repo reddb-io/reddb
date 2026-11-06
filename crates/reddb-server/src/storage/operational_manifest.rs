@@ -97,6 +97,44 @@ mod tests {
     }
 
     #[test]
+    fn catalogue_proven_collision_keeps_survivor_artifact_and_is_idempotent() {
+        let path = temp_db_path("collision_reconcile");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.create_collection("red_config").unwrap();
+        manifest.create_collection("red.config").unwrap();
+        let survivor_path = manifest.collection_path_for_test("red_config");
+        let loser_path = manifest.collection_path_for_test("red.config");
+        fs::write(&survivor_path, b"survivor").unwrap();
+        fs::write(&loser_path, b"loser").unwrap();
+
+        manifest
+            .reconcile_collection_collisions(&[("red_config", "red.config", "red.config")])
+            .unwrap();
+        let generation = manifest.read_generation_for_test().unwrap();
+        let current: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest.current_manifest_path_for_test()).unwrap())
+                .unwrap();
+        let collections = current["collections"].as_object().unwrap();
+        assert!(!collections.contains_key("red_config"));
+        assert_eq!(
+            collections["red.config"]["path"].as_str(),
+            Some("red_config.rcol")
+        );
+        assert_eq!(fs::read(&survivor_path).unwrap(), b"survivor");
+        assert!(!loser_path.exists());
+        assert_eq!(
+            fs::read(manifest.quarantine_path_for_test("red.config.rcol")).unwrap(),
+            b"loser"
+        );
+
+        manifest
+            .reconcile_collection_collisions(&[("red_config", "red.config", "red.config")])
+            .unwrap();
+        assert_eq!(manifest.read_generation_for_test().unwrap(), generation);
+        assert_eq!(fs::read(&survivor_path).unwrap(), b"survivor");
+    }
+
+    #[test]
     fn checksum_validation_rejects_corrupted_current_manifest() {
         let path = temp_db_path("checksum");
         {
