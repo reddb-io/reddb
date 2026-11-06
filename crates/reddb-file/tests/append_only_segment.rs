@@ -107,17 +107,17 @@ fn retention_candidates_obey_cutoff_budget_and_recovery_state() {
     .unwrap();
     for (id, max) in [(1, Some(5)), (2, Some(9)), (3, Some(10)), (4, None)] {
         manifest
-            .publish_append_only_segment_with_retention_bounds(
+            .publish_append_only_segment_with_retention_column(
                 "events",
                 id,
                 AppendOnlySegmentCodec::None,
                 &encoded,
-                max,
-                max,
+                (max, max),
+                Some("ts"),
             )
             .unwrap();
     }
-    let cutoffs = BTreeMap::from([("events".to_string(), 10)]);
+    let cutoffs = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
     assert_eq!(
         manifest
             .append_only_retention_candidates(&cutoffs, 1)
@@ -147,6 +147,61 @@ fn retention_candidates_obey_cutoff_budget_and_recovery_state() {
         vec![("events".into(), 2)]
     );
     assert_eq!(reopened.append_only_segments().unwrap().len(), 3);
+}
+
+#[test]
+fn legacy_bounds_and_changed_timestamp_column_do_not_retire_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let encoded = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: b"v".to_vec(),
+        }],
+    )
+    .unwrap();
+    let legacy = manifest
+        .publish_append_only_segment_with_retention_bounds(
+            "events",
+            1,
+            AppendOnlySegmentCodec::None,
+            &encoded,
+            Some(1),
+            Some(1),
+        )
+        .unwrap();
+    manifest
+        .publish_append_only_segment_with_retention_column(
+            "events",
+            2,
+            AppendOnlySegmentCodec::None,
+            &encoded,
+            (Some(1), Some(1)),
+            Some("ts"),
+        )
+        .unwrap();
+    let path = manifest.append_only_segment_path_for_test(&legacy.path);
+    drop(manifest);
+
+    let reopened = OperationalManifest::for_db_path(&db_path);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert!(path.exists());
+    let other_column = BTreeMap::from([("events".to_string(), (10, "other_ts".to_string()))]);
+    assert!(reopened
+        .append_only_retention_candidates(&other_column, 10)
+        .unwrap()
+        .is_empty());
+    let original_column = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
+    assert_eq!(
+        reopened
+            .append_only_retention_candidates(&original_column, 10)
+            .unwrap(),
+        vec![("events".to_string(), 2)]
+    );
+    assert_eq!(reopened.append_only_segments().unwrap().len(), 2);
 }
 
 #[test]

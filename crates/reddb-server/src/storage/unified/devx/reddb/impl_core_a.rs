@@ -781,13 +781,15 @@ impl RedDB {
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &rows,
             )?;
-            manifest.publish_append_only_segment_with_retention_bounds(
+            let timestamp_column =
+                crate::runtime::retention_filter::resolve_timestamp_column(&contract);
+            manifest.publish_append_only_segment_with_retention_column(
                 &contract.name,
                 next_segment_id,
                 reddb_file::AppendOnlySegmentCodec::Zstd,
                 &bytes,
-                retention_min_ms,
-                retention_max_ms,
+                (retention_min_ms, retention_max_ms),
+                timestamp_column.as_deref(),
             )?;
         }
         Ok(())

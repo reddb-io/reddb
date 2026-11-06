@@ -405,6 +405,10 @@ impl RedDBRuntime {
         let Some(path) = self.inner.db.path() else {
             return Ok(0);
         };
+        // Flush publishes segments under the same fence. Do not interleave its
+        // manifest updates with selection and the two retirement phases.
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let manifest = reddb_file::OperationalManifest::for_db_path(path);
         let cutoffs: std::collections::BTreeMap<_, _> = self
             .inner
@@ -413,12 +417,15 @@ impl RedDBRuntime {
             .into_iter()
             .filter(|contract| contract.append_only)
             .filter_map(|contract| {
-                contract.retention_duration_ms.map(|retention_ms| {
+                let retention_ms = contract.retention_duration_ms?;
+                let column = super::retention_filter::resolve_timestamp_column(&contract)?;
+                Some((
+                    contract.name,
                     (
-                        contract.name,
                         super::retention_sweeper::cutoff_ms(now_ms, retention_ms),
-                    )
-                })
+                        column,
+                    ),
+                ))
             })
             .collect();
         let candidates = manifest

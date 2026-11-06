@@ -118,6 +118,9 @@ pub struct AppendOnlySegmentManifestEntry {
     pub row_count: u64,
     pub retention_min_ms: Option<i64>,
     pub retention_max_ms: Option<i64>,
+    /// Column used by the producer when checking every row for the bounds.
+    /// Legacy manifests lack this provenance and cannot justify deletion.
+    pub retention_timestamp_column: Option<String>,
     pub primary_min: Option<String>,
     pub primary_max: Option<String>,
     pub primary_bloom: Option<AppendOnlySegmentBloom>,
@@ -475,6 +478,27 @@ impl<V: Vfs> OperationalManifest<V> {
         retention_min_ms: Option<i64>,
         retention_max_ms: Option<i64>,
     ) -> io::Result<AppendOnlySegmentManifestEntry> {
+        self.publish_append_only_segment_with_retention_column(
+            collection,
+            segment_id,
+            codec,
+            bytes,
+            (retention_min_ms, retention_max_ms),
+            None,
+        )
+    }
+
+    /// The caller must derive both bounds from every row using `timestamp_column`.
+    pub fn publish_append_only_segment_with_retention_column(
+        &self,
+        collection: &str,
+        segment_id: u64,
+        codec: AppendOnlySegmentCodec,
+        bytes: &[u8],
+        retention_bounds: (Option<i64>, Option<i64>),
+        timestamp_column: Option<&str>,
+    ) -> io::Result<AppendOnlySegmentManifestEntry> {
+        let (retention_min_ms, retention_max_ms) = retention_bounds;
         self.ensure_dirs()?;
         let decoded = decode_append_only_segment(bytes).map_err(invalid_data)?;
         if decoded.codec != codec {
@@ -517,6 +541,9 @@ impl<V: Vfs> OperationalManifest<V> {
             row_count: decoded.rows.len() as u64,
             retention_min_ms,
             retention_max_ms,
+            retention_timestamp_column: timestamp_column
+                .filter(|_| retention_min_ms.is_some() && retention_max_ms.is_some())
+                .map(str::to_owned),
             primary_min: decoded.primary_min.as_ref().map(hex::encode),
             primary_max: decoded.primary_max.as_ref().map(hex::encode),
             primary_bloom: decoded.primary_bloom.clone(),
@@ -645,7 +672,7 @@ impl<V: Vfs> OperationalManifest<V> {
     /// bloom filters or other payload-sized metadata into the runtime.
     pub fn append_only_retention_candidates(
         &self,
-        cutoffs: &BTreeMap<String, i64>,
+        cutoffs: &BTreeMap<String, (i64, String)>,
         limit: usize,
     ) -> io::Result<Vec<(String, u64)>> {
         if limit == 0 || cutoffs.is_empty() {
@@ -661,7 +688,10 @@ impl<V: Vfs> OperationalManifest<V> {
             .filter(|segment| {
                 cutoffs
                     .get(&segment.collection)
-                    .is_some_and(|cutoff| segment.retention_max_ms.is_some_and(|max| max < *cutoff))
+                    .is_some_and(|(cutoff, column)| {
+                        segment.retention_timestamp_column.as_ref() == Some(column)
+                            && segment.retention_max_ms.is_some_and(|max| max < *cutoff)
+                    })
             })
             .take(limit)
             .map(|segment| (segment.collection.clone(), segment.segment_id))
@@ -1157,6 +1187,15 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         .transpose()?;
     let retention_min_ms = object.get("retention_min_ms").and_then(Value::as_i64);
     let retention_max_ms = object.get("retention_max_ms").and_then(Value::as_i64);
+    let retention_timestamp_column = object
+        .get("retention_timestamp_column")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_data("invalid retention timestamp column"))
+        })
+        .transpose()?;
     let chunk_checksums = object
         .get("chunk_checksums")
         .and_then(Value::as_array)
@@ -1174,6 +1213,7 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         row_count,
         retention_min_ms,
         retention_max_ms,
+        retention_timestamp_column,
         primary_min,
         primary_max,
         primary_bloom,
@@ -1372,6 +1412,12 @@ fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value
         object.insert(
             "retention_max_ms".to_string(),
             Value::from(retention_max_ms),
+        );
+    }
+    if let Some(column) = &entry.retention_timestamp_column {
+        object.insert(
+            "retention_timestamp_column".to_string(),
+            Value::String(column.clone()),
         );
     }
     if let Some(primary_min) = &entry.primary_min {
