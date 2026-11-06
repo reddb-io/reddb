@@ -1442,7 +1442,7 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let mut collections = store.list_collections();
         collections.sort();
         manifest.recover_or_bootstrap(&collections).map_err(|err| {
@@ -1469,7 +1469,7 @@ impl RedDBRuntime {
         })?;
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let dropped = manifest
             .drop_fork(&query.name)
             .map_err(|err| RedDBError::Query(format!("failed to drop store fork: {err}")))?;
@@ -1495,7 +1495,7 @@ impl RedDBRuntime {
         self.flush()?;
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let outcome = manifest
             .promote_fork(&query.name)
             .map_err(|err| RedDBError::Query(format!("failed to promote store fork: {err}")))?;

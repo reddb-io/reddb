@@ -409,7 +409,7 @@ impl RedDBRuntime {
         // manifest updates with selection and the two retirement phases.
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.inner.db.store().operational_manifest_for_path(path);
         let cutoffs: std::collections::BTreeMap<_, _> = self
             .inner
             .db

@@ -1046,6 +1046,7 @@ impl UnifiedStore {
             format_version: AtomicU32::new(STORE_VERSION_V11),
             pager: None,
             db_path: None,
+            operational_manifest: parking_lot::Mutex::new(None),
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
@@ -1152,6 +1153,7 @@ impl UnifiedStore {
             format_version: AtomicU32::new(STORE_VERSION_V11),
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
+            operational_manifest: parking_lot::Mutex::new(None),
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
@@ -1361,10 +1363,10 @@ impl UnifiedStore {
         };
         let mut collections = self.list_collections();
         collections.sort();
-        let pending_drops =
-            crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
-                .recover_or_bootstrap(&collections)
-                .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
+        let pending_drops = self
+            .operational_manifest_for_path(path)
+            .recover_or_bootstrap(&collections)
+            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
         for name in pending_drops {
             if self.get_collection(&name).is_some() {
                 self.drop_collection(&name)?;
@@ -1380,7 +1382,7 @@ impl UnifiedStore {
         let Some(path) = &self.db_path else {
             return Ok(());
         };
-        let manifest = crate::storage::operational_manifest::OperationalManifest::for_db_path(path);
+        let manifest = self.operational_manifest_for_path(path);
         let collision_refs = collisions
             .iter()
             .map(|collision| {
@@ -1406,7 +1408,7 @@ impl UnifiedStore {
         let Some(path) = &self.db_path else {
             return Ok(None);
         };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+        self.operational_manifest_for_path(path)
             .prepare_collection_create(name)
             .map(Some)
             .map_err(StoreError::Io)
@@ -1419,7 +1421,7 @@ impl UnifiedStore {
         let Some(path) = &self.db_path else {
             return Ok(None);
         };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+        self.operational_manifest_for_path(path)
             .prepare_collection_drop(name)
             .map(Some)
             .map_err(StoreError::Io)
@@ -2369,6 +2371,23 @@ impl UnifiedStore {
             .get(Self::canonical_collection(collection))
             .map(|btree| btree.root_page_id())
             .filter(|root| *root != 0)
+    }
+
+    /// Keep the journal replay baseline for the lifetime of this store, including
+    /// persistent resident layouts whose paged `db_path` is absent.
+    pub(crate) fn operational_manifest_for_path(
+        &self,
+        path: &Path,
+    ) -> reddb_file::OperationalManifest {
+        let mut cached = self.operational_manifest.lock();
+        if let Some((current, manifest)) = cached.as_ref() {
+            if current == path {
+                return manifest.clone();
+            }
+        }
+        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        *cached = Some((path.to_owned(), manifest.clone()));
+        manifest
     }
 
     /// Get the database file path (if using paged mode)

@@ -64,7 +64,7 @@ fn legacy_segment_revalidation_recomputes_bounds_across_cold_boot() {
     .unwrap();
     let manifest_path = manifest.current_manifest_path_for_test();
     let mut value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
     let entry = value["append_only_segments"]
         .as_array_mut()
         .unwrap()

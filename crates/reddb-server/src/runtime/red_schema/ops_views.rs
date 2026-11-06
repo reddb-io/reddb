@@ -135,7 +135,9 @@ pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedR
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let forks = reddb_file::OperationalManifest::for_db_path(path)
+    let forks = db
+        .store()
+        .operational_manifest_for_path(path)
         .list_forks()
         .map_err(RedDBError::Io)?;
     Ok(forks

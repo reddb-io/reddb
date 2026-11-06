@@ -25,8 +25,11 @@ impl RedDBRuntime {
         let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest =
-            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        let manifest = self
+            .inner
+            .db
+            .store()
+            .operational_manifest_for_path(data_path);
         manifest
             .create_fork(name, fork_lsn)
             .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
@@ -51,8 +54,11 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
-        let manifest =
-            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
+        let manifest = self
+            .inner
+            .db
+            .store()
+            .operational_manifest_for_path(data_path);
         manifest
             .detach_fork(name)
             .map(|detached| detached.is_some())
@@ -364,7 +370,10 @@ impl RedDBRuntime {
         let Some(data_path) = self.inner.db.options().data_path.as_ref() else {
             return Ok(Vec::new());
         };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path)
+        self.inner
+            .db
+            .store()
+            .operational_manifest_for_path(data_path)
             .list_forks()
             .map(|forks| forks.into_iter().map(|fork| fork.fork_lsn).collect())
             .map_err(|err| RedDBError::Internal(err.to_string()))

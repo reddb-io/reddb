@@ -13,6 +13,25 @@ mod tests {
     use super::*;
     use crate::storage::unified::UnifiedStore;
 
+    #[test]
+    fn store_reuses_manifest_replay_state_across_operations() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("cached.rdb");
+        let store = UnifiedStore::new();
+        let manifest = store.operational_manifest_for_path(&path);
+        let names = (0..200)
+            .map(|id| format!("collection-{id}"))
+            .collect::<Vec<_>>();
+        manifest.recover_or_bootstrap(&names).expect("bootstrap");
+        drop(manifest);
+        let warm = store.operational_manifest_for_path(&path);
+        let mut reader = warm.begin_incremental_read().expect("open").expect("head");
+        assert!(reader.step(512).expect("cached replay").complete);
+        let cold = OperationalManifest::for_db_path(&path);
+        let mut reader = cold.begin_incremental_read().expect("open").expect("head");
+        assert!(!reader.step(512).expect("cold bounded replay").complete);
+    }
+
     fn temp_db_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -112,8 +131,7 @@ mod tests {
             .unwrap();
         let generation = manifest.read_generation_for_test().unwrap();
         let current: serde_json::Value =
-            serde_json::from_slice(&fs::read(manifest.current_manifest_path_for_test()).unwrap())
-                .unwrap();
+            serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
         let collections = current["collections"].as_object().unwrap();
         assert!(!collections.contains_key("red_config"));
         assert_eq!(
@@ -143,9 +161,11 @@ mod tests {
         }
         let manifest_path =
             OperationalManifest::for_db_path(&path).current_manifest_path_for_test();
-        let mut text = fs::read_to_string(&manifest_path).unwrap();
-        text = text.replace("\"generation\": 1", "\"generation\": 9");
-        fs::write(&manifest_path, text).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let generation = document["generation"].as_u64().unwrap();
+        document["generation"] = serde_json::Value::from(generation + 1);
+        fs::write(&manifest_path, serde_json::to_vec(&document).unwrap()).unwrap();
 
         let err = match UnifiedStore::open(&path) {
             Ok(_) => panic!("corrupt manifest must fail closed"),

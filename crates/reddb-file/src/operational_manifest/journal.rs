@@ -50,8 +50,11 @@ impl Head {
             return Ok(None);
         }
         let head: Self = serde_json::from_value(value).map_err(invalid_data)?;
-        if head.checksum != head.checksum() || head.length < FRAME_HEADER as u64 {
-            return Err(invalid_data("invalid manifest journal head"));
+        if head.checksum != head.checksum() {
+            return Err(invalid_data("manifest journal head checksum mismatch"));
+        }
+        if head.length < FRAME_HEADER as u64 {
+            return Err(invalid_data("invalid manifest journal head length"));
         }
         Ok(Some(head))
     }

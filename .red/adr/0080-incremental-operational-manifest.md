@@ -25,7 +25,9 @@ publication follows segment-directory synchronization.
 Recovery parses individual records rather than one aggregate JSON document.
 The retained collection/segment index is still proportional to live metadata;
 the change does not promise constant-memory catalogs. Warm handles replay only
-the newly committed suffix. Maintenance retains its handle and caps replay I/O
+the newly committed suffix. The store shares this baseline across DDL, flush,
+recovery and retention instead of constructing an uncached handle per operation.
+Maintenance retains its handle and caps replay I/O
 per tick. It completes a pinned prefix before refreshing a newer head, so a
 concurrent publisher does not restart every partial cold read. It must observe
 a current head before publishing a proof or deleting anything.

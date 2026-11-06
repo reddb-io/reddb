@@ -733,7 +733,7 @@ impl RedDB {
     }
 
     fn publish_append_only_segments(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
+        let manifest = self.store.operational_manifest_for_path(path);
         for contract in self
             .collection_contracts()
             .into_iter()
