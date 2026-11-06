@@ -1373,6 +1373,121 @@ mod tests {
     }
 
     #[test]
+    fn autocommit_snapshot_does_not_lose_rows_after_index_publication() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_index_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_index_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_status_hash ON frame_index_race (status) USING HASH")
+            .expect("create index");
+        let sql = "SELECT id FROM frame_index_race WHERE status = 'old'";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture autocommit snapshot");
+        rt.execute_query("UPDATE frame_index_race SET status = 'new' WHERE id = 1")
+            .expect("publish changed index entry");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(sql).expect("parse")
+        else {
+            panic!("expected table query");
+        };
+        let _guards = frame.install(&rt);
+        let records =
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &rt.db(),
+                &query,
+                Some(rt.index_store_ref()),
+            )
+            .expect("read captured snapshot");
+        let mut ids = records
+            .iter()
+            .map(|record| record.get("id").expect("id").to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["1", "2"],
+            "current index omitted a visible historical row"
+        );
+    }
+
+    #[test]
+    fn captured_dml_snapshot_finds_rows_after_index_publication() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_dml_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_dml_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_dml_status ON frame_dml_race (status) USING HASH")
+            .expect("create index");
+        let sql = "DELETE FROM frame_dml_race WHERE status = 'old'";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture DML snapshot");
+        rt.execute_query("UPDATE frame_dml_race SET status = 'new' WHERE id = 1")
+            .expect("publish new indexed value");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM frame_dml_race WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let _guards = frame.install(&rt);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &rt,
+            "frame_dml_race",
+            Some(&filter),
+            None,
+        )
+        .find_target_ids()
+        .expect("find DML targets");
+        assert_eq!(
+            ids.len(),
+            2,
+            "DML target scan must discover both snapshot-visible rows"
+        );
+    }
+
+    #[test]
+    fn captured_snapshot_survives_indexed_update_and_delete_for_range_queries() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_range_race (id INT PRIMARY KEY, score INT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_range_race (id, score) VALUES (1, 10), (2, 20)")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_score_range ON frame_range_race (score)")
+            .expect("create index");
+        let sql = "SELECT id FROM frame_range_race WHERE score >= 10 AND score <= 20 ORDER BY id";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture read snapshot");
+        rt.execute_query("UPDATE frame_range_race SET score = 99 WHERE id = 1")
+            .expect("update row");
+        rt.execute_query("DELETE FROM frame_range_race WHERE id = 2")
+            .expect("delete row");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(sql).expect("parse")
+        else {
+            panic!("expected table query");
+        };
+        let _guards = frame.install(&rt);
+        let records =
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &rt.db(),
+                &query,
+                Some(rt.index_store_ref()),
+            )
+            .expect("read captured snapshot");
+        let ids = records
+            .iter()
+            .map(|record| record.get("id").expect("id").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["1", "2"]);
+    }
+
+    #[test]
     fn frame_captures_identity_and_scope() {
         reset_thread_locals();
         set_current_tenant("acme".to_string());
