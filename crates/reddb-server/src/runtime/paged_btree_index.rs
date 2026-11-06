@@ -9,7 +9,7 @@ use crate::storage::unified::store::secondary_index::{
 use crate::storage::{EntityData, EntityId, EntityKind, StoreError, UnifiedEntity};
 use reddb_engine::storage::ordered_secondary_key::encode_ordered_key;
 use reddb_rql::ast::{CompareOp, FieldRef, Filter};
-use reddb_types::value_to_canonical_key;
+use reddb_types::{value_to_canonical_key, Value};
 use sha2::{Digest, Sha256};
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
 use std::sync::{Arc, Weak};
@@ -136,6 +136,33 @@ fn encode_bound(value: &reddb_types::Value) -> Option<Vec<u8>> {
     Some(output[..length].to_vec())
 }
 
+fn exact_prefix_bound(column: &str, filter: &Filter) -> Option<(Vec<u8>, bool)> {
+    match filter {
+        Filter::Compare {
+            field: FieldRef::TableColumn {
+                column: candidate, ..
+            },
+            op: CompareOp::Eq,
+            value,
+        } if candidate == column => {
+            let key = encode_bound(value)?;
+            // Equality can follow SQL coercion rules. Keep the existing
+            // conservative families until the remaining coercions (notably
+            // floating signed zero) have their own qualified ordered lookup.
+            matches!(key[0], 2 | 3 | 4 | 6).then_some((key, true))
+        }
+        Filter::IsNull(FieldRef::TableColumn {
+            column: candidate, ..
+        }) if candidate == column => {
+            // IS NULL is an exact family match: values from another family
+            // cannot compare equal through SQL coercion, so a mixed column
+            // does not force the authoritative scan fallback.
+            Some((encode_bound(&Value::Null)?, false))
+        }
+        _ => None,
+    }
+}
+
 impl Range {
     fn from_filter(filter: &Filter) -> Option<(&str, Self)> {
         let (field, lower, upper, family) = match filter {
@@ -186,64 +213,76 @@ impl Range {
     fn for_index(columns: &[String], filter: &Filter) -> Option<Self> {
         let (last, prefix_columns) = columns.split_last()?;
         let leaves = conjuncts(filter)?;
-        let mut range = leaves.iter().find_map(|filter| {
+        let trailing_range = leaves.iter().find_map(|filter| {
             let (column, range) = Self::from_filter(filter)?;
             (column == last).then_some(range)
-        })?;
+        });
         let mut prefix = Vec::new();
         let mut families = Vec::new();
-        for column in prefix_columns {
-            let key = leaves.iter().find_map(|filter| {
-                let Filter::Compare {
-                    field:
-                        FieldRef::TableColumn {
-                            column: candidate, ..
-                        },
-                    op: CompareOp::Eq,
-                    value,
-                } = filter
-                else {
-                    return None;
-                };
-                (candidate == column).then(|| encode_bound(value)).flatten()
-            })?;
-            if !matches!(key[0], 2 | 3 | 4 | 6)
-                || prefix.len() + key.len() > SECONDARY_KEY_BYTES_MAX
-            {
-                return None;
-            }
-            families.push(ScopedFamily {
-                prefix: prefix.clone(),
-                family: key[0],
-            });
-            prefix.extend_from_slice(&key);
-        }
-        let family = range.families[0].family;
-        families.push(ScopedFamily {
-            prefix: prefix.clone(),
-            family,
-        });
-        let with_prefix = |key: Vec<u8>| -> Option<Vec<u8>> {
+        let mut append_exact = |column: &str| -> Option<()> {
+            let (key, require_homogeneous_family) = leaves
+                .iter()
+                .find_map(|filter| exact_prefix_bound(column, filter))?;
             if prefix.len() + key.len() > SECONDARY_KEY_BYTES_MAX {
                 return None;
             }
-            let mut joined = prefix.clone();
-            joined.extend_from_slice(&key);
-            Some(joined)
+            if require_homogeneous_family {
+                families.push(ScopedFamily {
+                    prefix: prefix.clone(),
+                    family: key[0],
+                });
+            }
+            prefix.extend_from_slice(&key);
+            Some(())
         };
-        range.lower = match range.lower {
-            Included(key) => Included(with_prefix(key)?),
-            Excluded(key) => Excluded(with_prefix(key)?),
-            Unbounded if !prefix.is_empty() => Included(prefix.clone()),
-            Unbounded => Unbounded,
-        };
-        range.upper = match range.upper {
-            Included(key) => Included(with_prefix(key)?),
-            Excluded(key) => Excluded(with_prefix(key)?),
-            Unbounded => successor(prefix).map(Excluded).unwrap_or(Unbounded),
-        };
-        range.families = families;
-        Some(range)
+
+        if let Some(mut range) = trailing_range {
+            for column in prefix_columns {
+                append_exact(column)?;
+            }
+            let family = range.families[0].family;
+            families.push(ScopedFamily {
+                prefix: prefix.clone(),
+                family,
+            });
+            let with_prefix = |key: Vec<u8>| -> Option<Vec<u8>> {
+                if prefix.len() + key.len() > SECONDARY_KEY_BYTES_MAX {
+                    return None;
+                }
+                let mut joined = prefix.clone();
+                joined.extend_from_slice(&key);
+                Some(joined)
+            };
+            range.lower = match range.lower {
+                Included(key) => Included(with_prefix(key)?),
+                Excluded(key) => Excluded(with_prefix(key)?),
+                Unbounded if !prefix.is_empty() => Included(prefix.clone()),
+                Unbounded => Unbounded,
+            };
+            range.upper = match range.upper {
+                Included(key) => Included(with_prefix(key)?),
+                Excluded(key) => Excluded(with_prefix(key)?),
+                Unbounded => successor(prefix).map(Excluded).unwrap_or(Unbounded),
+            };
+            range.families = families;
+            return Some(range);
+        }
+
+        // A leading exact prefix is enough to seek a composite tree even when
+        // the remaining columns are used only for ordering. SQL execution
+        // still reapplies the complete filter to every returned candidate.
+        let mut exact_columns = 0;
+        for column in columns {
+            if append_exact(column).is_none() {
+                break;
+            }
+            exact_columns += 1;
+        }
+        (exact_columns > 0).then(|| Self {
+            lower: Included(prefix.clone()),
+            upper: successor(prefix).map(Excluded).unwrap_or(Unbounded),
+            families,
+        })
     }
 
     fn contains(&self, key: &[u8]) -> bool {
@@ -531,6 +570,7 @@ pub(super) fn equality_storage_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{encode_bound, Range};
     use crate::storage::{EntityId, StoreError};
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_engine::storage::collection_read::{
@@ -1091,6 +1131,92 @@ mod tests {
                 }),
             )),
         )
+    }
+
+    #[test]
+    fn composite_prefix_accepts_is_null_without_a_trailing_range() {
+        use reddb_rql::ast::{CompareOp, FieldRef, Filter};
+
+        let filter = Filter::And(
+            Box::new(Filter::Compare {
+                field: FieldRef::column("monitoring_exports", "status"),
+                op: CompareOp::Eq,
+                value: Value::text("accepted"),
+            }),
+            Box::new(Filter::IsNull(FieldRef::column(
+                "monitoring_exports",
+                "estimated_at",
+            ))),
+        );
+        let columns = [
+            "status".to_string(),
+            "estimated_at".to_string(),
+            "received_at".to_string(),
+        ];
+        let range = Range::for_index(&columns, &filter).expect("exact composite prefix");
+        let tuple = |values: &[Value]| {
+            values
+                .iter()
+                .flat_map(|value| encode_bound(value).expect("ordered value"))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(range.contains(&tuple(&[
+            Value::text("accepted"),
+            Value::Null,
+            Value::text("2026-11-06T00:00:00Z"),
+        ])));
+        assert!(!range.contains(&tuple(&[
+            Value::text("accepted"),
+            Value::text("2026-11-06T00:01:00Z"),
+            Value::text("2026-11-06T00:00:00Z"),
+        ])));
+        assert!(!range.contains(&tuple(&[
+            Value::text("rejected"),
+            Value::Null,
+            Value::text("2026-11-06T00:00:00Z"),
+        ])));
+    }
+
+    #[test]
+    fn paged_composite_exact_null_prefix_without_trailing_range_never_scans_source() {
+        let (_directory, runtime, options) = fixture();
+        runtime
+            .execute_query("CREATE TABLE monitoring_exports (status TEXT, estimated_at TEXT, received_at TEXT, payload TEXT)")
+            .expect("monitoring table");
+        runtime
+            .execute_query("CREATE INDEX monitoring_pending ON monitoring_exports (status, estimated_at, received_at) USING BTREE")
+            .expect("monitoring index");
+        for values in [
+            "('accepted', NULL, '2026-11-06T00:00:02Z', 'second')",
+            "('accepted', NULL, '2026-11-06T00:00:01Z', 'first')",
+            "('accepted', '2026-11-06T00:01:00Z', '2026-11-06T00:00:00Z', 'estimated')",
+            "('rejected', NULL, '2026-11-06T00:00:00Z', 'rejected')",
+        ] {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO monitoring_exports (status, estimated_at, received_at, payload) VALUES {values}"
+                ))
+                .expect("monitoring row");
+        }
+        runtime.flush().expect("monitoring checkpoint");
+        drop(runtime);
+
+        let runtime = open(&options);
+        deny_scan_table(&runtime, "monitoring_exports");
+        runtime
+            .rebuild_runtime_indexes_for_table("monitoring_exports")
+            .expect("prepared monitoring metadata-only restore");
+        let result = runtime
+            .execute_query("SELECT payload FROM monitoring_exports WHERE status = 'accepted' AND estimated_at IS NULL ORDER BY received_at LIMIT 100")
+            .expect("pending monitoring exports");
+        let payloads: Vec<_> = result
+            .result
+            .records
+            .iter()
+            .map(|record| record.get("payload").expect("payload").clone())
+            .collect();
+        assert_eq!(payloads, [Value::text("first"), Value::text("second")]);
     }
 
     #[test]
