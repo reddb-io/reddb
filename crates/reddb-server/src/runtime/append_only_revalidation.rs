@@ -232,6 +232,43 @@ mod tests {
     use reddb_types::Value;
 
     #[test]
+    fn append_only_retention_respects_tick_budget_across_cold_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("append_only_retention_budget.rdb");
+        let options = RedDBOptions::persistent(&db_path);
+        let manifest = OperationalManifest::for_db_path(&db_path);
+        {
+            let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+            rt.background_tasks.as_ref().unwrap().shutdown();
+            rt.execute_query("CREATE TABLE events (id INT) WITH timestamps = true APPEND ONLY")
+                .unwrap();
+            rt.execute_query("CREATE TABLE logs (id INT) WITH timestamps = true APPEND ONLY")
+                .unwrap();
+            for (collection, id) in [("events", 1), ("events", 2), ("logs", 3)] {
+                rt.execute_query(&format!("INSERT INTO {collection} (id) VALUES ({id})"))
+                    .unwrap();
+                rt.flush().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2_100));
+            rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                .unwrap();
+            rt.execute_query("ALTER COLLECTION logs SET RETENTION 1 s")
+                .unwrap();
+            rt.sweep_retention_tick(1);
+            assert_eq!(manifest.append_only_segments_for_test().unwrap().len(), 2);
+        }
+        let rt = RedDBRuntime::with_options(options).unwrap();
+        rt.background_tasks.as_ref().unwrap().shutdown();
+        assert_eq!(manifest.append_only_segments_for_test().unwrap().len(), 2);
+        rt.sweep_retention_tick(1);
+        assert_eq!(manifest.append_only_segments_for_test().unwrap().len(), 1);
+        rt.sweep_retention_tick(1);
+        assert!(manifest.append_only_segments_for_test().unwrap().is_empty());
+        rt.sweep_retention_tick(1);
+        assert!(manifest.append_only_segments_for_test().unwrap().is_empty());
+    }
+
+    #[test]
     fn large_manifest_restarts_after_replacement_and_cold_boot() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large-manifest.rdb");
