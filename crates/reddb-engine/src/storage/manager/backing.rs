@@ -287,6 +287,21 @@ impl SegmentManager {
             .map(|base| base.total_entities)
     }
 
+    /// Reconcile a verified physical count while a recovered store is still
+    /// exclusively owned and has not been made available to readers.
+    #[doc(hidden)]
+    pub fn set_recovered_backing_count(&self, root_page: u32, count: u64) -> bool {
+        let mut backing = self.backing.write();
+        let Some(backing) = backing.as_mut() else {
+            return false;
+        };
+        if backing.root_page != root_page {
+            return false;
+        }
+        backing.total_entities = count;
+        true
+    }
+
     /// Whether a projected base posting has been replaced or physically
     /// removed. The host must fence publication/mutations while merging the
     /// projected base with resident rows. This never reads a base payload.

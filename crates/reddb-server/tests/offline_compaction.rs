@@ -109,6 +109,42 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
     recover_paged_wal(&source, &output).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_recovered_fixture(&output.join("source.rdb"));
+    assert_eq!(
+        u64::from(root) + 1,
+        before.len() as u64 / 16384,
+        "fixture must place the damaged page last"
+    );
+    let mut partial = before.clone();
+    partial.truncate(root as usize * 16384 + 1024);
+    let partial_source = directory.path().join("partial.rdb");
+    std::fs::write(&partial_source, &partial).unwrap();
+    let partial_output = directory.path().join("partial-recovered");
+    recover_paged_wal(&partial_source, &partial_output)
+        .expect("restore a torn final page from DWB");
+    assert_eq!(std::fs::read(&partial_source).unwrap(), partial);
+    assert_recovered_fixture(&partial_output.join("partial.rdb"));
+    let mut unsupported = partial;
+    for id in reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE
+        ..reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE
+    {
+        let mut page = Page::new(PageType::Header, id);
+        page.update_checksum();
+        let offset = id as usize * 16384;
+        unsupported[offset..offset + 16384].copy_from_slice(page.as_bytes());
+    }
+    let missing_image = directory.path().join("missing-image.rdb");
+    std::fs::write(&missing_image, &unsupported).unwrap();
+    let missing_wal = reddb_file::unified_wal_path(&missing_image);
+    {
+        use reddb_server::storage::wal::{WalRecord, WalWriter};
+        let mut writer = WalWriter::open(&missing_wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 999 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let missing_output = directory.path().join("missing-image-output");
+    assert!(recover_paged_wal(&missing_image, &missing_output).is_err());
+    assert!(!missing_output.join("missing-image.rdb").exists());
+    assert_eq!(std::fs::read(&missing_image).unwrap(), unsupported);
 
     let mut invalid = before.clone();
     invalid[reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE as usize * 16384 + 20] ^= 1;
@@ -144,6 +180,12 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
         let mut obsolete_page = page.clone();
         obsolete_page.set_cell_count(0);
         obsolete_page.update_checksum();
+        let mut latest_page = page.clone();
+        latest_page.as_bytes_mut()[100] ^= 1;
+        assert!(
+            latest_page.verify_checksum().is_err(),
+            "engine WAL captures pages before checksum refresh"
+        );
         writer.append(&WalRecord::Begin { tx_id: 7 }).unwrap();
         writer
             .append(&WalRecord::PageWrite {
@@ -156,7 +198,7 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
             .append(&WalRecord::PageWrite {
                 tx_id: 7,
                 page_id: root,
-                data: page.as_bytes().to_vec(),
+                data: latest_page.as_bytes().to_vec(),
             })
             .unwrap();
         checkpoint_lsn = writer.append(&WalRecord::Commit { tx_id: 7 }).unwrap();
@@ -184,6 +226,23 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
     assert_recovered_fixture(&output.join("source.rdb"));
+    // An older DWB image must be applied before the newer committed WAL image.
+    let mut combined = before.clone();
+    let mut old_page = page.clone();
+    old_page.set_cell_count(0);
+    old_page.update_checksum();
+    let frame = reddb_file::encode_paged_dwb_frame([(root, old_page.as_bytes())]);
+    let offset = reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE as usize * 16384;
+    combined[offset..offset + frame.len()].copy_from_slice(&frame);
+    let combined_source = directory.path().join("combined.rdb");
+    let combined_wal = reddb_file::engine_wal_path(&combined_source);
+    std::fs::write(&combined_source, &combined).unwrap();
+    std::fs::write(&combined_wal, &wal_before).unwrap();
+    let combined_output = directory.path().join("combined-recovery");
+    recover_paged_wal(&combined_source, &combined_output).unwrap();
+    assert_eq!(std::fs::read(&combined_source).unwrap(), combined);
+    assert_eq!(std::fs::read(&combined_wal).unwrap(), wal_before);
+    assert_recovered_fixture(&combined_output.join("combined.rdb"));
     let missing_target = &wal_before[..checkpoint_lsn as usize];
     std::fs::write(&wal, missing_target).unwrap();
     let output = directory.path().join("missing-checkpoint-target");
@@ -200,6 +259,236 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     assert!(!output.join("source.rdb").exists());
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_eq!(std::fs::read(&wal).unwrap(), truncated);
+}
+
+#[test]
+fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore, UnifiedStoreConfig};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("xid.rdb");
+    let config = UnifiedStoreConfig {
+        resident_memory_bytes_max: Some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+    {
+        let store = UnifiedStore::open_with_config(&source, config).unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![Value::Integer(17)]),
+            )
+            .unwrap();
+        store
+            .insert_auto(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(18)]),
+            )
+            .unwrap();
+        store.persist().unwrap();
+    }
+    let copy = directory.path().join("prepare.rdb");
+    std::fs::copy(&source, &copy).unwrap();
+    let pager = Arc::new(
+        Pager::open(
+            &copy,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    let catalog = pager.read_page(1).unwrap();
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .unwrap()
+        .unwrap();
+    let old_floor = resume.xid_high_water_mark.unwrap();
+    let root = resume.collections["rows"].root_page;
+    let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .unwrap()
+        .unwrap()
+        .format_version;
+    let mut entity = UnifiedEntity::table_row(
+        EntityId::new(50_000),
+        "rows",
+        60_000,
+        vec![Value::Integer(17)],
+    );
+    entity.xmin = 50_000;
+    entity.xmax = 70_000;
+    entity.sequence_id = 70_000;
+    let encoded =
+        reddb_engine::storage::metadata_codec::serialize_entity_record(&entity, None, format);
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    tree.insert(&50_000u64.to_be_bytes(), &encoded).unwrap();
+    assert_eq!(tree.root_page_id(), root);
+    let page = pager.read_page(root).unwrap();
+    drop(tree);
+    drop(pager);
+    let wal = reddb_file::engine_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 90_000 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 90_000,
+                page_id: root,
+                data: page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 90_000 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let before = std::fs::read(&source).unwrap();
+    let output = directory.path().join("xid-recovered");
+    recover_paged_wal(&source, &output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let pager = Pager::open(
+        &output.join("xid.rdb"),
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .unwrap();
+    let catalog = pager.read_page(1).unwrap();
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .unwrap()
+        .unwrap();
+    assert!(resume.xid_high_water_mark.unwrap() >= old_floor.max(90_000));
+    assert!(resume.entity_id_next > 50_000);
+    assert!(resume.collections["rows"].entity_id_next > 50_000);
+    assert!(resume.collections["rows"].row_id_next > 60_000);
+    assert!(resume.collections["rows"].sequence_id_next > 70_000);
+    assert_eq!(resume.collections["rows"].entities, 3);
+}
+
+#[test]
+fn physical_wal_recovery_keeps_secondary_index_consistent_with_changed_data() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("indexed.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        runtime
+            .execute_query("CREATE TABLE records (id INT, value TEXT)")
+            .unwrap();
+        runtime
+            .execute_query("CREATE INDEX record_value ON records (value) USING HASH")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO records (id, value) VALUES (1, 'before')")
+            .unwrap();
+        runtime.graceful_shutdown(false).unwrap();
+    }
+    let modified = directory.path().join("modified.rdb");
+    std::fs::copy(&source, &modified).unwrap();
+    let pager = Arc::new(
+        Pager::open(
+            &modified,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .unwrap(),
+    );
+    let catalog = pager.read_page(1).unwrap();
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .unwrap()
+        .unwrap();
+    let root = resume.collections["records"].root_page;
+    let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .unwrap()
+        .unwrap()
+        .format_version;
+    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let mut cursor = tree.cursor_first().unwrap();
+    let (key, bytes) = cursor.next_with_budget(1024 * 1024).unwrap().unwrap();
+    let id = reddb_server::storage::EntityId::new(u64::from_be_bytes(
+        key.as_slice().try_into().unwrap(),
+    ));
+    let (mut entity, metadata) =
+        reddb_engine::storage::collection_read::EncodedRecord { id, bytes }
+            .decode(format)
+            .unwrap();
+    let reddb_server::storage::EntityData::Row(row) = &mut entity.data else {
+        panic!("row")
+    };
+    if let Some(named) = row.named.as_mut() {
+        named.insert("value".into(), Value::text("after"));
+    }
+    if row.columns.len() > 1 {
+        row.columns[1] = Value::text("after");
+    }
+    let encoded = reddb_engine::storage::metadata_codec::serialize_entity_record(
+        &entity,
+        metadata.as_ref(),
+        format,
+    );
+    drop(cursor);
+    tree.upsert(&key, &encoded).unwrap();
+    assert_eq!(tree.root_page_id(), root);
+    let page = pager.read_page(root).unwrap();
+    drop(tree);
+    drop(pager);
+    let wal = reddb_file::engine_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 700 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 700,
+                page_id: root,
+                data: page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 700 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let output = directory.path().join("index-recovered");
+    recover_paged_wal(&source, &output).unwrap();
+    let options = RedDBOptions::persistent(output.join("indexed.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    for _ in 0..2 {
+        let runtime = RedDBRuntime::with_options(options.clone()).unwrap();
+        let row = runtime
+            .execute_query("SELECT id FROM records WHERE value = 'after'")
+            .unwrap();
+        assert_eq!(
+            row.result.records.len(),
+            1,
+            "recovered index must include updated row"
+        );
+        assert_eq!(
+            row.result.records[0].get("id").unwrap().display_string(),
+            "1"
+        );
+        let row = runtime
+            .execute_query("SELECT id FROM records WHERE value = 'before'")
+            .unwrap();
+        assert!(row.result.records.is_empty());
+        let explain = runtime
+            .explain_query("SELECT id FROM records WHERE value = 'after'")
+            .unwrap();
+        let mut nodes = vec![&explain.logical_plan.root];
+        let mut indexed = false;
+        while let Some(node) = nodes.pop() {
+            indexed |= node.operator == "index_seek";
+            nodes.extend(&node.children);
+        }
+        assert!(indexed, "recovered query must use the secondary index");
+        runtime.graceful_shutdown(false).unwrap();
+    }
 }
 
 #[test]

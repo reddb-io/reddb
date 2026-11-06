@@ -70,9 +70,8 @@ impl Source {
         )?;
         ensure(
             if allow_unified_wal {
-                bytes >= u64::from(header.page_count) * PAGE_SIZE as u64
-                    && bytes % PAGE_SIZE as u64 == 0
-                    && bytes / PAGE_SIZE as u64 <= 64 * 1024 * 1024
+                bytes.div_ceil(PAGE_SIZE as u64) >= u64::from(header.page_count)
+                    && bytes.div_ceil(PAGE_SIZE as u64) <= 64 * 1024 * 1024
             } else {
                 bytes == u64::from(header.page_count) * PAGE_SIZE as u64
             },
@@ -124,7 +123,7 @@ impl Source {
                     entry.page_id > 0
                         && (entry.page_id < DWB_ZONE_START_PAGE
                             || entry.page_id >= FIRST_ALLOCATABLE_PAGE)
-                        && u64::from(entry.page_id) < bytes / PAGE_SIZE as u64
+                        && u64::from(entry.page_id) < bytes.div_ceil(PAGE_SIZE as u64)
                         && seen.insert(entry.page_id),
                     "invalid double-write page ownership",
                 )?;
@@ -171,6 +170,24 @@ impl Source {
             "page identity mismatch",
         )?;
         Ok(page)
+    }
+    pub fn copy_snapshot(&self, destination: &Path) -> Result<()> {
+        let mut source = self.file.lock();
+        source.seek(SeekFrom::Start(0))?;
+        let mut output = create_new(destination)?;
+        ensure(
+            std::io::copy(&mut *source, &mut output)? == self.bytes,
+            "source size changed while copying",
+        )?;
+        output.sync_all()?;
+        drop(output);
+        source.seek(SeekFrom::Start(0))?;
+        let original_hash = hash_reader(&mut *source)?;
+        let copied_hash = hash_reader(&mut File::open(destination)?)?;
+        ensure(
+            original_hash == copied_hash,
+            "database copy failed complete readback parity",
+        )
     }
     pub fn verify_superblocks(&self) -> Result<()> {
         let mut zone = [0; f::PAGED_SUPERBLOCK_ZONE_SIZE];

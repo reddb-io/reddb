@@ -137,6 +137,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     {
         salvage::verify_vault(&source, &guard)?;
     }
+    let mut recovered_engine_xid = 0;
     if pending_engine {
         for entry in WalReader::open(&engine_wal)?.iter() {
             match entry?.1 {
@@ -148,7 +149,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
                     ensure(
                         page_id > 0
                             && (page_id < DWB_ZONE_START_PAGE || page_id >= FIRST_ALLOCATABLE_PAGE)
-                            && u64::from(page_id) < guard.bytes / PAGE_SIZE as u64
+                            && u64::from(page_id) < guard.bytes.div_ceil(PAGE_SIZE as u64)
                             && data.len() == PAGE_SIZE,
                         "invalid engine WAL page",
                     )?;
@@ -158,9 +159,9 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
                         "engine WAL page identity mismatch",
                     )?;
                     page.page_type()?;
-                    if page_id != 2 {
-                        page.verify_checksum()?;
-                    }
+                    // Engine transactions log page bytes before Pager::write_page
+                    // updates the page checksum. The WAL frame itself protects
+                    // the image; redo will seal the page before writing it.
                 }
                 _ => return Err("unsupported engine WAL record".into()),
             }
@@ -176,12 +177,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     std::fs::create_dir(&stage)?;
     let name = source.file_name().ok_or("source filename is missing")?;
     let staged_source = stage.join(name);
-    let mut input = File::open(&source)?;
-    let mut output = create_new(&staged_source)?;
-    std::io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    drop(output);
-    verify_file_copy(&source, &staged_source)?;
+    guard.copy_snapshot(&staged_source)?;
     copy_sidecars(&source, &staged_source)?;
     copy_physical_metadata_files(&source, &staged_source)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
@@ -199,7 +195,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
             },
         )?;
         let wal = f::engine_wal_path(&staged_source);
-        replay_engine_wal_on_copy(&pager, &wal)?;
+        recovered_engine_xid = replay_engine_wal_on_copy(&pager, &wal)?;
         let mut writer = crate::storage::wal::WalWriter::open(&wal)?;
         writer.truncate()?;
         writer.sync()?;
@@ -207,6 +203,55 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     {
         let store =
             crate::storage::unified::UnifiedStore::open_with_config(&staged_source, config)?;
+        if pending_engine || guard.pending_double_write {
+            store.reconcile_physical_recovery()?;
+            // The same root can now contain newer entity headers than the
+            // old catalog summary. Preserve its previous floor, account for
+            // the physical WAL, and visit the recovered base before publishing.
+            let mut high = store
+                .startup_xid_high_water_mark()
+                .unwrap_or(0)
+                .max(recovered_engine_xid);
+            for name in store.list_collections() {
+                let manager = store
+                    .get_collection(&name)
+                    .ok_or("recovered collection disappeared")?;
+                let mut max_entity = 0u64;
+                let mut max_row = 0u64;
+                let mut max_sequence = 0u64;
+                let mut has_entity = false;
+                manager.try_for_each_entity(32 * 1024 * 1024, |entity| {
+                    has_entity = true;
+                    high = high.max(entity.xmin).max(entity.xmax);
+                    max_entity = max_entity.max(entity.id.raw());
+                    max_sequence = max_sequence.max(entity.sequence_id);
+                    if let crate::storage::EntityKind::TableRow { row_id, .. } = &entity.kind {
+                        max_row = max_row.max(*row_id);
+                    }
+                    true
+                })?;
+                if !has_entity {
+                    continue;
+                }
+                let entity_next = max_entity
+                    .checked_add(1)
+                    .ok_or("recovered entity IDs are exhausted")?;
+                let row_next = max_row
+                    .checked_add(1)
+                    .ok_or("recovered row IDs are exhausted")?;
+                let sequence_next = max_sequence
+                    .checked_add(1)
+                    .ok_or("recovered sequence IDs are exhausted")?;
+                manager.restore_identity_counters(entity_next, row_next);
+                manager.restore_sequence_id_next(sequence_next);
+                store.register_entity_id(crate::storage::EntityId::new(max_entity));
+            }
+            ensure(
+                high < u64::MAX,
+                "recovered transaction high-water mark is exhausted",
+            )?;
+            store.remember_startup_xid_high_water_mark(high);
+        }
         store.persist()?;
     }
     let validated_dir = stage.join("validated");
@@ -248,10 +293,11 @@ fn wal_has_records(path: &Path) -> Result<bool> {
     }
 }
 
-fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<()> {
+fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<u64> {
     use crate::storage::wal::{WalReader, WalRecord};
     let mut transactions = std::collections::HashMap::new();
     let mut last_lsn = 0;
+    let mut highest_tx = 0u64;
     let header = pager.header()?;
     let mut target_seen = !header.checkpoint_in_progress;
     for item in WalReader::open(path)?.iter() {
@@ -260,14 +306,18 @@ fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<()> {
         target_seen |= lsn == header.checkpoint_target_lsn;
         match record {
             WalRecord::Begin { tx_id } => {
+                highest_tx = highest_tx.max(tx_id);
                 transactions.insert(tx_id, false);
             }
             WalRecord::Commit { tx_id } => {
+                highest_tx = highest_tx.max(tx_id);
                 transactions.insert(tx_id, true);
             }
             WalRecord::Rollback { tx_id } => {
+                highest_tx = highest_tx.max(tx_id);
                 transactions.remove(&tx_id);
             }
+            WalRecord::PageWrite { tx_id, .. } => highest_tx = highest_tx.max(tx_id),
             _ => {}
         }
     }
@@ -302,7 +352,7 @@ fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<()> {
         pager.sync()?;
         pager.complete_checkpoint(last_lsn)?;
     }
-    Ok(())
+    Ok(highest_tx)
 }
 
 fn copy_physical_metadata_files(source: &Path, destination: &Path) -> Result<()> {
@@ -962,23 +1012,22 @@ fn validate_operational(root: &Path) -> Result<()> {
     check(&document, 0)
 }
 fn verify_file_copy(source: &Path, destination: &Path) -> Result<()> {
-    fn hash(path: &Path) -> Result<blake3::Hash> {
-        let mut file = File::open(path)?;
-        let mut hash = blake3::Hasher::new();
-        let mut buffer = [0; 64 * 1024];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
-        }
-        Ok(hash.finalize())
-    }
     ensure(
-        hash(source)? == hash(destination)?,
+        hash_reader(&mut File::open(source)?)? == hash_reader(&mut File::open(destination)?)?,
         "sidecar failed complete readback parity",
     )
+}
+fn hash_reader(input: &mut impl Read) -> Result<blake3::Hash> {
+    let mut hash = blake3::Hasher::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(hash.finalize())
 }
 fn allocated_bytes(path: &Path) -> Result<Option<u64>> {
     #[cfg(unix)]

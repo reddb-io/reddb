@@ -4,6 +4,56 @@ use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
 use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 
 impl UnifiedStore {
+    /// Physical redo can change records without changing their root address.
+    /// Recount bases and discard derived indexes before this private copy is
+    /// published; normal startup recreates secondary indexes from definitions.
+    pub(crate) fn reconcile_physical_recovery(&self) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        if self.config.resident_memory_bytes_max.is_none() {
+            return Ok(());
+        }
+        for (name, tree) in self.btree_indices.read().iter() {
+            let manager = self
+                .get_collection(name)
+                .ok_or_else(|| StoreError::CollectionNotFound(name.clone()))?;
+            let root = tree.root_page_id();
+            if root != 0 && manager.backing_count_at_root(root).is_none() {
+                return Err(StoreError::Io(std::io::Error::other(
+                    "physical recovery cannot verify the collection backing",
+                )));
+            }
+            if manager.backing_count_at_root(root).is_some() {
+                let mut cursor = tree
+                    .cursor_first()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                let mut count = 0u64;
+                while cursor
+                    .skip_next()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                {
+                    count = count.checked_add(1).ok_or_else(|| {
+                        StoreError::Io(std::io::Error::other("recovered count overflow"))
+                    })?;
+                }
+                if !manager.set_recovered_backing_count(root, count) {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "recovered backing changed",
+                    )));
+                }
+            }
+        }
+        let previous = std::mem::take(&mut *self.key_indices.write());
+        for index in previous.values() {
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
+        }
+        self.resident
+            .paged_registry_dirty
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
     pub(super) fn checkpoint_key_indices(
         &self,
         pager: &Arc<Pager>,
