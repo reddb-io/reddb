@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.17
+
+### Patch Changes
+
+- [#2685](https://github.com/reddb-io/reddb/pull/2685) [`f3ed5eb`](https://github.com/reddb-io/reddb/commit/f3ed5ebb80ebe486034d137c26b623c558fd6419) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover catalogues containing an empty duplicate legacy system collection while preserving the populated collection and its existing data and index roots.
+
 ## 1.28.16
 
 ### Patch Changes
