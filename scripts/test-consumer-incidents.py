@@ -22,7 +22,11 @@ def main():
         ["cargo", "test", "--locked", "-p", "reddb-io-server", "--test", "consumer_incidents",
          "--", "--nocapture"],
         ["cargo", "test", "--locked", "-p", "reddb-io-server", "--lib",
-         "runtime::statement_frame::tests::", "--", "--nocapture"],
+         "--", "--nocapture", "runtime::statement_frame::tests::",
+         "runtime::mutation_index_topology_tests::", "wire::query_direct::tests::",
+         "replication::logical::"],
+        ["cargo", "test", "--locked", "-p", "reddb-io-client", "--features", "redwire",
+         "--lib", "redwire::tests::", "--", "--nocapture"],
         ["cargo", "test", "--locked", "-p", "reddb-io-engine", "--test", "portable",
          "portable_snapshot_conformance", "--", "--nocapture"],
     ]
