@@ -19,7 +19,7 @@ class DumpRestore(unittest.TestCase):
 
     def cli(self, *args, success=True):
         result = subprocess.run([self.binary, *map(str, args)], capture_output=True,
-                                text=True, timeout=60)
+                                text=True, encoding="utf-8", timeout=60)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -27,7 +27,7 @@ class DumpRestore(unittest.TestCase):
     def dump(self, database, name):
         output = self.root / name
         self.cli("dump", "--path", database, "-o", output)
-        return output, [json.loads(line) for line in output.read_text().splitlines()]
+        return output, [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
     def test_values_survive_dump_restore_and_reopen(self):
         source = self.root / "source.rdb"
@@ -52,7 +52,7 @@ class DumpRestore(unittest.TestCase):
 
     def test_partial_restore_fails_in_text_and_json_modes(self):
         source = self.root / "invalid.jsonl"
-        source.write_text('{"collection":"accepted","fields":{"id":1}}\nnot JSON\n')
+        source.write_text('{"collection":"accepted","fields":{"id":1}}\nnot JSON\n', encoding="utf-8")
         for flags in [[], ["--json"]]:
             result = self.cli("restore", "--path", self.root / f"partial{len(flags)}.rdb",
                               "-i", source, *flags, success=False)
@@ -64,7 +64,7 @@ class DumpRestore(unittest.TestCase):
     def test_restore_rejects_identifiers_containing_sql(self):
         source = self.root / "identifiers.jsonl"
         source.write_text(json.dumps({"collection": "rows; DROP TABLE protected",
-                                      "fields": {"id": 1}}) + "\n")
+                                      "fields": {"id": 1}}) + "\n", encoding="utf-8")
         result = self.cli("restore", "--path", self.root / "identifiers.rdb", "-i", source,
                           success=False)
         self.assertNotEqual(result.returncode, 0)
@@ -75,7 +75,7 @@ class DumpRestore(unittest.TestCase):
                   "unsigned": {"$uint": "18446744073709551615"},
                   "amount": {"$decimal": "1234567890.123456789"}}
         source = self.root / "numbers.jsonl"
-        source.write_text(json.dumps({"collection": "exact_numbers", "fields": fields}) + "\n")
+        source.write_text(json.dumps({"collection": "exact_numbers", "fields": fields}) + "\n", encoding="utf-8")
         target = self.root / "numbers.rdb"
         self.cli("restore", "--path", target, "-i", source)
         _, records = self.dump(target, "numbers-restored.jsonl")
@@ -89,7 +89,7 @@ class DumpRestore(unittest.TestCase):
         self.cli("query", "--path", source, "INSERT INTO original (id) VALUES (1)")
         dump = self.root / "selected.jsonl"
         self.cli("dump", "--path", source, "--collection", "original", "-o", dump)
-        records = [json.loads(line) for line in dump.read_text().splitlines()]
+        records = [json.loads(line) for line in dump.read_text(encoding="utf-8").splitlines()]
         self.assertEqual({r.get("collection") for r in records}, {"original", "red_config"})
         target = self.root / "config-target.rdb"
         self.cli("restore", "--path", target, "--collection", "renamed", "-i", dump)
