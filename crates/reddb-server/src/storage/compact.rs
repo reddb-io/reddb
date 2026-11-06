@@ -18,6 +18,7 @@ use std::{
 mod assets;
 pub(crate) mod boot_system_wal;
 mod catalog;
+pub(crate) mod catalog_aliases;
 mod salvage;
 mod scrub;
 mod source;
@@ -45,18 +46,22 @@ pub struct CompactionReport {
     pub repaired_leaf_backlinks: u64,
     /// Only operator-selected canonical recovery can retire boot-derived WAL actions.
     pub retired_boot_system_wal_actions: usize,
+    pub reconciled_system_collections: usize,
+    pub imported_system_records: usize,
 }
 
 impl CompactionReport {
     pub fn machine_json(&self) -> String {
         format!(
-            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"repaired_leaf_backlinks":{},"retired_boot_system_wal_actions":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
+            r#"{{"source_bytes":{},"destination_bytes":{},"records":{},"trees":{},"repaired_leaf_backlinks":{},"retired_boot_system_wal_actions":{},"reconciled_system_collections":{},"imported_system_records":{},"source_allocated_bytes":{},"destination_allocated_bytes":{}}}"#,
             self.source_bytes,
             self.destination_bytes,
             self.records,
             self.trees,
             self.repaired_leaf_backlinks,
             self.retired_boot_system_wal_actions,
+            self.reconciled_system_collections,
+            self.imported_system_records,
             self.source_allocated_bytes
                 .map_or_else(|| "null".into(), |n| n.to_string()),
             self.destination_allocated_bytes
@@ -246,6 +251,14 @@ fn recover_paged_wal_inner(
             boot_system_wal::BootSystemWalPlan::prepare(&checkpoint, &staged_wal, pending_engine)?;
         verify_wal_recovery_records(&staged_wal, true, &boot_wal)?;
     }
+    let catalog_plan = if retain_canonical_system_config {
+        catalog_aliases::CanonicalCatalogPlan::prepare(
+            &staged_source,
+            &f::unified_wal_path(&staged_source),
+        )?
+    } else {
+        catalog_aliases::CanonicalCatalogPlan::default()
+    };
     let probabilistic_deltas;
     let mut has_vector_cache = false;
     {
@@ -254,8 +267,10 @@ fn recover_paged_wal_inner(
             config,
             retain_canonical_system_config,
             Some(&boot_wal),
+            Some(&catalog_plan),
         )?;
         boot_wal.preserve_identity_floors(&store)?;
+        catalog_plan.restore(&store)?;
         if pending_engine || guard.pending_double_write {
             store.reconcile_physical_recovery()?;
         }
@@ -359,6 +374,8 @@ fn recover_paged_wal_inner(
     let validated_dir = stage.join("validated");
     let mut report = compact_paged(&staged_source, &validated_dir)?;
     report.retired_boot_system_wal_actions = boot_wal.action_count();
+    report.reconciled_system_collections = catalog_plan.reconciled_count();
+    report.imported_system_records = catalog_plan.imported_count();
     let verified = scrub_paged(&validated_dir.join(name))?;
     ensure(
         verified.assets_verified
@@ -963,6 +980,8 @@ fn compact_paged_inner(
     }
     let report = CompactionReport {
         retired_boot_system_wal_actions: 0,
+        reconciled_system_collections: 0,
+        imported_system_records: 0,
         source_bytes: source.bytes,
         destination_bytes: reopened.bytes,
         source_allocated_bytes: allocated_bytes(&source_path)?,
