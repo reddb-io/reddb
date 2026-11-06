@@ -614,11 +614,14 @@ impl<V: Vfs> OperationalManifest<V> {
 
     fn load_current(&self) -> io::Result<Option<Manifest>> {
         let path = self.root.join(MANIFEST_FILE);
-        match self.read_file(&path) {
-            Ok(bytes) => manifest_from_bytes(&bytes).map(Some),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
-        }
+        let file = match self.vfs.open(&path, OpenMode::read_only()) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let reader = io::BufReader::new(ManifestFileReader(file));
+        let value = serde_json::from_reader(reader).map_err(manifest_json_error)?;
+        manifest_from_value(value).map(Some)
     }
 
     /// Never read an oversized manifest for a bounded maintenance pass.
@@ -897,6 +900,14 @@ fn next_append_only_segment_id(manifest: &Manifest, collection: &str) -> u64 {
 
 struct ManifestFileWriter<'a, F: VfsFile>(&'a mut F);
 
+struct ManifestFileReader<F: VfsFile>(F);
+
+impl<F: VfsFile> io::Read for ManifestFileReader<F> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(bytes)
+    }
+}
+
 impl<F: VfsFile> io::Write for ManifestFileWriter<'_, F> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.write_all(bytes)?;
@@ -934,13 +945,15 @@ fn write_manifest(writer: impl io::Write, manifest: &Manifest) -> io::Result<()>
         "checksum".to_string(),
         Value::String(format!("{checksum:08x}")),
     );
-    serde_json::to_writer_pretty(writer, &object).map_err(|error| {
-        if let Some(kind) = error.io_error_kind() {
-            io::Error::new(kind, error)
-        } else {
-            invalid_data(error)
-        }
-    })
+    serde_json::to_writer_pretty(writer, &object).map_err(manifest_json_error)
+}
+
+fn manifest_json_error(error: serde_json::Error) -> io::Error {
+    if let Some(kind) = error.io_error_kind() {
+        io::Error::new(kind, error)
+    } else {
+        invalid_data(error)
+    }
 }
 
 fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
@@ -950,7 +963,11 @@ fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
 }
 
 fn manifest_from_bytes(bytes: &[u8]) -> io::Result<Manifest> {
-    let mut value: Value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    let value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    manifest_from_value(value)
+}
+
+fn manifest_from_value(mut value: Value) -> io::Result<Manifest> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid_data("manifest root must be an object"))?;

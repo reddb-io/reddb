@@ -181,6 +181,8 @@ struct RecordingVfs {
     fail_manifest_rename_at: Arc<AtomicUsize>,
     manifest_writes: Arc<AtomicUsize>,
     fail_manifest_write_at: Arc<AtomicUsize>,
+    manifest_reads: Arc<AtomicUsize>,
+    fail_manifest_read_at: Arc<AtomicUsize>,
     fail_after_manifest_rename: Arc<AtomicBool>,
     manifest_renamed: Arc<AtomicBool>,
     segment_removals: Arc<AtomicUsize>,
@@ -239,6 +241,15 @@ impl VfsFile for RecordingFile {
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.path.ends_with("manifest.json") {
+            let attempt = self.vfs.manifest_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.vfs.fail_manifest_read_at.load(Ordering::SeqCst) == attempt {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected manifest read failure",
+                ));
+            }
+        }
         self.file.read(buf)
     }
 
@@ -277,7 +288,16 @@ fn interrupted_streamed_manifest_write_preserves_previous_generation_on_recovery
     vfs.fail_manifest_write_at.store(0, Ordering::SeqCst);
     drop(manifest);
 
-    let reopened = OperationalManifest::with_vfs(&db_path, vfs);
+    let reopened = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    let reads = vfs.manifest_reads.load(Ordering::SeqCst);
+    vfs.fail_manifest_read_at.store(reads + 2, Ordering::SeqCst);
+    assert_eq!(
+        reopened.recover_or_bootstrap(&[]).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(std::fs::read(&current_path).unwrap(), previous);
+    assert!(reopened.collection_path_for_test("existing").exists());
+    vfs.fail_manifest_read_at.store(0, Ordering::SeqCst);
     reopened.recover_or_bootstrap(&[]).unwrap();
     assert_eq!(
         reopened.read_generation_for_test().unwrap(),
