@@ -1374,6 +1374,23 @@ fn main() {
     // before threads exist, so the process-global change races nothing.
     reddb::utils::file_mode::restrict_new_file_permissions();
 
+    // Windows executables have a smaller default main-thread stack. Embedded
+    // query startup can exceed it in debug builds, so run the dispatcher with
+    // the same 8 MiB stack used by the integration-test threads.
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("red-cli".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)
+        .expect("start CLI thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+    #[cfg(not(windows))]
+    run_cli();
+}
+
+fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Private desktop persistence service: fixed loopback binding, authenticated
