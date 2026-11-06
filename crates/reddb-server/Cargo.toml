@@ -141,6 +141,7 @@ serde = { version = "1", features = ["derive"] }
 # randomized iteration order into the merge or sort step.
 indexmap = "2"
 argon2 = "0.6.0"
+zeroize = "1"
 
 [features]
 default = []

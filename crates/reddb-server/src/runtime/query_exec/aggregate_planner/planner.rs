@@ -40,7 +40,12 @@ impl<'a> AggregateQueryPlanner<'a> {
     /// Fold an input immediately. Reject a new group before allocating its
     /// accumulator, so a cardinality ceiling stops the source scan itself.
     pub fn push(&mut self, row: ScanRow) -> Result<(), PlanError> {
-        let key = canonical_group_key(&row.group_key);
+        self.push_inputs(row.group_key, &row.agg_inputs)
+    }
+
+    /// Borrow reusable input slots; only a new group's key and accumulator are retained.
+    pub fn push_inputs(&mut self, group_key: Value, inputs: &[Value]) -> Result<(), PlanError> {
+        let key = canonical_group_key(&group_key);
         let count_next = self.groups.len().saturating_add(1);
         let entry = match self.groups.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -51,10 +56,10 @@ impl<'a> AggregateQueryPlanner<'a> {
                         current: count_next,
                     });
                 }
-                entry.insert((row.group_key, GroupAccumulator::new(&self.ast.aggregates)))
+                entry.insert((group_key, GroupAccumulator::new(&self.ast.aggregates)))
             }
         };
-        entry.1.accumulate(&self.ast.aggregates, &row.agg_inputs);
+        entry.1.accumulate(&self.ast.aggregates, inputs);
         Ok(())
     }
 

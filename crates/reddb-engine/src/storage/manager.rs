@@ -2268,6 +2268,64 @@ impl SegmentManager {
         )
     }
 
+    /// Hydrate one bounded graph batch at a time. Payloads and policy callbacks
+    /// leave storage locks; pinned cursors survive sealing and consolidation.
+    /// Work is charged for pruned sources and every inspected physical slot.
+    #[doc(hidden)]
+    pub fn scan_graph_batches(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(Vec<UnifiedEntity>) -> bool,
+    ) -> bool {
+        let segments = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return false;
+                }
+                let view = segment.read();
+                if view.may_contain_graph_kind(kind) {
+                    segments.push((Arc::clone(segment), view.scan_cursor()));
+                }
+            }
+            segments
+        };
+        let mut ids = [EntityId::new(0); super::segment::SCAN_BATCH_SIZE];
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                let mut count = 0;
+                {
+                    let view = segment.read();
+                    if !view.scan_batch(&mut cursor, &mut before_work, &mut |id| {
+                        ids[count] = id;
+                        count += 1;
+                    }) {
+                        return false;
+                    }
+                }
+                if !before_work() {
+                    return false;
+                }
+                // Hydration groups lookups by their current segment. Restore the
+                // cursor's order when an update moved a candidate between sources.
+                let mut batch = vec![None; count];
+                self.for_each_id(&ids[..count], |position, entity| {
+                    if kind.matches(&entity.kind) && Self::scan_entity_visible(snapshot, entity) {
+                        batch[position] = Some(entity.clone());
+                    }
+                });
+                if !before_work() || !consume(batch.into_iter().flatten().collect()) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Visit visible candidates in segments that may contain the requested kind.
     /// Non-graph items in those segments still reach the callback so work budgets
     /// charge every inspected visible candidate. RLS must run outside this callback.
@@ -3741,6 +3799,17 @@ mod tests {
                         .map(|item| item.id)
                         .collect();
                     assert_eq!(actual, expected);
+                    let mut batched = HashSet::new();
+                    assert!(manager.scan_graph_batches(
+                        view,
+                        kind,
+                        || true,
+                        |batch| {
+                            batched.extend(batch.into_iter().map(|item| item.id));
+                            true
+                        }
+                    ));
+                    assert_eq!(batched, expected);
                     let mut visited = 0;
                     let mut candidates = HashSet::new();
                     manager.scan_graph_candidates_for_each(
@@ -4280,6 +4349,60 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn graph_batches_bound_payloads_and_hydrate_current_entities_after_sealing() {
+        let manager = SegmentManager::new("graph");
+        let node =
+            |id| UnifiedEntity::graph_node(EntityId::new(id), "graph", "node", HashMap::new());
+        manager
+            .bulk_insert((1..=1024).map(node).collect())
+            .expect("nodes");
+        let mut hidden = node(1025);
+        hidden.set_xmax(5);
+        manager.insert(hidden).expect("hidden version");
+        manager
+            .insert(UnifiedEntity::vector(EntityId::new(1026), "graph", vec![]))
+            .expect("mixed kind");
+        let mut work = 0;
+        let mut delivered = 0;
+        assert!(!manager.scan_graph_batches(
+            None,
+            GraphEntityKind::Node,
+            || {
+                work += 1;
+                work < 100
+            },
+            |batch| {
+                delivered += batch.len();
+                true
+            }
+        ));
+        assert_eq!(delivered, 0, "cancelled partial batch must not escape");
+        let mut seen = Vec::new();
+        assert!(manager.scan_graph_batches(None, GraphEntityKind::Node, || true, |batch| {
+            assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+            assert!(manager.growing.try_write().is_some(), "no topology guard");
+            assert!(manager.sealed.try_write().is_some(), "no sealed guard");
+            if seen.is_empty() {
+                manager.force_seal().expect("seal during delivery");
+                manager.insert(node(2000)).expect("append beyond captured boundary");
+                let mut updated = node(900);
+                if let EntityKind::GraphNode(node) = &mut updated.kind {
+                    node.label = "updated".into();
+                }
+                manager.update(updated).expect("update unread candidate");
+            }
+            for entity in batch {
+                if entity.id.raw() == 900 {
+                    assert!(matches!(&entity.kind, EntityKind::GraphNode(node) if node.label == "updated"));
+                }
+                seen.push(entity.id.raw());
+            }
+            true
+        }));
+        assert_eq!(seen, (1..=1024).collect::<Vec<_>>());
     }
 
     #[test]

@@ -119,6 +119,40 @@ impl SplitBlockBloom {
         true
     }
 
+    /// Fold sparse halves together without rehashing keys. Reducing the mask
+    /// routes every old block to its index modulo the new block count, so OR
+    /// preserves all inserted bits. Stop before any merged word is over half
+    /// full, keeping compaction conservative for equality pruning.
+    pub(crate) fn compact(&mut self) {
+        let original_len = self.blocks.len();
+        while self.blocks.len() > 1 {
+            let half = self.blocks.len() / 2;
+            let can_fold =
+                self.blocks[..half]
+                    .iter()
+                    .zip(&self.blocks[half..])
+                    .all(|(left, right)| {
+                        left.words
+                            .iter()
+                            .zip(right.words)
+                            .all(|(left, right)| (left | right).count_ones() <= u32::BITS / 2)
+                    });
+            if !can_fold {
+                break;
+            }
+            for index in 0..half {
+                for word in 0..8 {
+                    self.blocks[index].words[word] |= self.blocks[index + half].words[word];
+                }
+            }
+            self.blocks.truncate(half);
+            self.mask = half - 1;
+        }
+        if self.blocks.len() != original_len {
+            self.blocks.shrink_to_fit();
+        }
+    }
+
     /// Number of blocks allocated (each block = 32 bytes).
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
@@ -291,6 +325,51 @@ mod tests {
         for i in 0u32..500 {
             assert!(restored.probe(i.wrapping_mul(2_654_435_761)));
         }
+    }
+
+    #[test]
+    fn compact_preserves_keys_and_serialized_routing() {
+        for distinct in [1u64, 4, 16, 64, 128, 200, 255, 256] {
+            let mut bloom = SplitBlockBloom::with_capacity(8192);
+            for value in 0u64..8192 {
+                bloom.insert(hash_bytes_u32(&(value % distinct).to_le_bytes()));
+            }
+            let original_size = bloom.byte_size();
+            bloom.compact();
+            assert!(bloom.byte_size() < original_size);
+            let restored = SplitBlockBloom::from_bytes(&bloom.to_bytes()).expect("compacted bloom");
+            for value in 0..distinct {
+                assert!(restored.probe(hash_bytes_u32(&value.to_le_bytes())));
+            }
+            let compacted = bloom.clone();
+            bloom.compact();
+            assert_eq!(bloom, compacted);
+        }
+    }
+
+    #[test]
+    fn compact_preserves_byte_key_routing_and_dense_filters() {
+        let mut sparse = SplitBlockBloom::with_capacity(8192);
+        for value in 0u64..16 {
+            sparse.insert_bytes(&value.to_le_bytes());
+        }
+        sparse.compact();
+        let restored =
+            SplitBlockBloom::from_bytes(&sparse.to_bytes()).expect("compacted byte bloom");
+        for value in 0u64..16 {
+            assert!(restored.probe_bytes(&value.to_le_bytes()));
+        }
+
+        let mut dense = SplitBlockBloom::with_capacity(128);
+        for value in 0u64..128 {
+            dense.insert(hash_bytes_u32(&value.to_le_bytes()));
+        }
+        let original = dense.clone();
+        dense.compact();
+        assert_eq!(
+            dense, original,
+            "dense filters should not pay for a rebuild"
+        );
     }
 
     #[test]

@@ -614,6 +614,7 @@ impl RedDBRuntime {
         // Registry restoration can checkpoint missing projections on any
         // collection. Register every internal projector before that epoch.
         super::control_event_index::prepare(&runtime)?;
+        super::queue_storage_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
         if runtime
             .db()

@@ -2864,6 +2864,7 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "x509-parser",
+ "zeroize",
  "zstd",
 ]
 
