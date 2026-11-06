@@ -1197,7 +1197,11 @@ impl StoreCommitCoordinator {
         self.release_completed_ownership_wal()
     }
 
-    pub(crate) fn replay_into(&self, store: &UnifiedStore) -> io::Result<()> {
+    pub(crate) fn replay_into(
+        &self,
+        store: &UnifiedStore,
+        boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
+    ) -> io::Result<()> {
         if !self.wal_path.exists() {
             return Ok(());
         }
@@ -1216,7 +1220,7 @@ impl StoreCommitCoordinator {
         let mut applied = false;
 
         for record in reader.iter() {
-            let (_lsn, record) = match record {
+            let (lsn, record) = match record {
                 Ok(record) => record,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
                     incomplete_wal_tail = true;
@@ -1233,7 +1237,10 @@ impl StoreCommitCoordinator {
                         .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
                 WalRecord::TxCommitBatch { actions, .. } => {
-                    for payload in actions {
+                    for (index, payload) in actions.into_iter().enumerate() {
+                        if boot_wal.is_some_and(|proof| proof.skips_action(lsn, index)) {
+                            continue;
+                        }
                         let action = StoreWalAction::decode(&payload)?;
                         applied = true;
                         store.apply_replayed_action(&action, false).map_err(|err| {

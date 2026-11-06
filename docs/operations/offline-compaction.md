@@ -87,10 +87,22 @@ For a store with divergent, populated `red_config` and `red.config` identities,
 an operator who has chosen the latter may explicitly add
 `--retain-canonical-system-config`. This retires the old identity only on the
 recovery copy. The operation refuses WAL actions addressed to `red_config`,
-because replay would otherwise redirect those actions to `red.config`. It also
-refuses cross-references to the old identity. Inspect the preserved source and
-its WAL separately if either condition occurs. The normal recovery command
-continues to reject the ambiguous catalog.
+except for committed upserts and deletes proved to affect only the process
+information recreated at boot (`red.system.pid`, CPU/memory observations,
+OS, architecture, hostname and start time). Delete identities must resolve
+in the old checkpoint or an earlier committed upsert. User-defined keys,
+unknown identities, references and unsupported action kinds are rejected.
+
+This exception requires a stable checkpoint image. Pending double-write pages
+are recovered on the isolated copy before inspecting configuration identities;
+engine WAL, interrupted checkpoints and full-page undo images are refused for
+this exception.
+The original WAL is copied unchanged; replay retires only the proved actions
+at their original positions. Other actions in the same transaction and page
+ownership records retain their order and behavior. Consumed identity counters
+are preserved. The JSON report exposes `retired_boot_system_wal_actions`;
+canonical process values remain unchanged until runtime boot reseeds them.
+The normal recovery command continues to reject the ambiguous catalog.
 
 The source read lock excludes normal writers; the original file and sidecars
 remain unchanged. The operation strictly reads the WAL and validates any
