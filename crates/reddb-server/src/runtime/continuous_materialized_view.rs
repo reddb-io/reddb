@@ -100,20 +100,27 @@ impl MaterializedViewDescriptor {
 /// rows that are missing the required `name` / `source_sql` columns
 /// — boot-time rehydrate logs and continues so a single malformed
 /// entry does not block startup.
-pub(crate) fn decode_row(entity: &UnifiedEntity) -> Option<MaterializedViewDescriptor> {
+#[cfg(test)]
+fn decode_row(entity: &UnifiedEntity) -> Option<MaterializedViewDescriptor> {
+    decode_row_with_schema(entity, None)
+}
+
+fn decode_row_with_schema(
+    entity: &UnifiedEntity,
+    schema: Option<&Vec<String>>,
+) -> Option<MaterializedViewDescriptor> {
     let EntityData::Row(row) = &entity.data else {
         return None;
     };
-    let named = row.named.as_ref()?;
-    let name = match named.get("name")? {
+    let name = match field(row, schema, "name")? {
         Value::Text(s) => s.to_string(),
         _ => return None,
     };
-    let source_sql = match named.get("source_sql")? {
+    let source_sql = match field(row, schema, "source_sql")? {
         Value::Text(s) => s.to_string(),
         _ => return None,
     };
-    let source_collections = match named.get("source_collections") {
+    let source_collections = match field(row, schema, "source_collections") {
         Some(Value::Array(values)) => values
             .iter()
             .filter_map(|v| match v {
@@ -123,12 +130,12 @@ pub(crate) fn decode_row(entity: &UnifiedEntity) -> Option<MaterializedViewDescr
             .collect(),
         _ => Vec::new(),
     };
-    let refresh_every_ms = match named.get("refresh_every_ms") {
+    let refresh_every_ms = match field(row, schema, "refresh_every_ms") {
         Some(Value::UnsignedInteger(ms)) => Some(*ms),
         Some(Value::Integer(ms)) if *ms >= 0 => Some(*ms as u64),
         _ => None,
     };
-    let retention_duration_ms = match named.get("retention_duration_ms") {
+    let retention_duration_ms = match field(row, schema, "retention_duration_ms") {
         Some(Value::UnsignedInteger(ms)) => Some(*ms),
         Some(Value::Integer(ms)) if *ms >= 0 => Some(*ms as u64),
         _ => None,
@@ -176,17 +183,22 @@ pub(crate) fn remove_by_name(
         return Ok(());
     };
     let mut to_delete: Vec<EntityId> = Vec::new();
-    for entity in manager.query_all(|_| true) {
-        let EntityData::Row(row) = &entity.data else {
-            continue;
-        };
-        let Some(named) = &row.named else { continue };
-        if let Some(Value::Text(stored)) = named.get("name") {
-            if stored.as_ref() == name {
-                to_delete.push(entity.id);
+    let schema = manager.column_schema();
+    manager
+        .try_for_each_entity(usize::MAX, |entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            if let Some(Value::Text(stored)) = field(row, schema.as_deref(), "name") {
+                if stored.as_ref() == name {
+                    to_delete.push(entity.id);
+                }
             }
-        }
-    }
+            true
+        })
+        .map_err(|err| {
+            RedDBError::Internal(format!("scan materialized-view descriptors: {err}"))
+        })?;
     for id in to_delete {
         store.delete(CATALOG_COLLECTION, id).map_err(|err| {
             RedDBError::Internal(format!(
@@ -201,15 +213,32 @@ pub(crate) fn remove_by_name(
 /// catalog collection doesn't exist (fresh datadir / first boot).
 pub(crate) fn load_all(
     store: &crate::storage::unified::UnifiedStore,
-) -> Vec<MaterializedViewDescriptor> {
+) -> RedDBResult<Vec<MaterializedViewDescriptor>> {
     let Some(manager) = store.get_collection(CATALOG_COLLECTION) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    let schema = manager.column_schema();
+    let mut descriptors = Vec::new();
     manager
-        .query_all(|_| true)
-        .iter()
-        .filter_map(decode_row)
-        .collect()
+        .try_for_each_entity(usize::MAX, |entity| {
+            if let Some(descriptor) = decode_row_with_schema(entity, schema.as_deref()) {
+                descriptors.push(descriptor);
+            }
+            true
+        })
+        .map_err(|err| {
+            RedDBError::Internal(format!("load materialized-view descriptors: {err}"))
+        })?;
+    Ok(descriptors)
+}
+
+fn field<'a>(row: &'a RowData, schema: Option<&Vec<String>>, name: &str) -> Option<&'a Value> {
+    if row.named.is_some() || row.schema.is_some() {
+        return row.get_field(name);
+    }
+    schema
+        .and_then(|columns| columns.iter().position(|column| column == name))
+        .and_then(|index| row.columns.get(index))
 }
 
 #[cfg(test)]
