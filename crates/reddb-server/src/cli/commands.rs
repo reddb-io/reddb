@@ -138,6 +138,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       ],
     },
     CommandDef {
+      name: "scrub-paged-trees",
+      summary: "Check tree structure in a closed checkpointed paged database",
+      usage: "red scrub-paged-trees --source data.rdb [--json]",
+      flags: vec![FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged")],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -1008,6 +1014,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("migrate-from-redis".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("scrub-paged-trees".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),

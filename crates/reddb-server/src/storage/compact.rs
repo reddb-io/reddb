@@ -17,8 +17,10 @@ use std::{
 };
 mod assets;
 mod catalog;
+mod scrub;
 mod source;
 use catalog::Catalog;
+pub use scrub::{scrub_paged_trees, PagedTreeFinding, PagedTreeScrubReport};
 use source::Source;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

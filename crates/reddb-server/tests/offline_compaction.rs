@@ -1,4 +1,4 @@
-use reddb_server::storage::compact::compact_paged;
+use reddb_server::storage::compact::{compact_paged, scrub_paged_trees};
 use reddb_server::storage::engine::{BTree, Page, PageType, Pager, PagerConfig, HEADER_SIZE};
 use std::sync::Arc;
 
@@ -85,12 +85,121 @@ fn compact_rewrites_live_records_and_preserves_source() {
 }
 
 #[test]
+fn scrub_paged_trees_reports_corruption_without_changing_source() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    {
+        let pager = Arc::new(Pager::open_default(&source).expect("open source"));
+        let catalog = pager.read_page(1).expect("catalog");
+        let mut offset = reddb_file::METADATA_HEADER_BYTES;
+        let first = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+            .expect("first root");
+        let second = BTree::new(Arc::clone(&pager));
+        for id in 0u64..3 {
+            second
+                .insert(&id.to_be_bytes(), b"healthy")
+                .expect("insert");
+        }
+        let mut metadata = Vec::new();
+        reddb_file::encode_native_paged_metadata_header(
+            &mut metadata,
+            reddb_file::NativePagedMetadataHeader {
+                format_version: 11,
+                collection_count: 2,
+            },
+        );
+        reddb_file::encode_native_paged_collection_root(&mut metadata, "rows", first.root_page);
+        reddb_file::encode_native_paged_collection_root(
+            &mut metadata,
+            "healthy",
+            second.root_page_id(),
+        );
+        metadata.extend_from_slice(&0u32.to_le_bytes());
+        let mut catalog = Page::new(PageType::Header, 1);
+        catalog.content_mut()[..metadata.len()].copy_from_slice(&metadata);
+        pager.write_page(1, catalog).expect("catalog");
+        pager.sync().expect("checkpoint");
+    }
+    let before = std::fs::read(&source).expect("source image");
+    let report = scrub_paged_trees(&source).expect("scrub healthy trees");
+    assert_eq!(report.trees_verified, 2);
+    assert_eq!(report.records_verified, 1003);
+    assert!(report.findings.is_empty());
+    assert_eq!(std::fs::read(&source).expect("preserved image"), before);
+
+    let pager = Pager::open_default(&source).expect("open source");
+    let catalog = pager.read_page(1).expect("catalog");
+    let mut offset = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
+        .expect("root")
+        .root_page;
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(root) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0x80;
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let damaged = std::fs::read(&source).expect("damaged image");
+    let report = scrub_paged_trees(&source).expect("report corruption");
+    assert_eq!(report.trees_verified, 1);
+    assert_eq!(report.records_verified, 3);
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].collection, "rows");
+    assert_eq!(report.findings[0].root_page, root);
+    assert_eq!(std::fs::read(&source).expect("preserved damage"), damaged);
+}
+
+#[test]
+fn destroyed_paged_superblocks_do_not_trigger_embedded_carving() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let destination = directory.path().join("recovered.rdb");
+    fixture(&source);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .expect("open source for fault injection");
+    file.write_all(&vec![0; reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE])
+        .expect("destroy both superblocks");
+    file.seek(SeekFrom::End(0)).expect("end");
+    let mut embedded_value =
+        reddb_file::encode_native_store_header(reddb_file::STORE_VERSION_CURRENT);
+    embedded_value.extend_from_slice(&[0; 16]);
+    reddb_file::append_native_store_crc32_footer(&mut embedded_value);
+    file.write_all(&embedded_value)
+        .expect("embedded-looking bytes");
+    file.sync_all().expect("sync fault injection");
+    drop(file);
+    let damaged = std::fs::read(&source).expect("damaged image");
+    let error = reddb_file::salvage_embedded_store(&source, &destination)
+        .expect_err("paged source must not be carved as embedded");
+    assert!(error.to_string().contains("paged"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).expect("preserved source"), damaged);
+}
+
+#[test]
 fn compact_refuses_busy_source_and_existing_destination() {
     let directory = tempfile::tempdir().expect("directory");
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let destination = directory.path().join("compacted");
     let pager = Pager::open_default(&source).expect("writer");
+    assert!(scrub_paged_trees(&source).is_err());
     assert!(compact_paged(&source, &destination).is_err());
     assert!(!destination.exists());
     drop(pager);
@@ -180,6 +289,10 @@ fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     let mut pending = reddb_file::encode_wal_file_header().to_vec();
     pending.extend_from_slice(b"uncheckpointed");
     std::fs::write(&wal, pending).expect("pending WAL");
+    assert!(scrub_paged_trees(&source)
+        .expect_err("pending WAL")
+        .to_string()
+        .contains("WAL"));
     let destination = directory.path().join("compacted");
     assert!(compact_paged(&source, &destination)
         .expect_err("pending WAL")
@@ -194,6 +307,7 @@ fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     file.seek(SeekFrom::Start(16384 + 100)).expect("seek");
     file.write_all(&[0xFF]).expect("corrupt catalog");
     drop(file);
+    assert!(scrub_paged_trees(&source).is_err());
     assert!(compact_paged(&source, &destination).is_err());
     assert!(!destination.join("source.rdb").exists());
 }
@@ -231,6 +345,9 @@ fn compact_real_runtime_preserves_resume_indexes_and_subsequent_writes() {
             .graceful_shutdown(false)
             .expect("shutdown before compaction");
     }
+    let report = scrub_paged_trees(&source).expect("scrub real runtime trees");
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.trees_verified >= 2, "collection and secondary index");
     let destination = directory.path().join("compacted");
     compact_paged(&source, &destination).expect("compact actual runtime");
     let options = RedDBOptions::persistent(destination.join("source.rdb"))

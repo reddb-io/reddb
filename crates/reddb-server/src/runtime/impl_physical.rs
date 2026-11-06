@@ -364,7 +364,7 @@ impl RedDBRuntime {
     pub fn apply_retention_policy(&self) -> RedDBResult<()> {
         self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
         let now_ms = current_unix_ms_u64();
-        self.retire_expired_append_only_segments(now_ms)?;
+        self.retire_expired_append_only_segments(now_ms, usize::MAX)?;
         let expired = self
             .inner
             .db
@@ -394,7 +394,14 @@ impl RedDBRuntime {
         Ok(())
     }
 
-    pub(crate) fn retire_expired_append_only_segments(&self, now_ms: u64) -> RedDBResult<u64> {
+    pub(crate) fn retire_expired_append_only_segments(
+        &self,
+        now_ms: u64,
+        max_segments: usize,
+    ) -> RedDBResult<u64> {
+        if max_segments == 0 {
+            return Ok(0);
+        }
         let Some(path) = self.inner.db.path() else {
             return Ok(0);
         };
@@ -423,6 +430,7 @@ impl RedDBRuntime {
                 .iter()
                 .filter(|segment| segment.collection == contract.name)
                 .filter(|segment| segment.retention_max_ms.is_some_and(|max| max < cutoff))
+                .take(max_segments.saturating_sub(total_retired as usize))
             {
                 manifest
                     .begin_retire_append_only_segment(&segment.collection, segment.segment_id)
@@ -440,6 +448,9 @@ impl RedDBRuntime {
                     .write()
                     .record_segments_retired(&contract.name, retired_for_collection, now_ms);
                 total_retired = total_retired.saturating_add(retired_for_collection);
+            }
+            if total_retired >= max_segments as u64 {
+                break;
             }
         }
         Ok(total_retired)
