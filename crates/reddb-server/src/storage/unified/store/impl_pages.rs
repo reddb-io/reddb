@@ -4098,12 +4098,25 @@ mod checkpoint_work_tests {
                 )
                 .unwrap();
                 assert!(store.get_collection("durable_rows").is_some());
+                let imported = store
+                    .get_collection("red.index.registry")
+                    .unwrap()
+                    .query_all(|entity| {
+                        entity.data.as_row().and_then(|r| r.get_field("name"))
+                            == Some(&Value::text("legacy_only"))
+                    });
+                assert_eq!(imported.len(), 1, "legacy-only index must survive");
                 assert!(
-                    store
-                        .get("red.index.registry", EntityId::new(10001))
-                        .is_some(),
-                    "legacy-only index must survive"
+                    imported[0].id.raw() > 10003,
+                    "all retired identities must be reserved first"
                 );
+                assert!(
+                    matches!(imported[0].kind, EntityKind::TableRow{row_id,..} if row_id>10001)
+                );
+                assert_eq!(imported[0].logical_id(), imported[0].id);
+                assert!(store
+                    .get("red.index.registry", EntityId::new(10001))
+                    .is_none());
                 assert!(store
                     .get("red.index.registry", EntityId::new(101))
                     .is_some());

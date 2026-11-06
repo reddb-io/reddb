@@ -260,6 +260,8 @@ impl CanonicalCatalogPlan {
     }
 
     pub(super) fn restore(&self, store: &UnifiedStore) -> Result<()> {
+        // Reserve every retired identity before importing any definition.
+        // An old row_id may already belong to another canonical descriptor.
         for alias in &self.aliases {
             let manager = store
                 .get_collection(alias.canonical)
@@ -267,15 +269,19 @@ impl CanonicalCatalogPlan {
             manager.restore_identity_counters(alias.entity_next, alias.row_next);
             manager.restore_sequence_id_next(alias.sequence_next);
             store.register_entity_id(EntityId::new(alias.entity_next.saturating_sub(1)));
-            for entity in &alias.missing {
-                ensure(
-                    store
-                        .try_get(alias.canonical, entity.id, READ_BUDGET)?
-                        .is_none(),
-                    "recovered metadata identity collides",
-                )?;
-                let mut entity = entity.clone();
-                entity.canonicalize_system_collection_names();
+        }
+        for alias in &self.aliases {
+            for previous in &alias.missing {
+                let mut entity = UnifiedEntity::new(
+                    EntityId::new(0),
+                    EntityKind::TableRow {
+                        table: Arc::from(alias.canonical),
+                        row_id: 0,
+                    },
+                    previous.data.clone(),
+                );
+                entity.created_at = previous.created_at;
+                entity.updated_at = previous.updated_at;
                 store.insert_auto(alias.canonical, entity)?;
             }
         }
