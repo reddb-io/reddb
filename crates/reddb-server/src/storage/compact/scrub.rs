@@ -44,8 +44,8 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
     }
     let mut assets = super::assets::Assets::for_verification(&source);
     assets.vault()?;
-    assets.physical()?;
-    assets.metadata(path, None)?;
+    let mut physical = assets.physical()?;
+    assets.metadata(path, None, &mut physical, None)?;
     Ok(PagedScrubReport {
         trees,
         assets_verified: true,
@@ -63,8 +63,8 @@ pub(super) fn verify_recovery_vector_pages(path: &Path) -> Result<()> {
     )?;
     let mut assets = super::assets::Assets::for_verification(&source);
     assets.vault()?;
-    assets.physical()?;
-    assets.metadata(path, None)?;
+    let mut physical = assets.physical()?;
+    assets.metadata(path, None, &mut physical, None)?;
     source.verify_unclaimed_vector_pages()
 }
 

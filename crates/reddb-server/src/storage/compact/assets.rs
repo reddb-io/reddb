@@ -1,5 +1,7 @@
 use super::*;
 use crate::serde_json;
+#[path = "assets_native_document.rs"]
+mod native_document;
 
 #[derive(Clone, Copy)]
 pub(super) struct Blob {
@@ -244,13 +246,22 @@ impl<'a> Assets<'a> {
         }
         Ok(header)
     }
-    pub fn metadata(&mut self, source: &Path, destination: Option<&Path>) -> Result<()> {
+    pub fn metadata(
+        &mut self,
+        source: &Path,
+        destination: Option<&Path>,
+        physical: &mut f::PhysicalFileHeader,
+        roots: Option<&BTreeMap<String, u64>>,
+    ) -> Result<()> {
+        let native = self.native_document()?;
         let binary = f::physical_metadata_binary_path(source);
         let json = f::physical_metadata_json_path(source);
-        let path = if binary.exists() {
-            binary
+        let path = if native.is_some() {
+            None
+        } else if binary.exists() {
+            Some(binary)
         } else if json.exists() {
-            json
+            Some(json)
         } else {
             ensure(
                 self.source.header.physical.index_count == 0
@@ -259,15 +270,22 @@ impl<'a> Assets<'a> {
             )?;
             return Ok(());
         };
-        ensure(
-            std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
-            "physical metadata exceeds compaction budget",
-        )?;
-        let text = f::physical_metadata::read_physical_metadata_document(&path)?;
+        let text = if let Some(text) = native {
+            text
+        } else {
+            let path = path.ok_or("metadata source missing")?;
+            ensure(
+                std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
+                "physical metadata exceeds compaction budget",
+            )?;
+            f::physical_metadata::read_physical_metadata_document(&path)?
+        };
         let mut document: serde_json::Value = serde_json::from_str(&text)?;
         // Validate the complete native contract, then edit only physical addresses
         // in the JSON value so unrelated and forward-compatible fields survive.
         let envelope = f::decode_physical_metadata_document_root_json(&text)?;
+        let runtime_value = crate::json::from_str(&text)?;
+        crate::physical::PhysicalMetadataFile::from_json_value(&runtime_value)?;
         for hypertable in envelope.hypertables_json {
             let hypertable = f::decode_persisted_physical_hypertable_json(&hypertable)?;
             ensure(
@@ -300,6 +318,17 @@ impl<'a> Assets<'a> {
         let Some(destination) = destination else {
             return Ok(());
         };
+        if let Some(roots) = roots {
+            document["superblock"]["collection_roots"] = serde_json::Value::Object(
+                roots
+                    .iter()
+                    .map(|(name, root)| (name.clone(), serde_json::Value::Integer(*root as i64)))
+                    .collect(),
+            );
+        }
+        if self.source.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION {
+            return self.publish_native_document(physical, &serde_json::to_string(&document)?);
+        }
         let encoded =
             f::encode_physical_metadata_binary_document(&serde_json::to_string(&document)?)?;
         let output = f::physical_metadata_binary_path(destination);

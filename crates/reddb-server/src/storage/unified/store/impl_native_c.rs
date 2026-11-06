@@ -1,6 +1,125 @@
 use super::*;
 
 impl UnifiedStore {
+    pub(crate) fn read_physical_metadata_document(&self) -> Result<Option<String>, StoreError> {
+        use reddb_file::native_store::{
+            decode_native_metadata_document_ref, NATIVE_METADATA_DOCUMENT_MAX_BYTES,
+        };
+        let Some(header) = self.physical_file_header() else {
+            return Ok(None);
+        };
+        if header.metadata_state_page == 0 {
+            return Ok(None);
+        }
+        let content =
+            self.read_native_meta_page(header.metadata_state_page, "physical metadata")?;
+        let reference = decode_native_metadata_document_ref(&content)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let Some(reference) = reference else {
+            return Ok(None);
+        };
+        let pager = self.pager.as_ref().ok_or_else(|| {
+            StoreError::Serialization("physical metadata requires a pager".into())
+        })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut next = reference.root_page;
+        let mut bytes = Vec::new();
+        while next != 0 {
+            if !seen.insert(next) || bytes.len() as u64 >= reference.byte_len {
+                return Err(StoreError::Serialization(
+                    "physical metadata blob cycle or excess length".into(),
+                ));
+            }
+            let page = pager
+                .read_page(next)
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            if page
+                .page_type()
+                .map_err(|e| StoreError::Serialization(e.to_string()))?
+                != crate::storage::engine::PageType::NativeMeta
+            {
+                return Err(StoreError::Serialization(
+                    "physical metadata blob has invalid page type".into(),
+                ));
+            }
+            let (following, chunk) = reddb_file::decode_native_blob_page(page.content())
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            if chunk.is_empty()
+                || bytes.len() as u64 + chunk.len() as u64 > reference.byte_len
+                || reference.byte_len > NATIVE_METADATA_DOCUMENT_MAX_BYTES
+            {
+                return Err(StoreError::Serialization(
+                    "physical metadata blob exceeds declared length".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+            next = following;
+        }
+        if bytes.len() as u64 != reference.byte_len
+            || crate::storage::engine::crc32(&bytes) as u64 != reference.checksum
+        {
+            return Err(StoreError::Serialization(
+                "physical metadata blob length or checksum mismatch".into(),
+            ));
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| StoreError::Serialization(e.to_string()))
+    }
+
+    pub(crate) fn write_physical_metadata_document(
+        &self,
+        summary: &NativeMetadataStateSummary,
+        document: &str,
+        existing_page: Option<u32>,
+    ) -> Result<(u32, u64), StoreError> {
+        use reddb_file::native_store::{
+            decode_native_metadata_document_ref, encode_native_metadata_document_page,
+            NativeMetadataDocumentRef, NATIVE_METADATA_DOCUMENT_MAX_BYTES,
+        };
+        if document.is_empty() || document.len() as u64 > NATIVE_METADATA_DOCUMENT_MAX_BYTES {
+            return Err(StoreError::Serialization(
+                "physical metadata document exceeds bounded size".into(),
+            ));
+        }
+        let pager = self.pager.as_ref().ok_or_else(|| {
+            StoreError::Serialization("physical metadata requires a pager".into())
+        })?;
+        let _publication = self.vault_publication_lock.lock();
+        let existing = existing_page
+            .map(|page| {
+                let content = self.read_native_meta_page(page, "physical metadata")?;
+                decode_native_metadata_document_ref(&content)
+                    .map_err(|e| StoreError::Serialization(e.to_string()))
+            })
+            .transpose()?
+            .flatten();
+        if pager
+            .header()
+            .map_err(|e| StoreError::Serialization(e.to_string()))?
+            .version
+            < reddb_file::file_format::PAGE_NATIVE_METADATA_FILE_VERSION
+        {
+            pager
+                .fence_file_format_version(
+                    reddb_file::file_format::PAGE_NATIVE_METADATA_FILE_VERSION,
+                )
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        }
+        let (root_page, _, checksum) =
+            self.write_native_blob_chain(document.as_bytes(), existing.map(|r| r.root_page))?;
+        let data = encode_native_metadata_document_page(
+            summary,
+            NativeMetadataDocumentRef {
+                root_page,
+                byte_len: document.len() as u64,
+                checksum,
+            },
+        )
+        .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        self.write_native_meta_page(existing_page, &data)
+    }
+
     pub fn read_native_physical_state(&self) -> Result<NativePhysicalState, StoreError> {
         let header = self.physical_file_header().ok_or_else(|| {
             StoreError::Serialization("native physical header is not available".to_string())

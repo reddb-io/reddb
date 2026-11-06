@@ -19,6 +19,7 @@ mod assets;
 pub(crate) mod boot_system_wal;
 mod catalog;
 pub(crate) mod catalog_aliases;
+mod catalog_metadata;
 mod salvage;
 mod scrub;
 mod source;
@@ -271,6 +272,13 @@ fn recover_paged_wal_inner(
         )?;
         boot_wal.preserve_identity_floors(&store)?;
         catalog_plan.restore(&store)?;
+        if retain_canonical_system_config
+            && guard.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        {
+            let mut aliases = catalog_plan.retired_aliases();
+            aliases.push(("red_config", "red.config"));
+            catalog_metadata::persist_reconciled_metadata(&store, &staged_source, &aliases)?;
+        }
         if pending_engine || guard.pending_double_write {
             store.reconcile_physical_recovery()?;
         }
@@ -390,7 +398,10 @@ fn recover_paged_wal_inner(
     copy_sidecars(&validated_dir.join(name), &final_path, false)?;
     copy_physical_metadata_files(&validated_dir.join(name), &final_path)?;
     write_new(
-        &destination.join("compaction.json"),
+        &compaction_report_path(
+            destination,
+            guard.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION,
+        )?,
         report.machine_json().as_bytes(),
     )?;
     sync_directory(destination)?;
@@ -674,6 +685,18 @@ fn replay_engine_wal_on_copy(pager: &Pager, path: &Path) -> Result<u64> {
     Ok(highest_tx)
 }
 
+fn compaction_report_path(destination: &Path, native: bool) -> Result<PathBuf> {
+    if !native {
+        return Ok(destination.join("compaction.json"));
+    }
+    let mut name = destination
+        .file_name()
+        .ok_or("compaction directory needs a name")?
+        .to_os_string();
+    name.push(".compaction.json");
+    Ok(destination.with_file_name(name))
+}
+
 fn copy_physical_metadata_files(source: &Path, destination: &Path) -> Result<()> {
     for (old, new) in [
         (
@@ -857,8 +880,27 @@ fn compact_paged_inner(
     }
     let mut assets = assets::Assets::new(&source, &target);
     assets.vault()?;
-    let physical = assets.physical()?;
-    assets.metadata(&source_path, Some(&output))?;
+    let mut physical = assets.physical()?;
+    let collection_roots = catalog
+        .roots
+        .iter()
+        .map(|entry| {
+            (if entry.root_page == 0 {
+                Some(0)
+            } else {
+                roots.get(&entry.root_page).copied()
+            })
+            .map(|root| (entry.collection.clone(), u64::from(root)))
+            .ok_or("missing relocated collection root")
+        })
+        .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+    assets.metadata(
+        &source_path,
+        Some(&output),
+        &mut physical,
+        Some(&collection_roots),
+    )?;
+    assets.publish_collection_roots(&mut physical, &collection_roots)?;
     if salvage.is_some() || lost_collections.is_some() {
         if let Some(salvage) = salvage {
             for index in &salvage.indexes {
@@ -916,7 +958,18 @@ fn compact_paged_inner(
     }
     catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
     target.update_physical_header(physical)?;
-    target.fence_file_format_version(source.header.version)?;
+    let output_version = if source.header.version
+        >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        && physical.metadata_state_page != 0
+    {
+        source
+            .header
+            .version
+            .max(f::file_format::PAGE_NATIVE_METADATA_FILE_VERSION)
+    } else {
+        source.header.version
+    };
+    target.fence_file_format_version(output_version)?;
     target.sync()?;
     // Preserve source schema/LSN, but retain the newly allocated page boundary.
     for _ in 0..2 {
@@ -938,7 +991,11 @@ fn compact_paged_inner(
             target.commit_superblock(|slot| {
                 f::set_database_header_version(
                     slot,
-                    f::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION,
+                    if output_version >= f::file_format::PAGE_NATIVE_METADATA_FILE_VERSION {
+                        f::file_format::PAGE_NATIVE_METADATA_RECOVERY_READ_ONLY_FILE_VERSION
+                    } else {
+                        f::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
+                    },
                 )
                 .map_err(|error| {
                     reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
@@ -1000,7 +1057,10 @@ fn compact_paged_inner(
         }
     }
     write_new(
-        &destination.join("compaction.json"),
+        &compaction_report_path(
+            destination,
+            source.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION,
+        )?,
         report.machine_json().as_bytes(),
     )?;
     if let Some(salvage) = salvage {
@@ -1244,8 +1304,21 @@ fn copy_sidecars(source: &Path, destination: &Path, recovery: bool) -> Result<()
     let old = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     let new = destination.with_file_name(format!("{}.ops", f::data_file_name(destination)));
     if old.exists() {
-        f::OperationalManifest::for_db_path(source).verify_owned_for_copy()?;
-        copy_directory(&old, &new, 0)?;
+        let manifest = f::OperationalManifest::for_db_path(source);
+        manifest.verify_owned_for_copy()?;
+        let mut bytes = [0; PAGE_SIZE];
+        File::open(source)?.read_exact(&mut bytes)?;
+        let selected = f::select_paged_superblock(&bytes).ok_or("source superblock missing")?;
+        let offset = selected.copy_index * f::PAGED_SUPERBLOCK_SLOT_SIZE;
+        let header =
+            f::decode_database_header(&bytes[offset..offset + f::PAGED_SUPERBLOCK_SLOT_SIZE])?;
+        if !recovery && header.version >= f::file_format::PAGE_NATIVE_METADATA_FILE_VERSION {
+            // Only empty collection markers can be retired. Pending DDL,
+            // append-only segments and external forks remain explicit errors.
+            manifest.verify_marker_only_for_recovery()?;
+        } else {
+            copy_directory(&old, &new, 0)?;
+        }
     }
     Ok(())
 }

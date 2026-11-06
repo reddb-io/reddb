@@ -1337,7 +1337,8 @@ impl RedDB {
                 native_bootstrap_ready: native_state
                     .as_ref()
                     .map(Self::native_state_is_bootstrap_complete)
-                    .unwrap_or(false),
+                    .unwrap_or(false)
+                    || self.native_document_is_complete(),
                 native_registry_complete: native_state
                     .as_ref()
                     .and_then(|state| state.registry.as_ref())
@@ -1382,7 +1383,8 @@ impl RedDB {
             native_bootstrap_ready: native_state
                 .as_ref()
                 .map(Self::native_state_is_bootstrap_complete)
-                .unwrap_or(false),
+                .unwrap_or(false)
+                || self.native_document_is_complete(),
             native_registry_complete: native_state
                 .as_ref()
                 .and_then(|state| state.registry.as_ref())
@@ -1661,7 +1663,8 @@ impl RedDB {
         let native_bootstrap_ready = self
             .native_physical_state()
             .as_ref()
-            .is_some_and(Self::native_state_is_bootstrap_complete);
+            .is_some_and(Self::native_state_is_bootstrap_complete)
+            || self.native_document_is_complete();
         let query_allowed = native_bootstrap_ready && matches!(report.state, HealthState::Healthy);
         let write_allowed = !self.options.read_only
             && native_bootstrap_ready

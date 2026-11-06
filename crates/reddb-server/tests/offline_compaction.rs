@@ -1292,13 +1292,19 @@ fn recover_pending_runtime_wal_preserves_sql_and_index_results() {
     let before = std::fs::read(&source).unwrap();
     let wal_before = std::fs::read(&wal).unwrap();
     let metadata = reddb_file::physical_metadata_binary_path(&source);
-    let metadata_before = std::fs::read(&metadata).unwrap();
+    assert!(
+        !metadata.exists(),
+        "bounded runtime metadata must stay in the database"
+    );
     assert!(wal_before.len() > reddb_file::WAL_FILE_HEADER_BYTES);
     let output = directory.path().join("runtime-recovered");
     recover_paged_wal(&source, &output).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
-    assert_eq!(std::fs::read(&metadata).unwrap(), metadata_before);
+    assert!(
+        !metadata.exists(),
+        "recovery must not create a metadata sidecar"
+    );
     let options = RedDBOptions::persistent(output.join("runtime.rdb"))
         .with_memory_budget(64 * 1024 * 1024)
         .with_bounded_disk_residency(true);
@@ -2940,7 +2946,15 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     assert!(!scrub.assets_verified);
     assert_eq!(scrub.trees.findings.len(), 1);
     assert_eq!(std::fs::read(&source).unwrap(), damaged);
-    let nested = source.with_file_name("source.rdb.ops").join("recovered");
+    let operational = source.with_file_name("source.rdb.ops");
+    assert!(
+        !operational.exists(),
+        "bounded store has no external collection markers"
+    );
+    reddb_file::OperationalManifest::for_db_path(&source)
+        .recover_or_bootstrap(&["records".to_string()])
+        .unwrap();
+    let nested = operational.join("recovered");
     let error = salvage_paged_indexes(&source, &nested).expect_err("destination inside source");
     assert!(
         error.to_string().contains("destination is inside source"),
@@ -3339,7 +3353,10 @@ fn compact_repeat_has_stable_size() {
             report.source_allocated_bytes,
             compacted.destination_allocated_bytes,
         ) {
-            assert!(allocated < original, "compaction must reclaim abandoned pages");
+            assert!(
+                allocated < original,
+                "compaction must reclaim abandoned pages"
+            );
         }
     }
     eprintln!("compaction size evidence: {}", report.machine_json());

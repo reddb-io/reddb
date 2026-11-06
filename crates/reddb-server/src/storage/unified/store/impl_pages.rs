@@ -1371,7 +1371,23 @@ impl UnifiedStore {
         Ok(())
     }
 
+    fn native_operational_catalog(&self) -> bool {
+        // Native disk-resident DDL already commits collection identity with
+        // its rows through the ownership WAL and the paged catalog. Existing
+        // operational directories remain migration inputs; never discard them
+        // on open or bypass their pending-operation recovery.
+        self.config.resident_memory_bytes_max.is_some()
+            && self.db_path.as_ref().is_some_and(|path| {
+                !path
+                    .with_file_name(format!("{}.ops", reddb_file::data_file_name(path)))
+                    .exists()
+            })
+    }
+
     pub(crate) fn recover_operational_manifest(&self) -> Result<(), StoreError> {
+        if self.native_operational_catalog() {
+            return Ok(());
+        }
         let Some(path) = &self.db_path else {
             return Ok(());
         };
@@ -1393,6 +1409,9 @@ impl UnifiedStore {
         &self,
         collisions: &[SystemCollectionCollision],
     ) -> Result<(), StoreError> {
+        if self.native_operational_catalog() {
+            return Ok(());
+        }
         let Some(path) = &self.db_path else {
             return Ok(());
         };
@@ -1419,6 +1438,9 @@ impl UnifiedStore {
         &self,
         name: &str,
     ) -> Result<Option<reddb_file::PreparedCollectionCreate<reddb_file::StdVfs>>, StoreError> {
+        if self.native_operational_catalog() {
+            return Ok(None);
+        }
         let Some(path) = &self.db_path else {
             return Ok(None);
         };
@@ -1432,6 +1454,9 @@ impl UnifiedStore {
         &self,
         name: &str,
     ) -> Result<Option<reddb_file::PreparedCollectionDrop<reddb_file::StdVfs>>, StoreError> {
+        if self.native_operational_catalog() {
+            return Ok(None);
+        }
         let Some(path) = &self.db_path else {
             return Ok(None);
         };

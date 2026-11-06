@@ -171,3 +171,34 @@ checkpointing; paced incremental maintenance remains the architectural target.
 - Migration must distinguish legacy sidecar-backed stores from zoned `.rdb`
   stores; per the house no-backcompat posture, a major zoned bump reads the
   old form only through the explicit offline migration tool, never silently.
+
+### Native paged server metadata amendment (2026-11-06)
+
+The operator contract for the bounded disk-resident server used in STG is one
+`.rdb` plus its WAL. Complete physical metadata belongs in native blob pages,
+owned by a reference in the metadata-state page. The small native registry and
+catalog summaries remain diagnostics; their 32-entry samples are not sufficient
+to recover large catalogs or collection definitions. The document reference
+carries a bounded length and checksum and is covered by paged publication and
+recovery. Updating it reuses its pages and retires a shortened tail through the
+existing ownership publication fence.
+
+Both superblocks must reject old writers before the new ownership is published.
+Paged file version 1.0.7 provides this fence. Compatibility import is confined to
+preserved old inputs; a rewritten bounded store carries its complete metadata in
+its `.rdb`. Canonical recovery must apply its proven collection retirements to
+physical metadata too, and the offline scrub must use the runtime metadata
+schema decoder. An outer JSON envelope and valid trees alone are insufficient.
+
+For bounded stores without an existing operational directory, native DDL WAL and
+catalog publication own collection creation and deletion. Offline migration may
+retire only verified empty, active operational markers. Pending operations,
+nonempty collection artifacts, append-only segments and external fork owners
+require their own recovery proof. The original directory and WAL remain intact.
+A rollback restores the preserved original generation; it cannot run an older
+writer against a file upgraded to this layout.
+
+The regression gates include a file census across cold boots, a catalog larger
+than the native summary limit, schema and row preservation after compaction, and
+canonical metadata reconciliation with source/WAL parity. These local gates do
+not by themselves qualify fleet rollout, power-loss recovery or long-run RSS.

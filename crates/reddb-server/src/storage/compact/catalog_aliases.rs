@@ -109,6 +109,13 @@ fn shape(legacy: &str, fields: &Fields) -> Result<Vec<String>> {
 }
 
 impl CanonicalCatalogPlan {
+    pub(super) fn retired_aliases(&self) -> Vec<(&str, &str)> {
+        self.aliases
+            .iter()
+            .map(|alias| (alias.legacy, alias.canonical))
+            .collect()
+    }
+
     pub(super) fn prepare(path: &Path, wal: &Path) -> Result<Self> {
         let source = Arc::new(Source::open_for_wal_recovery(path)?);
         ensure(

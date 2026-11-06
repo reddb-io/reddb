@@ -27,7 +27,7 @@ impl RedDB {
         // Export pruning is only meaningful for persistent mode where we
         // have a metadata sidecar that tracks file-backed export artifacts.
         if self.options.mode == StorageMode::Persistent {
-            let Some(path) = self.path() else {
+            let Some(_path) = self.path() else {
                 return Ok(());
             };
 
@@ -37,7 +37,7 @@ impl RedDB {
             };
 
             self.prune_export_registry(&mut metadata.exports);
-            metadata.save_for_data_path(path)?;
+            self.save_physical_metadata_document(&metadata)?;
         }
 
         let _ = self.sweep_ttl_expired_entities()?;
@@ -491,7 +491,7 @@ impl RedDB {
         {
             return Ok(());
         }
-        let Some(path) = self.path() else {
+        let Some(_path) = self.path() else {
             return Ok(());
         };
 
@@ -562,9 +562,6 @@ impl RedDB {
         metadata.hypertables = self.hypertable_registry_snapshot();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
-        metadata.save_for_data_path(path)?;
-        #[cfg(test)]
-        metadata_qualification_phase(&qualification_started, "sidecar-save");
         self.persist_native_physical_header(&metadata)?;
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-header");
@@ -572,6 +569,9 @@ impl RedDB {
     }
 
     fn bootstrap_metadata_from_native_state(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.native_document_is_complete() {
+            return Ok(true);
+        }
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(false);
         }
@@ -588,7 +588,6 @@ impl RedDB {
         let _publication = self.store.vault_publication_lock.lock();
         let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
-        metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(true)
     }
@@ -645,6 +644,35 @@ impl RedDB {
             && native_state.vector_artifact_pages.is_none()
     }
 
+    pub(crate) fn save_physical_metadata_document(
+        &self,
+        metadata: &PhysicalMetadataFile,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.options.bounded_disk_residency {
+            let path = self.path().ok_or("database path is not available")?;
+            metadata.save_for_data_path(path)?;
+            return Ok(());
+        }
+        let _publication = self.store.vault_publication_lock.lock();
+        let mut header = self
+            .store
+            .physical_file_header()
+            .ok_or("native physical header missing")?;
+        let existing = (header.metadata_state_page != 0).then_some(header.metadata_state_page);
+        let summary = Self::native_metadata_state_summary_from_metadata(metadata);
+        let (page, checksum) = self.store.write_physical_metadata_document(
+            &summary,
+            &metadata.to_json_value().to_string_compact(),
+            existing,
+        )?;
+        header.metadata_state_page = page;
+        header.metadata_state_checksum = checksum;
+        self.store.update_physical_file_header(header)?;
+        self.store.persist()?;
+        self.store.publish_detached_native_blob_pages()?;
+        Ok(())
+    }
+
     pub(crate) fn load_or_bootstrap_physical_metadata(
         &self,
         persist_bootstrapped: bool,
@@ -656,6 +684,10 @@ impl RedDB {
             return Err("database path is not available".into());
         };
         let _publication = self.store.vault_publication_lock.lock();
+        if let Some(document) = self.store.read_physical_metadata_document()? {
+            let value = crate::json::from_str::<JsonValue>(&document)?;
+            return Ok(PhysicalMetadataFile::from_json_value(&value)?);
+        }
         let native_state = self.native_physical_state();
 
         let metadata = if persist_bootstrapped && !self.options.read_only {
@@ -676,7 +708,6 @@ impl RedDB {
                         let bootstrapped =
                             self.metadata_from_native_state(native_state, Some(&metadata));
                         if persist_bootstrapped && !self.options.read_only {
-                            bootstrapped.save_for_data_path(path)?;
                             self.persist_native_physical_header(&bootstrapped)?;
                         }
                         return Ok(bootstrapped);
@@ -704,7 +735,6 @@ impl RedDB {
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
                 if persist_bootstrapped && !self.options.read_only {
-                    metadata.save_for_data_path(path)?;
                     self.persist_native_physical_header(&metadata)?;
                 }
                 Ok(metadata)
@@ -712,7 +742,20 @@ impl RedDB {
         }
     }
 
+    pub(crate) fn native_document_is_complete(&self) -> bool {
+        self.store
+            .read_physical_metadata_document()
+            .ok()
+            .flatten()
+            .and_then(|document| crate::json::from_str::<JsonValue>(&document).ok())
+            .and_then(|value| PhysicalMetadataFile::from_json_value(&value).ok())
+            .is_some()
+    }
+
     pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
+        if self.native_document_is_complete() {
+            return Some("native_document");
+        }
         let path = self.path()?;
         let native_state = self.native_physical_state();
         let metadata = PhysicalMetadataFile::inspect_for_data_path(path).ok();
@@ -1398,7 +1441,7 @@ impl RedDB {
         if self.options.read_only {
             return Err("physical metadata operations are not allowed in read-only mode".into());
         }
-        let Some(path) = self.path() else {
+        let Some(_path) = self.path() else {
             return Err("database path is not available".into());
         };
 
@@ -1420,7 +1463,6 @@ impl RedDB {
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
         let result = mutator(&mut metadata);
-        metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(result)
     }
@@ -1528,11 +1570,19 @@ impl RedDB {
             .store
             .write_native_catalog_summary(&catalog_summary, existing_catalog_page)?;
         let metadata_state_summary = Self::native_metadata_state_summary_from_metadata(metadata);
-        let (metadata_state_page, metadata_state_checksum) =
+        let (metadata_state_page, metadata_state_checksum) = if self.options.bounded_disk_residency
+        {
+            self.store.write_physical_metadata_document(
+                &metadata_state_summary,
+                &metadata.to_json_value().to_string_compact(),
+                existing_metadata_state_page,
+            )?
+        } else {
             self.store.write_native_metadata_state_summary(
                 &metadata_state_summary,
                 existing_metadata_state_page,
-            )?;
+            )?
+        };
         let vector_artifact_payloads = vector_artifact_records
             .iter()
             .map(|(summary, bytes)| {
@@ -1563,8 +1613,10 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
-        if let Some(path) = self.path() {
-            metadata.save_for_data_path(path)?;
+        if !self.options.bounded_disk_residency {
+            if let Some(path) = self.path() {
+                metadata.save_for_data_path(path)?;
+            }
         }
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;

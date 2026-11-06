@@ -960,6 +960,77 @@ pub struct NativeMetadataStateSummary {
     pub last_healed_at_unix_ms: Option<u128>,
 }
 
+/// Complete metadata document owned by the native metadata-state page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeMetadataDocumentRef {
+    pub root_page: u32,
+    pub byte_len: u64,
+    pub checksum: u64,
+}
+
+pub const NATIVE_METADATA_DOCUMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+pub fn encode_native_metadata_document_page(
+    summary: &NativeMetadataStateSummary,
+    document: NativeMetadataDocumentRef,
+) -> RdbFileResult<Vec<u8>> {
+    validate_native_metadata_document_ref(document)?;
+    let mut data = encode_native_metadata_state_summary_page(summary);
+    data.extend_from_slice(b"RDPD");
+    data.extend_from_slice(&document.root_page.to_le_bytes());
+    data.extend_from_slice(&document.byte_len.to_le_bytes());
+    data.extend_from_slice(&document.checksum.to_le_bytes());
+    Ok(data)
+}
+
+pub fn decode_native_metadata_document_ref(
+    content: &[u8],
+) -> RdbFileResult<Option<NativeMetadataDocumentRef>> {
+    let summary = decode_native_metadata_state_summary_page(content)?;
+    let offset = encode_native_metadata_state_summary_page(&summary).len();
+    let tail = &content[offset..];
+    if tail.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    if tail.len() < 24 || &tail[..4] != b"RDPD" || tail[24..].iter().any(|b| *b != 0) {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid native metadata document reference".into(),
+        ));
+    }
+    let document = NativeMetadataDocumentRef {
+        root_page: u32::from_le_bytes(
+            tail[4..8]
+                .try_into()
+                .expect("validated reference root width"),
+        ),
+        byte_len: u64::from_le_bytes(
+            tail[8..16]
+                .try_into()
+                .expect("validated reference length width"),
+        ),
+        checksum: u64::from_le_bytes(
+            tail[16..24]
+                .try_into()
+                .expect("validated reference checksum width"),
+        ),
+    };
+    validate_native_metadata_document_ref(document)?;
+    Ok(Some(document))
+}
+
+fn validate_native_metadata_document_ref(document: NativeMetadataDocumentRef) -> RdbFileResult<()> {
+    if document.root_page == 0
+        || document.byte_len == 0
+        || document.byte_len > NATIVE_METADATA_DOCUMENT_MAX_BYTES
+        || document.checksum > u64::from(u32::MAX)
+    {
+        return Err(RdbFileError::InvalidOperation(
+            "invalid native metadata document bounds".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn native_store_page_checksum(data: &[u8]) -> u64 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(data);

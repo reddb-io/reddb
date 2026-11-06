@@ -264,7 +264,7 @@ impl RedDB {
         if self.options.read_only {
             return Err("physical metadata operations are not allowed in read-only mode".into());
         }
-        let Some(path) = self.path() else {
+        let Some(_path) = self.path() else {
             return Err("database path is not available".into());
         };
 
@@ -275,7 +275,7 @@ impl RedDB {
         let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = self.load_or_bootstrap_physical_metadata(false)?;
         let result = mutator(&mut metadata);
-        metadata.save_for_data_path(path)?;
+        self.save_physical_metadata_document(&metadata)?;
         Ok(result)
     }
 
@@ -372,7 +372,7 @@ impl RedDB {
         self.invalidate_collection_contract_cache();
 
         if self.paged_mode {
-            let Some(path) = self.path() else {
+            let Some(_path) = self.path() else {
                 return Err("database path is not available".into());
             };
             // DROP already published the native collection registry before it
@@ -410,7 +410,6 @@ impl RedDB {
                 .position(|contract| contract.name == collection)
                 .map(|index| metadata.collection_contracts.remove(index));
             metadata.collection_ttl_defaults_ms.remove(collection);
-            metadata.save_for_data_path(path)?;
             self.persist_native_physical_header(&metadata)?;
             self.invalidate_collection_contract_cache();
             return Ok(removed);
@@ -1245,7 +1244,7 @@ impl RedDB {
             .retain(|export| export.name != descriptor.name);
         metadata.exports.push(descriptor.clone());
         self.prune_export_registry(&mut metadata.exports);
-        metadata.save_for_data_path(path)?;
+        self.save_physical_metadata_document(&metadata)?;
         metadata.save_to_binary_path(&export_metadata_binary_path)?;
         metadata.save_to_path(&export_metadata_path)?;
 

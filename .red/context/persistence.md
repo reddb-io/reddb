@@ -352,3 +352,11 @@ those carried IDs have been checked by sparse projection; differing rows still
 require exact durable WAL proof. An already-absent aborted row is a completed
 physical removal, while tree errors and unknown mutations keep conservative
 validation.
+
+Bounded native paged stores persist the complete physical metadata document in
+`.rdb` blob pages referenced by the metadata-state page. Registry/catalog samples
+are diagnostic summaries, not recovery authority for large catalogs. Native DDL
+WAL and the paged catalog replace external empty collection markers for this
+path. Offline recovery imports proven legacy metadata and preserves its original
+source; file version 1.0.7 prevents older writers from dropping the new ownership.
+See ADR 0038's native paged metadata amendment for qualification boundaries.

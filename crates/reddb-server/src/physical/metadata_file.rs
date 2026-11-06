@@ -131,13 +131,15 @@ impl PhysicalMetadataFile {
         repair_primary: bool,
     ) -> io::Result<(Self, PhysicalMetadataSource)> {
         let binary_path = Self::metadata_binary_path_for(data_path);
+        let mut binary_error = None;
         if binary_path.exists() {
             match Self::load_from_binary_path(&binary_path) {
                 Ok(metadata) => {
                     return Ok((metadata, PhysicalMetadataSource::Binary));
                 }
                 Err(error) if is_collection_contract_decode_error(&error) => return Err(error),
-                Err(_) => {
+                Err(error) => {
+                    binary_error = Some(error);
                     let mut journal_paths = Self::journal_paths_for_data_path(data_path)?;
                     journal_paths.reverse();
                     for journal_path in journal_paths {
@@ -160,7 +162,13 @@ impl PhysicalMetadataFile {
                 }
             }
         }
-        Self::load_from_path(&Self::metadata_path_for(data_path)).map(|metadata| {
+        let json_path = Self::metadata_path_for(data_path);
+        if !json_path.exists() {
+            if let Some(error) = binary_error {
+                return Err(error);
+            }
+        }
+        Self::load_from_path(&json_path).map(|metadata| {
             if !repair_primary {
                 return (metadata, PhysicalMetadataSource::Json);
             }

@@ -849,3 +849,56 @@ fn native_summary_decoders_tolerate_partial_samples_without_panics() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn native_metadata_document_reference_is_bounded_and_legacy_decodable() {
+    let summary = NativeMetadataStateSummary {
+        protocol_version: "1".into(),
+        generated_at_unix_ms: 7,
+        last_loaded_from: None,
+        last_healed_at_unix_ms: None,
+    };
+    let legacy = encode_native_metadata_state_summary_page(&summary);
+    assert_eq!(decode_native_metadata_document_ref(&legacy).unwrap(), None);
+    let reference = NativeMetadataDocumentRef {
+        root_page: 70,
+        byte_len: 600_000,
+        checksum: 19,
+    };
+    let encoded = encode_native_metadata_document_page(&summary, reference).unwrap();
+    assert_eq!(
+        decode_native_metadata_document_ref(&encoded).unwrap(),
+        Some(reference)
+    );
+    assert_eq!(
+        decode_native_metadata_state_summary_page(&encoded).unwrap(),
+        summary
+    );
+    let mut padded = encoded.clone();
+    padded.resize(16_352, 0);
+    assert_eq!(
+        decode_native_metadata_document_ref(&padded).unwrap(),
+        Some(reference)
+    );
+    for length in legacy.len() + 1..encoded.len() {
+        assert!(decode_native_metadata_document_ref(&encoded[..length]).is_err());
+    }
+    let mut bad = padded;
+    *bad.last_mut().unwrap() = 1;
+    assert!(decode_native_metadata_document_ref(&bad).is_err());
+    for (root_page, byte_len) in [
+        (0, 1),
+        (70, 0),
+        (70, NATIVE_METADATA_DOCUMENT_MAX_BYTES + 1),
+    ] {
+        assert!(encode_native_metadata_document_page(
+            &summary,
+            NativeMetadataDocumentRef {
+                root_page,
+                byte_len,
+                checksum: 0,
+            }
+        )
+        .is_err());
+    }
+}
