@@ -43,6 +43,7 @@ pub fn referenced_collections(body: &str) -> HashSet<String> {
                 if !name.is_empty()
                     && !is_sql_keyword(&name)
                     && !name.starts_with("red_")
+                    && !name.starts_with("red.")
                     && name
                         .chars()
                         .next()

@@ -71,6 +71,7 @@ impl UnifiedStore {
         identity: SecondaryIndexIdentity,
         projector: Arc<dyn SecondaryIndexProjector>,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         if name.is_empty() || name.len() > 1024 || identity.codec_version == 0 {
             return Err(StoreError::Serialization(
                 "invalid secondary index identity".into(),
@@ -130,6 +131,7 @@ impl UnifiedStore {
         name: &str,
         identity: &SecondaryIndexIdentity,
     ) -> Option<SecondaryIndexRead> {
+        let collection = Self::canonical_collection(collection);
         let _publication = self.vault_publication_lock.lock();
         let trees = self.btree_indices.read();
         let data = trees.get(collection)?;
@@ -146,6 +148,7 @@ impl UnifiedStore {
     /// The next checkpoint publishes the removal. Already-pinned readers keep
     /// their old immutable tree until the normal retirement protocol releases it.
     pub fn unregister_secondary_index(&self, collection: &str, name: &str) {
+        let collection = Self::canonical_collection(collection);
         let _publication = self.vault_publication_lock.lock();
         if let Some(specs) = self.secondary_index_specs.write().get_mut(collection) {
             specs.remove(name);

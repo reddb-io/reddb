@@ -46,6 +46,10 @@ pub enum StoreWalAction {
 }
 
 impl StoreWalAction {
+    fn canonical_name(name: &str) -> String {
+        super::system_collection_names::canonical_or_self(name).to_owned()
+    }
+
     pub fn upsert_entity(
         collection: &str,
         entity: &UnifiedEntity,
@@ -53,7 +57,7 @@ impl StoreWalAction {
         format_version: u32,
     ) -> Self {
         Self::UpsertEntityRecord {
-            collection: collection.to_string(),
+            collection: Self::canonical_name(collection),
             record: super::metadata_codec::serialize_entity_record(
                 entity,
                 metadata,
@@ -69,15 +73,15 @@ impl StoreWalAction {
 
     fn to_frame(&self) -> reddb_file::StoreWalActionFrame {
         match self {
-            Self::CreateCollection { name } => {
-                reddb_file::StoreWalActionFrame::CreateCollection { name: name.clone() }
-            }
-            Self::DropCollection { name } => {
-                reddb_file::StoreWalActionFrame::DropCollection { name: name.clone() }
-            }
+            Self::CreateCollection { name } => reddb_file::StoreWalActionFrame::CreateCollection {
+                name: Self::canonical_name(name),
+            },
+            Self::DropCollection { name } => reddb_file::StoreWalActionFrame::DropCollection {
+                name: Self::canonical_name(name),
+            },
             Self::UpsertEntityRecord { collection, record } => {
                 reddb_file::StoreWalActionFrame::UpsertEntityRecord {
-                    collection: collection.clone(),
+                    collection: Self::canonical_name(collection),
                     record: record.clone(),
                 }
             }
@@ -85,21 +89,21 @@ impl StoreWalAction {
                 collection,
                 entity_id,
             } => reddb_file::StoreWalActionFrame::DeleteEntityRecord {
-                collection: collection.clone(),
+                collection: Self::canonical_name(collection),
                 entity_id: *entity_id,
             },
             Self::BulkUpsertEntityRecords {
                 collection,
                 records,
             } => reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
-                collection: collection.clone(),
+                collection: Self::canonical_name(collection),
                 records: records.clone(),
             },
             Self::RefreshCollection {
                 collection,
                 records,
             } => reddb_file::StoreWalActionFrame::RefreshCollection {
-                collection: collection.clone(),
+                collection: Self::canonical_name(collection),
                 records: records.clone(),
             },
             Self::SetAuxMetadata { bytes } => reddb_file::StoreWalActionFrame::SetAuxMetadata {
@@ -111,33 +115,38 @@ impl StoreWalAction {
     pub fn decode(bytes: &[u8]) -> io::Result<Self> {
         match reddb_file::decode_store_wal_action_frame(bytes)? {
             reddb_file::StoreWalActionFrame::CreateCollection { name } => {
-                Ok(Self::CreateCollection { name })
+                Ok(Self::CreateCollection {
+                    name: super::system_collection_names::canonical_owned(name),
+                })
             }
-            reddb_file::StoreWalActionFrame::DropCollection { name } => {
-                Ok(Self::DropCollection { name })
-            }
+            reddb_file::StoreWalActionFrame::DropCollection { name } => Ok(Self::DropCollection {
+                name: super::system_collection_names::canonical_owned(name),
+            }),
             reddb_file::StoreWalActionFrame::UpsertEntityRecord { collection, record } => {
-                Ok(Self::UpsertEntityRecord { collection, record })
+                Ok(Self::UpsertEntityRecord {
+                    collection: super::system_collection_names::canonical_owned(collection),
+                    record,
+                })
             }
             reddb_file::StoreWalActionFrame::DeleteEntityRecord {
                 collection,
                 entity_id,
             } => Ok(Self::DeleteEntityRecord {
-                collection,
+                collection: super::system_collection_names::canonical_owned(collection),
                 entity_id,
             }),
             reddb_file::StoreWalActionFrame::BulkUpsertEntityRecords {
                 collection,
                 records,
             } => Ok(Self::BulkUpsertEntityRecords {
-                collection,
+                collection: super::system_collection_names::canonical_owned(collection),
                 records,
             }),
             reddb_file::StoreWalActionFrame::RefreshCollection {
                 collection,
                 records,
             } => Ok(Self::RefreshCollection {
-                collection,
+                collection: super::system_collection_names::canonical_owned(collection),
                 records,
             }),
             reddb_file::StoreWalActionFrame::SetAuxMetadata { bytes } => {

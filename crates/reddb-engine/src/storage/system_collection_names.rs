@@ -37,6 +37,17 @@ pub fn canonical_name(name: &str) -> Option<&'static str> {
         .find_map(|(legacy, canonical)| (*legacy == name).then_some(*canonical))
 }
 
+/// Return the durable identity for a collection name. Exact legacy system
+/// names remain accepted at API and WAL boundaries, but are never published
+/// into a new catalog or snapshot.
+pub fn canonical_or_self(name: &str) -> &str {
+    canonical_name(name).unwrap_or(name)
+}
+
+pub fn canonical_owned(name: String) -> String {
+    canonical_name(&name).map_or(name, str::to_owned)
+}
+
 /// Plan migrations without changing the store. A destination already present
 /// alongside its legacy name is ambiguous and must never be merged implicitly.
 pub fn migration_plan<'a>(

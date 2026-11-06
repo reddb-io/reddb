@@ -572,6 +572,47 @@ pub struct EntityAux {
 }
 
 impl UnifiedEntity {
+    /// Normalize persisted runtime-owned collection identities while retaining
+    /// exact user collection names. This is idempotent and intentionally does
+    /// not rewrite graph labels, which are data rather than collection keys.
+    pub fn canonicalize_system_collection_names(&mut self) {
+        match &mut self.kind {
+            EntityKind::TableRow { table, .. } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(table) {
+                    *table = Arc::from(canonical);
+                }
+            }
+            EntityKind::Vector { collection } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(collection)
+                {
+                    *collection = canonical.to_owned();
+                }
+            }
+            EntityKind::TimeSeriesPoint(point) => {
+                if let Some(canonical) =
+                    super::system_collection_names::canonical_name(&point.series)
+                {
+                    point.series = canonical.to_owned();
+                }
+            }
+            EntityKind::QueueMessage { queue, .. } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(queue) {
+                    *queue = canonical.to_owned();
+                }
+            }
+            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => {}
+        }
+        if let Some(aux) = &mut self.aux {
+            for reference in &mut aux.cross_refs {
+                if let Some(canonical) =
+                    super::system_collection_names::canonical_name(&reference.target_collection)
+                {
+                    reference.target_collection = canonical.to_owned();
+                }
+            }
+        }
+    }
+
     /// Access embeddings (returns empty slice if no aux data).
     pub fn embeddings(&self) -> &[EmbeddingSlot] {
         self.aux

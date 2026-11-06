@@ -91,6 +91,44 @@ fn operational_manifest_publishes_closed_append_only_segment_once() {
 }
 
 #[test]
+fn operational_manifest_renames_append_only_identity_without_moving_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let rows = vec![AppendOnlySegmentRow {
+        primary_key: b"1".to_vec(),
+        payload: b"audit".to_vec(),
+    }];
+    let encoded = encode_append_only_segment(AppendOnlySegmentCodec::None, &rows).unwrap();
+    let segment = manifest
+        .publish_append_only_segment("red_ask_audit", 1, AppendOnlySegmentCodec::None, &encoded)
+        .unwrap();
+    let path = manifest.append_only_segment_path_for_test(&segment.path);
+
+    manifest
+        .rename_collections(&[("red_ask_audit", "red.ask.audit")])
+        .unwrap();
+    let renamed = manifest.append_only_segments().unwrap();
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0].collection, "red.ask.audit");
+    assert_eq!(renamed[0].path, segment.path);
+    assert!(path.exists());
+    assert_eq!(
+        manifest
+            .append_only_published_rows("red.ask.audit")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        manifest
+            .next_append_only_segment_id("red.ask.audit")
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn unpublished_append_only_segment_files_are_quarantined_on_recover() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("data.rdb");

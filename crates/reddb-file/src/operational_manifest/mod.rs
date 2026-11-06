@@ -279,12 +279,6 @@ impl<V: Vfs> OperationalManifest<V> {
         let Some(mut manifest) = self.load_current()? else {
             return Ok(());
         };
-        if manifest.fork_origin.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "collection rename on a fork is unsupported",
-            ));
-        }
         let mut sources = BTreeSet::new();
         let mut targets = BTreeSet::new();
         for &(source, target) in names {
@@ -296,27 +290,25 @@ impl<V: Vfs> OperationalManifest<V> {
             return Err(invalid_data("overlapping collection rename mappings"));
         }
 
-        let referenced = self.fork_referenced_collection_paths()?;
         for &(source, target) in names {
-            let Some(entry) = manifest.collections.get(source) else {
-                continue;
-            };
-            if manifest.collections.contains_key(target) {
-                return Err(invalid_data(format!(
-                    "collection rename collision: {source} and {target}"
-                )));
-            }
-            if entry.state != CollectionState::Active
-                || entry.source.is_some()
-                || referenced.contains(&entry.path)
+            let source_exists = manifest.collections.contains_key(source)
                 || manifest
                     .append_only_segments
                     .iter()
                     .any(|segment| segment.collection == source)
-                || manifest.append_only_retired.contains_key(source)
+                || manifest.append_only_retired.contains_key(source);
+            if !source_exists {
+                continue;
+            }
+            if manifest.collections.contains_key(target)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == target)
+                || manifest.append_only_retired.contains_key(target)
             {
-                return Err(io::Error::new(io::ErrorKind::Unsupported, format!(
-                    "collection rename requires independent active non-append-only collection: {source}"
+                return Err(invalid_data(format!(
+                    "collection rename collision: {source} and {target}"
                 )));
             }
         }
@@ -325,6 +317,18 @@ impl<V: Vfs> OperationalManifest<V> {
         for &(source, target) in names {
             if let Some(entry) = manifest.collections.remove(source) {
                 manifest.collections.insert(target.to_string(), entry);
+                changed = true;
+            }
+            for segment in &mut manifest.append_only_segments {
+                if segment.collection == source {
+                    segment.collection = target.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(retired) = manifest.append_only_retired.remove(source) {
+                manifest
+                    .append_only_retired
+                    .insert(target.to_string(), retired);
                 changed = true;
             }
         }
@@ -1589,24 +1593,26 @@ mod tests {
     }
 
     #[test]
-    fn collection_rename_rejects_a_live_shared_fork() {
+    fn collection_rename_preserves_a_live_shared_fork() {
         let path = temp_db_path("rename_shared_fork");
         let manifest = OperationalManifest::for_db_path(&path);
         manifest.create_collection("red_config").unwrap();
         manifest.create_fork("shared", 1).unwrap();
-        let before = fs::read(manifest.root.join(MANIFEST_FILE)).unwrap();
-        let error = manifest
+        manifest
             .rename_collections(&[("red_config", "red.config")])
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(fs::read(manifest.root.join(MANIFEST_FILE)).unwrap(), before);
+            .unwrap();
+        let parent = manifest.load_current().unwrap().unwrap();
+        assert!(parent.collections.contains_key("red.config"));
+        assert!(!parent.collections.contains_key("red_config"));
+
         let fork = manifest.fork_handle("shared");
-        assert_eq!(
-            fork.rename_collections(&[("red_config", "red.config")])
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Unsupported
-        );
+        let before = fork.load_current().unwrap().unwrap();
+        let source = before.collections["red_config"].source.clone();
+        fork.rename_collections(&[("red_config", "red.config")])
+            .unwrap();
+        let after = fork.load_current().unwrap().unwrap();
+        assert_eq!(after.collections["red.config"].source, source);
+        assert!(after.fork_origin.is_some());
     }
 
     #[test]

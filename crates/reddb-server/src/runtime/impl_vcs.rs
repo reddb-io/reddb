@@ -343,7 +343,7 @@ fn delete_ref(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
 /// extra row versions. Internal `red_*` collections are never
 /// versioned — they store VCS metadata itself.
 fn is_versioned(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
-    if name.starts_with("red_") {
+    if name.starts_with("red_") || name.starts_with("red.") {
         return Ok(false);
     }
     let Some(manager) = store.get_collection(vc::SETTINGS) else {
@@ -400,7 +400,7 @@ fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
 /// existing row versions — you control whether history is retained
 /// by deciding *when* to opt out.
 fn set_versioned_flag(store: &UnifiedStore, name: &str, enabled: bool) -> RedDBResult<()> {
-    if name.starts_with("red_") {
+    if name.starts_with("red_") || name.starts_with("red.") {
         return Err(RedDBError::InvalidConfig(format!(
             "cannot version internal collection `{name}`"
         )));
@@ -1393,7 +1393,7 @@ impl RedDBRuntime {
         let mut modified = 0usize;
         let collections = store.list_collections();
         for coll in collections {
-            if coll.starts_with("red_") {
+            if coll.starts_with("red_") || coll.starts_with("red.") {
                 continue;
             }
             if !is_versioned(store, &coll)? {
@@ -1739,7 +1739,7 @@ fn materialize_merge_conflicts(
     // over.
     let mut conflicts: Vec<Conflict> = Vec::new();
     for coll in store.list_collections() {
-        if coll.starts_with("red_") {
+        if coll.starts_with("red_") || coll.starts_with("red.") {
             continue;
         }
         if !is_versioned(store, &coll)? {
