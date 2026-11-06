@@ -52,6 +52,34 @@ fn embedded_salvage_does_not_carve_embedded_looking_values_from_paged_storage() 
     }
 }
 
+#[test]
+fn damaged_paged_superblocks_do_not_turn_catalog_values_into_embedded_salvage() {
+    for magic in [b"RDM2", b"RDM3"] {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let source = dir.path().join("paged.rdb");
+        let destination = dir.path().join("recovered.rdb");
+        let mut bytes = vec![0; reddb_file::PAGED_PAGE_SIZE * 2];
+        let catalog = &mut bytes[reddb_file::PAGED_PAGE_SIZE..];
+        catalog[0] = 6; // paged catalog header page
+        catalog[8..12].copy_from_slice(&1u32.to_le_bytes());
+        catalog[reddb_file::PAGED_PAGE_HEADER_SIZE..][..4].copy_from_slice(magic);
+        let mut snapshot = encode_native_store_header(reddb_file::STORE_VERSION_CURRENT);
+        snapshot.extend_from_slice(&[0; 16]);
+        append_native_store_crc32_footer(&mut snapshot);
+        bytes.extend_from_slice(&snapshot);
+        std::fs::write(&source, &bytes).expect("damaged source");
+
+        let error = scrub_embedded_store(&source, 0, usize::MAX)
+            .expect_err("paged catalog is not embedded storage");
+        assert!(error.to_string().contains("paged"), "{error}");
+        let error = salvage_embedded_store(&source, &destination)
+            .expect_err("paged catalog is not an embedded snapshot");
+        assert!(error.to_string().contains("paged"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&source).expect("preserved source"), bytes);
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn large_paged_store_is_rejected_before_whole_file_carving() {
