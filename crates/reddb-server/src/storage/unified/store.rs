@@ -410,7 +410,7 @@ mod native_helpers;
 mod recovery_xid;
 pub mod secondary_index;
 
-pub(crate) use self::commit::DeferredStoreWalActions;
+pub(crate) use self::commit::{DeferredStoreWalActions, StoreWalCaptureGuard};
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
 

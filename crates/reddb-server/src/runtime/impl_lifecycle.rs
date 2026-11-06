@@ -597,6 +597,12 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor()?;
+        assert!(runtime
+            .inner
+            .db
+            .runtime
+            .set(super::WeakRuntime(Arc::downgrade(&runtime.inner)))
+            .is_ok());
         assert!(
             runtime
                 .inner

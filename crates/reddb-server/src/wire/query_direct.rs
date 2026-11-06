@@ -43,6 +43,43 @@ pub(crate) fn try_handle_query_binary_direct(
     runtime: &RedDBRuntime,
     sql: &str,
 ) -> Option<BinaryQueryResponse> {
+    let index_store = runtime.index_store_ref();
+    let generation = index_store.indexed_mutation_generation();
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let snapshot_unsafe = || {
+        let manager = runtime.snapshot_manager();
+        if manager.oldest_active_xid().is_some() {
+            return true;
+        }
+        snapshot.as_ref().is_some_and(|snapshot| {
+            let current = manager.fresh_read_snapshot();
+            snapshot.requires_index_fallback
+                || snapshot.snapshot.xid != current.xid
+                || snapshot.snapshot.in_progress != current.in_progress
+        })
+    };
+    if index_store.indexed_mutation_active() || snapshot_unsafe() {
+        return None;
+    }
+    #[cfg(test)]
+    index_store.mutation_test_hook(
+        "__direct_wire_query__",
+        crate::runtime::MutationTestPhase::DirectWireQueryStarted,
+    );
+    let response = try_handle_query_binary_direct_inner(runtime, sql);
+    if index_store.indexed_mutation_active()
+        || generation != index_store.indexed_mutation_generation()
+        || snapshot_unsafe()
+    {
+        return None;
+    }
+    response
+}
+
+fn try_handle_query_binary_direct_inner(
+    runtime: &RedDBRuntime,
+    sql: &str,
+) -> Option<BinaryQueryResponse> {
     // Cheap prefix gate. Avoid parse for anything not a plain SELECT
     // (WITHIN, EXPLAIN, SET, BEGIN, …).
     let trimmed = sql.trim_start();
@@ -1546,6 +1583,54 @@ mod tests {
              (4, 'd', 'NYC', 40), (5, 'e', 'LA', 45)",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn direct_wire_falls_back_if_index_publication_races_the_query() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+        let rt = mk_runtime();
+        seed_users(&rt);
+        let sql = "SELECT * FROM users WHERE age BETWEEN 30 AND 40";
+        assert!(
+            try_handle_query_binary_direct(&rt, sql).is_some(),
+            "fixture uses direct path"
+        );
+        let (started_tx, started_rx) = mpsc::channel();
+        let (published_tx, published_rx) = mpsc::channel();
+        let published_rx = Mutex::new(published_rx);
+        rt.index_store_ref()
+            .set_mutation_test_hook(Some(Arc::new(move |collection, phase| {
+                if collection == "__direct_wire_query__"
+                    && phase == crate::runtime::MutationTestPhase::DirectWireQueryStarted
+                {
+                    started_tx.send(()).expect("notify writer");
+                    published_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("writer published");
+                }
+            })));
+        std::thread::scope(|scope| {
+            let writer_rt = &rt;
+            let writer = scope.spawn(move || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("query started");
+                writer_rt
+                    .execute_query("UPDATE users SET age = 26 WHERE id = 1")
+                    .expect("publish indexed update");
+                published_tx.send(()).expect("release query");
+            });
+            let response = try_handle_query_binary_direct(&rt, sql);
+            writer.join().expect("writer thread");
+            assert!(
+                response.is_none(),
+                "racing index publication must use the standard query path"
+            );
+        });
+        rt.index_store_ref().set_mutation_test_hook(None);
     }
 
     #[test]

@@ -329,6 +329,13 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        if options.read_only
+            && !options
+                .resolved_path(reddb_file::default_database_path())
+                .exists()
+        {
+            return Err("read-only database path does not exist".into());
+        }
         if options.bounded_disk_residency
             && (!embedded_single_file_selected(options)
                 || options.replication.role != crate::replication::ReplicationRole::Standalone
@@ -345,7 +352,7 @@ impl RedDB {
         // Must run before any physical-layer call site reads the
         // toggles, so it sits at the top of open_with_options.
         options.apply_tier_defaults();
-        if !embedded_single_file_selected(options) {
+        if !options.read_only && !embedded_single_file_selected(options) {
             if let Some((_, paths)) = options.resolve_tiered_layout() {
                 if let Err(err) = paths.ensure_dirs() {
                     tracing::warn!(
@@ -464,9 +471,15 @@ impl RedDB {
 
         let path_buf = options.resolved_path(reddb_file::default_database_path());
         let store_config = store_config_from_options(options)?;
-        let embedded_store_config = store_config
-            .clone()
-            .with_embedded_wal_path(path_buf.clone());
+        // Bootstrapping runtime catalogs may update the resident view. A
+        // read-only open must never attach a writer to the source artifact.
+        let embedded_store_config = if options.read_only {
+            store_config.clone()
+        } else {
+            store_config
+                .clone()
+                .with_embedded_wal_path(path_buf.clone())
+        };
         // Taken before reading the snapshot: every writer holds the whole
         // store in memory and checkpoints it on close, so a second writer
         // process would silently discard the first one's commits.
@@ -479,6 +492,9 @@ impl RedDB {
             None
         };
         let embedded_open = if options.bounded_disk_residency {
+            if options.read_only {
+                return Err("read-only native paged recovery is not supported".into());
+            }
             // The snapshot-backed embedded factory has no durable page ownership
             // coordinator. Explicit residency must create/open the native pager,
             // including on the very first boot, before registering disk indexes.
@@ -552,13 +568,17 @@ impl RedDB {
                         })?;
                         let store = UnifiedStore::load_from_bytes_with_config(
                             &snapshot,
-                            store_config.clone(),
+                            embedded_store_config.clone(),
                         )
                         .map_err(|err| format!("load legacy embedded snapshot: {err}"))?;
-                        crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
-                            &path_buf, &snapshot,
-                        )
-                        .map_err(|err| format!("promote legacy snapshot to embedded rdb: {err}"))?;
+                        if !options.read_only {
+                            crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
+                                &path_buf, &snapshot,
+                            )
+                            .map_err(|err| {
+                                format!("promote legacy snapshot to embedded rdb: {err}")
+                            })?;
+                        }
                         Some((store, Some(path_buf.clone()), false))
                     }
                     Err(_) => None,
@@ -594,6 +614,8 @@ impl RedDB {
                     Some(path_buf),
                     false,
                 )
+            } else if options.read_only {
+                return Err("read-only native paged recovery is not supported".into());
             } else if let Some(store) =
                 operational_store_from_embedded_artifact(&path_buf, store_config.clone())?
             {
@@ -649,6 +671,7 @@ impl RedDB {
 
         Self {
             store: Arc::new(store),
+            runtime: std::sync::OnceLock::new(),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),
             path,
@@ -686,6 +709,9 @@ impl RedDB {
     /// behaviour use `flush_local_only()` + `upload_to_remote_backend()`
     /// separately so the gate fits between the two halves.
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Ok(());
+        }
         self.flush_local_only()?;
         self.upload_to_remote_backend()?;
         Ok(())
@@ -708,6 +734,9 @@ impl RedDB {
         &self,
         runtime_snapshots_durable: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Ok(());
+        }
         #[cfg(test)]
         let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
