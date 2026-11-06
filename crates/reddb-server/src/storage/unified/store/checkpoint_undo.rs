@@ -26,6 +26,16 @@ fn page_image(page_id: u32, bytes: &[u8]) -> io::Result<Page> {
 
 impl StoreCommitCoordinator {
     pub(crate) fn restore_checkpoint_page_images(&self, store: &UnifiedStore) -> io::Result<()> {
+        Self::restore_checkpoint_page_images_from_path(store, &self.wal_path)
+    }
+
+    pub(crate) fn restore_checkpoint_page_images_from_path(
+        store: &UnifiedStore,
+        wal_path: &Path,
+    ) -> io::Result<()> {
+        if !wal_path.exists() {
+            return Ok(());
+        }
         let Some(pager) = &store.pager else {
             return Ok(());
         };
@@ -42,7 +52,7 @@ impl StoreCommitCoordinator {
         let mut journal = Vec::new();
         let mut active_epoch = None;
         let mut images = roaring::RoaringBitmap::new();
-        for item in WalReader::open(&self.wal_path)?.iter() {
+        for item in WalReader::open(wal_path)?.iter() {
             let (_, record) = match item {
                 Ok(record) => record,
                 Err(error)
@@ -115,7 +125,7 @@ impl StoreCommitCoordinator {
             return Ok(());
         }
 
-        for item in WalReader::open(&self.wal_path)?.iter() {
+        for item in WalReader::open(wal_path)?.iter() {
             let (_, record) = item?;
             if let WalRecord::FullPageImage {
                 page_id,
@@ -125,11 +135,17 @@ impl StoreCommitCoordinator {
             } = record
             {
                 if ckpt_epoch == pending.epoch {
-                    pager
-                        .write_page(page_id, page_image(page_id, &data)?)
-                        .map_err(|error| invalid(&error.to_string()))?;
+                    let image = page_image(page_id, &data)?;
+                    if pager.is_read_only() {
+                        pager.restore_read_only_page(page_id, image)
+                    } else {
+                        pager.write_page(page_id, image)
+                    }
+                    .map_err(|error| invalid(&error.to_string()))?;
                     #[cfg(test)]
-                    if std::env::var_os("REDDB_TEST_EXIT_DURING_PAGE_UNDO").is_some() {
+                    if !pager.is_read_only()
+                        && std::env::var_os("REDDB_TEST_EXIT_DURING_PAGE_UNDO").is_some()
+                    {
                         pager.sync().map_err(|error| invalid(&error.to_string()))?;
                         std::process::exit(194);
                     }
@@ -138,6 +154,9 @@ impl StoreCommitCoordinator {
         }
         // Restoration must survive another crash before allocator recovery can
         // release newly allocated children/overflow pages from the failed epoch.
+        if pager.is_read_only() {
+            return Ok(());
+        }
         pager.sync().map_err(|error| invalid(&error.to_string()))
     }
 }
@@ -233,6 +252,36 @@ mod tests {
             let original_wal =
                 std::fs::read(reddb_file::layout::unified_wal_path(&path)).expect("preserved WAL");
             let original_pages = std::fs::read(&path).expect("preserved pages");
+            for _ in 0..2 {
+                let reader = UnifiedStore::open_read_only_with_config(
+                    &path,
+                    UnifiedStoreConfig::default().with_page_cache_slots(512),
+                )
+                .expect("read-only checkpoint undo and cold boot");
+                assert_eq!(reader.get_collection("rows").expect("rows").count(), 32);
+                for id in 1..=32 {
+                    assert_eq!(
+                        reader
+                            .get("rows", EntityId::new(id))
+                            .expect("row")
+                            .data
+                            .as_row()
+                            .expect("row")
+                            .columns,
+                        row(id, 2).data.as_row().expect("expected row").columns
+                    );
+                }
+                drop(reader);
+                assert_eq!(
+                    std::fs::read(&path).expect("unchanged pages"),
+                    original_pages
+                );
+                assert_eq!(
+                    std::fs::read(reddb_file::layout::unified_wal_path(&path))
+                        .expect("unchanged WAL"),
+                    original_wal
+                );
+            }
             let isolated = directory.path().join("isolated-recovery");
             crate::storage::compact::recover_paged_wal(&path, &isolated)
                 .expect("recover interrupted checkpoint on a copy");
@@ -305,6 +354,15 @@ mod tests {
                         );
                     }
                     std::fs::write(&wal_path, invalid_wal).expect("inject invalid image");
+                    let invalid_wal_before = std::fs::read(&wal_path).expect("invalid WAL");
+                    assert!(
+                        UnifiedStore::open_read_only_with_config(&path, config()).is_err(),
+                        "read-only corruption {corruption}"
+                    );
+                    assert_eq!(
+                        std::fs::read(&wal_path).expect("unchanged invalid WAL"),
+                        invalid_wal_before
+                    );
                     assert!(
                         UnifiedStore::open_with_config(&path, config()).is_err(),
                         "corruption {corruption}"

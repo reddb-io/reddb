@@ -402,7 +402,7 @@ fn replica_update_and_delete_survive_wal_only_recovery_with_indexes() {
 }
 
 #[test]
-fn read_only_native_pager_is_rejected_before_recovery_writes() {
+fn read_only_native_pager_opens_without_recovery_writes() {
     let directory = tempfile::tempdir().expect("fixture");
     let path = directory.path().join("paged.rdb");
     {
@@ -410,9 +410,10 @@ fn read_only_native_pager_is_rejected_before_recovery_writes() {
         store.persist().expect("checkpoint");
     }
     let before = std::fs::read(&path).expect("native bytes");
-    assert!(
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true)).is_err()
-    );
+    let reader = RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true))
+        .expect("read-only native open");
+    reader.flush().expect("read-only flush");
+    drop(reader);
     assert_eq!(std::fs::read(&path).expect("unchanged bytes"), before);
 }
 

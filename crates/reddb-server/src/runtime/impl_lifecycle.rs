@@ -237,7 +237,7 @@ impl RedDBRuntime {
         // The RAM tier is sized from its share. L2's disk extent is not memory
         // and keeps its own ceiling; only L1 and L2's resident metadata are
         // accounted against `blob_cache_l1`.
-        let result_blob_cache_config = if embedded_single_file {
+        let result_blob_cache_config = if embedded_single_file || options.read_only {
             crate::storage::cache::BlobCacheConfig::default()
         } else {
             crate::storage::cache::BlobCacheConfig::default().with_l2_path(

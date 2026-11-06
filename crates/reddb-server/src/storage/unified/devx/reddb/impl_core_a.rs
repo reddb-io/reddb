@@ -492,9 +492,6 @@ impl RedDB {
             None
         };
         let embedded_open = if options.bounded_disk_residency {
-            if options.read_only {
-                return Err("read-only native paged recovery is not supported".into());
-            }
             // The snapshot-backed embedded factory has no durable page ownership
             // coordinator. Explicit residency must create/open the native pager,
             // including on the very first boot, before registering disk indexes.
@@ -511,7 +508,11 @@ impl RedDB {
             {
                 return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
             }
-            let store = UnifiedStore::open_with_config(&path_buf, store_config.clone())?;
+            let store = if options.read_only {
+                UnifiedStore::open_read_only_with_config(&path_buf, store_config.clone())?
+            } else {
+                UnifiedStore::open_with_config(&path_buf, store_config.clone())?
+            };
             Some((store, Some(path_buf.clone()), true))
         } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
@@ -615,7 +616,11 @@ impl RedDB {
                     false,
                 )
             } else if options.read_only {
-                return Err("read-only native paged recovery is not supported".into());
+                (
+                    UnifiedStore::open_read_only_with_config(&path_buf, store_config.clone())?,
+                    Some(path_buf),
+                    true,
+                )
             } else if let Some(store) =
                 operational_store_from_embedded_artifact(&path_buf, store_config.clone())?
             {
@@ -646,10 +651,9 @@ impl RedDB {
 
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
-            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new_with_config(
-                path.as_deref(),
-                &options.replication,
-            ))),
+            ReplicationRole::Primary if !options.read_only => Some(Arc::new(
+                PrimaryReplication::new_with_config(path.as_deref(), &options.replication),
+            )),
             _ => None,
         };
 

@@ -1036,7 +1036,11 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
-    fn recover_page_ownership(&self, store: &UnifiedStore, journal: &[u8]) -> io::Result<()> {
+    fn recover_page_ownership(
+        coordinator: Option<&Self>,
+        store: &UnifiedStore,
+        journal: &[u8],
+    ) -> io::Result<()> {
         use reddb_file::page_ownership_journal::{
             pending_epoch, recovery_plan, PageOwnershipRecord,
         };
@@ -1091,6 +1095,10 @@ impl StoreCommitCoordinator {
             pager
                 .validate_owned_pages(&plan.preserve)
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            let Some(coordinator) = coordinator else {
+                // Readers validate ownership but never reclaim or finish an epoch.
+                return Ok(());
+            };
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1105,7 +1113,7 @@ impl StoreCommitCoordinator {
             if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC").is_some() {
                 std::process::exit(188);
             }
-            self.append_durable_page_ownership(PageOwnershipRecord::Finish {
+            coordinator.append_durable_page_ownership(PageOwnershipRecord::Finish {
                 epoch: pending.epoch,
             })?;
             #[cfg(test)]
@@ -1113,7 +1121,7 @@ impl StoreCommitCoordinator {
                 std::process::exit(189);
             }
         }
-        self.release_completed_ownership_wal()
+        coordinator.map_or(Ok(()), Self::release_completed_ownership_wal)
     }
 
     pub(super) fn next_page_ownership_epoch(&self, store: &UnifiedStore) -> io::Result<u64> {
@@ -1202,11 +1210,24 @@ impl StoreCommitCoordinator {
         store: &UnifiedStore,
         boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
     ) -> io::Result<()> {
-        if !self.wal_path.exists() {
+        Self::replay_from_wal(store, &self.wal_path, Some(self), boot_wal)
+    }
+
+    pub(crate) fn replay_read_only(store: &UnifiedStore, wal_path: &Path) -> io::Result<()> {
+        Self::replay_from_wal(store, wal_path, None, None)
+    }
+
+    fn replay_from_wal(
+        store: &UnifiedStore,
+        wal_path: &Path,
+        coordinator: Option<&Self>,
+        boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
+    ) -> io::Result<()> {
+        if !wal_path.exists() {
             return Ok(());
         }
 
-        let reader = match WalReader::open(&self.wal_path) {
+        let reader = match WalReader::open(wal_path) {
             Ok(reader) => reader,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err),
@@ -1231,8 +1252,11 @@ impl StoreCommitCoordinator {
             match record {
                 WalRecord::PageOwnership { record } => {
                     latest_ownership_epoch = latest_ownership_epoch.max(record.epoch());
-                    self.ownership_last_epoch
-                        .fetch_max(record.epoch(), Ordering::AcqRel);
+                    if let Some(coordinator) = coordinator {
+                        coordinator
+                            .ownership_last_epoch
+                            .fetch_max(record.epoch(), Ordering::AcqRel);
+                    }
                     ownership_journal
                         .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
@@ -1268,7 +1292,9 @@ impl StoreCommitCoordinator {
                     entity_id,
                     vector,
                 } => {
-                    self.runtime_wal_state.store(2, Ordering::Release);
+                    if let Some(coordinator) = coordinator {
+                        coordinator.runtime_wal_state.store(2, Ordering::Release);
+                    }
                     // Issue #694 — capture `vector.turbo` WAL inserts so the
                     // boot-time TurboQuant index rebuild can drain them in
                     // WAL order (deterministic against the pre-restart
@@ -1287,7 +1313,9 @@ impl StoreCommitCoordinator {
                     name,
                     operands,
                 } => {
-                    self.runtime_wal_state.store(2, Ordering::Release);
+                    if let Some(coordinator) = coordinator {
+                        coordinator.runtime_wal_state.store(2, Ordering::Release);
+                    }
                     let mut deltas = store.replayed_probabilistic_deltas.lock();
                     deltas.push((kind, operation, name, operands));
                 }
@@ -1303,13 +1331,13 @@ impl StoreCommitCoordinator {
                 "incomplete WAL prevents ownership recovery",
             ));
         }
-        self.recover_page_ownership(store, &ownership_journal)?;
+        Self::recover_page_ownership(coordinator, store, &ownership_journal)?;
 
         if has_page_writes {
             // Do not retain every transaction's page payload while scanning a
             // large WAL. The writer remains open and ownership recovery may
             // append a Finish record, but it does not truncate the journal.
-            for item in WalReader::open(&self.wal_path)?.iter() {
+            for item in WalReader::open(wal_path)?.iter() {
                 let record = match item {
                     Ok((_, record)) => record,
                     Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
@@ -1330,6 +1358,9 @@ impl StoreCommitCoordinator {
             }
         }
 
+        let Some(coordinator) = coordinator else {
+            return Ok(());
+        };
         if applied && store.config.resident_memory_bytes_max.is_some() {
             // The immutable base plus committed WAL overlay is authoritative.
             // Keep the WAL until a paced checkpoint publishes the replacement;
@@ -1343,14 +1374,14 @@ impl StoreCommitCoordinator {
                 .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))?;
-            self.begin_page_ownership_epoch(store, epoch)?;
+            coordinator.begin_page_ownership_epoch(store, epoch)?;
             // Even when the replayed actions leave all B-trees unchanged, the
             // epoch must be in the catalog before its journal can finish.
             store.mark_paged_registry_dirty();
             store
                 .reconcile_replayed_btrees()
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            self.finish_page_ownership_epoch(store, epoch)?;
+            coordinator.finish_page_ownership_epoch(store, epoch)?;
         }
         Ok(())
     }
@@ -1633,6 +1664,9 @@ impl UnifiedStore {
         actions: impl IntoIterator<Item = StoreWalAction>,
         track: bool,
     ) -> Result<(), StoreError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         if deferred_store_wal_capture_active() {
             let captured = capture_deferred_store_wal_actions(actions);
@@ -2002,7 +2036,7 @@ impl UnifiedStore {
             .create_collection_in_memory(name, &self.config.manager_config)
     }
 
-    fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+    pub(super) fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
         let name = Self::canonical_collection(name);
         self.resident.drop_collection_in_memory(name, || {
             if let Some(tree) = self.btree_indices.write().remove(name) {

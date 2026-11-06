@@ -78,7 +78,9 @@ impl UnifiedStore {
             ));
         }
         let _publication = self.vault_publication_lock.lock();
-        if self.config.resident_memory_bytes_max.is_none() || self.commit.is_none() {
+        if self.config.resident_memory_bytes_max.is_none()
+            || (self.commit.is_none() && !self.is_read_only())
+        {
             return Err(StoreError::Serialization(
                 "secondary trees require disk residency and durable page ownership".into(),
             ));
