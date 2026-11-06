@@ -762,6 +762,8 @@ fn restore_flags() -> Vec<FlagSchema> {
         storage_profile_flag(),
         storage_packaging_flag(),
         storage_preset_flag(),
+        FlagSchema::boolean("bounded-disk-residency")
+            .with_description("Keep restored rows within the resolved memory budget"),
         FlagSchema::new("input")
             .with_short('i')
             .with_description("Dump file to read (required)"),
