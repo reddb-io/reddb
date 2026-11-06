@@ -168,6 +168,110 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
 }
 
 #[test]
+fn recovery_refuses_stale_legacy_pager_wal_without_losing_newer_data() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let (root, old_page) = recovery_page_fixture(&source);
+    {
+        let pager = Arc::new(Pager::open_default(&source).unwrap());
+        let catalog = pager.read_page(1).unwrap();
+        let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
+            .unwrap()
+            .unwrap()
+            .format_version;
+        let newer = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(29)]);
+        let encoded =
+            reddb_engine::storage::metadata_codec::serialize_entity_record(&newer, None, format);
+        let tree = BTree::with_root(Arc::clone(&pager), root);
+        tree.insert(&2u64.to_be_bytes(), &encoded).unwrap();
+        assert_eq!(tree.root_page_id(), root);
+        pager.sync().unwrap();
+    }
+    let wal = reddb_file::pager_legacy_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 1,
+                page_id: root,
+                data: old_page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+    }
+    let before = std::fs::read(&source).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    let destination = directory.path().join("rejected");
+    assert!(recover_paged_wal(&source, &destination).is_err());
+    assert!(!destination.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    std::fs::remove_file(&wal).unwrap();
+    let store = UnifiedStore::open(&source).unwrap();
+    assert_eq!(
+        store
+            .get("rows", EntityId::new(2))
+            .unwrap()
+            .data
+            .as_row()
+            .unwrap()
+            .columns,
+        vec![Value::Integer(29)]
+    );
+}
+
+#[test]
+fn recovery_refuses_unmaterialized_multimodel_wal_without_changing_source() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    recovery_page_fixture(&source);
+    let wal = reddb_file::unified_wal_path(&source);
+    for (name, record) in [
+        (
+            "vector",
+            WalRecord::VectorInsert {
+                collection: "embeddings".into(),
+                entity_id: 42,
+                vector: vec![1.0, 2.0],
+            },
+        ),
+        (
+            "probabilistic",
+            WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            },
+        ),
+    ] {
+        {
+            let mut writer = WalWriter::open(&wal).unwrap();
+            writer.append(&record).unwrap();
+            writer.sync().unwrap();
+        }
+        let before = std::fs::read(&source).unwrap();
+        let wal_before = std::fs::read(&wal).unwrap();
+        let destination = directory.path().join(name);
+        let error =
+            recover_paged_wal(&source, &destination).expect_err("runtime data not persisted");
+        assert!(error.to_string().contains("runtime-owned"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+        std::fs::remove_file(&wal).unwrap();
+    }
+}
+
+#[test]
 fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     use reddb_server::storage::wal::{WalRecord, WalWriter};
     let directory = tempfile::tempdir().unwrap();
