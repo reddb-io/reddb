@@ -428,6 +428,10 @@ impl LogicalChangeApplier {
         mode: ApplyMode,
         range_fence: Option<&RangeAuthority>,
     ) -> Result<ApplyOutcome, LogicalApplyError> {
+        // Serialize validation, publication and frontier advancement. The same
+        // mutex also prevents a bookmark notification from being lost between
+        // checking its frontier and entering the condition-variable wait.
+        let _apply = self.apply_wait.0.lock().expect("apply wait mutex");
         let last = self.last_applied_lsn.load(Ordering::Acquire);
         let last_term = self.last_applied_term.load(Ordering::Acquire);
 
@@ -564,9 +568,76 @@ impl LogicalChangeApplier {
             ChangeOperation::Delete => 0,
         };
         let store = db.store();
+        let runtime = db
+            .runtime
+            .get()
+            .and_then(crate::runtime::WeakRuntime::upgrade);
+        let indexes = runtime.as_ref().map(|runtime| runtime.index_store_ref());
+        let _publication = indexes.map(|indexes| indexes.begin_indexed_mutation());
+        let topology = indexes.map(|indexes| indexes.collection_topology_lock(&record.collection));
+        let _topology = topology.as_ref().map(|lock| lock.read());
+        let _storage_publication = store.vault_publication_lock.lock();
+        // Decode before changing either data or indexes. Collect only affected
+        // physical versions, except Refresh which replaces the whole collection.
+        let incoming = record
+            .entity_bytes
+            .as_ref()
+            .map(|bytes| {
+                UnifiedStore::deserialize_entity(bytes, store.format_version())
+                    .map_err(|err| RedDBError::Internal(err.to_string()))
+            })
+            .transpose()?;
+        let mut previous = match record.operation {
+            ChangeOperation::Refresh => store
+                .get_collection(&record.collection)
+                .map(|manager| manager.query_all(|_| true))
+                .unwrap_or_default(),
+            _ => store
+                .get(&record.collection, EntityId::new(record.entity_id))
+                .into_iter()
+                .collect(),
+        };
+        if let Some(entity) = &incoming {
+            if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                previous.extend(
+                    store
+                        .table_row_versions_by_logical_id(&record.collection, entity.logical_id())
+                        .into_iter()
+                        .filter(|version| version.id != entity.id && version.xmax == 0),
+                );
+            }
+        }
+        let capture = (!UnifiedStore::deferred_store_wal_capture_active())
+            .then(|| crate::storage::unified::store::StoreWalCaptureGuard::begin(None));
+        let mut replayed_xid = 0;
         match record.operation {
             ChangeOperation::Delete => {
-                match store.delete(&record.collection, EntityId::new(record.entity_id)) {
+                // Runtime readers may still hold snapshots of this table row.
+                // Retain a durable tombstone until normal MVCC reclamation.
+                let deletion = if let (Some(runtime), Some(entity)) = (
+                    runtime.as_ref(),
+                    previous
+                        .first()
+                        .filter(|entity| matches!(entity.kind, EntityKind::TableRow { .. })),
+                ) {
+                    let mut tombstone = entity.clone();
+                    if tombstone.xmax == 0 {
+                        tombstone.set_xmax(runtime.snapshot_manager().allocate_committed_xid());
+                        let manager = store
+                            .get_collection(&record.collection)
+                            .expect("existing row collection");
+                        manager
+                            .update(tombstone.clone())
+                            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                        store
+                            .persist_entities_to_pager(&record.collection, &[tombstone])
+                            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                    }
+                    Ok(true)
+                } else {
+                    store.delete(&record.collection, EntityId::new(record.entity_id))
+                };
+                match deletion {
                     Ok(true) => {}
                     Ok(false) => {
                         // Target collection existed but no such entity —
@@ -614,7 +685,6 @@ impl LogicalChangeApplier {
                         "replication refresh record missing refresh_records payload".to_string(),
                     )
                 })?;
-                let mut replayed_xid = 0;
                 for bytes in &records {
                     let (entity, _) =
                         UnifiedStore::deserialize_entity_record(bytes, store.format_version())
@@ -624,9 +694,6 @@ impl LogicalChangeApplier {
                 store
                     .refresh_collection_from_records(&record.collection, records)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                if let Some(manager) = store.snapshot_manager.get() {
-                    manager.observe_committed_xid(replayed_xid);
-                }
             }
             ChangeOperation::Insert | ChangeOperation::Update => {
                 let Some(bytes) = &record.entity_bytes else {
@@ -634,8 +701,24 @@ impl LogicalChangeApplier {
                         "replication record missing entity payload".to_string(),
                     ));
                 };
-                let entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
+                let mut entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if matches!(entity.kind, EntityKind::TableRow { .. }) && entity.xmax == 0 {
+                    if let Some(runtime) = &runtime {
+                        // Source and replica allocators are independent. A source
+                        // xid already in a local snapshot's past must not make a
+                        // newly arriving physical version visible retroactively.
+                        if let Some(existing) = previous.iter().find(|old| old.id == entity.id) {
+                            entity.set_xmin(existing.xmin);
+                        } else {
+                            entity.set_xmin(
+                                entity
+                                    .xmin
+                                    .max(runtime.snapshot_manager().allocate_committed_xid()),
+                            );
+                        }
+                    }
+                }
 
                 // Issue #813 — MVCC table-row supersession on the replica.
                 //
@@ -668,12 +751,17 @@ impl LogicalChangeApplier {
                         let manager = store
                             .get_collection(&record.collection)
                             .ok_or_else(|| RedDBError::NotFound(record.collection.clone()))?;
+                        let mut changed = Vec::with_capacity(stale.len());
                         for mut version in stale {
                             version.set_xmax(superseding_xid);
                             manager
-                                .update(version)
+                                .update(version.clone())
                                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                            changed.push(version);
                         }
+                        store
+                            .persist_entities_to_pager(&record.collection, &changed)
+                            .map_err(|err| RedDBError::Internal(err.to_string()))?;
                     }
                 }
 
@@ -686,6 +774,12 @@ impl LogicalChangeApplier {
                         .ok_or_else(|| RedDBError::NotFound(record.collection.clone()))?;
                     manager
                         .update(entity.clone())
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                    store
+                        .persist_entities_to_pager(
+                            &record.collection,
+                            std::slice::from_ref(&entity),
+                        )
                         .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 } else {
                     store
@@ -706,9 +800,56 @@ impl LogicalChangeApplier {
                 // The runtime owns the read snapshot allocator. Logical
                 // replay preserves source xids, so publish their floor only
                 // after the entity and its metadata have been installed.
-                if let Some(manager) = store.snapshot_manager.get() {
-                    manager.observe_committed_xid(entity.xmin.max(entity.xmax));
+                replayed_xid = entity.xmin.max(entity.xmax);
+            }
+        }
+        if let Some(capture) = capture {
+            store
+                .append_deferred_store_wal_actions(capture.finish())
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        }
+        if let Some(manager) = store.snapshot_manager.get() {
+            manager.observe_committed_xid(replayed_xid);
+        }
+        if let Some(indexes) = indexes {
+            let publish = (|| -> Result<(), String> {
+                for entity in &previous {
+                    indexes.index_entity_delete(
+                        &record.collection,
+                        entity.id,
+                        &crate::application::ports::entity_row_fields_snapshot(entity),
+                    )?;
                 }
+                let current = match record.operation {
+                    ChangeOperation::Refresh => store
+                        .get_collection(&record.collection)
+                        .map(|manager| manager.query_all(|entity| entity.xmax == 0))
+                        .unwrap_or_default(),
+                    ChangeOperation::Insert | ChangeOperation::Update => incoming
+                        .into_iter()
+                        .filter(|entity| entity.xmax == 0)
+                        .collect(),
+                    ChangeOperation::Delete => Vec::new(),
+                };
+                for entity in &current {
+                    indexes.index_entity_insert(
+                        &record.collection,
+                        entity.id,
+                        &crate::application::ports::entity_row_fields_snapshot(entity),
+                    )?;
+                }
+                Ok(())
+            })();
+            if let Some(runtime) = &runtime {
+                runtime.invalidate_result_cache_for_table(&record.collection);
+            }
+            if let Err(error) = publish {
+                // A partially repaired index must never answer subsequent
+                // queries. Keep durable declarations for rebuild on restart.
+                for index in indexes.list_indices(&record.collection) {
+                    indexes.drop_index(&index.name, &record.collection);
+                }
+                return Err(RedDBError::Internal(error));
             }
         }
         // Issue #1242 — only reached on successful apply (all early `return

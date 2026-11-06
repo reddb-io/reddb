@@ -15,12 +15,19 @@ use tokio::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_reply_cannot_be_returned_for_the_next_query() {
-    tokio::time::timeout(Duration::from_secs(15), cancellation_scenario())
+    tokio::time::timeout(Duration::from_secs(15), cancellation_scenario(false))
         .await
         .expect("bounded cancellation regression");
 }
 
-async fn cancellation_scenario() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_committed_write_is_not_replayed_or_misattributed() {
+    tokio::time::timeout(Duration::from_secs(15), cancellation_scenario(true))
+        .await
+        .expect("bounded write cancellation regression");
+}
+
+async fn cancellation_scenario(write: bool) {
     let runtime = Arc::new(
         RedDBRuntime::with_options(RedDBOptions::in_memory().with_auth(
             reddb_server::auth::AuthConfig {
@@ -40,8 +47,9 @@ async fn cancellation_scenario() {
         .await
         .expect("isolated listener");
     let server_address = listener.local_addr().expect("server address");
+    let server_runtime = Arc::clone(&runtime);
     let server = tokio::spawn(async move {
-        reddb_server::wire::redwire::start_redwire_listener_on(listener, runtime)
+        reddb_server::wire::redwire::start_redwire_listener_on(listener, server_runtime)
             .await
             .expect("serve");
     });
@@ -88,8 +96,15 @@ async fn cancellation_scenario() {
     );
     armed.store(true, Ordering::SeqCst);
     let first_client = Arc::clone(&client);
-    let first =
-        tokio::spawn(async move { first_client.query("SELECT payload FROM cancellation").await });
+    let first = tokio::spawn(async move {
+        first_client
+            .query(if write {
+                "INSERT INTO cancellation (id, payload) VALUES (8, 'committed once')"
+            } else {
+                "SELECT payload FROM cancellation"
+            })
+            .await
+    });
     received.notified().await;
     first.abort();
     assert!(first
@@ -98,6 +113,17 @@ async fn cancellation_scenario() {
         .is_cancelled());
     release.notify_one();
     let next = client.query("SELECT id FROM cancellation").await;
+    if write {
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM cancellation WHERE id = 8")
+                .expect("inspect committed write")
+                .result
+                .records
+                .len(),
+            1
+        );
+    }
     proxy.abort();
     server.abort();
     match next {
@@ -107,7 +133,11 @@ async fn cancellation_scenario() {
                 ["id"],
                 "cancelled reply was assigned to a different query"
             );
-            assert_eq!(result.rows, [vec![("id".to_owned(), ValueOut::Integer(7))]]);
+            if !write {
+                assert_eq!(result.rows, [vec![("id".to_owned(), ValueOut::Integer(7))]]);
+            } else {
+                assert_eq!(result.rows.len(), 2);
+            }
         }
         Err(error) => assert!(
             matches!(error.code, ErrorCode::Network | ErrorCode::Protocol),

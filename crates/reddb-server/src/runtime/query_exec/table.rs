@@ -612,6 +612,111 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let Some(mut snapshot) = snapshot else {
+        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+    };
+    if snapshot.requires_index_fallback {
+        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+    }
+    let Some(index_store) = index_store else {
+        return execute_runtime_canonical_table_query_inner(db, query, None);
+    };
+    let start = index_store.indexed_mutation_generation();
+    if !indexed_query_can_retry(query)
+        || crate::runtime::function_budget::stored_function_active()
+        || index_store.indexed_mutation_active()
+        || snapshot_index_is_stale(&snapshot)
+    {
+        snapshot.requires_index_fallback = true;
+        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    }
+    let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    if index_store.indexed_mutation_active()
+        || start != index_store.indexed_mutation_generation()
+        || snapshot_index_is_stale(&snapshot)
+    {
+        snapshot.requires_index_fallback = true;
+        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    }
+    result
+}
+
+// The optimistic path may repeat a read when a writer races it. Never repeat
+// arbitrary expressions, subqueries, graph expansion, or metered work.
+fn indexed_query_can_retry(query: &TableQuery) -> bool {
+    use reddb_rql::ast::{Expr, SelectItem, TableSource};
+
+    let plain_source = matches!(query.source, None | Some(TableSource::Name(_)));
+    let plain_select = query.select_items.iter().all(|item| {
+        matches!(
+            item,
+            SelectItem::Wildcard
+                | SelectItem::Expr {
+                    expr: Expr::Column { .. },
+                    ..
+                }
+        )
+    });
+    let plain_columns = query.columns.iter().all(|column| {
+        matches!(
+            column,
+            Projection::All
+                | Projection::Column(_)
+                | Projection::Alias(_, _)
+                | Projection::Field(_, _)
+        )
+    });
+    let plain_filter = effective_table_filter(query)
+        .as_ref()
+        .is_none_or(|filter| !runtime_filter_contains_compare_expr(filter));
+    let plain_where = query.where_expr.as_ref().is_none_or(indexed_pure_expr);
+    plain_source
+        && plain_select
+        && plain_columns
+        && plain_filter
+        && plain_where
+        && query.group_by_exprs.is_empty()
+        && query.group_by.is_empty()
+        && query.having_expr.is_none()
+        && query.having.is_none()
+        && query
+            .order_by
+            .iter()
+            .all(|order| order.expr.as_ref().is_none_or(indexed_pure_expr))
+        && query.expand.is_none()
+        && query.sessionize.is_none()
+        && query.as_of.is_none()
+}
+
+fn indexed_pure_expr(expr: &reddb_rql::ast::Expr) -> bool {
+    use reddb_rql::ast::Expr;
+    match expr {
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => true,
+        Expr::BinaryOp { lhs, rhs, .. } => indexed_pure_expr(lhs) && indexed_pure_expr(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => indexed_pure_expr(operand),
+        Expr::InList { target, values, .. } => {
+            indexed_pure_expr(target) && values.iter().all(indexed_pure_expr)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => indexed_pure_expr(target) && indexed_pure_expr(low) && indexed_pure_expr(high),
+        _ => false,
+    }
+}
+
+fn snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
+    let current = snapshot.manager.fresh_read_snapshot();
+    snapshot.snapshot.xid != current.xid || snapshot.snapshot.in_progress != current.in_progress
+}
+
+fn execute_runtime_canonical_table_query_inner(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);

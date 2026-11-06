@@ -1491,6 +1491,18 @@ pub struct RedDBRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Storage replay can reach the owning runtime without keeping it alive.
+pub(crate) struct WeakRuntime(std::sync::Weak<RuntimeInner>);
+
+impl WeakRuntime {
+    pub(crate) fn upgrade(&self) -> Option<RedDBRuntime> {
+        self.0.upgrade().map(|inner| RedDBRuntime {
+            background_tasks: None,
+            inner,
+        })
+    }
+}
+
 impl RedDBRuntime {
     pub(crate) fn execution_admission(
         &self,

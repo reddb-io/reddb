@@ -1972,6 +1972,7 @@ impl RedDBRuntime {
     }
 
     fn truncate_collection_entities(&self, name: &str) -> RedDBResult<u64> {
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(name) else {
             return Ok(0);

@@ -90,13 +90,13 @@ pub(crate) struct DeferredStoreWalActions {
     pub(super) actions: Vec<StoreWalAction>,
 }
 
-pub(super) struct StoreWalCaptureGuard<'a> {
+pub(crate) struct StoreWalCaptureGuard<'a> {
     active: bool,
     session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
 }
 
 impl<'a> StoreWalCaptureGuard<'a> {
-    pub(super) fn begin(
+    pub(crate) fn begin(
         session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
     ) -> Self {
         assert!(
@@ -110,7 +110,7 @@ impl<'a> StoreWalCaptureGuard<'a> {
         }
     }
 
-    pub(super) fn finish(mut self) -> DeferredStoreWalActions {
+    pub(crate) fn finish(mut self) -> DeferredStoreWalActions {
         let actions = take_deferred_store_wal_capture();
         self.active = false;
         actions
