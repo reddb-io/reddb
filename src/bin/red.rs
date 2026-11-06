@@ -2087,6 +2087,13 @@ fn main() {
                 }
                 _ => store.list_collections(),
             };
+            // Keep the stable dump identity for configuration rows even when
+            // the store lists their canonical internal collection name.
+            for name in &mut targets {
+                if name == "red.config" {
+                    *name = "red_config".to_string();
+                }
+            }
             targets.sort();
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
