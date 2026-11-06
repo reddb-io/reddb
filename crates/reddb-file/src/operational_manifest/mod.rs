@@ -18,6 +18,7 @@ use crate::append_only_segment::{
 };
 
 mod fork;
+mod offline;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
 // path (`operational_manifest::ForkInfo`, etc.) is unchanged.

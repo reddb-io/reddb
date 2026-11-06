@@ -122,6 +122,19 @@ impl Source {
         )?;
         Ok(page)
     }
+    pub fn verify_superblocks(&self) -> Result<()> {
+        let mut zone = [0; f::PAGED_SUPERBLOCK_ZONE_SIZE];
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut zone)?;
+        for (copy, slot) in zone.chunks_exact(f::PAGED_SUPERBLOCK_SLOT_SIZE).enumerate() {
+            ensure(
+                f::paged_superblock_slot_generation(slot, copy).is_some(),
+                "superblock damage requires separate recovery",
+            )?;
+        }
+        Ok(())
+    }
     pub fn claim(&self, id: u32) -> Result<()> {
         ensure(
             id >= FIRST_ALLOCATABLE_PAGE && id < self.header.page_count,

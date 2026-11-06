@@ -16,6 +16,23 @@ assets, logical correspondence between indexes and rows, or replicated and
 serverless state. It is not a complete store scrub or a salvage operation.
 It applies the same source restrictions and per-value allowance listed below.
 
+If a closed, checkpointed store has damage limited to secondary index trees,
+the following operation copies verified data and surviving trees to a new
+directory and discards damaged secondary roots for rebuilding on reopen:
+
+```sh
+red salvage-paged-indexes --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+`salvage.json` lists the discarded roots and their reasons. Verify the recovered
+database and its indexes before serving it; retain the source. Data-tree,
+primary-key tree, catalog and pending-WAL corruption are not recovered by
+this command. An authenticated Vault, nonempty logical WAL, replication slot
+or audit files, operational segments and nonempty operational collection
+files are refused because this operation cannot verify them. The compaction qualification boundaries below
+also apply. A failed attempt may leave a diagnostic directory but will not
+publish the output file.
+
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim
 historical physical allocation:

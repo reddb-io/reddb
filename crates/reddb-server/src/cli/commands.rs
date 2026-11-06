@@ -144,6 +144,15 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: vec![FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged")],
     },
     CommandDef {
+      name: "salvage-paged-indexes",
+      summary: "Recover a paged store with corrupt secondary indexes into a fresh directory",
+      usage: "red salvage-paged-indexes --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -1015,6 +1024,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
         ("scrub-paged-trees".to_string(), vec![]),
+        ("salvage-paged-indexes".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),

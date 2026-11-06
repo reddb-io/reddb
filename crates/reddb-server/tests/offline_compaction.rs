@@ -1,4 +1,4 @@
-use reddb_server::storage::compact::{compact_paged, scrub_paged_trees};
+use reddb_server::storage::compact::{compact_paged, salvage_paged_indexes, scrub_paged_trees};
 use reddb_server::storage::engine::{BTree, Page, PageType, Pager, PagerConfig, HEADER_SIZE};
 use std::sync::Arc;
 
@@ -158,6 +158,9 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
     assert_eq!(report.findings.len(), 1);
     assert_eq!(report.findings[0].collection, "rows");
     assert_eq!(report.findings[0].root_page, root);
+    let destination = directory.path().join("unsafe-recovery");
+    assert!(salvage_paged_indexes(&source, &destination).is_err());
+    assert!(!destination.exists());
     assert_eq!(std::fs::read(&source).expect("preserved damage"), damaged);
 }
 
@@ -200,6 +203,7 @@ fn compact_refuses_busy_source_and_existing_destination() {
     let destination = directory.path().join("compacted");
     let pager = Pager::open_default(&source).expect("writer");
     assert!(scrub_paged_trees(&source).is_err());
+    assert!(salvage_paged_indexes(&source, &destination).is_err());
     assert!(compact_paged(&source, &destination).is_err());
     assert!(!destination.exists());
     drop(pager);
@@ -280,6 +284,31 @@ fn compact_preserves_chained_authenticated_vault_and_native_blob() {
 }
 
 #[test]
+fn index_salvage_refuses_unverified_vault() {
+    use reddb_server::auth::vault::{KeyPair, Vault, VaultState};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let destination = directory.path().join("recovered");
+    fixture(&source);
+    let pager = Pager::open_default(&source).expect("pager");
+    let certificate = KeyPair::generate().certificate_hex();
+    let vault = Vault::with_certificate(&pager, &certificate).expect("vault");
+    let mut state = VaultState {
+        bootstrapped: true,
+        ..VaultState::default()
+    };
+    state.kv.insert("red.secret".into(), "secret".into());
+    vault.save(&pager, &state).expect("save vault");
+    pager.sync().expect("checkpoint");
+    drop(pager);
+    let image = std::fs::read(&source).unwrap();
+    let error = salvage_paged_indexes(&source, &destination).expect_err("unverified vault");
+    assert!(error.to_string().contains("vault"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), image);
+}
+
+#[test]
 fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     use std::io::{Seek, SeekFrom, Write};
     let directory = tempfile::tempdir().expect("directory");
@@ -294,6 +323,7 @@ fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
         .to_string()
         .contains("WAL"));
     let destination = directory.path().join("compacted");
+    assert!(salvage_paged_indexes(&source, &destination).is_err());
     assert!(compact_paged(&source, &destination)
         .expect_err("pending WAL")
         .to_string()
@@ -385,6 +415,228 @@ fn compact_real_runtime_preserves_resume_indexes_and_subsequent_writes() {
             .graceful_shutdown(false)
             .expect("post-compact shutdown");
     }
+}
+
+#[test]
+fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE records (id INT, value TEXT)")
+            .unwrap();
+        runtime
+            .execute_query("CREATE INDEX record_value ON records (value) USING HASH")
+            .unwrap();
+        runtime
+            .execute_query("CREATE INDEX record_id ON records (id) USING HASH")
+            .unwrap();
+        for id in 0..80 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO records (id, value) VALUES ({id}, 'value-{id}')"
+                ))
+                .unwrap();
+        }
+        runtime
+            .execute_query("UPDATE records SET value = 'changed' WHERE id = 10")
+            .unwrap();
+        runtime
+            .execute_query("DELETE FROM records WHERE id = 20")
+            .unwrap();
+        runtime.graceful_shutdown(false).expect("checkpoint");
+    }
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("pager");
+    let catalog = pager.read_page(1).expect("catalog");
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .expect("decode catalog")
+        .expect("resume");
+    let root = resume.collections["records"].secondary_indices["record_value"].root_page;
+    assert_ne!(root, 0);
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(root) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let damaged = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("recovered");
+    let report = salvage_paged_indexes(&source, &destination).expect("recover index");
+    assert_eq!(report.indexes.len(), 1);
+    assert_eq!(report.indexes[0].collection, "records");
+    assert_eq!(report.indexes[0].index, "record_value");
+    let saved = std::fs::read_to_string(destination.join("salvage.json")).expect("loss report");
+    assert!(saved.contains("record_value"));
+    assert!(saved.contains("discarded_for_rebuild"));
+    assert_eq!(std::fs::read(&source).unwrap(), damaged);
+    let recovered = RedDBOptions::persistent(destination.join("source.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    for round in 0..2 {
+        let runtime = RedDBRuntime::with_options(recovered.clone()).expect("open recovered store");
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM records")
+            .unwrap();
+        assert_eq!(
+            count.result.records[0].get("n").unwrap().display_string(),
+            "79"
+        );
+        let row = runtime
+            .execute_query("SELECT id FROM records WHERE value = 'changed'")
+            .unwrap();
+        assert_eq!(row.result.records.len(), 1);
+        assert_eq!(
+            row.result.records[0].get("id").unwrap().display_string(),
+            "10"
+        );
+        let explain = runtime
+            .explain_query("SELECT id FROM records WHERE value = 'changed'")
+            .expect("explain recovered index");
+        let mut pending = vec![&explain.logical_plan.root];
+        let mut found_index = false;
+        while let Some(node) = pending.pop() {
+            found_index |= node.operator == "index_seek";
+            pending.extend(&node.children);
+        }
+        assert!(
+            found_index,
+            "recovered query should choose an index seek: {:?}",
+            explain.logical_plan.root
+        );
+        assert!(runtime
+            .execute_query("SELECT id FROM records WHERE value = 'value-20'")
+            .unwrap()
+            .result
+            .records
+            .is_empty());
+        runtime
+            .graceful_shutdown(false)
+            .expect("checkpoint recovered store");
+        drop(runtime);
+        if round == 0 {
+            let pager = Pager::open(
+                destination.join("source.rdb"),
+                PagerConfig {
+                    read_only: true,
+                    create: false,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("read recovered catalog");
+            let page = pager.read_page(1).expect("catalog");
+            let resume = reddb_file::native_resume::decode_catalog_resume(page.content())
+                .unwrap()
+                .expect("resume");
+            assert!(
+                resume.collections["records"]
+                    .secondary_indices
+                    .contains_key("record_value"),
+                "index should be rebuilt before publication"
+            );
+            assert!(resume.collections["records"]
+                .secondary_indices
+                .contains_key("record_id"));
+        }
+    }
+
+    // A damaged operational manifest must not be copied as if it were verified.
+    let manifest = source
+        .with_file_name("source.rdb.ops")
+        .join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest).unwrap();
+    let mut bad_manifest = manifest_bytes.clone();
+    let checksum = bad_manifest
+        .windows(b"checksum".len())
+        .position(|part| part == b"checksum")
+        .unwrap();
+    let digit = (checksum + b"checksum".len()..bad_manifest.len())
+        .find(|&i| bad_manifest[i].is_ascii_hexdigit())
+        .unwrap();
+    bad_manifest[digit] = if bad_manifest[digit] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    std::fs::write(&manifest, bad_manifest).unwrap();
+    let rejected = directory.path().join("rejected-manifest");
+    assert!(salvage_paged_indexes(&source, &rejected).is_err());
+    assert!(!rejected.exists());
+    std::fs::write(&manifest, manifest_bytes).unwrap();
+
+    // A valid page paired with the wrong published digest is also unsafe.
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            disk_residency: true,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("open for metadata fault injection");
+    let mut physical = pager.physical_header().unwrap();
+    assert_ne!(physical.manifest_page, 0);
+    physical.manifest_checksum ^= 1;
+    pager.update_physical_header(physical).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+    let rejected = directory.path().join("rejected-metadata");
+    let err = salvage_paged_indexes(&source, &rejected).expect_err("metadata digest mismatch");
+    assert!(err.to_string().contains("metadata"), "{err}");
+    assert!(!rejected.exists());
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            disk_residency: true,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("restore metadata");
+    physical.manifest_checksum ^= 1;
+    pager.update_physical_header(physical).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+
+    // A second damaged authority must not be silently repaired or omitted
+    // from a report that only describes index recovery.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(100)).unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let damaged_authority = std::fs::read(&source).unwrap();
+    let rejected = directory.path().join("rejected-superblock");
+    assert!(salvage_paged_indexes(&source, &rejected).is_err());
+    assert!(!rejected.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), damaged_authority);
 }
 
 #[test]

@@ -17,9 +17,11 @@ use std::{
 };
 mod assets;
 mod catalog;
+mod salvage;
 mod scrub;
 mod source;
 use catalog::Catalog;
+pub use salvage::{salvage_paged_indexes, PagedIndexSalvageFinding, PagedIndexSalvageReport};
 pub use scrub::{scrub_paged_trees, PagedTreeFinding, PagedTreeScrubReport};
 use source::Source;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -58,14 +60,42 @@ impl CompactionReport {
 /// directory. On failure the source is unchanged and the incomplete output is
 /// retained for diagnosis. This does not switch a serving database or vacuum MVCC.
 pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionReport> {
+    compact_paged_inner(source, destination, None)
+}
+
+fn compact_paged_inner(
+    source: &Path,
+    destination: &Path,
+    salvage: Option<&PagedIndexSalvageReport>,
+) -> Result<CompactionReport> {
     let source_path = source.canonicalize()?;
     let source = Arc::new(Source::open(&source_path)?);
-    let catalog = Catalog::read(&source)?;
+    let mut catalog = Catalog::read(&source)?;
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
     )?;
+    if let Some(salvage) = salvage {
+        let resume = catalog
+            .resume
+            .as_mut()
+            .ok_or("index recovery requires a resume catalog")?;
+        for finding in &salvage.indexes {
+            let state = resume
+                .collections
+                .get_mut(&finding.collection)
+                .ok_or("index collection missing from resume")?;
+            let index = state
+                .secondary_indices
+                .remove(&finding.index)
+                .ok_or("index missing from resume")?;
+            ensure(
+                index.root_page == finding.root_page,
+                "index root changed during salvage",
+            )?;
+        }
+    }
     let name = source_path
         .file_name()
         .ok_or("source filename is missing")?;
@@ -190,6 +220,12 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
         &destination.join("compaction.json"),
         report.machine_json().as_bytes(),
     )?;
+    if let Some(salvage) = salvage {
+        write_new(
+            &destination.join("salvage.json"),
+            salvage.machine_json().as_bytes(),
+        )?;
+    }
     sync_directory(destination)?;
     // hard_link is create-new even if an unexpected file appears during work.
     std::fs::hard_link(&temporary, &output)?;
