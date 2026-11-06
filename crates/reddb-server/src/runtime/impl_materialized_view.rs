@@ -84,6 +84,7 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         let collections = store.list_collections();
+        let mut append_only_checked = false;
         for name in collections {
             let Some(contract) = self.inner.db.collection_contract(&name) else {
                 continue;
@@ -92,7 +93,9 @@ impl RedDBRuntime {
                 continue;
             };
             if contract.append_only {
-                let _ = self.retire_expired_append_only_segments(now_ms);
+                if !append_only_checked {
+                    append_only_checked = self.retire_expired_append_only_segments(now_ms).is_ok();
+                }
                 continue;
             }
             let Some(ts_column) =
