@@ -44,6 +44,7 @@ fn vector_cold_start_child() {
     let start = Instant::now();
     let runtime = RedDBRuntime::with_options(options(Path::new(&path))).unwrap();
     let open = start.elapsed();
+    assert!(runtime.db().is_paged());
     let literal = vector(0, dim)
         .iter()
         .map(ToString::to_string)
@@ -102,6 +103,7 @@ fn vector_cold_start_benchmark() {
             .unwrap();
     {
         let runtime = RedDBRuntime::with_options(options(&path)).unwrap();
+        assert!(runtime.db().is_paged());
         runtime
             .execute_query(&format!(
                 "CREATE COLLECTION bench_vectors KIND vector.turbo DIM {dim} METRIC cosine"
@@ -119,7 +121,9 @@ fn vector_cold_start_benchmark() {
     }
     // A reopened runtime builds its index from the persisted entities, then
     // publishes a populated snapshot. No setup time is included in timings.
-    std::fs::remove_file(&snapshot).ok();
+    if snapshot.exists() {
+        std::fs::remove_file(&snapshot).unwrap();
+    }
     {
         let runtime = RedDBRuntime::with_options(options(&path)).unwrap();
         let literal = vector(0, dim)
@@ -149,8 +153,13 @@ fn vector_cold_start_benchmark() {
     );
     for mode in ["snapshot", "no_snapshot"] {
         for iteration in 0..3 {
-            if mode == "no_snapshot" {
-                std::fs::remove_file(&snapshot).ok();
+            if mode == "no_snapshot" && snapshot.exists() {
+                std::fs::remove_file(&snapshot).unwrap();
+            } else if mode == "snapshot" {
+                assert!(
+                    snapshot.exists(),
+                    "snapshot must exist for each snapshot run"
+                );
             }
             let result = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
