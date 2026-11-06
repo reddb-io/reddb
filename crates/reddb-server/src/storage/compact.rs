@@ -65,7 +65,17 @@ impl CompactionReport {
 /// directory. On failure the source is unchanged and the incomplete output is
 /// retained for diagnosis. This does not switch a serving database or vacuum MVCC.
 pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionReport> {
-    compact_paged_inner(source, destination, None, None)
+    compact_paged_inner(source, destination, None, None, false)
+}
+
+/// Rewrite a closed store while explicitly retiring the obsolete physical
+/// `red_config` identity. The canonical `red.config` tree is preserved as-is;
+/// the source remains unchanged and ordinary compaction never enables this.
+pub fn compact_paged_canonical_system_config(
+    source: &Path,
+    destination: &Path,
+) -> Result<CompactionReport> {
+    compact_paged_inner(source, destination, None, None, true)
 }
 
 /// Replay a supported pending unified WAL only against an isolated copy, then
@@ -509,6 +519,7 @@ fn compact_paged_inner(
     destination: &Path,
     salvage: Option<&PagedIndexSalvageReport>,
     lost_collections: Option<&PagedCollectionSalvageReport>,
+    retain_canonical_system_config: bool,
 ) -> Result<CompactionReport> {
     let source_path = source.canonicalize()?;
     let parent = destination
@@ -529,6 +540,9 @@ fn compact_paged_inner(
     }
     let source = Arc::new(Source::open(&source_path)?);
     let mut catalog = Catalog::read(&source)?;
+    if retain_canonical_system_config {
+        catalog.retain_canonical_system_config()?;
+    }
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             || catalog.resume.is_some(),
@@ -784,6 +798,13 @@ fn compact_paged_inner(
     };
     drop(reopened);
     copy_sidecars(&source_path, &output, false)?;
+    if retain_canonical_system_config {
+        let operational_path = output.with_file_name(format!("{}.ops", f::data_file_name(&output)));
+        if operational_path.exists() {
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(&output)
+                .reconcile_collection_collisions(&[("red.config", "red_config", "red.config")])?;
+        }
+    }
     write_new(
         &destination.join("compaction.json"),
         report.machine_json().as_bytes(),

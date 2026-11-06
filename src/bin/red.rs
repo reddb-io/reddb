@@ -3305,10 +3305,17 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
         let destination = flag_string(flags, "destination-dir")
             .filter(|value| !value.is_empty())
             .ok_or("--destination-dir is required and must not exist")?;
-        reddb_server::storage::compact::compact_paged(
-            std::path::Path::new(&source),
-            std::path::Path::new(&destination),
-        )
+        if flag_bool(flags, "retain-canonical-system-config") {
+            reddb_server::storage::compact::compact_paged_canonical_system_config(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        } else {
+            reddb_server::storage::compact::compact_paged(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        }
     })();
     match result {
         Ok(report) => {
