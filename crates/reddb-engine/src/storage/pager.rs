@@ -79,25 +79,24 @@ impl std::fmt::Display for PagerError {
                 f,
                 "superblock zone of {} is unrecoverable: both ping-pong copies failed \
                  validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with red salvage \
-                 (ADR 0074 §4); it reads the damaged file without writing to it and \
-                 reports what it could not verify.",
+                 will not be opened. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::ManifestZoneCorrupt(path) => write!(
                 f,
                 "internal manifest zone of {} failed its checksum: the zone that names \
                  collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
-                 and `red salvage` to extract what survives (ADR 0074 §2/§4).",
+                 rows are returned. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::DwbZoneCorrupt(path) => write!(
                 f,
                 "double-write zone of {} failed validation: page recovery cannot prove \
                  whether the protected in-place write completed. The store will not be opened \
-                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
-                 rows (ADR 0074 §2/§4).",
+                 silently. Preserve the database and its recovery files; restore from \
+                 a verified backup.",
                 path.display()
             ),
             Self::LegacySidecarStore { sidecar } => write!(
@@ -432,8 +431,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// The newest valid superblock copy, with its slot image.
     ///
     /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
-    /// §2): the store does not open, and the error names the zone and points
-    /// at salvage rather than panicking or silently re-initialising.
+    /// §2): the store does not open, and the error names the zone rather
+    /// than panicking or silently re-initialising.
     #[doc(hidden)]
     pub fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
         let zone = self.read_superblock_zone()?;
@@ -1636,5 +1635,26 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         *self.header_dirty_lock()? = true;
         drop(header);
         self.write_header_and_sync()
+    }
+}
+
+#[cfg(test)]
+mod integrity_guidance_tests {
+    use super::PagerError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn damaged_paged_zones_recommend_preserving_files_and_a_verified_backup() {
+        for error in [
+            PagerError::SuperblockZoneUnrecoverable(PathBuf::from("data.rdb")),
+            PagerError::ManifestZoneCorrupt(PathBuf::from("data.rdb")),
+            PagerError::DwbZoneCorrupt(PathBuf::from("data.rdb")),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("Preserve the database"), "{message}");
+            assert!(message.contains("verified backup"), "{message}");
+            assert!(!message.contains("salvage"), "{message}");
+            assert!(!message.contains("SCRUB"), "{message}");
+        }
     }
 }

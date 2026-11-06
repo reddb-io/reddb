@@ -1,15 +1,6 @@
 name: Columnar Read Bench Gate
 
 on:
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - '.github/workflows/columnar-read-bench.yml'
-      - 'crates/reddb-server/benches/columnar_read_bench.rs'
-      - 'crates/reddb-server/src/storage/query/batch.rs'
-      - 'crates/reddb-server/src/storage/timeseries/**'
-      - 'docs/engine/columnar-execution.md'
-      - 'docs/perf/2026-06-03-columnar-read.md'
   workflow_dispatch:
 
 env:

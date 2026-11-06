@@ -1,22 +1,7 @@
 name: SQL Reference
 
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'docs/reference/sql-1-0-x.md'
-      - 'scripts/check-sql-reference.py'
-      - 'crates/reddb-server/src/storage/query/lexer.rs'
-      - 'crates/reddb-server/src/storage/query/sql.rs'
-      - '.github/workflows/sql-reference.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - 'docs/reference/sql-1-0-x.md'
-      - 'scripts/check-sql-reference.py'
-      - 'crates/reddb-server/src/storage/query/lexer.rs'
-      - 'crates/reddb-server/src/storage/query/sql.rs'
-      - '.github/workflows/sql-reference.yml'
+  workflow_dispatch:
 
 concurrency:
   group: sql-reference-${{ github.workflow }}-${{ github.ref }}

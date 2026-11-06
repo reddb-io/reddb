@@ -2789,6 +2789,7 @@ fn ensure_event_target_queue(runtime: &RedDBRuntime, queue: &str) -> RedDBResult
     store
         .create_collection(queue)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    crate::runtime::queue_storage_index::prepare_queue(runtime, queue)?;
     runtime
         .inner
         .db

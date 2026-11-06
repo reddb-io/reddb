@@ -272,6 +272,76 @@ impl<V: Vfs> OperationalManifest<V> {
         self.prepare_collection_create(name)?.publish()
     }
 
+    /// Atomically change manifest identities while retaining their physical files.
+    /// The caller must fence writers and coordinate the paged catalogue and WAL.
+    /// Repeating a completed operation is a no-op.
+    pub fn rename_collections(&self, names: &[(&str, &str)]) -> io::Result<()> {
+        let Some(mut manifest) = self.load_current()? else {
+            return Ok(());
+        };
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for &(source, target) in names {
+            if source == target || !sources.insert(source) || !targets.insert(target) {
+                return Err(invalid_data("invalid collection rename mapping"));
+            }
+        }
+        if sources.iter().any(|name| targets.contains(name)) {
+            return Err(invalid_data("overlapping collection rename mappings"));
+        }
+
+        for &(source, target) in names {
+            let source_exists = manifest.collections.contains_key(source)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == source)
+                || manifest.append_only_retired.contains_key(source);
+            if !source_exists {
+                continue;
+            }
+            if manifest.collections.contains_key(target)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == target)
+                || manifest.append_only_retired.contains_key(target)
+            {
+                return Err(invalid_data(format!(
+                    "collection rename collision: {source} and {target}"
+                )));
+            }
+        }
+
+        let mut changed = false;
+        for &(source, target) in names {
+            if let Some(entry) = manifest.collections.remove(source) {
+                manifest.collections.insert(target.to_string(), entry);
+                changed = true;
+            }
+            for segment in &mut manifest.append_only_segments {
+                if segment.collection == source {
+                    segment.collection = target.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(retired) = manifest.append_only_retired.remove(source) {
+                manifest
+                    .append_only_retired
+                    .insert(target.to_string(), retired);
+                changed = true;
+            }
+        }
+        if changed {
+            manifest.generation = manifest
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("manifest generation overflow"))?;
+            self.publish(&manifest)?;
+        }
+        Ok(())
+    }
+
     pub fn prepare_collection_create(&self, name: &str) -> io::Result<PreparedCollectionCreate<V>> {
         self.ensure_dirs()?;
         let manifest = self.load_current()?.unwrap_or_else(empty_manifest);
@@ -286,6 +356,16 @@ impl<V: Vfs> OperationalManifest<V> {
         }
 
         let path = self.collection_file_name(name);
+        if manifest
+            .collections
+            .values()
+            .any(|entry| entry.path == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("collection artifact already belongs to another collection: {name}"),
+            ));
+        }
         self.prepare_collection_file_by_name(&path)?;
         Ok(PreparedCollectionCreate {
             manifest: self.clone(),
@@ -302,6 +382,16 @@ impl<V: Vfs> OperationalManifest<V> {
             return Ok(());
         }
         let path = self.collection_file_name(name);
+        if manifest
+            .collections
+            .values()
+            .any(|entry| entry.path == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("collection artifact already belongs to another collection: {name}"),
+            ));
+        }
         manifest.collections.insert(
             name.to_string(),
             CollectionEntry {
@@ -1443,6 +1533,121 @@ mod tests {
             .unwrap();
         assert!(!manifest.collection_path_for_test("tenant/a b").exists());
         assert!(manifest.read_generation_for_test().unwrap() > first_generation);
+    }
+
+    #[test]
+    fn collection_rename_keeps_files_and_is_idempotent() {
+        let path = temp_db_path("rename");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.create_collection("red_queue_meta").unwrap();
+        let old_path = manifest.collection_path_for_test("red_queue_meta");
+        fs::write(&old_path, b"preserved").unwrap();
+        let generation = manifest.read_generation_for_test().unwrap();
+
+        manifest
+            .rename_collections(&[("red_queue_meta", "red.queue.meta")])
+            .unwrap();
+        let published = manifest.load_current().unwrap().unwrap();
+        assert!(!published.collections.contains_key("red_queue_meta"));
+        assert_eq!(
+            published.collections["red.queue.meta"].path,
+            "red_queue_meta.rcol"
+        );
+        assert_eq!(fs::read(&old_path).unwrap(), b"preserved");
+        assert_eq!(published.generation, generation + 1);
+        assert_eq!(
+            manifest
+                .create_collection("red_queue_meta")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        manifest
+            .recover_or_bootstrap(&["red.queue.meta".into()])
+            .unwrap();
+        manifest
+            .rename_collections(&[("red_queue_meta", "red.queue.meta")])
+            .unwrap();
+        assert_eq!(manifest.read_generation_for_test().unwrap(), generation + 1);
+        assert_eq!(fs::read(&old_path).unwrap(), b"preserved");
+    }
+
+    #[test]
+    fn collection_rename_collision_rejects_the_whole_batch() {
+        let path = temp_db_path("rename_collision");
+        let manifest = OperationalManifest::for_db_path(&path);
+        for name in ["red_config", "red_queue_meta", "red.queue.meta"] {
+            manifest.create_collection(name).unwrap();
+        }
+        let before = fs::read(manifest.root.join(MANIFEST_FILE)).unwrap();
+        assert!(manifest
+            .rename_collections(&[
+                ("red_config", "red.config"),
+                ("red_queue_meta", "red.queue.meta"),
+            ])
+            .is_err());
+        assert_eq!(fs::read(manifest.root.join(MANIFEST_FILE)).unwrap(), before);
+        let state = manifest.load_current().unwrap().unwrap();
+        assert!(state.collections.contains_key("red_config"));
+        assert!(!state.collections.contains_key("red.config"));
+    }
+
+    #[test]
+    fn collection_rename_preserves_a_live_shared_fork() {
+        let path = temp_db_path("rename_shared_fork");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.create_collection("red_config").unwrap();
+        manifest.create_fork("shared", 1).unwrap();
+        manifest
+            .rename_collections(&[("red_config", "red.config")])
+            .unwrap();
+        let parent = manifest.load_current().unwrap().unwrap();
+        assert!(parent.collections.contains_key("red.config"));
+        assert!(!parent.collections.contains_key("red_config"));
+
+        let fork = manifest.fork_handle("shared");
+        let before = fork.load_current().unwrap().unwrap();
+        let source = before.collections["red_config"].source.clone();
+        fork.rename_collections(&[("red_config", "red.config")])
+            .unwrap();
+        let after = fork.load_current().unwrap().unwrap();
+        assert_eq!(after.collections["red.config"].source, source);
+        assert!(after.fork_origin.is_some());
+    }
+
+    #[test]
+    fn renamed_collection_keeps_fork_isolation_and_drop_uses_recorded_path() {
+        let path = temp_db_path("rename_then_fork");
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.create_collection("red_config").unwrap();
+        let old_path = manifest.collection_path_for_test("red_config");
+        fs::write(&old_path, b"before fork").unwrap();
+        manifest
+            .rename_collections(&[("red_config", "red.config")])
+            .unwrap();
+        manifest.create_fork("child", 1).unwrap();
+        manifest
+            .materialize_forks_before_write("red.config")
+            .unwrap();
+        fs::write(&old_path, b"after fork").unwrap();
+        let fork = manifest.fork_handle("child");
+        let child = fork.load_current().unwrap().unwrap();
+        let entry = &child.collections["red.config"];
+        assert!(entry.source.is_none());
+        assert_eq!(
+            fs::read(fork.collections_dir().join(&entry.path)).unwrap(),
+            b"before fork"
+        );
+        manifest
+            .prepare_collection_drop("red.config")
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(!old_path.exists());
+        assert_eq!(
+            fs::read(fork.collections_dir().join(&entry.path)).unwrap(),
+            b"before fork"
+        );
     }
 
     #[test]

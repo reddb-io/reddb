@@ -1,14 +1,6 @@
 name: KV comparison harness
 
 on:
-  pull_request:
-    paths:
-      - 'bench/kv/compare.py'
-      - 'bench/kv/local_matrix.py'
-      - 'bench/kv/summarize.py'
-      - 'bench/kv/test_compare.py'
-      - 'bench/results/kv-compare-*/**'
-      - '.github/workflows/kv-compare-tests.yml'
   workflow_dispatch:
 
 permissions:

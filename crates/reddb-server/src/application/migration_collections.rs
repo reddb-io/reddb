@@ -7,10 +7,10 @@
 
 /// Migration definitions: id, name, status, kind, body, author,
 /// created_at, applied_at, rows_total, rows_processed, vcs_commit_hash.
-pub const MIGRATIONS: &str = "red_migrations";
+pub const MIGRATIONS: &str = "red.migration.definitions";
 
 /// Dependency edges between migrations: migration_id, depends_on_id, inferred.
-pub const MIGRATION_DEPS: &str = "red_migration_deps";
+pub const MIGRATION_DEPS: &str = "red.migration.dependencies";
 
 /// All migration collections, in bootstrap order.
 pub const ALL: &[&str] = &[MIGRATIONS, MIGRATION_DEPS];

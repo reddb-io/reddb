@@ -43,6 +43,7 @@ class Engine:
     def start(self, preset):
         assert self.process is None, 'Owned writer must be stopped before reopening'
         self.boots += 1
+        started = time.monotonic()
         command = [self.binary, 'server', '--path', str(self.root / 'data.rdb'),
                    '--http', '--http-bind', f'127.0.0.1:{self.http_port}',
                    '--wire-bind', f'127.0.0.1:{self.wire_port}',
@@ -60,7 +61,7 @@ class Engine:
             try:
                 with urllib.request.urlopen(self.origin + '/health/ready', timeout=.25) as response:
                     if response.status == 200:
-                        return
+                        return started, time.monotonic()
             except (OSError, urllib.error.URLError):
                 time.sleep(.05)
         raise RuntimeError('Owned engine did not become ready within 45 seconds')
@@ -111,6 +112,8 @@ def verify(engine, expected, padding):
     assert all(models.get(name) == 'table' for name in padding), 'Overflow catalog changed'
     assert engine.query('SELECT id, balance FROM financial_fixture ORDER BY id') == [
         {'id': 1, 'balance': 1100}, {'id': 2, 'balance': -1100}], 'Acknowledged table changed'
+    indexes = engine.query('SHOW INDEXES ON financial_fixture')
+    assert any(row.get('name') == 'financial_balance_idx' for row in indexes), indexes
     for name, values in expected.items():
         assert models[name] == 'kv', f'{name}: model changed: {models}'
         for key, value in values.items():
@@ -124,12 +127,40 @@ def verify(engine, expected, padding):
             assert actual == value, f'{name}.{key}: acknowledged value changed'
 
 
+def process_counters(process):
+    counters = {'peakRssBytes': None, 'readBytes': None, 'readSyscallBytes': None}
+    try:
+        for line in Path(f'/proc/{process.pid}/status').read_text().splitlines():
+            if line.startswith('VmHWM:'):
+                counters['peakRssBytes'] = int(line.split()[1]) * 1024
+        for line in Path(f'/proc/{process.pid}/io').read_text().splitlines():
+            name, value = line.split(':', 1)
+            if name == 'read_bytes':
+                counters['readBytes'] = int(value)
+            elif name == 'rchar':
+                counters['readSyscallBytes'] = int(value)
+    except OSError:
+        pass  # Counters are optional and unavailable on some hosts.
+    return counters
+
+
+def reopen_and_measure(engine, preset):
+    started, ready = engine.start(preset)
+    rows = engine.query('SELECT id, balance FROM financial_fixture WHERE balance = 1100')
+    first_result = time.monotonic()
+    assert rows == [{'id': 1, 'balance': 1100}], f'First query returned {rows}'
+    return {'readySeconds': ready - started, 'firstQuerySeconds': first_result - ready,
+            'startToFirstResultSeconds': first_result - started,
+            **process_counters(engine.process)}
+
+
 def run_case(binary, output, name, preset, existing_paged, catalog_entries=0):
     root = output / name
     root.mkdir()
     engine = Engine(binary, root)
     receipt = {'scenario': name, 'transport': 'RedWire', 'passed': False,
-               'explicitCheckpointsBetweenKvInitializationAndKill': 0, 'kills': 0, 'verifiedReopens': 0}
+               'explicitCheckpointsBetweenKvInitializationAndKill': 0, 'kills': 0,
+               'verifiedReopens': 0, 'reopenTimings': []}
     expected = {}
     padding = [f'catalog_padding_{index:03d}_' + 'p' * 40 for index in range(catalog_entries)]
     receipt['catalogPaddingCollections'] = len(padding)
@@ -137,6 +168,7 @@ def run_case(binary, output, name, preset, existing_paged, catalog_entries=0):
         engine.start('serverless' if existing_paged else preset)
         engine.execute('CREATE TABLE financial_fixture (id INTEGER PRIMARY KEY, balance INTEGER)')
         engine.execute('INSERT INTO financial_fixture (id,balance) VALUES (1,1100),(2,-1100)')
+        engine.execute('CREATE INDEX financial_balance_idx ON financial_fixture (balance) USING HASH')
         for collection in padding:
             engine.execute('CREATE TABLE ' + collection + ' (id INTEGER PRIMARY KEY, note TEXT)')
         if padding:
@@ -147,7 +179,7 @@ def run_case(binary, output, name, preset, existing_paged, catalog_entries=0):
             engine.checkpoint()
             engine.kill()
             receipt['kills'] += 1
-            engine.start(preset)
+            receipt['reopenTimings'].append(reopen_and_measure(engine, preset))
         for cycle in range(2):
             collection = f'native_accounts_{cycle}'
             engine.execute('CREATE KV ' + collection)
@@ -166,14 +198,14 @@ def run_case(binary, output, name, preset, existing_paged, catalog_entries=0):
             receipt['kills'] += 1
             # Negative control: never fall back to an embedded/in-memory client.
             engine.query('KV GET native_accounts_0.funded', expect_failure=True)
-            engine.start(preset)
+            receipt['reopenTimings'].append(reopen_and_measure(engine, preset))
             verify(engine, expected, padding)
             receipt['verifiedReopens'] += 1
         # Re-check the same models and values after an explicit checkpoint too.
         engine.checkpoint()
         engine.kill()
         receipt['kills'] += 1
-        engine.start(preset)
+        receipt['reopenTimings'].append(reopen_and_measure(engine, preset))
         verify(engine, expected, padding)
         receipt['verifiedReopens'] += 1
         receipt.update(passed=True, collections=len(expected),
@@ -193,19 +225,26 @@ def run():
     parser.add_argument('--binary', default=os.environ.get('REDDB_TEST_BINARY') or shutil.which('red'))
     parser.add_argument('--output', type=Path, required=True,
                         help='New owned directory; existing paths are rejected and fixtures are retained')
+    parser.add_argument('--case', choices=['default', 'serverless', 'default-on-paged', 'catalog-overflow'],
+                        help='Run only one named scenario')
     args = parser.parse_args()
     if not args.binary:
         parser.error('Set --binary or REDDB_TEST_BINARY to the built executable')
     binary = Path(args.binary).resolve(strict=True)
     args.output.mkdir(parents=True, exist_ok=False)
     with binary.open('rb') as artifact:
-        digest = hashlib.file_digest(artifact, 'sha256').hexdigest()
+        hasher = hashlib.sha256()
+        for chunk in iter(lambda: artifact.read(1024 * 1024), b''):
+            hasher.update(chunk)
+        digest = hasher.hexdigest()
     receipt = {'binarySha256': digest, 'passed': False, 'cases': []}
     try:
         for name, preset, existing, catalog in [('default', None, False, 0),
                                                 ('serverless', 'serverless', False, 0),
                                                 ('default-on-paged', None, True, 0),
                                                 ('catalog-overflow', 'serverless', False, 320)]:
+            if args.case and name != args.case:
+                continue
             receipt['cases'].append(run_case(binary, args.output, name, preset, existing, catalog))
         receipt['passed'] = True
     finally:

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.28.14
+
+### Patch Changes
+
+- [#2669](https://github.com/reddb-io/reddb/pull/2669) [`91eeaa5`](https://github.com/reddb-io/reddb/commit/91eeaa5256d405ab868f1c9ed28eba2d8987a5b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound synchronous `red.collections` disk accounting and skip legacy payload inspection when projected catalog fields do not require it, preventing large collections from blocking metadata requests.
+
+## 1.28.13
+
+### Patch Changes
+
+- [#2665](https://github.com/reddb-io/reddb/pull/2665) [`04d29a4`](https://github.com/reddb-io/reddb/commit/04d29a49956c41cf4ac562e95f93e2c4c92961e5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Push collection-name filters and projected fields into `red.collections` catalog snapshots so targeted introspection no longer decodes unrelated collection payloads or computes unrequested on-disk sizes.
+
+## 1.28.12
+
+### Patch Changes
+
+- [#2662](https://github.com/reddb-io/reddb/pull/2662) [`768275c`](https://github.com/reddb-io/reddb/commit/768275c591b832d0333441129bd1b2d5345000a4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Serve `SHOW INDEXES` from the operational index registry so introspection no longer scans unrelated collection payloads or starves query workers on large databases.
+
 ## 1.28.11
 
 ### Patch Changes

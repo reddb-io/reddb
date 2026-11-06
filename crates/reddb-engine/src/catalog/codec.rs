@@ -23,7 +23,7 @@ pub fn collection_contract_to_persisted(
     contract: &CollectionContract,
 ) -> reddb_file::PhysicalCollectionContract {
     reddb_file::PhysicalCollectionContract {
-        name: contract.name.clone(),
+        name: crate::storage::system_collection_names::canonical_or_self(&contract.name).to_owned(),
         declared_model: collection_model_as_str(contract.declared_model).to_string(),
         schema_mode: schema_mode_as_str(contract.schema_mode).to_string(),
         origin: contract.origin.as_str().to_string(),
@@ -619,7 +619,37 @@ pub fn deserialize_collection_contracts(bytes: &[u8]) -> io::Result<Vec<Collecti
     let value = crate::json::from_str::<JsonValue>(text)
         .map_err(|err| invalid_data(format!("invalid collection contract blob: {err}")))?;
     match value {
-        JsonValue::Array(items) => items.iter().map(collection_contract_from_json).collect(),
+        JsonValue::Array(items) => {
+            let mut contracts: Vec<_> = items
+                .iter()
+                .map(collection_contract_from_json)
+                .collect::<io::Result<_>>()?;
+            crate::storage::system_collection_names::migration_plan(
+                contracts.iter().map(|contract| contract.name.as_str()),
+            )
+            .map_err(|(legacy, canonical)| {
+                invalid_data(format!(
+                    "collection contracts contain both legacy collection '{legacy}' and canonical collection '{canonical}'"
+                ))
+            })?;
+            for contract in &mut contracts {
+                contract.name = crate::storage::system_collection_names::canonical_owned(
+                    std::mem::take(&mut contract.name),
+                );
+            }
+            Ok(contracts)
+        }
         _ => Err(invalid_data("collection contract blob is not a JSON array")),
     }
+}
+
+/// Canonicalize the single-file auxiliary contract blob when it is one. The
+/// store-level field predates collection contracts and remains opaque for
+/// non-JSON callers, so unrelated payloads must pass through byte-for-byte.
+pub fn canonicalize_collection_contract_blob(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    if bytes.first() != Some(&b'[') {
+        return Ok(bytes.to_vec());
+    }
+    deserialize_collection_contracts(bytes)
+        .map(|contracts| serialize_collection_contracts(&contracts))
 }

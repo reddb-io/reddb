@@ -296,10 +296,10 @@ mod tests {
             (
                 "runtime/primary_queue_store.rs",
                 include_str!("../../runtime/primary_queue_store.rs"),
-                3,
-                "maintenance: generic red_queue_meta read/delete helpers and the \
-                 next-position allocator, which must not collide with rows invisible \
-                 to the writer's snapshot",
+                2,
+                "maintenance: the generic red_queue_meta read helper and the \
+                 resident-only next-position fallback, which must not collide with \
+                 rows invisible to the writer's snapshot",
             ),
             (
                 "runtime/record_search.rs",

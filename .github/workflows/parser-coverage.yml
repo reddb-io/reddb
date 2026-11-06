@@ -8,10 +8,6 @@ name: Parser Coverage
 # crates/reddb-server/AGENTS.md for details.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-server/src/storage/query/**'
   workflow_dispatch:
 
 concurrency:

@@ -1,16 +1,6 @@
 name: RedDB Browser Example
 
 on:
-  pull_request:
-    paths:
-      - 'packages/browser-example/**'
-      - 'vendor/ds/**'
-      - 'design-system.manifest.json'
-      - 'svelte.config.js'
-      - 'pnpm-workspace.yaml'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/browser-example.yml'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:

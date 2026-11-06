@@ -126,10 +126,11 @@ pub use btree_value_layout::{
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
-    decode_column_block_granule_index_blob, encode_column_block_frame,
-    encode_column_block_granule_bloom_blob, encode_column_block_granule_index_blob,
-    peek_column_block_version, ColumnBlockColumn, ColumnBlockFrame, ColumnBlockFrameError,
-    ColumnBlockGranuleBloom, ColumnBlockGranuleIndex, ColumnBlockGranuleStats, ColumnBlockPart,
+    decode_column_block_granule_index_blob, decode_column_block_granule_index_view,
+    encode_column_block_frame, encode_column_block_granule_bloom_blob,
+    encode_column_block_granule_index_blob, peek_column_block_version, ColumnBlockColumn,
+    ColumnBlockFrame, ColumnBlockFrameError, ColumnBlockGranuleBloom, ColumnBlockGranuleIndex,
+    ColumnBlockGranuleIndexView, ColumnBlockGranuleStats, ColumnBlockPart,
     COLUMN_BLOCK_DIR_ENTRY_LEN, COLUMN_BLOCK_FOOTER_LEN, COLUMN_BLOCK_HEADER_LEN,
 };
 pub use control_store::{

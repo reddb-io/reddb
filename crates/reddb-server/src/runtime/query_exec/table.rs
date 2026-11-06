@@ -1944,10 +1944,12 @@ fn execute_runtime_canonical_table_query_inner(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::try_sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
+                query.offset,
+                query.limit,
                 Some(table_name),
                 Some(table_alias),
             )?;
@@ -2441,10 +2443,12 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 document_projection,
                 entity_projection,
             );
-            super::super::join_filter::try_sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 records,
                 &context.query.order_by,
+                context.query.offset,
+                context.query.limit,
                 Some(context.table_name),
                 Some(context.table_alias),
             )?;
@@ -2991,6 +2995,43 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn filtered_and_computed_top_k_match_the_full_ordered_result() {
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE ordered_candidates (id INTEGER, cohort INTEGER)",
+        );
+        for id in 0..96 {
+            let cohort = if id % 7 == 0 {
+                "NULL".to_string()
+            } else {
+                (id % 5).to_string()
+            };
+            exec(
+                &runtime,
+                &format!("INSERT INTO ordered_candidates (id, cohort) VALUES ({id}, {cohort})"),
+            );
+        }
+        for sql in [
+            "SELECT id, cohort FROM ordered_candidates WHERE cohort >= 0 ORDER BY cohort, id DESC",
+            "SELECT id * 2 AS score, cohort FROM ordered_candidates WHERE id >= 0 ORDER BY score DESC, cohort",
+            "SELECT id, cohort FROM ordered_candidates WHERE id >= 0 ORDER BY cohort DESC NULLS LAST, id",
+        ] {
+            let values = |result: crate::storage::query::unified::UnifiedResult| {
+                result.records.iter().map(|row| (
+                    row.get("id").cloned(), row.get("score").cloned(), row.get("cohort").cloned()
+                )).collect::<Vec<_>>()
+            };
+            let expected = values(runtime.execute_query(sql).expect("full sort").result);
+            for (limit, offset) in [(0, 0), (1, 0), (5, 3), (5, 200), (100, 3)] {
+                let query = format!("{sql} LIMIT {limit} OFFSET {offset}");
+                let actual = values(runtime.execute_query(&query).expect("top K").result);
+                assert_eq!(actual, expected.iter().skip(offset).take(limit).cloned().collect::<Vec<_>>(), "{query}");
+            }
+        }
     }
 
     #[test]

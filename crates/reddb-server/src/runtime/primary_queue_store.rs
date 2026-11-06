@@ -31,7 +31,7 @@ use super::impl_core::current_connection_id;
 use super::queue_lifecycle::LifecycleConfig;
 use super::RedDBRuntime;
 
-const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+const QUEUE_META_COLLECTION: &str = super::queue_storage_index::META_COLLECTION;
 const KIND_PENDING_LC: &str = "queue_pending_lc";
 const KIND_ACKED_LC: &str = "queue_acked_lc";
 const KIND_ATTEMPTS_LC: &str = "queue_attempts_lc";
@@ -142,30 +142,75 @@ impl PrimaryQueueStore {
         manager
             .query_all(|entity| entity.data.as_row().is_some_and(&predicate))
             .into_iter()
-            .filter_map(|entity| {
-                let row = entity.data.as_row()?.clone();
-                Some((entity.id, row))
+            .filter_map(|entity| match entity.data {
+                EntityData::Row(row) => Some((entity.id, row)),
+                _ => None,
             })
             .collect()
     }
 
-    fn delete_meta_where<F>(&self, predicate: F)
-    where
-        F: Fn(&RowData) -> bool + Sync,
-    {
-        let store = self.store();
-        let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
-            return;
-        };
-        let hits = manager.query_all(|entity| entity.data.as_row().is_some_and(&predicate));
-        for entity in hits {
-            let _ = store.delete(QUEUE_META_COLLECTION, entity.id);
+    fn subject_rows(
+        &self,
+        kind: &str,
+        queue: &str,
+        group: Option<&str>,
+        message_id: Option<MessageId>,
+    ) -> Vec<(EntityId, RowData)> {
+        match super::queue_storage_index::subject_rows(
+            &self.runtime,
+            kind,
+            queue,
+            group,
+            message_id,
+        ) {
+            Ok(Some(rows)) => rows,
+            Ok(None) => self.meta_rows(|row| {
+                row_text(row, "kind").as_deref() == Some(kind)
+                    && row_text(row, "queue").as_deref() == Some(queue)
+                    && group
+                        .map(|group| row_text(row, "group").as_deref() == Some(group))
+                        .unwrap_or(true)
+                    && message_id
+                        .map(|id| row_u64(row, "message_id") == Some(id))
+                        .unwrap_or(true)
+            }),
+            Err(error) => {
+                tracing::warn!(error = %error, "queue meta index read failed; using resident fallback");
+                self.meta_rows(|row| {
+                    row_text(row, "kind").as_deref() == Some(kind)
+                        && row_text(row, "queue").as_deref() == Some(queue)
+                        && group
+                            .map(|group| row_text(row, "group").as_deref() == Some(group))
+                            .unwrap_or(true)
+                        && message_id
+                            .map(|id| row_u64(row, "message_id") == Some(id))
+                            .unwrap_or(true)
+                })
+            }
+        }
+    }
+
+    fn delivery_rows(&self, delivery_id: &str) -> Vec<(EntityId, RowData)> {
+        match super::queue_storage_index::delivery_rows(&self.runtime, delivery_id) {
+            Ok(Some(rows)) => rows,
+            Ok(None) => {
+                self.meta_rows(|row| row_text(row, "delivery_id").as_deref() == Some(delivery_id))
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "queue delivery index read failed; using resident fallback");
+                self.meta_rows(|row| row_text(row, "delivery_id").as_deref() == Some(delivery_id))
+            }
         }
     }
 
     fn insert_meta_row(&self, fields: HashMap<String, Value>) -> Result<()> {
         let store = self.store();
+        let created = store.get_collection(QUEUE_META_COLLECTION).is_none();
         let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
+        if created {
+            super::queue_storage_index::prepare_meta(&self.runtime)
+                .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
+        }
         store
             .insert_auto(
                 QUEUE_META_COLLECTION,
@@ -187,13 +232,10 @@ impl PrimaryQueueStore {
     }
 
     fn find_pending_by_delivery(&self, delivery_id: &str) -> Option<(EntityId, PendingRow)> {
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                && row_text(row, "delivery_id").as_deref() == Some(delivery_id)
-        })
-        .into_iter()
-        .next()
-        .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)))
+        self.delivery_rows(delivery_id)
+            .into_iter()
+            .find(|(_, row)| row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC))
+            .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)))
     }
 
     fn find_pending_entry_by_key(
@@ -203,12 +245,7 @@ impl PrimaryQueueStore {
         group: &str,
     ) -> Option<(EntityId, PendingRow)> {
         let lifecycle_hit = self
-            .meta_rows(|row| {
-                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                    && row_text(row, "queue").as_deref() == Some(queue)
-                    && row_text(row, "group").as_deref() == Some(group)
-                    && row_u64(row, "message_id") == Some(message_id)
-            })
+            .subject_rows(KIND_PENDING_LC, queue, Some(group), Some(message_id))
             .into_iter()
             .next()
             .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)));
@@ -241,12 +278,12 @@ impl PrimaryQueueStore {
         let queue_owned = queue.to_string();
         let group_owned = group.to_string();
         let (legacy_eid, delivered_at_ns, delivery_count, consumer) = self
-            .meta_rows(|row| {
-                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LEGACY)
-                    && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                    && row_text(row, "group").as_deref() == Some(&group_owned)
-                    && row_u64(row, "message_id") == Some(message_id)
-            })
+            .subject_rows(
+                KIND_PENDING_LEGACY,
+                &queue_owned,
+                Some(&group_owned),
+                Some(message_id),
+            )
             .into_iter()
             .next()
             .map(|(eid, row)| {
@@ -294,30 +331,23 @@ impl PrimaryQueueStore {
     fn legacy_pending_message_ids(&self, queue: &str, group: Option<&str>) -> Vec<MessageId> {
         let queue_owned = queue.to_string();
         let group_owned = group.map(|g| g.to_string());
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LEGACY)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && group_owned
-                    .as_ref()
-                    .map(|g| row_text(row, "group").as_deref() == Some(g))
-                    .unwrap_or(true)
-        })
+        self.subject_rows(
+            KIND_PENDING_LEGACY,
+            &queue_owned,
+            group_owned.as_deref(),
+            None,
+        )
         .into_iter()
         .filter_map(|(_, row)| row_u64(&row, "message_id"))
         .collect()
     }
 
     fn read_attempts(&self, queue: &str, message_id: MessageId, group: &str) -> u32 {
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_ATTEMPTS_LC)
-                && row_text(row, "queue").as_deref() == Some(queue)
-                && row_text(row, "group").as_deref() == Some(group)
-                && row_u64(row, "message_id") == Some(message_id)
-        })
-        .into_iter()
-        .next()
-        .and_then(|(_, row)| row_u64(&row, "attempts").map(|v| v as u32))
-        .unwrap_or(0)
+        self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id))
+            .into_iter()
+            .next()
+            .and_then(|(_, row)| row_u64(&row, "attempts").map(|v| v as u32))
+            .unwrap_or(0)
     }
 
     fn write_attempts(
@@ -327,14 +357,9 @@ impl PrimaryQueueStore {
         group: &str,
         attempts: u32,
     ) -> Result<()> {
-        let queue_owned = queue.to_string();
-        let group_owned = group.to_string();
-        self.delete_meta_where(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_ATTEMPTS_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && row_text(row, "group").as_deref() == Some(&group_owned)
-                && row_u64(row, "message_id") == Some(message_id)
-        });
+        for (id, _) in self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id)) {
+            let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+        }
         let mut fields = HashMap::new();
         fields.insert("kind".into(), Value::text(KIND_ATTEMPTS_LC.to_string()));
         fields.insert("queue".into(), Value::text(queue.to_string()));
@@ -356,28 +381,16 @@ impl PrimaryQueueStore {
     }
 
     fn clear_attempts(&self, queue: &str, message_id: MessageId, group: &str) {
-        let queue_owned = queue.to_string();
-        let group_owned = group.to_string();
-        self.delete_meta_where(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_ATTEMPTS_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && row_text(row, "group").as_deref() == Some(&group_owned)
-                && row_u64(row, "message_id") == Some(message_id)
-        });
+        for (id, _) in self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id)) {
+            let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+        }
     }
 
     fn pending_message_ids(&self, queue: &str, group: Option<&str>) -> Vec<MessageId> {
         let queue_owned = queue.to_string();
         let group_owned = group.map(|g| g.to_string());
         let mut ids: Vec<MessageId> = self
-            .meta_rows(|row| {
-                row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                    && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                    && group_owned
-                        .as_ref()
-                        .map(|g| row_text(row, "group").as_deref() == Some(g))
-                        .unwrap_or(true)
-            })
+            .subject_rows(KIND_PENDING_LC, &queue_owned, group_owned.as_deref(), None)
             .into_iter()
             .filter_map(|(_, row)| row_u64(&row, "message_id"))
             .collect();
@@ -390,19 +403,25 @@ impl PrimaryQueueStore {
     }
 
     fn acked_message_ids(&self, queue: &str, group: &str) -> Vec<MessageId> {
-        let queue_owned = queue.to_string();
-        let group_owned = group.to_string();
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_ACKED_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && row_text(row, "group").as_deref() == Some(&group_owned)
-        })
-        .into_iter()
-        .filter_map(|(_, row)| row_u64(&row, "message_id"))
-        .collect()
+        self.subject_rows(KIND_ACKED_LC, queue, Some(group), None)
+            .into_iter()
+            .filter_map(|(_, row)| row_u64(&row, "message_id"))
+            .collect()
     }
 
     fn list_queue_messages(&self, queue: &str) -> Vec<QueueMessageOrdered> {
+        match super::queue_storage_index::ordered_messages(&self.runtime, queue) {
+            Ok(Some(rows)) => {
+                return rows
+                    .into_iter()
+                    .map(|(id, position)| QueueMessageOrdered { id, position })
+                    .collect();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "queue position index read failed; using resident fallback");
+            }
+        }
         let store = self.store();
         let Some(manager) = store.get_collection(queue) else {
             return Vec::new();
@@ -414,19 +433,14 @@ impl PrimaryQueueStore {
         // applies. Without this, a committed lifecycle ack still surfaces
         // the message on subsequent reads.
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-        let mut out: Vec<QueueMessageOrdered> = manager
-            .scan(snap_ctx.as_ref(), |entity| {
-                matches!(entity.kind, EntityKind::QueueMessage { .. })
-                    && matches!(entity.data, EntityData::QueueMessage(_))
-            })
-            .into_iter()
-            .filter_map(|entity| {
+        let (mut out, _) =
+            manager.scan_project_zoned_with_stats(snap_ctx.as_ref(), &[], |entity| {
                 let position = match &entity.kind {
                     EntityKind::QueueMessage { position, .. } => *position,
                     _ => return None,
                 };
                 let data = match &entity.data {
-                    EntityData::QueueMessage(d) => d.clone(),
+                    EntityData::QueueMessage(d) => d,
                     _ => return None,
                 };
                 if data.acked {
@@ -435,27 +449,33 @@ impl PrimaryQueueStore {
                 Some(QueueMessageOrdered {
                     id: entity.id,
                     position,
-                    payload: data.payload,
                 })
-            })
-            .collect();
+            });
         out.sort_by_key(|m| m.position);
         out
     }
 
     fn next_position(&self, queue: &str) -> Result<u64> {
         let store = self.store();
+        match super::queue_storage_index::position_boundary(store.as_ref(), queue, true) {
+            Ok(Some(boundary)) => {
+                return Ok(boundary.map(|position| position + 1).unwrap_or(1 << 32));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "queue boundary index read failed; using resident fallback");
+            }
+        }
         let Some(manager) = store.get_collection(queue) else {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
         };
-        let max = manager
-            .query_all(|e| matches!(e.kind, EntityKind::QueueMessage { .. }))
-            .into_iter()
-            .filter_map(|e| match e.kind {
-                EntityKind::QueueMessage { position, .. } => Some(position),
-                _ => None,
-            })
-            .max();
+        let mut max = None;
+        manager.for_each_entity(|entity| {
+            if let EntityKind::QueueMessage { position, .. } = entity.kind {
+                max = Some(max.map_or(position, |previous: u64| previous.max(position)));
+            }
+            true
+        });
         Ok(max.map(|p| p + 1).unwrap_or(1 << 32))
     }
 }
@@ -522,17 +542,42 @@ fn delete_message_with_state(
 }
 
 fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId) {
-    super::impl_queue::remove_meta_rows(store, |row| {
-        let kind = super::impl_queue::row_text(row, "kind");
-        matches!(
-            kind.as_deref(),
-            Some(KIND_PENDING_LC)
-                | Some(KIND_ACKED_LC)
-                | Some(KIND_ATTEMPTS_LC)
-                | Some(KIND_PENDING_LEGACY)
-        ) && super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
-            && super::impl_queue::row_u64(row, "message_id") == Some(message_id)
-    });
+    let kinds = [
+        KIND_PENDING_LC,
+        KIND_ACKED_LC,
+        KIND_ATTEMPTS_LC,
+        KIND_PENDING_LEGACY,
+    ];
+    let indexed = kinds
+        .iter()
+        .map(|kind| {
+            super::queue_storage_index::subject_rows_store(
+                store,
+                kind,
+                queue,
+                None,
+                Some(message_id),
+            )
+        })
+        .collect::<crate::RedDBResult<Vec<_>>>();
+    match indexed {
+        Ok(results) if results.iter().all(Option::is_some) => {
+            for (id, _) in results.into_iter().flatten().flatten() {
+                let _ = store.delete(QUEUE_META_COLLECTION, id);
+            }
+        }
+        Ok(_) | Err(_) => super::impl_queue::remove_meta_rows(store, |row| {
+            let kind = super::impl_queue::row_text(row, "kind");
+            matches!(
+                kind.as_deref(),
+                Some(KIND_PENDING_LC)
+                    | Some(KIND_ACKED_LC)
+                    | Some(KIND_ATTEMPTS_LC)
+                    | Some(KIND_PENDING_LEGACY)
+            ) && super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
+                && super::impl_queue::row_u64(row, "message_id") == Some(message_id)
+        }),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -562,7 +607,6 @@ impl PendingRow {
 struct QueueMessageOrdered {
     id: EntityId,
     position: u64,
-    payload: Value,
 }
 
 impl QueueStore for PrimaryQueueStore {
@@ -790,6 +834,8 @@ impl QueueStore for PrimaryQueueStore {
             store
                 .create_collection(dlq_target)
                 .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
+            super::queue_storage_index::prepare_queue(&self.runtime, dlq_target)
+                .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
         }
         let position = self.next_position(dlq_target)?;
         let entity = UnifiedEntity::new(
@@ -899,15 +945,11 @@ impl QueueStore for PrimaryQueueStore {
         // Sweep every meta-row keyed off this queue (pending, acked,
         // attempts) — none of them are meaningful once the underlying
         // messages are gone.
-        let queue_owned = queue.to_string();
-        self.delete_meta_where(|row| {
-            let kind = row_text(row, "kind");
-            let kind_matches = matches!(
-                kind.as_deref(),
-                Some(KIND_PENDING_LC) | Some(KIND_ACKED_LC) | Some(KIND_ATTEMPTS_LC)
-            );
-            kind_matches && row_text(row, "queue").as_deref() == Some(&queue_owned)
-        });
+        for kind in [KIND_PENDING_LC, KIND_ACKED_LC, KIND_ATTEMPTS_LC] {
+            for (id, _) in self.subject_rows(kind, queue, None, None) {
+                let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+            }
+        }
 
         Ok(ids.len())
     }
@@ -918,30 +960,26 @@ impl QueueStore for PrimaryQueueStore {
         // unix-ns; convert to a live `Instant` the same way
         // `read_lock_deadline` does so the caller compares against
         // `Clock::now()` in a single domain.
-        let queue_owned = queue.to_string();
         let now_i = Instant::now();
         let now_w = now_unix_ns();
-        self.meta_rows(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-        })
-        .into_iter()
-        .filter_map(|(_, row)| {
-            let pending = PendingRow::from_row(&row)?;
-            let deadline = if pending.lock_deadline_ns >= now_w {
-                now_i + Duration::from_nanos(pending.lock_deadline_ns - now_w)
-            } else {
-                now_i - Duration::from_nanos(now_w - pending.lock_deadline_ns)
-            };
-            Some(PendingDeliveryView {
-                delivery_id: pending.delivery_id,
-                queue: pending.queue,
-                message_id: pending.message_id,
-                group: pending.group,
-                deadline,
+        self.subject_rows(KIND_PENDING_LC, queue, None, None)
+            .into_iter()
+            .filter_map(|(_, row)| {
+                let pending = PendingRow::from_row(&row)?;
+                let deadline = if pending.lock_deadline_ns >= now_w {
+                    now_i + Duration::from_nanos(pending.lock_deadline_ns - now_w)
+                } else {
+                    now_i - Duration::from_nanos(now_w - pending.lock_deadline_ns)
+                };
+                Some(PendingDeliveryView {
+                    delivery_id: pending.delivery_id,
+                    queue: pending.queue,
+                    message_id: pending.message_id,
+                    group: pending.group,
+                    deadline,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     fn reclaim_expired(&self, _txn: &QueueTxn, queue: &str, now: Instant) -> Result<()> {
@@ -950,14 +988,21 @@ impl QueueStore for PrimaryQueueStore {
         // monotonic `now` argument the same way so the comparison
         // happens in a single domain.
         let now_ns = instant_to_unix_ns(now);
-        let queue_owned = queue.to_string();
-        self.delete_meta_where(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
-                && row_text(row, "queue").as_deref() == Some(&queue_owned)
-                && row_u64(row, "lock_deadline_ns")
-                    .map(|d| d <= now_ns)
-                    .unwrap_or(false)
-        });
+        let rows = match super::queue_storage_index::deadline_rows(&self.runtime, queue, now_ns) {
+            Ok(Some(rows)) => rows,
+            Ok(None) => self.subject_rows(KIND_PENDING_LC, queue, None, None),
+            Err(error) => {
+                tracing::warn!(error = %error, "queue deadline index read failed; using resident fallback");
+                self.subject_rows(KIND_PENDING_LC, queue, None, None)
+            }
+        };
+        for (id, row) in rows {
+            if row_text(&row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                && row_u64(&row, "lock_deadline_ns").is_some_and(|deadline| deadline <= now_ns)
+            {
+                let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+            }
+        }
         Ok(())
     }
 
@@ -1182,6 +1227,58 @@ mod tests {
     }
 
     #[test]
+    fn queue_selection_and_next_position_do_not_copy_payloads() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        let observe = |payload_bytes| {
+            let runtime = boot();
+            let store = runtime.db().store();
+            let manager = store.get_or_create_collection("projection");
+            for id in (1..=128).rev() {
+                manager
+                    .insert(UnifiedEntity::new(
+                        EntityId::new(id),
+                        EntityKind::QueueMessage {
+                            queue: "projection".into(),
+                            position: id * 10,
+                        },
+                        EntityData::QueueMessage(QueueMessageData {
+                            payload: Value::Blob(vec![7; payload_bytes]),
+                            priority: None,
+                            enqueued_at_ns: 0,
+                            attempts: 0,
+                            max_attempts: 0,
+                            acked: id == 64,
+                        }),
+                    ))
+                    .expect("queue message");
+            }
+            let adapter = PrimaryQueueStore::new(runtime);
+            let ((left, right, next), allocations) = measure_allocations(|| {
+                (
+                    adapter.available_messages("projection", QueueSide::Left),
+                    adapter.available_messages("projection", QueueSide::Right),
+                    adapter.next_position("projection").expect("position"),
+                )
+            });
+            let expected: Vec<_> = (1..=128).filter(|id| *id != 64).collect();
+            assert_eq!(left, expected);
+            assert_eq!(right, expected.into_iter().rev().collect::<Vec<_>>());
+            assert_eq!(next, 1281);
+            allocations
+        };
+        let empty = observe(0);
+        let large = observe(32 * 1024);
+        assert!(
+            large.allocated_bytes <= empty.allocated_bytes + 64 * 1024,
+            "queue selection copied payloads: {empty:?} -> {large:?}"
+        );
+        eprintln!(
+            "queue selection allocated bytes, empty/32 KiB payload: {} / {}",
+            empty.allocated_bytes, large.allocated_bytes
+        );
+    }
+
+    #[test]
     fn lifecycle_config_reads_from_descriptor() {
         let rt = boot();
         rt.execute_query(
@@ -1307,7 +1404,11 @@ mod tests {
         // DLQ has the original payload.
         let dlq_msgs = lc.store_ref().list_queue_messages("qdlq_dlq");
         assert_eq!(dlq_msgs.len(), 1);
-        assert_eq!(dlq_msgs[0].payload, Value::text("payload"));
+        assert_eq!(
+            lc.store_ref()
+                .read_message("qdlq_dlq", dlq_msgs[0].id.raw()),
+            Some(Value::text("payload"))
+        );
     }
 
     #[test]
@@ -1369,6 +1470,129 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, QueueStoreError::UnknownQueue(_)));
+    }
+
+    #[test]
+    fn cold_reopen_uses_persisted_queue_indices_without_changing_ack_retry() {
+        let directory = tempfile::tempdir().expect("queue index fixture");
+        let path = directory.path().join("queues.rdb");
+        let options = RedDBOptions::persistent(path.clone())
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+        runtime
+            .execute_query("CREATE QUEUE indexed_queue")
+            .expect("queue");
+        push(&runtime, "indexed_queue", "first");
+        push(&runtime, "indexed_queue", "second");
+        let seed = PrimaryQueueStore::new(runtime.clone());
+        let message_id = seed.list_queue_messages("indexed_queue")[0].id.raw();
+        let transaction = QueueTxn::new();
+        let delivery_id = seed
+            .mark_pending(
+                &transaction,
+                "indexed_queue",
+                message_id,
+                "workers",
+                "worker-1",
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("pending");
+        assert_eq!(
+            seed.bump_attempt(&transaction, &delivery_id)
+                .expect("attempt")
+                .attempts,
+            1
+        );
+        runtime.flush().expect("queue checkpoint");
+        drop(seed);
+        drop(runtime);
+
+        let reopened = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold runtime");
+        assert!(
+            crate::runtime::queue_storage_index::ordered_messages(&reopened, "indexed_queue")
+                .expect("position index")
+                .is_some()
+        );
+        assert!(
+            crate::runtime::queue_storage_index::delivery_rows(&reopened, &delivery_id)
+                .expect("delivery index")
+                .is_some()
+        );
+        let store = PrimaryQueueStore::new(reopened);
+        let restored = store
+            .read_pending_attempt(&delivery_id)
+            .expect("pending after reopen");
+        assert_eq!(restored.message_id, message_id);
+        assert_eq!(restored.attempts, 1);
+        store
+            .ack_pending(&QueueTxn::new(), &delivery_id)
+            .expect("ack after reopen");
+        assert_eq!(
+            store
+                .available_messages("indexed_queue", QueueSide::Left)
+                .len(),
+            1
+        );
+        store.runtime.flush().expect("ack checkpoint");
+        drop(store);
+
+        let mut warmed_pages = 0;
+        let mut warmed_bytes = 0;
+        let mut published_roots = None;
+        for boot in 0..5 {
+            let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options.clone())
+            })
+            .expect("repeat cold runtime");
+            assert!(crate::runtime::queue_storage_index::ordered_messages(
+                &runtime,
+                "indexed_queue"
+            )
+            .expect("published queue position index")
+            .is_some());
+            runtime.flush().expect("repeat cold checkpoint");
+            let roots = crate::runtime::queue_storage_index::published_roots(
+                runtime.db().store().as_ref(),
+                "indexed_queue",
+            )
+            .expect("all queue index roots published");
+            match &published_roots {
+                Some(expected) => assert_eq!(
+                    &roots, expected,
+                    "unchanged queue cold boot replaced a published index root at boot {boot}"
+                ),
+                None => published_roots = Some(roots),
+            }
+            let pages = runtime
+                .db()
+                .store()
+                .pager()
+                .expect("paged queue store")
+                .page_count()
+                .expect("queue page count");
+            let bytes = std::fs::metadata(&path).expect("queue database file").len();
+            if boot == 1 {
+                warmed_pages = pages;
+                warmed_bytes = bytes;
+            } else if boot > 1 {
+                assert!(
+                    pages <= warmed_pages + 32,
+                    "unchanged queue cold boot grew from {warmed_pages} to {pages} pages at boot {boot}"
+                );
+                assert!(
+                    bytes <= warmed_bytes + 32 * crate::storage::engine::PAGE_SIZE as u64,
+                    "unchanged queue cold boot grew from {warmed_bytes} to {bytes} bytes at boot {boot}"
+                );
+            }
+            drop(runtime);
+        }
     }
 
     #[test]

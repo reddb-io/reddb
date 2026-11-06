@@ -64,7 +64,6 @@ pub(super) fn show_indexes_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         SHOW_INDEX_COLUMNS
             .iter()
@@ -73,32 +72,30 @@ pub(super) fn show_indexes_snapshot(
     );
     let mut rows = Vec::new();
 
-    for collection in snapshot.collections {
-        if !collection_is_visible(&collection.name, visible_collections) {
+    for index in runtime.index_store_ref().list_all_indices() {
+        if !collection_is_visible(&index.collection, visible_collections) {
             continue;
         }
-        for index in runtime.index_store_ref().list_indices(&collection.name) {
-            let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
-            rows.push(UnifiedRecord::with_schema(
-                Arc::clone(&schema),
-                vec![
-                    Value::text(index.name),
-                    Value::text(index.collection),
-                    Value::Array(
-                        index
-                            .columns
-                            .into_iter()
-                            .map(|value| Value::text(value.as_str()))
-                            .collect(),
-                    ),
-                    Value::text(render_index_method_for_ddl(index.method)),
-                    Value::Boolean(index.unique),
-                    entries_indexed
-                        .map(Value::UnsignedInteger)
-                        .unwrap_or(Value::Null),
-                ],
-            ));
-        }
+        let entries_indexed = runtime.index_store_ref().entries_indexed(&index);
+        rows.push(UnifiedRecord::with_schema(
+            Arc::clone(&schema),
+            vec![
+                Value::text(index.name),
+                Value::text(index.collection),
+                Value::Array(
+                    index
+                        .columns
+                        .into_iter()
+                        .map(|value| Value::text(value.as_str()))
+                        .collect(),
+                ),
+                Value::text(render_index_method_for_ddl(index.method)),
+                Value::Boolean(index.unique),
+                entries_indexed
+                    .map(Value::UnsignedInteger)
+                    .unwrap_or(Value::Null),
+            ],
+        ));
     }
 
     Ok(rows)
@@ -441,12 +438,161 @@ fn render_sql_identifier(identifier: &str) -> String {
     reddb_rql::renderer::render_identifier(identifier)
 }
 
+fn field_is_column(field: &FieldRef, expected: &str) -> bool {
+    matches!(field, FieldRef::TableColumn { column, .. } if column == expected)
+}
+
+fn collection_name_candidates_from_filter(filter: &Filter) -> Option<HashSet<String>> {
+    match filter {
+        Filter::Compare {
+            field,
+            op: CompareOp::Eq,
+            value: Value::Text(value),
+        } if field_is_column(field, "name") => Some(HashSet::from([value.to_string()])),
+        Filter::In { field, values } if field_is_column(field, "name") => Some(
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Text(value) => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        Filter::And(left, right) => match (
+            collection_name_candidates_from_filter(left),
+            collection_name_candidates_from_filter(right),
+        ) {
+            (Some(left), Some(right)) => {
+                Some(left.intersection(&right).cloned().collect::<HashSet<_>>())
+            }
+            (Some(candidates), None) | (None, Some(candidates)) => Some(candidates),
+            (None, None) => None,
+        },
+        Filter::Or(left, right) => match (
+            collection_name_candidates_from_filter(left),
+            collection_name_candidates_from_filter(right),
+        ) {
+            (Some(mut left), Some(right)) => {
+                left.extend(right);
+                Some(left)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn filter_references_column(filter: &Filter, expected: &str) -> bool {
+    match filter {
+        Filter::Compare { field, .. }
+        | Filter::IsNull(field)
+        | Filter::IsNotNull(field)
+        | Filter::In { field, .. }
+        | Filter::Between { field, .. }
+        | Filter::Like { field, .. }
+        | Filter::StartsWith { field, .. }
+        | Filter::EndsWith { field, .. }
+        | Filter::Contains { field, .. } => field_is_column(field, expected),
+        Filter::CompareFields { left, right, .. } => {
+            field_is_column(left, expected) || field_is_column(right, expected)
+        }
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            filter_references_column(left, expected) || filter_references_column(right, expected)
+        }
+        Filter::Not(inner) => filter_references_column(inner, expected),
+        // Expression trees may reference any virtual column. Keep the
+        // expensive value available until expression-level column analysis is
+        // shared with the normal table executor.
+        Filter::CompareExpr { .. } => true,
+    }
+}
+
+fn collections_query_needs_on_disk_bytes(query: &TableQuery) -> bool {
+    let projection_needs_bytes =
+        effective_table_projections(query)
+            .iter()
+            .any(|projection| match projection {
+                Projection::All => true,
+                Projection::Column(column) | Projection::Alias(column, _) => {
+                    column == "on_disk_bytes"
+                }
+                Projection::Field(field, _) => field_is_column(field, "on_disk_bytes"),
+                // Functions, expressions, and windows may contain nested field
+                // references. Be conservative rather than returning a wrong row.
+                Projection::Function(_, _)
+                | Projection::Expression(_, _)
+                | Projection::Window { .. } => true,
+            });
+    let filter_needs_bytes = effective_table_filter(query)
+        .as_ref()
+        .is_some_and(|filter| filter_references_column(filter, "on_disk_bytes"));
+    let order_needs_bytes = query
+        .order_by
+        .iter()
+        .any(|order| field_is_column(&order.field, "on_disk_bytes") || order.expr.is_some());
+
+    projection_needs_bytes || filter_needs_bytes || order_needs_bytes
+}
+
+fn collections_query_needs_legacy_payloads(query: &TableQuery) -> bool {
+    const PAYLOAD_DERIVED_COLUMNS: [&str; 7] = [
+        "model",
+        "schema_mode",
+        "queue_mode",
+        "dimension",
+        "metric",
+        "session_key",
+        "session_gap_ms",
+    ];
+
+    let projection_needs_payload =
+        effective_table_projections(query)
+            .iter()
+            .any(|projection| match projection {
+                Projection::All => true,
+                Projection::Column(column) | Projection::Alias(column, _) => {
+                    PAYLOAD_DERIVED_COLUMNS.contains(&column.as_str())
+                }
+                Projection::Field(field, _) => PAYLOAD_DERIVED_COLUMNS
+                    .iter()
+                    .any(|column| field_is_column(field, column)),
+                Projection::Function(_, _)
+                | Projection::Expression(_, _)
+                | Projection::Window { .. } => true,
+            });
+    let filter_needs_payload = effective_table_filter(query)
+        .as_ref()
+        .is_some_and(|filter| {
+            PAYLOAD_DERIVED_COLUMNS
+                .iter()
+                .any(|column| filter_references_column(filter, column))
+        });
+    let order_needs_payload = query.order_by.iter().any(|order| {
+        order.expr.is_some()
+            || PAYLOAD_DERIVED_COLUMNS
+                .iter()
+                .any(|column| field_is_column(&order.field, column))
+    });
+
+    projection_needs_payload || filter_needs_payload || order_needs_payload
+}
+
 pub(super) fn collections_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&std::collections::HashSet<String>>,
+    query: &TableQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    let snapshot = runtime.try_catalog()?;
+    let candidate_names = effective_table_filter(query)
+        .as_ref()
+        .and_then(collection_name_candidates_from_filter);
+    let observe_legacy_payloads = collections_query_needs_legacy_payloads(query);
+    let snapshot = match candidate_names.as_ref() {
+        Some(candidate_names) => {
+            runtime.try_catalog_for_collections(candidate_names, observe_legacy_payloads)?
+        }
+        None => runtime.try_catalog()?,
+    };
     let schema = Arc::new(
         COLLECTION_COLUMNS
             .iter()
@@ -455,10 +601,16 @@ pub(super) fn collections_snapshot(
     );
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
+    let needs_on_disk_bytes = collections_query_needs_on_disk_bytes(query);
 
     Ok(snapshot
         .collections
         .into_iter()
+        .filter(|collection| {
+            candidate_names
+                .as_ref()
+                .is_none_or(|candidates| candidates.contains(&collection.name))
+        })
         .filter(|collection| {
             visible_collections.is_none_or(|visible| visible.contains(&collection.name))
         })
@@ -477,7 +629,11 @@ pub(super) fn collections_snapshot(
                 .get_collection(&collection.name)
                 .map(|manager| manager.stats().total_memory_bytes as u64)
                 .unwrap_or(0);
-            let on_disk_bytes = on_disk_bytes_value(store.as_ref(), &collection.name);
+            let on_disk_bytes = if needs_on_disk_bytes {
+                on_disk_bytes_value(store.as_ref(), &collection.name)
+            } else {
+                Value::Null
+            };
             let queue_mode = if collection.model == CollectionModel::Queue {
                 Value::text(super::impl_queue::queue_mode_str(
                     store.as_ref(),
@@ -503,6 +659,14 @@ pub(super) fn collections_snapshot(
                 .session_gap_ms
                 .map(Value::UnsignedInteger)
                 .unwrap_or(Value::Null);
+            let index_count = if collection.contract_present {
+                collection.indices.len()
+            } else {
+                runtime
+                    .index_store_ref()
+                    .list_indices(&collection.name)
+                    .len()
+            };
             UnifiedRecord::with_schema(
                 Arc::clone(&schema),
                 vec![
@@ -511,7 +675,7 @@ pub(super) fn collections_snapshot(
                     Value::text(schema_mode_name(collection.schema_mode)),
                     Value::UnsignedInteger(collection.entities as u64),
                     Value::UnsignedInteger(collection.segments as u64),
-                    Value::UnsignedInteger(collection.indices.len() as u64),
+                    Value::UnsignedInteger(index_count as u64),
                     Value::UnsignedInteger(in_memory_bytes),
                     on_disk_bytes,
                     Value::Boolean(internal),
@@ -1990,5 +2154,193 @@ mod scoped_stats_memory_tests {
         );
         assert!(measured.allocated_bytes <= baseline.allocated_bytes + 65536,
             "document catalog observation must not copy stored payloads: {baseline:?} -> {measured:?}");
+    }
+}
+
+#[cfg(test)]
+mod scoped_index_introspection_io_tests {
+    use super::*;
+    use crate::storage::engine::pager::measure_pager_read_bytes;
+    use crate::storage::{EntityId, UnifiedEntity};
+
+    #[test]
+    fn show_indexes_on_does_not_read_unrelated_collection_payloads() {
+        let directory = tempfile::tempdir().expect("index introspection fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join("indexes.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            runtime
+                .execute_query("CREATE TABLE target (id INT, value TEXT)")
+                .expect("target table");
+            runtime
+                .execute_query("CREATE INDEX target_value_idx ON target (value) USING HASH")
+                .expect("target index");
+            let store = runtime.db().store();
+            store
+                .create_collection("unrelated_payloads")
+                .expect("unrelated collection");
+            for id in 1..=4_096 {
+                store
+                    .insert(
+                        "unrelated_payloads",
+                        UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "unrelated_payloads",
+                            id,
+                            vec![Value::text(format!("payload-{id:08}-{}", "x".repeat(512)))],
+                        ),
+                    )
+                    .expect("unrelated payload");
+            }
+            runtime.checkpoint().expect("persist fixture");
+        }
+
+        let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query("SHOW INDEXES ON target")
+                .expect("target index introspection")
+        });
+        assert!(
+            result
+                .result
+                .records
+                .iter()
+                .any(|record| record.get("name") == Some(&Value::text("target_value_idx"))),
+            "target index remains visible"
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "SHOW INDEXES ON target read {read_bytes} bytes from unrelated payloads"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scoped_collection_introspection_io_tests {
+    use super::*;
+    use crate::storage::engine::pager::measure_pager_read_bytes;
+    use crate::storage::{EntityId, UnifiedEntity};
+
+    fn persistent_fixture() -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("collection introspection fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join("collections.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            runtime
+                .execute_query("CREATE TABLE target (id INT, value TEXT)")
+                .expect("target table");
+            runtime
+                .execute_query("INSERT INTO target (id, value) VALUES (1, 'kept')")
+                .expect("target row");
+            let store = runtime.db().store();
+            store
+                .create_collection("unrelated_payloads")
+                .expect("unrelated collection");
+            for id in 1..=4_096 {
+                store
+                    .insert(
+                        "unrelated_payloads",
+                        UnifiedEntity::table_row(
+                            EntityId::new(1_000_000 + id),
+                            "unrelated_payloads",
+                            id,
+                            vec![Value::text(format!("payload-{id:08}-{}", "x".repeat(512)))],
+                        ),
+                    )
+                    .expect("unrelated payload");
+            }
+            runtime.checkpoint().expect("persist fixture");
+        }
+
+        let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+        (directory, runtime)
+    }
+
+    #[test]
+    fn filtered_red_collections_does_not_read_unrelated_collection_pages() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query(
+                    "SELECT name, on_disk_bytes FROM red.collections WHERE name IN ('target')",
+                )
+                .expect("target collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("target"))
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "filtered red.collections read {read_bytes} bytes from unrelated collection pages"
+        );
+    }
+
+    #[test]
+    fn projected_red_collections_does_not_measure_unrequested_disk_bytes() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query("SELECT name FROM red.collections WHERE name = 'target'")
+                .expect("projected collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("target"))
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "projected red.collections measured unrequested disk bytes and read {read_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn selected_large_red_collection_bounds_synchronous_disk_accounting() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query(
+                    "SELECT name, entities, segments, indices, in_memory_bytes, on_disk_bytes \
+                     FROM red.collections \
+                     WHERE name = 'unrelated_payloads'",
+                )
+                .expect("large collection introspection")
+        });
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("unrelated_payloads"))
+        );
+        assert_eq!(
+            result.result.records[0].get("on_disk_bytes"),
+            Some(&Value::Null),
+            "large trees must report unknown rather than synchronously walking every page"
+        );
+        assert!(
+            read_bytes <= 2 * 1024 * 1024,
+            "large red.collections disk accounting read {read_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn selected_legacy_collection_still_observes_payload_when_model_is_requested() {
+        let (_directory, runtime) = persistent_fixture();
+        let result = runtime
+            .execute_query(
+                "SELECT name, model FROM red.collections WHERE name = 'unrelated_payloads'",
+            )
+            .expect("legacy model introspection");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("model"),
+            Some(&Value::text("table"))
+        );
     }
 }

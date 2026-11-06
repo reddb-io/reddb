@@ -164,6 +164,10 @@ mod tests {
         manager.install_backing(base, root, store.format_version(), 1, count);
         assert!(runtime.get_kv("cold_keys", "item").is_err());
         assert!(runtime.execute_query("KV GET cold_keys.item").is_err());
+        assert!(runtime.execute_query("KV LIST cold_keys LIMIT 0").is_err());
+        assert!(runtime
+            .execute_query("KV LIST cold_keys LIMIT 1 OFFSET 1")
+            .is_err());
     }
 
     #[test]

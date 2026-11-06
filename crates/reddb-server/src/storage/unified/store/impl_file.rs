@@ -200,6 +200,57 @@ mod aux_metadata_dump_tests {
     }
 
     #[test]
+    fn legacy_system_collection_snapshot_loads_and_republishes_canonical_name() {
+        let store = UnifiedStore::with_config(UnifiedStoreConfig::default());
+        store
+            .insert_auto(
+                "red_config",
+                UnifiedEntity::table_row(
+                    EntityId::new(1),
+                    "red_config",
+                    1,
+                    vec![Value::text("preserved")],
+                ),
+            )
+            .expect("config row");
+        let mut legacy = store.to_binary_dump_bytes();
+        let canonical = b"red.config";
+        let old = b"red_config";
+        let mut replacements = 0;
+        for offset in 0..=legacy.len() - canonical.len() {
+            if &legacy[offset..offset + canonical.len()] == canonical {
+                legacy[offset..offset + old.len()].copy_from_slice(old);
+                replacements += 1;
+            }
+        }
+        assert!(
+            replacements >= 2,
+            "snapshot carries catalog and entity names"
+        );
+        legacy.truncate(legacy.len() - 4);
+        reddb_file::append_native_store_crc32_footer(&mut legacy);
+
+        let migrated = UnifiedStore::load_from_bytes(&legacy).expect("legacy snapshot");
+        assert_eq!(migrated.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            migrated
+                .get("red.config", EntityId::new(1))
+                .expect("preserved row")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        let republished = migrated.to_binary_dump_bytes();
+        assert!(
+            republished.windows(old.len()).all(|window| window != old),
+            "new snapshots must not republish legacy identities"
+        );
+        assert!(republished
+            .windows(canonical.len())
+            .any(|window| window == canonical));
+    }
+
+    #[test]
     fn interned_timeseries_series_reduces_repeated_tag_storage() {
         let tags = HashMap::from([
             (

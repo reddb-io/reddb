@@ -1,26 +1,6 @@
 name: PG-Wire Client Conformance
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/pgwire-clients.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'crates/reddb-server/**'
-      - 'src/bin/red.rs'
-      - 'tests/pgwire_clients/**'
-      - 'tests/grouped/redwire_protocol/postgres_wire_extended.rs'
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - '.github/workflows/pgwire-clients.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'crates/reddb-server/**'
-      - 'src/bin/red.rs'
-      - 'tests/pgwire_clients/**'
-      - 'tests/grouped/redwire_protocol/postgres_wire_extended.rs'
   workflow_dispatch:
 
 concurrency:

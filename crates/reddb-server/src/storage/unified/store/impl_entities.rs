@@ -1,6 +1,10 @@
 use super::*;
 
 impl UnifiedStore {
+    pub(crate) fn canonical_collection(name: &str) -> &str {
+        reddb_engine::storage::system_collection_names::canonical_or_self(name)
+    }
+
     /// Vault versions are WAL-backed in memory until a committed checkpoint.
     /// Preparing a commit must not dirty pager pages: eviction or an auth
     /// flush could otherwise persist a version before its WAL batch exists.
@@ -61,6 +65,7 @@ impl UnifiedStore {
         entities: &[&UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
@@ -147,6 +152,7 @@ impl UnifiedStore {
         entities: &[UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
@@ -263,7 +269,7 @@ impl UnifiedStore {
     }
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
-        let name = name.into();
+        let name = reddb_engine::storage::system_collection_names::canonical_owned(name.into());
         let mut collections = self.resident.collections.write();
 
         if collections.contains_key(&name) {
@@ -298,13 +304,16 @@ impl UnifiedStore {
 
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
-        self.resident
-            .get_or_create_collection(name, &self.config.manager_config)
+        self.resident.get_or_create_collection(
+            reddb_engine::storage::system_collection_names::canonical_owned(name.into()),
+            &self.config.manager_config,
+        )
     }
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.resident.get_collection(name)
+        self.resident
+            .get_collection(Self::canonical_collection(name))
     }
 
     /// Get the context index for cross-structure search.
@@ -319,7 +328,7 @@ impl UnifiedStore {
     /// store's internal buffer is cleared for that collection.
     pub fn take_replayed_turbo_inserts(&self, collection: &str) -> Option<Vec<(u64, Vec<f32>)>> {
         let mut map = self.replayed_turbo_inserts.lock();
-        map.remove(collection)
+        map.remove(Self::canonical_collection(collection))
     }
 
     pub(crate) fn take_replayed_probabilistic_deltas(&self) -> Vec<(u8, u8, String, Vec<Vec<u8>>)> {
@@ -456,6 +465,8 @@ impl UnifiedStore {
     /// Persist single-file contracts through the same commit fence as rows.
     /// Memory-only stores retain the same auxiliary snapshot behavior.
     pub(crate) fn persist_aux_metadata(&self, bytes: Vec<u8>) -> Result<(), StoreError> {
+        let bytes = reddb_engine::catalog::codec::canonicalize_collection_contract_blob(&bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
         let _publication = self.vault_publication_lock.lock();
         self.finish_paged_write([StoreWalAction::SetAuxMetadata {
             bytes: bytes.clone(),
@@ -476,6 +487,7 @@ impl UnifiedStore {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         let _vault_guard = self.vault_publication_lock.lock();
         let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
@@ -540,11 +552,13 @@ impl UnifiedStore {
 
     /// Insert an entity into a collection
     pub fn insert(&self, collection: &str, entity: UnifiedEntity) -> Result<EntityId, StoreError> {
+        let collection = Self::canonical_collection(collection);
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
         let mut entity = entity;
+        entity.canonicalize_system_collection_names();
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
         } else {
@@ -643,6 +657,10 @@ impl UnifiedStore {
         collection: &str,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
+        let collection = Self::canonical_collection(collection);
+        for entity in &mut entities {
+            entity.canonicalize_system_collection_names();
+        }
         // A transaction can begin after checkpoint visibility is frozen.
         // Fence the entire row batch, including its captured or committed WAL.
         let _publication = self.vault_publication_lock.lock();
@@ -877,10 +895,12 @@ impl UnifiedStore {
         collection: &str,
         entity: UnifiedEntity,
     ) -> Result<EntityId, StoreError> {
+        let collection = Self::canonical_collection(collection);
         // Include the WAL append in the checkpoint publication fence.
         let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
+        entity.canonicalize_system_collection_names();
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
         } else {
@@ -1279,6 +1299,7 @@ impl UnifiedStore {
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
+        let collection = Self::canonical_collection(collection);
         let publication = self.vault_publication_lock.lock();
         // Invalidate entity cache (read-lock probe; no write lock when cold).
         self.resident.entity_cache.remove(id.raw());
@@ -1331,6 +1352,7 @@ impl UnifiedStore {
         collection: &str,
         ids: &[EntityId],
     ) -> Result<Vec<EntityId>, StoreError> {
+        let collection = Self::canonical_collection(collection);
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1446,6 +1468,8 @@ impl UnifiedStore {
         ref_type: RefType,
         weight: f32,
     ) -> Result<(), StoreError> {
+        let source_collection = Self::canonical_collection(source_collection);
+        let target_collection = Self::canonical_collection(target_collection);
         let registry_dirty = self.resident.add_cross_ref_in_memory(
             source_collection,
             source_id,

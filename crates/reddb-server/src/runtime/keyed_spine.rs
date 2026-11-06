@@ -62,6 +62,26 @@ pub(super) fn row_version(
     })
 }
 
+/// Consume a hydrated row without copying its value (including sealed bytes).
+pub(super) fn row_version_owned(
+    id: EntityId,
+    mut row: RowData,
+    fallback_version: i64,
+) -> Option<KeyedRowVersion> {
+    let value = if let Some(named) = row.named.as_mut() {
+        named.remove("value")
+    } else {
+        row.schema
+            .as_ref()
+            .and_then(|schema| schema.iter().position(|name| name == "value"))
+            .and_then(|index| row.columns.get_mut(index))
+            .map(|value| std::mem::replace(value, Value::Null))
+    };
+    let mut version = row_version(id, &row, fallback_version)?;
+    version.value = value.unwrap_or(Value::Null);
+    Some(version)
+}
+
 /// Point reads preserve the last entry among equal highest versions.
 pub(super) fn select_latest_version<T: KeyedVersion>(latest: &mut Option<T>, version: T) {
     if latest
@@ -252,6 +272,67 @@ mod tests {
         assert!(version.tombstone);
         assert_eq!(version.op, "delete");
         assert_eq!(version.created_at_ms, 42);
+    }
+
+    #[test]
+    fn owned_versions_move_sealed_payloads_for_named_and_compact_rows() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        for named in [false, true] {
+            let fields = [
+                ("key", Value::text("fixture.secret")),
+                ("value", Value::Secret(vec![7; 64 * 1024])),
+                ("version", Value::Integer(9)),
+                ("tombstone", Value::Boolean(true)),
+                ("op", Value::text("delete")),
+            ];
+            let row = RowData {
+                columns: if named {
+                    vec![]
+                } else {
+                    fields.iter().map(|(_, value)| value.clone()).collect()
+                },
+                named: named.then(|| {
+                    fields
+                        .iter()
+                        .map(|(key, value)| (key.to_string(), value.clone()))
+                        .collect()
+                }),
+                schema: (!named).then(|| {
+                    std::sync::Arc::new(fields.iter().map(|(key, _)| key.to_string()).collect())
+                }),
+            };
+            let expected = row_version(EntityId::new(5), &row, 3).expect("borrowed version");
+            let Some(Value::Secret(bytes)) = row.get_field("value") else {
+                panic!("sealed fixture")
+            };
+            let original = bytes.as_ptr();
+            let (actual, allocations) = measure_allocations(|| {
+                row_version_owned(EntityId::new(5), row, 3).expect("owned version")
+            });
+            assert_eq!(actual.value, expected.value);
+            let Value::Secret(bytes) = &actual.value else {
+                panic!("sealed result")
+            };
+            assert_eq!(
+                bytes.as_ptr(),
+                original,
+                "sealed bytes must move without copying"
+            );
+            assert!(allocations.allocated_bytes < 1024, "{allocations:?}");
+            assert_eq!(
+                (actual.key, actual.version, actual.tombstone, actual.op),
+                (
+                    expected.key,
+                    expected.version,
+                    expected.tombstone,
+                    expected.op
+                )
+            );
+        }
+        let missing = RowData::with_names(vec![Value::text("missing")], vec!["key".into()]);
+        let result = row_version_owned(EntityId::new(6), missing, 17).expect("missing value");
+        assert_eq!(result.version, 17);
+        assert_eq!(result.value, Value::Null);
     }
 
     #[test]

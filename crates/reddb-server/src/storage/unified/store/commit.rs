@@ -18,7 +18,9 @@ struct NativeReplayTarget<'a> {
 
 impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<'_> {
     fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        self.store.resident.set_aux_metadata(bytes.to_vec());
+        let bytes = reddb_engine::catalog::codec::canonicalize_collection_contract_blob(bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        self.store.resident.set_aux_metadata(bytes);
         Ok(())
     }
     fn has_collection(&self, name: &str) -> bool {
@@ -1122,7 +1124,11 @@ impl StoreCommitCoordinator {
                     // state under a fixed codec seed). The legacy `vector`
                     // path doesn't read this map.
                     let mut map = store.replayed_turbo_inserts.lock();
-                    map.entry(collection).or_default().push((entity_id, vector));
+                    map.entry(
+                        reddb_engine::storage::system_collection_names::canonical_owned(collection),
+                    )
+                    .or_default()
+                    .push((entity_id, vector));
                 }
                 WalRecord::ProbabilisticDelta {
                     kind,
@@ -1694,6 +1700,7 @@ impl UnifiedStore {
         name: &str,
         entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let name = Self::canonical_collection(name);
         let fv = self.format_version();
 
         // Build a fresh manager. Done outside the collections lock so
@@ -1705,6 +1712,7 @@ impl UnifiedStore {
 
         let mut prepared = entities;
         for entity in &mut prepared {
+            entity.canonicalize_system_collection_names();
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
             } else {
@@ -1785,6 +1793,7 @@ impl UnifiedStore {
         records: &[Vec<u8>],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let (new_manager, prepared) = self.resident.prepare_replayed_refresh_collection(
             collection,
             records,
@@ -1813,6 +1822,7 @@ impl UnifiedStore {
         name: &str,
         records: Vec<Vec<u8>>,
     ) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.apply_replayed_refresh_collection(name, &records, true)?;
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
@@ -1822,11 +1832,13 @@ impl UnifiedStore {
     }
 
     pub(crate) fn create_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.resident
             .create_collection_in_memory(name, &self.config.manager_config)
     }
 
     fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.resident.drop_collection_in_memory(name, || {
             if let Some(tree) = self.btree_indices.write().remove(name) {
                 self.retire_btree(tree);
@@ -1840,6 +1852,7 @@ impl UnifiedStore {
         record: &[u8],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let id = self.resident.apply_replayed_upsert(
             collection,
             record,
@@ -1884,6 +1897,7 @@ impl UnifiedStore {
         id: EntityId,
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         self.resident.apply_replayed_delete(collection, id, || {
             if self.pager.is_some()
                 && update_btrees

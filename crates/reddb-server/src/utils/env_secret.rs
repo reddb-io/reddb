@@ -149,6 +149,7 @@ mod tests {
 /// precedence to resolve silently.
 pub const FILE_BACKED_SECRET_ENV: &[&str] = &[
     "REDDB_CERTIFICATE",
+    "REDDB_VAULT_PASSPHRASE",
     "REDDB_USERNAME",
     "REDDB_PASSWORD",
     "REDDB_ROOT_TOKEN",

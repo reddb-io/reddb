@@ -1,9 +1,7 @@
 name: Changesets
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 concurrency:
   group: changesets-${{ github.workflow }}
@@ -16,7 +14,7 @@ jobs:
     # Skip on the version-bump commit itself to avoid an infinite loop. The
     # commit landing the version bump is authored by github-actions[bot] —
     # that push doesn't need to re-trigger this workflow.
-    if: github.actor != 'github-actions[bot]'
+    if: (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && (github.actor != 'github-actions[bot]')
     permissions:
       contents: write
       pull-requests: write

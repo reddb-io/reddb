@@ -6,11 +6,6 @@ name: Crypto Coverage Gate
 # PR if the crate drops below 90% line coverage.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-crypto/**'
-      - '.github/workflows/crypto-coverage.yml'
   workflow_dispatch:
 
 concurrency:

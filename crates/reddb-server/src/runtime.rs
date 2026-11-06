@@ -1703,6 +1703,7 @@ pub(crate) mod query_exec;
 pub(crate) mod query_latency_telemetry;
 pub mod query_request;
 pub(crate) mod queue_lifecycle;
+mod queue_storage_index;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;
 pub mod quota_bucket;
