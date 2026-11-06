@@ -88,6 +88,42 @@ fn read_only_fixture(legacy: bool) {
         assert!(runtime
             .execute_query("INSERT INTO owner (id, payload) VALUES (2, 'denied')")
             .is_err());
+        let entity = runtime
+            .db()
+            .store()
+            .get_collection("owner")
+            .expect("owner")
+            .query_all(|entity| entity.xmax == 0)
+            .pop()
+            .expect("preserved row");
+        let deletion = reddb_server::replication::cdc::change_record_from_entity(
+            1,
+            1,
+            reddb_server::replication::cdc::ChangeOperation::Delete,
+            "owner",
+            "table",
+            &entity,
+            12,
+            None,
+        );
+        let applier = reddb_server::replication::logical::LogicalChangeApplier::new(0);
+        assert!(applier
+            .apply(
+                &runtime.db(),
+                &deletion,
+                reddb_server::replication::logical::ApplyMode::Replica
+            )
+            .is_err());
+        assert_eq!(applier.last_applied_lsn(), 0);
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM owner")
+                .expect("unchanged row")
+                .result
+                .records
+                .len(),
+            1
+        );
         runtime.flush().expect("read-only checkpoint is a no-op");
         runtime
             .db()

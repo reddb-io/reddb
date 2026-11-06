@@ -554,6 +554,11 @@ impl LogicalChangeApplier {
         _mode: ApplyMode,
         metrics: &ReplicaApplyMetrics,
     ) -> RedDBResult<()> {
+        if db.options().read_only {
+            return Err(RedDBError::InvalidOperation(
+                "cannot apply logical changes to a read-only database".into(),
+            ));
+        }
         // Issue #1242 — compute payload bytes before the apply so we can
         // increment the throughput counter unconditionally at the end (early
         // `return Err` paths skip the counter, correctly counting only
