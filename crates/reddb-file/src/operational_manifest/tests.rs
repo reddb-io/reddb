@@ -138,6 +138,34 @@ fn collection_rename_keeps_files_and_is_idempotent() {
 }
 
 #[test]
+fn collision_reconciliation_rejects_append_only_rows_owned_by_loser() {
+    let path = temp_db_path("collision_append_only_rows");
+    let manifest = OperationalManifest::for_db_path(&path);
+    manifest.create_collection("red_config").unwrap();
+    manifest.create_collection("red.config").unwrap();
+    let mut current = manifest.load_current().unwrap().unwrap();
+    current.append_only_retired.insert(
+        "red.config".to_string(),
+        AppendOnlyRetiredState {
+            row_count: 7,
+            segment_high_water: 3,
+        },
+    );
+    current.generation += 1;
+    manifest.publish(&current).unwrap();
+    let generation = current.generation;
+
+    let error = manifest
+        .reconcile_collection_collisions(&[("red_config", "red.config", "red.config")])
+        .expect_err("append-only data cannot be discarded as an empty duplicate");
+    assert!(error.to_string().contains("still owns 7 append-only rows"));
+    let unchanged = manifest.load_current().unwrap().unwrap();
+    assert_eq!(unchanged.generation, generation);
+    assert!(unchanged.collections.contains_key("red_config"));
+    assert!(unchanged.collections.contains_key("red.config"));
+}
+
+#[test]
 fn collection_rename_collision_rejects_the_whole_batch() {
     let path = temp_db_path("rename_collision");
     let manifest = OperationalManifest::for_db_path(&path);

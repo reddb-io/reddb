@@ -3189,6 +3189,7 @@ mod tests {
 
     #[test]
     fn required_auth_simple_preset_waits_for_durable_admin() {
+        let _guard = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
             enabled: true,

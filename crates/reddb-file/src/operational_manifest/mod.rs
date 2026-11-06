@@ -342,6 +342,107 @@ impl<V: Vfs> OperationalManifest<V> {
         Ok(())
     }
 
+    /// Apply catalogue-proven empty-duplicate decisions to operational
+    /// identities. The paged catalogue is authoritative for which side is
+    /// empty; this method deliberately does not inspect or infer row counts.
+    /// Losing artifacts are quarantined after the replacement manifest is
+    /// durably published. Repeating a completed reconciliation is a no-op.
+    pub fn reconcile_collection_collisions(
+        &self,
+        collisions: &[(&str, &str, &str)],
+    ) -> io::Result<()> {
+        if collisions.is_empty() {
+            return Ok(());
+        }
+        let Some(mut manifest) = self.load_current()? else {
+            return Ok(());
+        };
+        let mut identities = BTreeSet::new();
+        for &(survivor, loser, canonical) in collisions {
+            if survivor == loser
+                || (canonical != survivor && canonical != loser)
+                || !identities.insert(survivor)
+                || !identities.insert(loser)
+            {
+                return Err(invalid_data("invalid collection collision reconciliation"));
+            }
+            let loser_rows = append_only_published_rows(&manifest, loser);
+            if loser_rows != 0 {
+                return Err(invalid_data(format!(
+                    "collection collision loser {loser} still owns {loser_rows} append-only rows"
+                )));
+            }
+        }
+
+        let mut changed = false;
+        for &(survivor, loser, canonical) in collisions {
+            if survivor == canonical {
+                if manifest.collections.remove(loser).is_some() {
+                    changed = true;
+                }
+                let before = manifest.append_only_segments.len();
+                manifest
+                    .append_only_segments
+                    .retain(|segment| segment.collection != loser);
+                changed |= before != manifest.append_only_segments.len();
+                changed |= manifest.append_only_retired.remove(loser).is_some();
+                continue;
+            }
+
+            let source_present = manifest.collections.contains_key(survivor)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == survivor)
+                || manifest.append_only_retired.contains_key(survivor);
+            if !source_present {
+                // The previous attempt already published the canonical
+                // identity. Keeping it is the crash-idempotent outcome.
+                continue;
+            }
+
+            if manifest.collections.remove(loser).is_some() {
+                changed = true;
+            }
+            let before = manifest.append_only_segments.len();
+            manifest
+                .append_only_segments
+                .retain(|segment| segment.collection != loser);
+            changed |= before != manifest.append_only_segments.len();
+            changed |= manifest.append_only_retired.remove(loser).is_some();
+
+            if let Some(entry) = manifest.collections.remove(survivor) {
+                manifest.collections.insert(canonical.to_string(), entry);
+                changed = true;
+            }
+            for segment in &mut manifest.append_only_segments {
+                if segment.collection == survivor {
+                    segment.collection = canonical.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(retired) = manifest.append_only_retired.remove(survivor) {
+                manifest
+                    .append_only_retired
+                    .insert(canonical.to_string(), retired);
+                changed = true;
+            }
+        }
+
+        if changed {
+            manifest.generation = manifest
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("manifest generation overflow"))?;
+            self.publish(&manifest)?;
+            let protected_paths = self.protected_collection_paths(&manifest)?;
+            self.quarantine_unreferenced_collection_files(&protected_paths)?;
+            self.quarantine_unreferenced_append_only_segments(&manifest)?;
+            self.validate_manifest_artifacts(&manifest)?;
+        }
+        Ok(())
+    }
+
     pub fn prepare_collection_create(&self, name: &str) -> io::Result<PreparedCollectionCreate<V>> {
         self.ensure_dirs()?;
         let manifest = self.load_current()?.unwrap_or_else(empty_manifest);
