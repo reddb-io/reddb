@@ -102,6 +102,31 @@ fn recover_pending_wal_on_copy_preserves_source_and_committed_records() {
     assert!(!failed.join("source.rdb").exists());
     assert_eq!(std::fs::read(&source).unwrap(), source_image);
     assert_eq!(std::fs::read(&wal).unwrap(), corrupt);
+    std::fs::write(&wal, &wal_image).unwrap();
+    {
+        let mut writer = WalWriter::open(&wal).unwrap();
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "new_table".into(),
+            },
+        )
+        .unwrap();
+        writer
+            .append(&WalRecord::TxCommitBatch {
+                tx_id: 1000,
+                actions: vec![action],
+            })
+            .unwrap();
+        writer.sync().unwrap();
+    }
+    let schema_wal = std::fs::read(&wal).unwrap();
+    let failed = directory.path().join("unsupported-schema-wal");
+    let error =
+        recover_paged_wal(&source, &failed).expect_err("schema changes must be qualified first");
+    assert!(error.to_string().contains("schema"), "{error}");
+    assert!(!failed.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), source_image);
+    assert_eq!(std::fs::read(&wal).unwrap(), schema_wal);
 }
 
 #[test]
@@ -154,6 +179,91 @@ fn recover_pending_wal_for_disk_resident_store() {
             );
         }
     }
+}
+
+#[test]
+fn pending_runtime_wal_child() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let Some(path) = std::env::var_os("REDDB_TEST_PENDING_RUNTIME_PATH") else {
+        return;
+    };
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(std::path::PathBuf::from(path))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .unwrap();
+    runtime
+        .execute_query("INSERT INTO records (id, value) VALUES (2, 'after-crash')")
+        .unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn recover_pending_runtime_wal_preserves_sql_and_index_results() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("runtime.rdb");
+    let options = RedDBOptions::persistent(&source)
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    {
+        let runtime = RedDBRuntime::with_options(options).unwrap();
+        runtime
+            .execute_query("CREATE TABLE records (id INT, value TEXT)")
+            .unwrap();
+        runtime
+            .execute_query("CREATE INDEX record_value ON records (value) USING HASH")
+            .unwrap();
+        runtime
+            .execute_query("INSERT INTO records (id, value) VALUES (1, 'before-crash')")
+            .unwrap();
+        runtime.graceful_shutdown(false).unwrap();
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "pending_runtime_wal_child"])
+        .env("REDDB_TEST_PENDING_RUNTIME_PATH", &source)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stdout)
+    );
+    let before = std::fs::read(&source).unwrap();
+    let wal = reddb_file::unified_wal_path(&source);
+    let wal_before = std::fs::read(&wal).unwrap();
+    let metadata = reddb_file::physical_metadata_binary_path(&source);
+    let metadata_before = std::fs::read(&metadata).unwrap();
+    assert!(wal_before.len() > reddb_file::WAL_FILE_HEADER_BYTES);
+    let output = directory.path().join("runtime-recovered");
+    recover_paged_wal(&source, &output).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert_eq!(std::fs::read(&metadata).unwrap(), metadata_before);
+    let options = RedDBOptions::persistent(output.join("runtime.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    let runtime = RedDBRuntime::with_options(options).unwrap();
+    let row = runtime
+        .execute_query("SELECT id FROM records WHERE value = 'after-crash'")
+        .unwrap();
+    assert_eq!(row.result.records.len(), 1);
+    assert_eq!(
+        row.result.records[0].get("id").unwrap().display_string(),
+        "2"
+    );
+    let explain = runtime
+        .explain_query("SELECT id FROM records WHERE value = 'after-crash'")
+        .unwrap();
+    let mut nodes = vec![&explain.logical_plan.root];
+    let mut uses_index = false;
+    while let Some(node) = nodes.pop() {
+        uses_index |= node.operator == "index_seek";
+        nodes.extend(&node.children);
+    }
+    assert!(uses_index, "recovered query should use its secondary index");
+    runtime.graceful_shutdown(false).unwrap();
 }
 
 #[test]

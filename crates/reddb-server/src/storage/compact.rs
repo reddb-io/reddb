@@ -92,15 +92,10 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     }
     let guard = Source::open_for_wal_recovery(&source)?;
     salvage::verify_supported_source(&source, &guard)?;
-    ensure(
-        guard.header.physical == f::PhysicalFileHeader::default(),
-        "physical metadata requires separate WAL recovery qualification",
-    )?;
-    ensure(
-        !f::physical_metadata_binary_path(&source).exists()
-            && !f::physical_metadata_json_path(&source).exists(),
-        "physical metadata sidecar requires separate WAL recovery qualification",
-    )?;
+    let mut assets = assets::Assets::for_verification(&guard);
+    assets.vault()?;
+    assets.physical()?;
+    assets.metadata(&source, None)?;
     let wal = f::unified_wal_path(&source);
     let length = std::fs::metadata(&wal)?.len();
     ensure(
@@ -113,6 +108,12 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     )?;
     for entry in WalReader::open(&wal)?.iter() {
         match entry?.1 {
+            WalRecord::PageWrite { data, .. } => verify_wal_recovery_action(&data)?,
+            WalRecord::TxCommitBatch { actions, .. } => {
+                for action in actions {
+                    verify_wal_recovery_action(&action)?;
+                }
+            }
             WalRecord::VectorInsert { .. } | WalRecord::ProbabilisticDelta { .. } => {
                 return Err("WAL contains runtime-owned data requiring separate recovery".into());
             }
@@ -136,6 +137,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     drop(output);
     verify_file_copy(&source, &staged_source)?;
     copy_sidecars(&source, &staged_source)?;
+    copy_physical_metadata_files(&source, &staged_source)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
         resident_memory_bytes_max: (guard.header.version
             >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION)
@@ -158,6 +160,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     )?;
     let final_path = destination.join(name);
     copy_sidecars(&validated_dir.join(name), &final_path)?;
+    copy_physical_metadata_files(&validated_dir.join(name), &final_path)?;
     write_new(
         &destination.join("compaction.json"),
         report.machine_json().as_bytes(),
@@ -170,6 +173,46 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
     std::fs::remove_file(validated_dir.join(name))?;
     sync_directory(&validated_dir)?;
     Ok(report)
+}
+
+fn verify_wal_recovery_action(bytes: &[u8]) -> Result<()> {
+    match f::decode_store_wal_action_frame(bytes)? {
+        f::StoreWalActionFrame::UpsertEntityRecord { .. }
+        | f::StoreWalActionFrame::DeleteEntityRecord { .. }
+        | f::StoreWalActionFrame::BulkUpsertEntityRecords { .. } => Ok(()),
+        _ => Err("WAL schema or metadata changes require separate recovery qualification".into()),
+    }
+}
+
+fn copy_physical_metadata_files(source: &Path, destination: &Path) -> Result<()> {
+    for (old, new) in [
+        (
+            f::physical_metadata_binary_path(source),
+            f::physical_metadata_binary_path(destination),
+        ),
+        (
+            f::physical_metadata_json_path(source),
+            f::physical_metadata_json_path(destination),
+        ),
+    ] {
+        match std::fs::symlink_metadata(&old) {
+            Ok(stat) => {
+                ensure(
+                    stat.is_file() && stat.len() <= 64 * 1024 * 1024,
+                    "invalid physical metadata sidecar",
+                )?;
+                let mut input = File::open(&old)?;
+                let mut output = create_new(&new)?;
+                std::io::copy(&mut input, &mut output)?;
+                output.sync_all()?;
+                drop(output);
+                verify_file_copy(&old, &new)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn compact_paged_inner(
