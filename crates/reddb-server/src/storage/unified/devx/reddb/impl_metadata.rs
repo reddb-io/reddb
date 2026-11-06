@@ -445,7 +445,7 @@ impl RedDB {
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(crate::physical::is_collection_contract_decode_error) =>
                 {
-                    return Err(error)
+                    return Err(error);
                 }
                 Err(_) => {}
             }
@@ -623,6 +623,28 @@ impl RedDB {
             && catalog_complete == Some(true)
     }
 
+    fn native_state_is_summary_free_legacy(native_state: &NativePhysicalState) -> bool {
+        let header = native_state.header;
+        header.manifest_page == 0
+            && header.manifest_checksum == 0
+            && header.registry_page == 0
+            && header.registry_checksum == 0
+            && header.recovery_page == 0
+            && header.recovery_checksum == 0
+            && header.catalog_page == 0
+            && header.catalog_checksum == 0
+            && header.metadata_state_page == 0
+            && header.metadata_state_checksum == 0
+            && header.vector_artifact_page == 0
+            && header.vector_artifact_checksum == 0
+            && native_state.manifest.is_none()
+            && native_state.registry.is_none()
+            && native_state.recovery.is_none()
+            && native_state.catalog.is_none()
+            && native_state.metadata_state.is_none()
+            && native_state.vector_artifact_pages.is_none()
+    }
+
     pub(crate) fn load_or_bootstrap_physical_metadata(
         &self,
         persist_bootstrapped: bool,
@@ -669,26 +691,15 @@ impl RedDB {
                 let Some(native_state) = native_state else {
                     return Err(err.into());
                 };
-                // Accept the bootstrap when the native state is either
-                // (a) fully populated and consistent (the original
-                // contract), or (b) trivially empty — a freshly created
-                // database with no collections written yet. Without (b)
-                // a brand-new data file can never reach
-                // `readiness_for_query = true`, because the bootstrap
-                // refuses to run until the registry/catalog/recovery
-                // structures are "complete", which they never become
-                // until the bootstrap has already run once.
-                //
-                // The emptiness check is conservative: header.sequence
-                // must still be at its initial value AND all three
-                // physical state summaries must be absent. Anything
-                // else falls through to the original error so we never
-                // paper over partially corrupted files.
-                let is_fresh_empty = native_state.header.sequence == 0
-                    && native_state.registry.is_none()
-                    && native_state.catalog.is_none()
-                    && native_state.recovery.is_none();
-                if !is_fresh_empty && !Self::native_state_is_bootstrap_complete(&native_state) {
+                // Summary-free paged files predate native registry/catalog/recovery
+                // publication. Their catalog sequence can legitimately advance during
+                // an in-place identity migration, so sequence zero is not a format
+                // discriminator. Admit only the exact legacy shape: every summary
+                // pointer and checksum is zero. A non-zero unreadable pointer remains a
+                // partial/corrupt publication and must fail closed.
+                if !Self::native_state_is_summary_free_legacy(&native_state)
+                    && !Self::native_state_is_bootstrap_complete(&native_state)
+                {
                     return Err(err.into());
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
@@ -1610,6 +1621,85 @@ mod catalog_observation_tests {
     use super::*;
 
     #[test]
+    fn summary_free_legacy_native_state_rebuilds_a_missing_sidecar_after_catalog_publication() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("legacy-summary-free.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options).expect("paged runtime");
+        runtime
+            .execute_query("CREATE TABLE retained (value INTEGER)")
+            .expect("retained table");
+        runtime
+            .execute_query("INSERT INTO retained (value) VALUES (17)")
+            .expect("retained row");
+        runtime.checkpoint().expect("publish retained row");
+
+        let db = runtime.db();
+        let store = db.store();
+        let mut header = store.physical_file_header().expect("physical header");
+        assert_ne!(
+            header.collection_roots_page, 0,
+            "fixture retains native roots"
+        );
+        header.sequence = header
+            .sequence
+            .checked_add(1)
+            .expect("next catalog sequence");
+        header.manifest_page = 0;
+        header.manifest_checksum = 0;
+        header.registry_page = 0;
+        header.registry_checksum = 0;
+        header.recovery_page = 0;
+        header.recovery_checksum = 0;
+        header.catalog_page = 0;
+        header.catalog_checksum = 0;
+        header.metadata_state_page = 0;
+        header.metadata_state_checksum = 0;
+        header.vector_artifact_page = 0;
+        header.vector_artifact_checksum = 0;
+        store
+            .update_physical_file_header(header)
+            .expect("publish legacy catalog sequence");
+
+        let legacy = db.native_physical_state().expect("legacy native state");
+        assert!(RedDB::native_state_is_summary_free_legacy(&legacy));
+        let mut unreadable_publication = legacy.clone();
+        unreadable_publication.header.registry_page = u32::MAX;
+        assert!(
+            !RedDB::native_state_is_summary_free_legacy(&unreadable_publication),
+            "a non-zero unreadable summary pointer must still fail closed"
+        );
+
+        let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
+        let json = PhysicalMetadataFile::metadata_path_for(&path);
+        std::fs::remove_file(binary).expect("remove binary sidecar");
+        if json.exists() {
+            std::fs::remove_file(json).expect("remove JSON sidecar");
+        }
+        for journal in PhysicalMetadataFile::journal_paths_for_data_path(&path)
+            .expect("list metadata journals")
+        {
+            std::fs::remove_file(journal).expect("remove metadata journal");
+        }
+
+        let metadata = db
+            .load_or_bootstrap_physical_metadata(true)
+            .expect("summary-free legacy state must rebuild its missing sidecar");
+        assert_eq!(
+            metadata.superblock.collection_roots.get("retained"),
+            db.physical_collection_roots().get("retained")
+        );
+        assert!(PhysicalMetadataFile::metadata_binary_path_for(&path).exists());
+        let rows = runtime
+            .execute_query("SELECT value FROM retained")
+            .expect("retained row remains queryable");
+        assert_eq!(rows.result.records.len(), 1);
+    }
+
+    #[test]
     fn legacy_paged_drop_does_not_resurrect_derived_index_descriptors() {
         let directory = tempfile::tempdir().expect("temporary database");
         let path = directory.path().join("drop-descriptors.rdb");
@@ -1667,10 +1757,12 @@ mod catalog_observation_tests {
                         .db()
                         .native_registry_summary()
                         .expect("native registry");
-                    assert!(!native.indexes.iter().any(|index| index
-                        .collection
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with("discarded_source_"))));
+                    assert!(!native.indexes.iter().any(|index| {
+                        index
+                            .collection
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("discarded_source_"))
+                    }));
                 }
                 if cycle == 0 {
                     // Model the consistent sidecar/native pair left by an older
@@ -1729,10 +1821,12 @@ mod catalog_observation_tests {
             1
         );
         let metadata = runtime.db().physical_metadata().expect("physical metadata");
-        assert!(!metadata.indexes.iter().any(|index| index
-            .collection
-            .as_deref()
-            .is_some_and(|name| name.starts_with("discarded_source_"))));
+        assert!(!metadata.indexes.iter().any(|index| {
+            index
+                .collection
+                .as_deref()
+                .is_some_and(|name| name.starts_with("discarded_source_"))
+        }));
         assert!(metadata
             .indexes
             .iter()
