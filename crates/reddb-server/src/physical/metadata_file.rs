@@ -340,7 +340,7 @@ impl PhysicalMetadataFile {
     fn from_document_envelope(
         envelope: reddb_file::PhysicalMetadataDocumentEnvelope,
     ) -> io::Result<Self> {
-        Ok(Self {
+        let mut metadata = Self {
             protocol_version: envelope.protocol_version,
             generated_at_unix_ms: envelope.generated_at_unix_ms,
             last_loaded_from: envelope.last_loaded_from,
@@ -403,8 +403,87 @@ impl PhysicalMetadataFile {
                 "snapshots",
                 snapshot_descriptor_from_json,
             )?,
-        })
+        };
+        metadata.canonicalize_system_collection_names()?;
+        Ok(metadata)
     }
+
+    fn canonicalize_system_collection_names(&mut self) -> io::Result<()> {
+        canonicalize_map_keys(&mut self.catalog.stats_by_collection, "catalog statistics")?;
+        canonicalize_map_keys(
+            &mut self.collection_ttl_defaults_ms,
+            "collection TTL defaults",
+        )?;
+        canonicalize_map_keys(
+            &mut self.superblock.collection_roots,
+            "physical collection roots",
+        )?;
+
+        reddb_engine::storage::system_collection_names::migration_plan(
+            self.collection_contracts
+                .iter()
+                .map(|contract| contract.name.as_str()),
+        )
+        .map_err(|(legacy, canonical)| {
+            invalid_data(format!(
+                "collection contracts contain both legacy collection '{legacy}' and canonical collection '{canonical}'"
+            ))
+        })?;
+        for contract in &mut self.collection_contracts {
+            contract.name = reddb_engine::storage::system_collection_names::canonical_owned(
+                std::mem::take(&mut contract.name),
+            );
+        }
+        for index in &mut self.indexes {
+            if let Some(collection) = index.collection.take() {
+                index.collection = Some(
+                    reddb_engine::storage::system_collection_names::canonical_owned(collection),
+                );
+            }
+        }
+        for event in &mut self.manifest_events {
+            let old = std::mem::take(&mut event.collection);
+            let object_key_is_collection = event.object_key == old;
+            let canonical = reddb_engine::storage::system_collection_names::canonical_owned(old);
+            if object_key_is_collection {
+                event.object_key = canonical.clone();
+            }
+            event.collection = canonical;
+        }
+        for definition in &mut self.tree_definitions {
+            definition.collection = reddb_engine::storage::system_collection_names::canonical_owned(
+                std::mem::take(&mut definition.collection),
+            );
+        }
+        for hypertable in &mut self.hypertables {
+            hypertable.name = reddb_engine::storage::system_collection_names::canonical_owned(
+                std::mem::take(&mut hypertable.name),
+            );
+        }
+        for projection in &mut self.graph_projections {
+            projection.source = reddb_engine::storage::system_collection_names::canonical_owned(
+                std::mem::take(&mut projection.source),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn canonicalize_map_keys<T>(map: &mut BTreeMap<String, T>, label: &str) -> io::Result<()> {
+    reddb_engine::storage::system_collection_names::migration_plan(map.keys().map(String::as_str))
+        .map_err(|(legacy, canonical)| {
+            invalid_data(format!(
+                "{label} contain both legacy collection '{legacy}' and canonical collection '{canonical}'"
+            ))
+        })?;
+    let previous = std::mem::take(map);
+    for (name, value) in previous {
+        map.insert(
+            reddb_engine::storage::system_collection_names::canonical_owned(name),
+            value,
+        );
+    }
+    Ok(())
 }
 
 fn parse_document_fragment(json: &str, field: &'static str) -> io::Result<JsonValue> {
@@ -421,4 +500,48 @@ fn parse_document_fragments<T>(
         .iter()
         .map(|fragment| decode(&parse_document_fragment(fragment, field)?))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_catalog_names_migrate_and_collisions_fail_closed() {
+        let mut metadata = PhysicalMetadataFile::from_state(
+            RedDBOptions::default(),
+            CatalogSnapshot::default(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        );
+        metadata
+            .catalog
+            .stats_by_collection
+            .insert("red_config".to_string(), CollectionStats::default());
+        metadata
+            .superblock
+            .collection_roots
+            .insert("red_config".to_string(), 41);
+        metadata
+            .collection_ttl_defaults_ms
+            .insert("red_config".to_string(), 5000);
+        metadata.canonicalize_system_collection_names().unwrap();
+
+        assert!(metadata
+            .catalog
+            .stats_by_collection
+            .contains_key("red.config"));
+        assert_eq!(metadata.superblock.collection_roots["red.config"], 41);
+        assert_eq!(metadata.collection_ttl_defaults_ms["red.config"], 5000);
+
+        metadata
+            .superblock
+            .collection_roots
+            .insert("red_config".to_string(), 42);
+        let error = metadata.canonicalize_system_collection_names().unwrap_err();
+        assert!(error.to_string().contains("both legacy collection"));
+        assert_eq!(metadata.superblock.collection_roots["red.config"], 41);
+        assert_eq!(metadata.superblock.collection_roots["red_config"], 42);
+    }
 }

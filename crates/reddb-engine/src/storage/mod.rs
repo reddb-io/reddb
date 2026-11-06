@@ -29,6 +29,8 @@ mod segment_unique_key;
 
 pub mod metadata_codec;
 pub mod snapshot;
+#[doc(hidden)]
+pub mod system_collection_names;
 
 pub mod manager;
 pub mod visibility;

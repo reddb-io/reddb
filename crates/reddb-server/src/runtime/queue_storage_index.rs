@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::ops::Bound;
 use std::sync::Arc;
 
-pub(super) const META_COLLECTION: &str = "red_queue_meta";
+pub(super) const META_COLLECTION: &str = "red.queue.meta";
 const POSITION_ASC: &str = "\0reddb/queue-position-asc-v1";
 const POSITION_DESC: &str = "\0reddb/queue-position-desc-v1";
 const META_MESSAGE: &str = "\0reddb/queue-meta-message-v1";

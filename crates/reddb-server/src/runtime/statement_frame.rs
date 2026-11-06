@@ -1147,7 +1147,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<(Snapshot, Option<Xid>, SnapshotRetentionGuard)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
-                if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
+                if !table.starts_with("red_")
+                    && !table.starts_with("red.")
+                    && !self.vcs_is_versioned(&table)?
+                {
                     return Err(RedDBError::InvalidConfig(format!(
                         "AS OF requires a versioned collection — \
                          `{table}` has not opted in. \

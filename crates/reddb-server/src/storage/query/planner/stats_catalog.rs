@@ -10,7 +10,7 @@ use crate::storage::UnifiedStore;
 use crate::storage::{EntityData, EntityKind, UnifiedEntity};
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
-pub(crate) const STATS_COLLECTION: &str = "red_stats";
+pub(crate) const STATS_COLLECTION: &str = "red.query.stats_catalog";
 const DEFAULT_ROWS_PER_PAGE: u64 = 100;
 const DEFAULT_SAMPLE_TARGET: usize = 30_000;
 const DEFAULT_BUCKETS: usize = 100;

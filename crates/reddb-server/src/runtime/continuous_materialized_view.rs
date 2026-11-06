@@ -18,7 +18,7 @@ use reddb_types::Value;
 /// Name of the system collection that stores one row per
 /// materialized-view definition. Bootstrapped alongside the other
 /// keyed system collections (`red.config`, `red.vault`) at boot.
-pub const CATALOG_COLLECTION: &str = "red_materialized_view_defs";
+pub const CATALOG_COLLECTION: &str = "red.materialized_view.definitions";
 
 /// Persisted shape of a single `CREATE MATERIALIZED VIEW`.
 ///
