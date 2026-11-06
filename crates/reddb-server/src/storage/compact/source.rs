@@ -8,6 +8,7 @@ pub(super) struct Source {
     file: parking_lot::Mutex<File>,
     pub header: f::DatabaseHeader,
     pub bytes: u64,
+    pub pending_double_write: bool,
     // One byte per addressable page, capped at 64 MiB. No page payload cache.
     ownership: parking_lot::Mutex<Vec<u8>>,
 }
@@ -16,8 +17,8 @@ impl Source {
         Self::open_inner(path, false)
     }
 
-    /// The replay path accepts a pending unified WAL but still rejects an
-    /// interrupted checkpoint, DWB recovery, and other pending WALs.
+    /// Do not follow allocator or catalog pages until the copied image has
+    /// passed the pager's double-write and checkpoint recovery.
     pub fn open_for_wal_recovery(path: &Path) -> Result<Self> {
         Self::open_inner(path, true)
     }
@@ -60,7 +61,7 @@ impl Source {
         let header =
             f::decode_database_header(&zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE])?;
         ensure(
-            !header.checkpoint_in_progress,
+            allow_unified_wal || !header.checkpoint_in_progress,
             "source needs checkpoint recovery",
         )?;
         ensure(
@@ -68,13 +69,18 @@ impl Source {
             "source page inventory exceeds compaction budget",
         )?;
         ensure(
-            bytes == u64::from(header.page_count) * PAGE_SIZE as u64,
+            if allow_unified_wal {
+                bytes.div_ceil(PAGE_SIZE as u64) >= u64::from(header.page_count)
+                    && bytes.div_ceil(PAGE_SIZE as u64) <= 64 * 1024 * 1024
+            } else {
+                bytes == u64::from(header.page_count) * PAGE_SIZE as u64
+            },
             "source allocation boundary differs from file length",
         )?;
         // Ownership intents and undo images live in this WAL; none may be pending.
         for (wal, pending_supported) in [
             (f::unified_wal_path(path), allow_unified_wal),
-            (f::engine_wal_path(path), false),
+            (f::engine_wal_path(path), allow_unified_wal),
             (f::pager_legacy_wal_path(path), false),
         ] {
             match std::fs::symlink_metadata(&wal) {
@@ -102,19 +108,48 @@ impl Source {
         ))?;
         let mut double_write = vec![0; DWB_ZONE_PAGES as usize * PAGE_SIZE];
         file.read_exact(&mut double_write)?;
-        ensure(
-            reddb_engine::storage::pager_io::dwb_zone_is_clear(&double_write),
-            "source has pending double-write recovery",
-        )?;
+        let pending_double_write =
+            !reddb_engine::storage::pager_io::dwb_zone_is_clear(&double_write);
+        if pending_double_write {
+            ensure(
+                allow_unified_wal,
+                "source has pending double-write recovery",
+            )?;
+            let entries = f::decode_paged_dwb_frame(&double_write)?;
+            ensure(!entries.is_empty(), "empty double-write frame")?;
+            let mut seen = std::collections::HashSet::new();
+            for entry in entries {
+                ensure(
+                    entry.page_id > 0
+                        && (entry.page_id < DWB_ZONE_START_PAGE
+                            || entry.page_id >= FIRST_ALLOCATABLE_PAGE)
+                        && u64::from(entry.page_id) < bytes.div_ceil(PAGE_SIZE as u64)
+                        && seen.insert(entry.page_id),
+                    "invalid double-write page ownership",
+                )?;
+                let page = Page::from_bytes(entry.page);
+                ensure(
+                    page.page_id() == entry.page_id,
+                    "double-write page identity mismatch",
+                )?;
+                page.page_type()?;
+                if entry.page_id != 2 {
+                    page.verify_checksum()?;
+                }
+            }
+        }
         let mut ownership = vec![0; header.page_count as usize];
         ownership[..FIRST_ALLOCATABLE_PAGE as usize].fill(1);
         let source = Self {
             file: parking_lot::Mutex::new(file),
             bytes,
+            pending_double_write,
             header,
             ownership: parking_lot::Mutex::new(ownership),
         };
-        source.validate_freelist()?;
+        if !allow_unified_wal {
+            source.validate_freelist()?;
+        }
         Ok(source)
     }
     pub fn raw_page(&self, id: u32, checksum: bool) -> Result<Page> {
@@ -135,6 +170,24 @@ impl Source {
             "page identity mismatch",
         )?;
         Ok(page)
+    }
+    pub fn copy_snapshot(&self, destination: &Path) -> Result<()> {
+        let mut source = self.file.lock();
+        source.seek(SeekFrom::Start(0))?;
+        let mut output = create_new(destination)?;
+        ensure(
+            std::io::copy(&mut *source, &mut output)? == self.bytes,
+            "source size changed while copying",
+        )?;
+        output.sync_all()?;
+        drop(output);
+        source.seek(SeekFrom::Start(0))?;
+        let original_hash = hash_reader(&mut *source)?;
+        let copied_hash = hash_reader(&mut File::open(destination)?)?;
+        ensure(
+            original_hash == copied_hash,
+            "database copy failed complete readback parity",
+        )
     }
     pub fn verify_superblocks(&self) -> Result<()> {
         let mut zone = [0; f::PAGED_SUPERBLOCK_ZONE_SIZE];

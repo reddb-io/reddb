@@ -230,6 +230,36 @@ mod tests {
                 .filter(|item| matches!(item, Ok((_, WalRecord::FullPageImage { .. }))))
                 .count();
             assert!(images > 0, "the fixture must overwrite published pages");
+            let original_wal =
+                std::fs::read(reddb_file::layout::unified_wal_path(&path)).expect("preserved WAL");
+            let original_pages = std::fs::read(&path).expect("preserved pages");
+            let isolated = directory.path().join("isolated-recovery");
+            crate::storage::compact::recover_paged_wal(&path, &isolated)
+                .expect("recover interrupted checkpoint on a copy");
+            assert_eq!(
+                std::fs::read(&path).expect("unchanged pages"),
+                original_pages
+            );
+            assert_eq!(
+                std::fs::read(reddb_file::layout::unified_wal_path(&path)).expect("unchanged WAL"),
+                original_wal
+            );
+            let recovered = UnifiedStore::open_with_config(isolated.join("undo.rdb"), config())
+                .expect("open isolated recovery");
+            assert_eq!(recovered.get_collection("rows").expect("rows").count(), 32);
+            for id in 1..=32 {
+                assert_eq!(
+                    recovered
+                        .get("rows", EntityId::new(id))
+                        .expect("row")
+                        .data
+                        .as_row()
+                        .expect("row")
+                        .columns,
+                    row(id, 2).data.as_row().expect("expected row").columns
+                );
+            }
+            drop(recovered);
             if exit_code == 193 {
                 let wal_path = reddb_file::layout::unified_wal_path(&path);
                 let baseline_wal = std::fs::read(&wal_path).expect("baseline WAL");
