@@ -29,6 +29,8 @@ def main():
          "--lib", "redwire::tests::", "--", "--nocapture"],
         ["cargo", "test", "--locked", "-p", "reddb-io-engine", "--test", "portable",
          "portable_snapshot_conformance", "--", "--nocapture"],
+        ["cargo", "test", "--locked", "--test", "grouped_cli_transport", "--", "--nocapture",
+         "cli_first_boot::http_readiness_", "cli_first_boot::first_boot_cloud_intent_"],
     ]
     failed = []
     for command in commands:
