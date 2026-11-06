@@ -346,6 +346,17 @@ impl RedDB {
                 "bounded disk residency requires standalone single-file local storage".into(),
             );
         }
+        // Format probes use the embedded reader's blocking publication lock.
+        // A native writer holds its data lock for its whole lifetime, so reject
+        // it before probing instead of waiting indefinitely (POSIX flock).
+        // Keep this shared fence until the native pager owns its own lock.
+        let _read_only_open_lock = if options.read_only {
+            let file = File::open(options.resolved_path(reddb_file::default_database_path()))?;
+            fs2::FileExt::try_lock_shared(&file)?;
+            Some(file)
+        } else {
+            None
+        };
         // Tier wiring: flip the six tier-flag global toggles from the
         // resolved StorageLayout, then materialise the support
         // directories the layout demands (logs/wal/snapshots/etc).
