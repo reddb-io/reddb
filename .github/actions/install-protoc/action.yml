@@ -41,7 +41,13 @@ runs:
         mkdir -p "${DEST}"
         URL="https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${ASSET}"
         echo "downloading ${URL}"
-        curl -fsSL "${URL}" -o "${DEST}/protoc.zip"
+        curl -fsSL \
+          --retry 5 \
+          --retry-all-errors \
+          --retry-delay 2 \
+          --connect-timeout 20 \
+          --max-time 300 \
+          "${URL}" -o "${DEST}/protoc.zip"
         unzip -o "${DEST}/protoc.zip" -d "${DEST}" >/dev/null
         echo "${DEST}/bin" >> "${GITHUB_PATH}"
         "${DEST}/bin/protoc" --version

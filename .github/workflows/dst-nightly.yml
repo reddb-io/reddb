@@ -57,8 +57,9 @@ jobs:
         with:
           name: dst-storage-fault-report
           path: target/dst-storage/test-dst-storage.log
+          if-no-files-found: ignore
       - name: Open issue on storage fault failure
-        if: failure()
+        if: always() && steps.storage_faults.outcome == 'failure'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |

@@ -358,6 +358,12 @@ test("DST storage fault issue creation deduplicates open release blockers", () =
   assert.match(storageFaultRecovery, /labels: 'release-blocker'/);
   assert.match(storageFaultRecovery, /issue\.body\?\.includes\(`Marker: \$\{marker\}`\)/);
   assert.match(storageFaultRecovery, /github\.rest\.issues\.create/);
+  assert.match(
+    storageFaultRecovery,
+    /if: always\(\) && steps\.storage_faults\.outcome == 'failure'/,
+    "setup failures must not be reported as storage recovery failures",
+  );
+  assert.match(storageFaultRecovery, /if-no-files-found: ignore/);
 
   const existingGuard = storageFaultRecovery.indexOf("if (existing) {");
   const existingReturn = storageFaultRecovery.indexOf("return;", existingGuard);
@@ -366,6 +372,14 @@ test("DST storage fault issue creation deduplicates open release blockers", () =
   assert.ok(existingGuard >= 0, "existing issue guard must be present");
   assert.ok(existingReturn > existingGuard, "existing issue branch must return");
   assert.ok(createCall > existingReturn, "issue creation must happen after existing issue guard");
+});
+
+test("protoc downloads retry transient transport failures", () => {
+  const action = read(".github/actions/install-protoc/action.yml");
+  assert.match(action, /--retry 5/);
+  assert.match(action, /--retry-all-errors/);
+  assert.match(action, /--connect-timeout 20/);
+  assert.match(action, /--max-time 300/);
 });
 
 test("on-demand parser fuzz runs as one bounded smoke check", () => {
