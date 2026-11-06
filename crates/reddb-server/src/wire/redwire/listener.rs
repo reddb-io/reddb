@@ -44,9 +44,29 @@ pub async fn start_redwire_listener(
     config: RedWireConfig,
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_store = resolve_listener_auth(config.auth_store, runtime.auth_store())?;
     let listener = TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(transport = "redwire", bind = %config.bind_addr, "listener online");
-    serve_redwire_tcp(listener, runtime, config.auth_store, config.oauth).await
+    serve_redwire_tcp(listener, runtime, auth_store, config.oauth).await
+}
+
+fn resolve_listener_auth(
+    configured: Option<Arc<AuthStore>>,
+    runtime: Option<Arc<AuthStore>>,
+) -> io::Result<Option<Arc<AuthStore>>> {
+    if let Some(active) = runtime.as_ref().filter(|store| store.is_enabled()) {
+        if configured
+            .as_ref()
+            .is_some_and(|store| !Arc::ptr_eq(store, active))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "RedWire authentication authority conflicts with the runtime",
+            ));
+        }
+        return Ok(Some(Arc::clone(active)));
+    }
+    Ok(configured.or(runtime))
 }
 
 /// Start a RedWire listener on an already-bound TCP listener (used by
@@ -262,7 +282,8 @@ async fn handle_standalone_unix(
     let mut magic = [0u8; 1];
     crate::wire::admission::with_handshake_deadline(stream.read_exact(&mut magic)).await??;
     validate_startup_magic(magic[0]).map_err(io::Error::other)?;
-    handle_session(stream, runtime, None, None).await
+    let auth_store = runtime.auth_store();
+    handle_session(stream, runtime, auth_store, None).await
 }
 
 async fn handle_standalone_tls<S>(
@@ -277,4 +298,22 @@ where
     validate_startup_magic(magic[0]).map_err(io::Error::other)?;
     let auth_store = runtime.auth_store();
     handle_session(stream, runtime, auth_store, None).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_listener_accepts_the_same_runtime_authority() {
+        let config = crate::auth::AuthConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let store = Arc::new(AuthStore::new(config));
+        let resolved = resolve_listener_auth(Some(Arc::clone(&store)), Some(Arc::clone(&store)))
+            .expect("matching authorities")
+            .expect("authority");
+        assert!(Arc::ptr_eq(&store, &resolved));
+    }
 }

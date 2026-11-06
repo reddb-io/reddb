@@ -154,6 +154,224 @@ fn wire_tls_only_serves_without_router_collision() {
     );
 }
 
+#[test]
+fn wire_tls_uses_bootstrapped_authentication() {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient, TlsConfig};
+
+    let dir = support::temp_data_dir("wire-tls-auth-context");
+    let db_path = dir.join("data.rdb");
+    let password_file = dir.join("password");
+    let cert_file = dir.join("bootstrap-cert");
+    std::fs::write(&password_file, "synthetic-password-for-ci").expect("password fixture");
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let db_str = db_path.to_str().expect("database path");
+    let password_str = password_file.to_str().expect("password path");
+    let cert_str = cert_file.to_str().expect("certificate path");
+    let mut server = spawn_server(
+        &[
+            "server",
+            "--path",
+            db_str,
+            "--wire-tls-bind",
+            &addr,
+            "--require-auth",
+            "--bootstrap-preset",
+            "production",
+            "--bootstrap-admin",
+            "integration-user",
+            "--bootstrap-admin-password-file",
+            password_str,
+            "--bootstrap-cert-out",
+            cert_str,
+        ],
+        &dir.join("server.stderr"),
+    );
+    assert!(
+        wait_until_serving(&mut server, &addr, Duration::from_secs(30)),
+        "server did not start: {}",
+        server.stderr()
+    );
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let server_cert = dir.join("wire-tls-cert.pem");
+        let options = || {
+            ConnectOptions::new("127.0.0.1", port).with_tls(
+                TlsConfig::from_files(Some(&server_cert), None, None)
+                    .expect("test CA")
+                    .with_servername("localhost"),
+            )
+        };
+        let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
+        if let Ok(mut client) = anonymous {
+            let query_succeeded = client.query("SELECT 1").await.is_ok();
+            let create_succeeded = client.query("CREATE TABLE auth_probe (id INT)").await.is_ok();
+            let insert_succeeded = client.query("INSERT INTO auth_probe (id) VALUES (1)").await.is_ok();
+            panic!("anonymous client must be rejected; query_succeeded={query_succeeded}; create_succeeded={create_succeeded}; insert_succeeded={insert_succeeded}");
+        }
+        let wrong = RedWireClient::connect(options().with_auth(Auth::Basic {
+            user: "integration-user".into(),
+            pass: "wrong-password".into(),
+        }))
+        .await;
+        assert!(wrong.is_err(), "incorrect credentials must be rejected");
+        let mut client = RedWireClient::connect(options().with_auth(Auth::Basic {
+            user: "integration-user".into(),
+            pass: "synthetic-password-for-ci".into(),
+        }))
+        .await
+        .expect("configured user must authenticate");
+        client.query("SELECT 1").await.expect("authenticated query");
+        client.close().await.expect("close");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn wire_unix_uses_bootstrapped_authentication() {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+
+    let dir = support::temp_data_dir("wire-auth");
+    let socket = dir.join("wire.sock");
+    let db_path = dir.join("data.rdb");
+    let password_file = dir.join("password");
+    let cert_file = dir.join("bootstrap-cert");
+    std::fs::write(&password_file, "synthetic-password-for-ci").expect("password fixture");
+    let mut server = spawn_server(
+        &[
+            "server",
+            "--path",
+            db_path.to_str().expect("database path"),
+            "--wire-bind",
+            socket.to_str().expect("socket path"),
+            "--require-auth",
+            "--bootstrap-preset",
+            "production",
+            "--bootstrap-admin",
+            "integration-user",
+            "--bootstrap-admin-password-file",
+            password_file.to_str().expect("password path"),
+            "--bootstrap-cert-out",
+            cert_file.to_str().expect("certificate path"),
+        ],
+        &dir.join("server.stderr"),
+    );
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) && !socket.exists() {
+        assert!(
+            server.child.try_wait().expect("child status").is_none(),
+            "server exited: {}",
+            server.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(socket.exists(), "server did not start: {}", server.stderr());
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        // The RedWire client currently exposes TCP only. Forward raw bytes to
+        // the Unix socket so the actual client and actual server handshake.
+        let bridge = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bridge");
+        let port = bridge.local_addr().expect("bridge address").port();
+        let socket_path = socket.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut tcp, _) = bridge.accept().await.expect("accept bridge");
+                let path = socket_path.clone();
+                tokio::spawn(async move {
+                    let mut unix = tokio::net::UnixStream::connect(path)
+                        .await
+                        .expect("unix socket");
+                    let _ = tokio::io::copy_bidirectional(&mut tcp, &mut unix).await;
+                });
+            }
+        });
+        let options = || ConnectOptions::new("127.0.0.1", port);
+        let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
+        if let Ok(mut client) = anonymous {
+            let query_succeeded = client.query("SELECT 1").await.is_ok();
+            panic!("anonymous Unix client must be rejected; query_succeeded={query_succeeded}");
+        }
+        let wrong = RedWireClient::connect(options().with_auth(Auth::Basic {
+            user: "integration-user".into(),
+            pass: "wrong-password".into(),
+        }))
+        .await;
+        assert!(wrong.is_err(), "incorrect credentials must be rejected");
+        let mut client = RedWireClient::connect(options().with_auth(Auth::Basic {
+            user: "integration-user".into(),
+            pass: "synthetic-password-for-ci".into(),
+        }))
+        .await
+        .expect("configured user must authenticate");
+        client.query("SELECT 1").await.expect("authenticated query");
+        client.close().await.expect("close");
+        task.abort();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn wire_unix_explicit_no_auth_remains_available() {
+    use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+
+    let dir = support::temp_data_dir("wire-no-auth");
+    let socket = dir.join("wire.sock");
+    let db_path = dir.join("data.rdb");
+    let mut server = spawn_server(
+        &[
+            "server",
+            "--path",
+            db_path.to_str().expect("database path"),
+            "--wire-bind",
+            socket.to_str().expect("socket path"),
+            "--no-auth",
+        ],
+        &dir.join("server.stderr"),
+    );
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) && !socket.exists() {
+        assert!(
+            server.child.try_wait().expect("child status").is_none(),
+            "server exited: {}",
+            server.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(socket.exists(), "server did not start: {}", server.stderr());
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let bridge = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bridge");
+        let port = bridge.local_addr().expect("bridge address").port();
+        let task = tokio::spawn(async move {
+            let (mut tcp, _) = bridge.accept().await.expect("accept bridge");
+            let mut unix = tokio::net::UnixStream::connect(socket)
+                .await
+                .expect("unix socket");
+            let _ = tokio::io::copy_bidirectional(&mut tcp, &mut unix).await;
+        });
+        let mut client = RedWireClient::connect(
+            ConnectOptions::new("127.0.0.1", port).with_auth(Auth::Anonymous),
+        )
+        .await
+        .expect("explicit anonymous mode must work");
+        client
+            .query("CREATE TABLE development_probe (id INT)")
+            .await
+            .expect("create");
+        client
+            .query("INSERT INTO development_probe (id) VALUES (1)")
+            .await
+            .expect("insert");
+        client.close().await.expect("close");
+        task.abort();
+    });
+}
+
 /// Wait until the spawned server process exits. Returns `true` if it
 /// exited within the timeout, `false` if it was still running.
 fn wait_for_exit(server: &mut ServerChild, timeout: Duration) -> bool {
