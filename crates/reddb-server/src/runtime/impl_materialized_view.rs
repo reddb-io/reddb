@@ -95,9 +95,8 @@ impl RedDBRuntime {
             };
             if contract.append_only {
                 if !append_only_checked {
-                    append_only_checked = self
-                        .retire_expired_append_only_segments(now_ms, batch_size)
-                        .is_ok();
+                    append_only_checked = true;
+                    let _ = self.retire_expired_append_only_segments(now_ms, batch_size);
                 }
                 continue;
             }
