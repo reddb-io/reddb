@@ -106,6 +106,8 @@ the resident view. They do not checkpoint, consume WAL, reclaim pages, migrate t
 manifest, clean up pending drops, or start a primary replication spool. Pending
 collection drops are reflected in the reader's view without deleting artifacts.
 Repeated opens leave source file contents and modification times unchanged.
+Result caching stays in memory; audit and slow-query logs use the existing
+process-temporary destinations outside the database directory.
 
 With bounded disk residency enabled, compatible published indexes and collection
 backings remain paged. Without it, read-only opens hydrate collections, including

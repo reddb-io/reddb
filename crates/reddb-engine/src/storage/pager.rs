@@ -723,6 +723,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 .map_err(|_| PagerError::LockPoisoned)?
                 .get(&page_id)
             {
+                if self.config.verify_checksums {
+                    page.verify_checksum()?;
+                }
                 return Ok(page.clone());
             }
         }
@@ -1527,8 +1530,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             + if self.config.read_only {
                 self.read_only_recovery
                     .read()
-                    .map(|images| images.len())
-                    .unwrap_or(0)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len()
             } else {
                 0
             }
@@ -1642,7 +1645,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let mut file = self.file_lock()?;
         if self.config.read_only {
             for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
-                self.restore_read_only_page(id, page)?;
+                // The DWB checksum seals raw bytes, which may be ciphertext.
+                // Normal reads check the page checksum; encryption hosts use
+                // read_page_no_checksum and authenticate after decrypting.
+                self.install_read_only_page(id, page)?;
             }
             return Ok(());
         }
@@ -1659,6 +1665,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             ));
         }
         page.verify_checksum()?;
+        self.install_read_only_page(page_id, page)
+    }
+
+    fn install_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
         let mut images = self
             .read_only_recovery
             .write()

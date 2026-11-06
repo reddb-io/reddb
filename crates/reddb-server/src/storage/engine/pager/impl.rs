@@ -665,6 +665,53 @@ mod tests {
     }
 
     #[test]
+    fn read_only_dwb_retains_raw_pages_for_host_authentication() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("data.rdb");
+        let writer = Pager::open_default(&path).expect("writer");
+        let id = writer
+            .allocate_page(PageType::Overflow)
+            .expect("page")
+            .page_id();
+        writer.sync().expect("checkpoint");
+        drop(writer);
+        // Ciphertext does not carry a plaintext PageHeader or page checksum.
+        let raw = [91; PAGE_SIZE];
+        let frame = reddb_file::encode_paged_dwb_frame([(id, &raw)]);
+        let mut file = OpenOptions::new().write(true).open(&path).expect("fixture");
+        file.seek(SeekFrom::Start(
+            u64::from(DWB_ZONE_START_PAGE) * PAGE_SIZE as u64,
+        ))
+        .expect("DWB offset");
+        file.write_all(&frame).expect("staged raw frame");
+        file.sync_all().expect("fixture sync");
+        drop(file);
+        let before = std::fs::read(&path).expect("source");
+        let reader = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..Default::default()
+            },
+        )
+        .expect("raw DWB recovery");
+        assert_eq!(
+            reader
+                .read_page_no_checksum(id)
+                .expect("raw image")
+                .as_bytes(),
+            &raw
+        );
+        assert!(
+            reader.read_page(id).is_err(),
+            "normal reads still require a page checksum"
+        );
+        drop(reader);
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+    }
+
+    #[test]
     fn read_only_recovery_refuses_excess_images_without_writing() {
         let directory = tempfile::tempdir().expect("fixture");
         let path = directory.path().join("data.rdb");
