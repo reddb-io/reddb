@@ -755,7 +755,8 @@ mod tests {
             (2, "red.config.theme", "light", false),
             (3, "other", "hidden", true),
         ] {
-            let mut entity = UnifiedEntity::table_row(EntityId::new(id), "red_config", id, vec![]);
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(2_000_000 + id), "red_config", id, vec![]);
             entity.data = EntityData::Row(RowData {
                 columns: vec![],
                 schema: None,
@@ -851,7 +852,7 @@ mod tests {
 }
 
 fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
-    let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
+    let mut latest: HashMap<String, (u64, Arc<Value>)> = HashMap::new();
 
     // The store canonicalizes the legacy `red_config` name to `red.config`.
     // Scan it once, but preserve both legacy and namespaced resolver keys.
@@ -868,17 +869,27 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                 let value = row.get_field("value").unwrap_or(&Value::Null);
                 let id = entity.id.raw();
                 let key = key.to_ascii_lowercase();
-                insert_latest_config_value(&mut latest, key.clone(), id, value);
+                // One value may be visible under several aliases. Clone the
+                // payload at most once for each advancing entity version.
+                let mut shared = None;
+                insert_latest_config_value(&mut latest, key.clone(), id, value, &mut shared);
                 if let Some(rest) = key.strip_prefix("red.config.") {
                     insert_latest_config_value(
                         &mut latest,
                         format!("red.config/{rest}"),
                         id,
                         value,
+                        &mut shared,
                     );
                 }
                 if !matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                    insert_latest_config_value(&mut latest, format!("red.config/{key}"), id, value);
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{key}"),
+                        id,
+                        value,
+                        &mut shared,
+                    );
                 }
                 true
             },
@@ -887,20 +898,27 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
 
     Ok(latest
         .into_iter()
-        .map(|(key, (_, value))| (key, value))
+        .map(|(key, (_, value))| {
+            (
+                key,
+                Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()),
+            )
+        })
         .collect())
 }
 
 fn insert_latest_config_value(
-    latest: &mut HashMap<String, (u64, Value)>,
+    latest: &mut HashMap<String, (u64, Arc<Value>)>,
     key: String,
     id: u64,
     value: &Value,
+    shared: &mut Option<Arc<Value>>,
 ) {
     match latest.get(&key) {
         Some((prev_id, _)) if *prev_id > id => {}
         _ => {
-            latest.insert(key, (id, value.clone()));
+            let shared = shared.get_or_insert_with(|| Arc::new(value.clone()));
+            latest.insert(key, (id, Arc::clone(shared)));
         }
     }
 }
