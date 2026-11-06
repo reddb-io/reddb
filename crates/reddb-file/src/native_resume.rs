@@ -220,9 +220,15 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
 fn validate_key_roots(collections: &BTreeMap<String, CollectionResume>) -> RdbFileResult<()> {
     let data_roots: std::collections::BTreeSet<_> =
         collections.values().map(|state| state.root_page).collect();
+    let mut unique_states = Vec::new();
+    for state in collections.values() {
+        if !unique_states.contains(&state) {
+            unique_states.push(state);
+        }
+    }
     let mut key_roots = std::collections::BTreeSet::new();
-    for root in collections
-        .values()
+    for root in unique_states
+        .iter()
         .filter_map(|state| state.key_index_root)
         .filter(|root| *root != 0)
     {
@@ -230,7 +236,7 @@ fn validate_key_roots(collections: &BTreeMap<String, CollectionResume>) -> RdbFi
             return Err(invalid("key index root aliases another published tree"));
         }
     }
-    for state in collections.values() {
+    for state in unique_states {
         if state.secondary_indices.len() > SECONDARY_COUNT_MAX {
             return Err(invalid("too many secondary indexes in catalog resume"));
         }
@@ -522,6 +528,43 @@ mod tests {
         assert!(
             decode_catalog_resume(&bytes).is_err(),
             "a key tree cannot alias a physical data tree"
+        );
+    }
+
+    #[test]
+    fn exact_collection_aliases_share_derived_roots() {
+        let mut state = secondary_resume();
+        let alias = state.collections.get("rows").expect("rows").clone();
+        state.collections.insert("rows_alias".into(), alias);
+
+        let mut data = Vec::new();
+        encode_native_paged_metadata_header(
+            &mut data,
+            NativePagedMetadataHeader {
+                format_version: 11,
+                collection_count: 2,
+            },
+        );
+        encode_native_paged_collection_root(&mut data, "rows", 70);
+        encode_native_paged_collection_root(&mut data, "rows_alias", 70);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        encode_native_paged_retired_trees(&mut data, &[]).expect("retired");
+        encode_native_paged_deferred_pages(&mut data, &[]).expect("deferred");
+        encode_native_paged_ownership_epoch(&mut data, 7).expect("epoch");
+        encode_catalog_resume(&mut data, &state).expect("encode exact aliases");
+        assert_eq!(
+            decode_catalog_resume(&data).expect("decode exact aliases"),
+            Some(state.clone())
+        );
+
+        state
+            .collections
+            .get_mut("rows_alias")
+            .expect("alias")
+            .row_id_next += 1;
+        assert!(
+            encode_catalog_resume(&mut Vec::new(), &state).is_err(),
+            "shared derived roots require identical collection state"
         );
     }
 }

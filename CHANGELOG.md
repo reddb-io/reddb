@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.19
+
+### Patch Changes
+
+- [#2689](https://github.com/reddb-io/reddb/pull/2689) [`7a94140`](https://github.com/reddb-io/reddb/commit/7a94140eec3f640a5a13dfb8beb47a3d7c875de4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile populated legacy and canonical system collection names only when their complete physical state is identical, preserving shared data and index roots while continuing to fail closed on divergent collections.
+
 ## 1.28.18
 
 ### Patch Changes
