@@ -107,6 +107,22 @@ historical physical allocation:
 red compact --source /preserved/data.rdb --destination-dir /new/compacted --json
 ```
 
+If a historical store contains both populated physical system-config identities
+and normal open fails closed on that ambiguity, an operator may explicitly retain
+the canonical `red.config` identity while performing the rewrite:
+
+```sh
+red compact --source /preserved/data.rdb --destination-dir /new/compacted \
+  --retain-canonical-system-config --json
+```
+
+This repair requires exactly one `red_config` and one `red.config` catalog entry
+with complete resume state. It copies only `red.config`; it neither merges nor
+guesses between divergent values. References to `red_config`, missing identities,
+and other catalog shapes are refused. The original store remains unchanged, and
+ordinary compaction never enables this behavior implicitly. Scrub and validate
+the new store before any serving cutover.
+
 The source must be closed and fully checkpointed. The command takes a shared
 read lock that excludes the writer's exclusive lock, opens the source without
 write/recovery privileges, and refuses pending WAL, checkpoint or double-write

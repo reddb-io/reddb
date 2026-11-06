@@ -3536,6 +3536,53 @@ mod checkpoint_work_tests {
     }
 
     #[test]
+    fn explicit_compaction_retires_populated_legacy_system_config() {
+        let fixture = duplicate_system_catalog_fixture(true, true, false);
+        let destination = fixture._directory.path().join("canonical-system-config");
+
+        let report = crate::storage::compact::compact_paged_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("rewrite duplicate system config");
+        assert!(report.records > 0);
+
+        let rewritten_path = destination.join("data.rdb");
+        let rewritten = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
+            .expect("open canonical rewrite");
+        assert_eq!(rewritten.list_collections(), vec!["red.config".to_string()]);
+        assert!(
+            rewritten.get("red.config", EntityId::new(1)).is_none(),
+            "the obsolete legacy tree must not leak into the canonical collection"
+        );
+        assert_eq!(
+            rewritten
+                .get("red.config", EntityId::new(2))
+                .expect("canonical row survives")
+                .kind
+                .collection(),
+            "red.config"
+        );
+        drop(rewritten);
+
+        let cold = UnifiedStore::open_with_config(&rewritten_path, fixture.config)
+            .expect("cold reopen canonical rewrite");
+        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            cold.get_collection("red.config")
+                .expect("canonical collection")
+                .count(),
+            1
+        );
+        assert!(
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(&rewritten_path)
+                .recover_or_bootstrap(&["red.config".to_string()])
+                .expect("canonical operational manifest")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn populated_system_collection_aliases_reconcile_without_rebuild() {
         let fixture = duplicate_system_catalog_fixture(true, false, true);
         alias_duplicate_system_catalog_state(&fixture);

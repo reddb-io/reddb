@@ -135,6 +135,7 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: vec![
         FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
         FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+        FlagSchema::boolean("retain-canonical-system-config").with_description("Explicitly retire the obsolete physical red_config identity and retain red.config"),
       ],
     },
     CommandDef {
