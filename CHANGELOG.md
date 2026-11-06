@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.16
+
+### Patch Changes
+
+- [#2683](https://github.com/reddb-io/reddb/pull/2683) [`2f32b89`](https://github.com/reddb-io/reddb/commit/2f32b89cd8b0c99c885c0ac12ea01e79aeb36513) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound logical restores by the configured memory budget and seek exact composite BTREE prefixes containing NULL values.
+
 ## 1.28.15
 
 ### Patch Changes
