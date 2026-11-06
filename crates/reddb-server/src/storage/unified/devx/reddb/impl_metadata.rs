@@ -1,6 +1,8 @@
 use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
+const PHYSICAL_METADATA_CONFIG_KEY: &str = "red.storage.physical_metadata";
+
 #[cfg(test)]
 fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
     if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
@@ -12,6 +14,73 @@ fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
 }
 
 impl RedDB {
+    /// Physical metadata follows the same WAL and checkpoint boundary as data.
+    /// Legacy sidecars are import sources only, never a publication target.
+    pub(crate) fn persist_physical_metadata_record(
+        &self,
+        metadata: &PhysicalMetadataFile,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Err("physical metadata operations are not allowed in read-only mode".into());
+        }
+        let value = crate::serde_json::Value::String(metadata.to_document_json(false)?);
+        self.store
+            .try_set_config_tree(PHYSICAL_METADATA_CONFIG_KEY, &value)?;
+        Ok(())
+    }
+
+    fn load_internal_physical_metadata(
+        &self,
+    ) -> Result<Option<PhysicalMetadataFile>, Box<dyn std::error::Error>> {
+        let Some(value) = self.store.try_get_config(PHYSICAL_METADATA_CONFIG_KEY)? else {
+            return Ok(None);
+        };
+        let Value::Text(document) = value else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid internal physical metadata record",
+            )
+            .into());
+        };
+        Ok(Some(PhysicalMetadataFile::from_document_json(
+            &document,
+            "invalid internal physical metadata record",
+        )?))
+    }
+
+    fn has_legacy_metadata_sidecars(&self) -> std::io::Result<bool> {
+        let Some(path) = self.path() else {
+            return Ok(false);
+        };
+        Ok(
+            PhysicalMetadataFile::metadata_binary_path_for(path).try_exists()?
+                || PhysicalMetadataFile::metadata_path_for(path).try_exists()?
+                || !PhysicalMetadataFile::journal_paths_for_data_path(path)?.is_empty(),
+        )
+    }
+
+    /// Called only after the internal record has reached a successful checkpoint.
+    /// Failed imports and read-only opens must leave the legacy source intact.
+    pub(crate) fn remove_imported_metadata_sidecars(
+        &self,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only || self.load_internal_physical_metadata()?.is_none() {
+            return Ok(());
+        }
+        let mut paths = PhysicalMetadataFile::journal_paths_for_data_path(path)?;
+        paths.push(PhysicalMetadataFile::metadata_binary_path_for(path));
+        paths.push(PhysicalMetadataFile::metadata_path_for(path));
+        for legacy in paths {
+            match std::fs::remove_file(legacy) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     pub fn is_replica_role(&self) -> bool {
         matches!(
             self.options.replication.role,
@@ -25,9 +94,9 @@ impl RedDB {
         }
 
         // Export pruning is only meaningful for persistent mode where we
-        // have a metadata sidecar that tracks file-backed export artifacts.
+        // track file-backed export artifacts in the internal metadata record.
         if self.options.mode == StorageMode::Persistent {
-            let Some(path) = self.path() else {
+            let Some(_) = self.path() else {
                 return Ok(());
             };
 
@@ -37,7 +106,7 @@ impl RedDB {
             };
 
             self.prune_export_registry(&mut metadata.exports);
-            metadata.save_for_data_path(path)?;
+            self.persist_physical_metadata_record(&metadata)?;
         }
 
         let _ = self.sweep_ttl_expired_entities()?;
@@ -434,11 +503,16 @@ impl RedDB {
 
     pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent {
+            // A damaged authoritative record must never fall back to stale sidecars.
+            let has_internal_metadata = self.load_internal_physical_metadata()?.is_some();
             // Load metadata without persisting (avoids blocking catalog snapshot on boot)
             match self.load_or_bootstrap_physical_metadata(false) {
                 Ok(metadata) => {
                     crate::reserved_fields::validate_physical_metadata_contracts(&metadata)
                         .map_err(|err| err.to_string())?;
+                    if !has_internal_metadata && !self.options.read_only {
+                        self.persist_physical_metadata_record(&metadata)?;
+                    }
                 }
                 Err(error)
                     if error
@@ -447,7 +521,11 @@ impl RedDB {
                 {
                     return Err(error);
                 }
-                Err(_) => {}
+                Err(error) => {
+                    if self.has_legacy_metadata_sidecars()? {
+                        return Err(error);
+                    }
+                }
             }
             // Skip repair on boot — deferred to first explicit persist_metadata() call.
             // This avoids the recursive catalog_model_snapshot → physical_metadata loop
@@ -491,7 +569,7 @@ impl RedDB {
         {
             return Ok(());
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Ok(());
         };
 
@@ -513,7 +591,7 @@ impl RedDB {
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
         if let Some(previous) = previous.as_ref() {
-            // Legacy paged contract edits publish the sidecar first. Do not
+            // Paged contract edits publish the internal record first. Do not
             // resurrect a dropped collection from the older native registry.
             // Preserve unrelated orphan descriptors without a removal proof.
             let absent = |name: &str| {
@@ -562,9 +640,9 @@ impl RedDB {
         metadata.hypertables = self.hypertable_registry_snapshot();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
-        metadata.save_for_data_path(path)?;
+        self.persist_physical_metadata_record(&metadata)?;
         #[cfg(test)]
-        metadata_qualification_phase(&qualification_started, "sidecar-save");
+        metadata_qualification_phase(&qualification_started, "metadata-record-save");
         self.persist_native_physical_header(&metadata)?;
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-header");
@@ -575,7 +653,7 @@ impl RedDB {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(false);
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Ok(false);
         };
         let Some(native_state) = self.native_physical_state() else {
@@ -586,9 +664,9 @@ impl RedDB {
         }
 
         let _publication = self.store.vault_publication_lock.lock();
-        let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
-        metadata.save_for_data_path(path)?;
+        self.persist_physical_metadata_record(&metadata)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(true)
     }
@@ -656,12 +734,11 @@ impl RedDB {
             return Err("database path is not available".into());
         };
         let _publication = self.store.vault_publication_lock.lock();
+        let internal_metadata = self.load_internal_physical_metadata()?;
         let native_state = self.native_physical_state();
-
-        let metadata = if persist_bootstrapped && !self.options.read_only {
-            PhysicalMetadataFile::load_for_data_path(path)
-        } else {
-            PhysicalMetadataFile::inspect_for_data_path(path)
+        let metadata = match internal_metadata {
+            Some(metadata) => Ok(metadata),
+            None => PhysicalMetadataFile::inspect_for_data_path(path),
         };
         match metadata {
             Ok(metadata) => {
@@ -676,7 +753,7 @@ impl RedDB {
                         let bootstrapped =
                             self.metadata_from_native_state(native_state, Some(&metadata));
                         if persist_bootstrapped && !self.options.read_only {
-                            bootstrapped.save_for_data_path(path)?;
+                            self.persist_physical_metadata_record(&bootstrapped)?;
                             self.persist_native_physical_header(&bootstrapped)?;
                         }
                         return Ok(bootstrapped);
@@ -685,7 +762,9 @@ impl RedDB {
                 Ok(metadata)
             }
             Err(err) => {
-                if crate::physical::is_collection_contract_decode_error(&err) {
+                if crate::physical::is_collection_contract_decode_error(&err)
+                    || self.has_legacy_metadata_sidecars()?
+                {
                     return Err(err.into());
                 }
                 let Some(native_state) = native_state else {
@@ -704,7 +783,7 @@ impl RedDB {
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
                 if persist_bootstrapped && !self.options.read_only {
-                    metadata.save_for_data_path(path)?;
+                    self.persist_physical_metadata_record(&metadata)?;
                     self.persist_native_physical_header(&metadata)?;
                 }
                 Ok(metadata)
@@ -713,6 +792,14 @@ impl RedDB {
     }
 
     pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
+        if self
+            .load_internal_physical_metadata()
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Some("internal_record");
+        }
         let path = self.path()?;
         let native_state = self.native_physical_state();
         let metadata = PhysicalMetadataFile::inspect_for_data_path(path).ok();
@@ -1398,7 +1485,7 @@ impl RedDB {
         if self.options.read_only {
             return Err("physical metadata operations are not allowed in read-only mode".into());
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Err("database path is not available".into());
         };
 
@@ -1420,7 +1507,7 @@ impl RedDB {
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
         let result = mutator(&mut metadata);
-        metadata.save_for_data_path(path)?;
+        self.persist_physical_metadata_record(&metadata)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(result)
     }
@@ -1563,9 +1650,7 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
-        if let Some(path) = self.path() {
-            metadata.save_for_data_path(path)?;
-        }
+        self.persist_physical_metadata_record(metadata)?;
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;
@@ -1675,7 +1760,11 @@ mod catalog_observation_tests {
 
         let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
         let json = PhysicalMetadataFile::metadata_path_for(&path);
-        std::fs::remove_file(binary).expect("remove binary sidecar");
+        db.delete_kv("red.config", PHYSICAL_METADATA_CONFIG_KEY)
+            .expect("legacy fixture");
+        if binary.exists() {
+            std::fs::remove_file(binary).expect("remove binary sidecar");
+        }
         if json.exists() {
             std::fs::remove_file(json).expect("remove JSON sidecar");
         }
@@ -1687,12 +1776,13 @@ mod catalog_observation_tests {
 
         let metadata = db
             .load_or_bootstrap_physical_metadata(true)
-            .expect("summary-free legacy state must rebuild its missing sidecar");
+            .expect("summary-free legacy state must bootstrap internal metadata");
         assert_eq!(
             metadata.superblock.collection_roots.get("retained"),
             db.physical_collection_roots().get("retained")
         );
-        assert!(PhysicalMetadataFile::metadata_binary_path_for(&path).exists());
+        assert!(!PhysicalMetadataFile::metadata_binary_path_for(&path).exists());
+        assert!(db.load_internal_physical_metadata().unwrap().is_some());
         let rows = runtime
             .execute_query("SELECT value FROM retained")
             .expect("retained row remains queryable");

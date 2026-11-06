@@ -1,5 +1,17 @@
 # Storage Packaging by Profile — Single-file Zoned RDB and Its Siblings
 
+> **2026-11-06 policy correction:** database-owned metadata must live in the
+> `.rdb` and participate in its WAL/checkpoint recovery boundary in every
+> profile. The historical profile exceptions below do not authorize external
+> metadata files. Physical catalog documents now use the internal
+> `red.storage.physical_metadata` config record. Automatic `.meta.rdbx`, JSON,
+> journal-shadow and operational-manifest publication is rolled back. Legacy
+> physical sidecars are import sources and are removed only after the imported
+> record is checkpointed. Legacy operational artifacts, including forks, are
+> preserved; runtime fork mutations that depend on those artifacts are disabled.
+> Explicit backup/export artifacts and explicitly configured diagnostic sinks
+> are distinct from the live database's storage contract.
+
 Status: accepted
 Date: 2026-07-08 (rewritten; originally proposed as "Embedded Single-file Zoned RDB");
 amended 2026-07-10 (§5: WAL region sizing presets + overflow policy)

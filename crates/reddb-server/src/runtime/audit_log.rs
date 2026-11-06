@@ -644,6 +644,7 @@ enum WriterMsg {
 #[derive(Debug)]
 pub struct AuditLogger {
     path: PathBuf,
+    stderr: bool,
     tx: Mutex<Option<mpsc::SyncSender<WriterMsg>>>,
     /// Direct-write fallback mutex. Used when the writer thread isn't
     /// running (in-memory tests) or the channel is full and the emit
@@ -677,19 +678,37 @@ impl AuditLogger {
     /// yet wired (ADR 0018 marks Syslog as a stub-and-warn lane).
     pub fn for_destination(
         dest: &crate::storage::layout::LogDestination,
-        fallback_data_path: &Path,
+        _fallback_data_path: &Path,
     ) -> Self {
         use crate::storage::layout::LogDestination;
         match dest {
             LogDestination::File(path) => Self::with_path(path.clone()),
-            LogDestination::Stderr => Self::for_data_path(fallback_data_path),
+            LogDestination::Stderr => Self::with_stderr(),
             LogDestination::Syslog => {
                 tracing::warn!(
                     target: "reddb::audit",
-                    "audit LogDestination::Syslog requested; sink not implemented, falling back to file next to data path"
+                    "audit LogDestination::Syslog requested; sink not implemented, falling back to stderr"
                 );
-                Self::for_data_path(fallback_data_path)
+                Self::with_stderr()
             }
+        }
+    }
+
+    fn with_stderr() -> Self {
+        Self {
+            path: PathBuf::new(),
+            stderr: true,
+            tx: Mutex::new(None),
+            fallback_lock: Mutex::new(()),
+            last_hash: Arc::new(Mutex::new(None)),
+            max_bytes: 0,
+            fsync_mode: FsyncMode::Off,
+            stream_url: std::env::var("RED_AUDIT_STREAM_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            writer_alive: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(AtomicU64::new(0)),
+            handle: Mutex::new(None),
         }
     }
 
@@ -731,6 +750,7 @@ impl AuditLogger {
         let last_hash = Arc::new(Mutex::new(seed));
         let logger = Self {
             path,
+            stderr: false,
             tx: Mutex::new(None),
             fallback_lock: Mutex::new(()),
             last_hash,
@@ -794,6 +814,9 @@ impl AuditLogger {
     /// Block until the writer thread has drained every pending event.
     /// Tests use this to make assertions deterministic.
     pub fn wait_idle(&self, timeout: Duration) -> bool {
+        if self.stderr {
+            return true;
+        }
         let deadline = Instant::now() + timeout;
         let tx_guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = tx_guard.as_ref() {
@@ -868,7 +891,12 @@ impl AuditLogger {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let line = event.to_json_line(prev.as_deref());
-        if let Err(err) = append_line_with_rotation(&self.path, &line, self.max_bytes) {
+        let result = if self.stderr {
+            writeln!(std::io::stderr().lock(), "{line}")
+        } else {
+            append_line_with_rotation(&self.path, &line, self.max_bytes)
+        };
+        if let Err(err) = result {
             tracing::warn!(
                 target: "reddb::audit",
                 error = %err,

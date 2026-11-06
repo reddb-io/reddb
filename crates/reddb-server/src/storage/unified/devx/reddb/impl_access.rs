@@ -1543,13 +1543,8 @@ impl RedDB {
                 self.store.pager(),
             ),
         );
-        // Issue #674 — derive the `.tv` snapshot path from the
-        // resolved tier layout if the active layout enables snapshot
-        // files. `Minimal` (embedded) returns `None` and the state
-        // never writes a `.tv` for this collection.
-        if let Some((_, paths)) = self.options.resolve_tiered_layout() {
-            state.set_snapshot_path(paths.turbo_snapshot_path(collection));
-        }
+        // Native artifacts belong to the .rdb checkpoint. Leave the optional
+        // standalone snapshot sink unset instead of creating a .tv sidecar.
         let mut guard = map.lock();
         let inserted_now = !guard.contains_key(collection);
         let entry = guard

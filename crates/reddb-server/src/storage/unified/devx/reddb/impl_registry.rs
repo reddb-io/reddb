@@ -264,18 +264,18 @@ impl RedDB {
         if self.options.read_only {
             return Err("physical metadata operations are not allowed in read-only mode".into());
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Err("database path is not available".into());
         };
 
-        // Legacy paged files keep contracts in the durable metadata sidecar,
-        // not the embedded dump's auxiliary blob or native artifact summaries.
+        // Paged contracts live in an internal record protected by the WAL.
+        // Native artifact summaries are not a complete contract representation.
         // A definition edit must not rebuild every collection's search indexes.
         // Retain publication serialization and the canonical atomic writer.
         let _publication = self.store.vault_publication_lock.lock();
         let mut metadata = self.load_or_bootstrap_physical_metadata(false)?;
         let result = mutator(&mut metadata);
-        metadata.save_for_data_path(path)?;
+        self.persist_physical_metadata_record(&metadata)?;
         Ok(result)
     }
 
@@ -386,7 +386,7 @@ impl RedDB {
         self.invalidate_collection_contract_cache();
 
         if self.paged_mode {
-            let Some(path) = self.path() else {
+            let Some(_) = self.path() else {
                 return Err("database path is not available".into());
             };
             // DROP already published the native collection registry before it
@@ -424,7 +424,7 @@ impl RedDB {
                 .position(|contract| contract.name == collection)
                 .map(|index| metadata.collection_contracts.remove(index));
             metadata.collection_ttl_defaults_ms.remove(collection);
-            metadata.save_for_data_path(path)?;
+            self.persist_physical_metadata_record(&metadata)?;
             self.persist_native_physical_header(&metadata)?;
             self.invalidate_collection_contract_cache();
             return Ok(removed);
@@ -1198,7 +1198,7 @@ impl RedDB {
         })
     }
 
-    /// Create a named export by copying the current database file and metadata sidecar.
+    /// Create a named export by copying the current database file, including its internal metadata.
     pub fn create_named_export(
         &self,
         name: impl Into<String>,
@@ -1233,9 +1233,6 @@ impl RedDB {
             Err(err) => return Err(err),
         };
         let export_data_path = reddb_file::copy_physical_export_data_file(path, &name)?;
-        let export_metadata_path = PhysicalMetadataFile::metadata_path_for(&export_data_path);
-        let export_metadata_binary_path =
-            PhysicalMetadataFile::metadata_binary_path_for(&export_data_path);
 
         let descriptor = ExportDescriptor {
             name: name.clone(),
@@ -1249,7 +1246,7 @@ impl RedDB {
                 .map(|snapshot| snapshot.snapshot_id),
             superblock_sequence: metadata.superblock.sequence,
             data_path: export_data_path.display().to_string(),
-            metadata_path: export_metadata_path.display().to_string(),
+            metadata_path: export_data_path.display().to_string(),
             collection_count: metadata.catalog.total_collections,
             total_entities: metadata.catalog.total_entities,
         };
@@ -1259,9 +1256,7 @@ impl RedDB {
             .retain(|export| export.name != descriptor.name);
         metadata.exports.push(descriptor.clone());
         self.prune_export_registry(&mut metadata.exports);
-        metadata.save_for_data_path(path)?;
-        metadata.save_to_binary_path(&export_metadata_binary_path)?;
-        metadata.save_to_path(&export_metadata_path)?;
+        self.persist_physical_metadata_record(&metadata)?;
 
         Ok(descriptor)
     }

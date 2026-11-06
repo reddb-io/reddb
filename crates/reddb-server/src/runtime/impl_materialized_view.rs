@@ -88,7 +88,6 @@ impl RedDBRuntime {
             }
         }
         let mut remaining = batch_size;
-        let mut append_only_checked = false;
         for (index, name) in collections.iter().enumerate() {
             let Some(contract) = self.inner.db.collection_contract(name) else {
                 continue;
@@ -96,15 +95,6 @@ impl RedDBRuntime {
             let Some(retention_ms) = contract.retention_duration_ms else {
                 continue;
             };
-            if contract.append_only {
-                if !append_only_checked {
-                    append_only_checked = true;
-                    if let Err(err) = self.retire_expired_append_only_segments(now_ms, batch_size) {
-                        tracing::warn!(error = %err, "append-only retention sweep failed");
-                    }
-                }
-                continue;
-            }
             let Some(ts_column) =
                 crate::runtime::retention_filter::resolve_timestamp_column(&contract)
             else {

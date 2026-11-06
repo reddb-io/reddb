@@ -1,5 +1,14 @@
 # Operational Storage Profiles
 
+> **Storage policy correction (2026-11-06):** live database metadata belongs
+> inside `.rdb`, protected by its WAL. The operational-directory manifest and
+> external append-only segment publication described below are retired runtime
+> behavior. Store fork mutations requiring those files return an unsupported
+> operation error. Existing fork artifacts remain readable and are not deleted.
+> Retention uses bounded row deletes through the regular WAL path. Physical
+> metadata sidecars are imported into the database before checkpointed cleanup.
+
+
 > [!NOTE]
 > This page describes a **target storage design**, not the current shipped
 > on-disk format. The decisions below come from ADRs 0038–0045, all of which are

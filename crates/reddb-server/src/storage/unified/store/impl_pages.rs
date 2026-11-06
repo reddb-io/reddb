@@ -1143,10 +1143,7 @@ impl UnifiedStore {
             .map_err(StoreError::Io)?;
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
-        let pending_drops = store
-            .operational_manifest_for_path(path)
-            .read_only_pending_drops()
-            .map_err(StoreError::Io)?;
+        let pending_drops = store.legacy_pending_collection_drops()?;
         for name in pending_drops {
             if !catalog
                 .collisions
@@ -1267,10 +1264,6 @@ impl UnifiedStore {
         let page_load_started = std::time::Instant::now();
         let catalog_load = store.load_from_pages(retain_canonical_system_config, catalog_plan)?;
         trace_startup_phase(path, "paged_catalog_and_roots", page_load_started);
-        // Reconcile independently from the catalog flag. A prior process may
-        // have published one side of the rename before crashing; the manifest
-        // operation is idempotent and fails closed on old/new collisions.
-        store.migrate_operational_manifest(&catalog_load.collisions)?;
         let wal_replay_started = std::time::Instant::now();
         if let Some(commit) = &store.commit {
             commit
@@ -1285,7 +1278,7 @@ impl UnifiedStore {
             store.flush_paged_state()?;
         }
         let manifest_recovery_started = std::time::Instant::now();
-        store.recover_operational_manifest()?;
+        store.recover_operational_manifest(&catalog_load.collisions)?;
         if store.config.resident_memory_bytes_max.is_some() {
             let missing_key_index = {
                 let trees = store.btree_indices.read();
@@ -1432,80 +1425,43 @@ impl UnifiedStore {
         Ok(())
     }
 
-    pub(crate) fn recover_operational_manifest(&self) -> Result<(), StoreError> {
-        let Some(path) = &self.db_path else {
-            return Ok(());
-        };
-        let mut collections = self.list_collections();
-        collections.sort();
-        let pending_drops = self
-            .operational_manifest_for_path(path)
-            .recover_or_bootstrap(&collections)
-            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
-        for name in pending_drops {
-            if self.get_collection(&name).is_some() {
-                self.drop_collection(&name)?;
-            }
+    fn legacy_pending_collection_drops(&self) -> Result<Vec<String>, StoreError> {
+        if self
+            .try_get_config("red.storage.legacy_manifest_imported")?
+            .is_some()
+        {
+            return Ok(Vec::new());
         }
-        Ok(())
+        let Some(path) = &self.db_path else {
+            return Ok(Vec::new());
+        };
+        self.operational_manifest_for_path(path)
+            .read_only_pending_drops()
+            .map_err(StoreError::Io)
     }
 
-    fn migrate_operational_manifest(
+    fn recover_operational_manifest(
         &self,
         collisions: &[SystemCollectionCollision],
     ) -> Result<(), StoreError> {
-        let Some(path) = &self.db_path else {
+        let pending = self.legacy_pending_collection_drops()?;
+        if pending.is_empty() {
             return Ok(());
-        };
-        let manifest = self.operational_manifest_for_path(path);
-        let collision_refs = collisions
-            .iter()
-            .map(|collision| {
-                (
-                    collision.survivor.as_str(),
-                    collision.loser.as_str(),
-                    collision.canonical.as_str(),
-                )
-            })
-            .collect::<Vec<_>>();
-        manifest
-            .reconcile_collection_collisions(&collision_refs)
-            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))?;
-        manifest
-            .rename_collections(reddb_engine::storage::system_collection_names::LEGACY_NAMES)
-            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))
-    }
-
-    pub(crate) fn prepare_operational_collection_create(
-        &self,
-        name: &str,
-    ) -> Result<Option<reddb_file::PreparedCollectionCreate<reddb_file::StdVfs>>, StoreError> {
-        if self.is_read_only() {
-            return Ok(None);
         }
-        let Some(path) = &self.db_path else {
-            return Ok(None);
-        };
-        self.operational_manifest_for_path(path)
-            .prepare_collection_create(name)
-            .map(Some)
-            .map_err(StoreError::Io)
-    }
-
-    pub(crate) fn prepare_operational_collection_drop(
-        &self,
-        name: &str,
-    ) -> Result<Option<reddb_file::PreparedCollectionDrop<reddb_file::StdVfs>>, StoreError> {
-        if self.is_read_only() {
-            return Ok(None);
+        // Consume legacy drop intents once, without rewriting their manifest.
+        // WAL replay restores both the drops and this marker after a crash.
+        for name in pending {
+            if !collisions.iter().any(|collision| collision.loser == name)
+                && self.get_collection(&name).is_some()
+            {
+                self.drop_collection(&name)?;
+            }
         }
-        let Some(path) = &self.db_path else {
-            return Ok(None);
-        };
-        self.operational_manifest_for_path(path)
-            .prepare_collection_drop(name)
-            .map(Some)
-            .map_err(StoreError::Io)
+        self.try_set_config_tree(
+            "red.storage.legacy_manifest_imported",
+            &crate::serde_json::Value::Bool(true),
+        )?;
+        Ok(())
     }
 
     /// Read the commit boundary before following potentially interrupted trees.

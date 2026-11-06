@@ -272,8 +272,7 @@ impl UnifiedStore {
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = reddb_engine::storage::system_collection_names::canonical_owned(name.into());
-        // Collection creation publishes the same manifest that flush and
-        // retention update. Fence the entire create, including registry/WAL.
+        // Serialize collection identity changes with catalog/WAL publication.
         let _publication = self.vault_publication_lock.lock();
         let mut collections = self.resident.collections.write();
 
@@ -284,22 +283,6 @@ impl UnifiedStore {
         let manager = SegmentManager::with_config(&name, self.config.manager_config.clone());
         collections.insert(name.clone(), Arc::new(manager));
         drop(collections);
-
-        let create = match self.prepare_operational_collection_create(&name) {
-            Ok(create) => create,
-            Err(err) => {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        };
-        if let Some(create) = create {
-            if let Err(err) = create.publish().map_err(StoreError::Io) {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        }
 
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
@@ -505,7 +488,6 @@ impl UnifiedStore {
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
         let name = Self::canonical_collection(name);
         let _vault_guard = self.vault_publication_lock.lock();
-        let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
             let mut collections = self.resident.collections.write();
 
@@ -559,9 +541,6 @@ impl UnifiedStore {
         self.finish_paged_write([StoreWalAction::DropCollection {
             name: name.to_string(),
         }])?;
-        if let Some(drop) = drop {
-            drop.finish().map_err(StoreError::Io)?;
-        }
 
         Ok(())
     }
