@@ -292,7 +292,15 @@ async fn configured_listener_cannot_bypass_runtime_authentication() {
     let handle = tokio::spawn(async move {
         let _ = start_redwire_listener(cfg, server_runtime).await;
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut ready = false;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ready, "configured listener did not start");
 
     let options = || ConnectOptions::new(addr.ip().to_string(), addr.port());
     let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
@@ -310,15 +318,19 @@ async fn configured_listener_cannot_bypass_runtime_authentication() {
     client.close().await.expect("close");
     handle.abort();
 
-    let conflicting = RedWireConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        auth_store: Some(Arc::new(reddb::auth::store::AuthStore::new(
-            Default::default(),
-        ))),
-        oauth: None,
-    };
-    assert!(
-        start_redwire_listener(conflicting, runtime).await.is_err(),
-        "an explicit different or disabled authority must fail closed"
-    );
+    for enabled in [false, true] {
+        let mut alternate = reddb::auth::AuthConfig::default();
+        alternate.enabled = enabled;
+        let conflicting = RedWireConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            auth_store: Some(Arc::new(reddb::auth::store::AuthStore::new(alternate))),
+            oauth: None,
+        };
+        assert!(
+            start_redwire_listener(conflicting, Arc::clone(&runtime))
+                .await
+                .is_err(),
+            "an explicit different or disabled authority must fail closed"
+        );
+    }
 }
