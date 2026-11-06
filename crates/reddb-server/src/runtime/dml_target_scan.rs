@@ -134,9 +134,9 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
-        if !(self.target.is_none() && self.limit.is_some())
-            && !matches!(self.target, Some(UpdateTarget::Documents))
-            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+        if !(self.target.is_none() && self.limit.is_some()
+            || matches!(self.target, Some(UpdateTarget::Documents))
+            || crate::runtime::impl_core::current_snapshot_requires_index_fallback())
         {
             if let Some(filter) = self.filter {
                 if let Some(ids) = query_exec::try_hash_eq_lookup(
@@ -163,8 +163,8 @@ impl<'a> DmlTargetScan<'a> {
         let mut predicate_failure = None;
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
-            if !matches!(self.target, Some(UpdateTarget::Documents))
-                && !(self.target.is_none() && self.limit.is_some())
+            if !(matches!(self.target, Some(UpdateTarget::Documents))
+                || self.target.is_none() && self.limit.is_some())
             {
                 query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
             }

@@ -148,7 +148,7 @@ pub fn recover_paged_wal(source: &Path, destination: &Path) -> Result<Compaction
                 WalRecord::PageWrite { page_id, data, .. } => {
                     ensure(
                         page_id > 0
-                            && (page_id < DWB_ZONE_START_PAGE || page_id >= FIRST_ALLOCATABLE_PAGE)
+                            && !(DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE).contains(&page_id)
                             && u64::from(page_id) < guard.bytes.div_ceil(PAGE_SIZE as u64)
                             && data.len() == PAGE_SIZE,
                         "invalid engine WAL page",

@@ -90,7 +90,7 @@ impl RedDBRuntime {
         let mut remaining = batch_size;
         let mut append_only_checked = false;
         for (index, name) in collections.iter().enumerate() {
-            let Some(contract) = self.inner.db.collection_contract(&name) else {
+            let Some(contract) = self.inner.db.collection_contract(name) else {
                 continue;
             };
             let Some(retention_ms) = contract.retention_duration_ms else {
@@ -110,7 +110,7 @@ impl RedDBRuntime {
             else {
                 continue;
             };
-            if store.get_collection(&name).is_none() {
+            if store.get_collection(name).is_none() {
                 continue;
             }
             if remaining == 0 {
@@ -122,14 +122,14 @@ impl RedDBRuntime {
                 .inner
                 .retention_sweeper
                 .write()
-                .scan_tick(&store, &name, remaining);
+                .scan_tick(&store, name, remaining);
             let (candidates, scanned) = match candidates {
                 Ok(result) => result,
                 Err(_) => {
                     self.inner
                         .retention_sweeper
                         .write()
-                        .record_tick(&name, 0, 1, now_ms);
+                        .record_tick(name, 0, 1, now_ms);
                     // The failed scan may already have consumed its budget.
                     // Retry other collections on a later tick.
                     remaining = 0;
@@ -151,14 +151,14 @@ impl RedDBRuntime {
                 self.inner
                     .retention_sweeper
                     .write()
-                    .record_tick(&name, 0, 1, now_ms);
+                    .record_tick(name, 0, 1, now_ms);
                 continue;
             }
 
             let stmt = format!("DELETE FROM {} WHERE {} < {}", name, ts_column, cutoff);
             let result = super::retention_sweeper::with_delete_candidates(
                 candidates,
-                &name,
+                name,
                 &ts_column,
                 || self.execute_query(&stmt),
             );
@@ -170,7 +170,7 @@ impl RedDBRuntime {
             self.inner
                 .retention_sweeper
                 .write()
-                .record_tick(&name, deleted, pending, now_ms);
+                .record_tick(name, deleted, pending, now_ms);
         }
     }
 
