@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.18
+
+### Patch Changes
+
+- [#2687](https://github.com/reddb-io/reddb/pull/2687) [`b3d2025`](https://github.com/reddb-io/reddb/commit/b3d202592a874c2aa06dbca3262c87c0a33da8b9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild a missing physical metadata sidecar for legacy paged stores after an in-place catalogue migration while preserving native collection roots and failing closed on partial summary publications.
+
 ## 1.28.17
 
 ### Patch Changes
