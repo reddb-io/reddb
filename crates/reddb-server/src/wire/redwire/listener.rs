@@ -44,9 +44,29 @@ pub async fn start_redwire_listener(
     config: RedWireConfig,
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let auth_store = resolve_listener_auth(config.auth_store, runtime.auth_store())?;
     let listener = TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(transport = "redwire", bind = %config.bind_addr, "listener online");
-    serve_redwire_tcp(listener, runtime, config.auth_store, config.oauth).await
+    serve_redwire_tcp(listener, runtime, auth_store, config.oauth).await
+}
+
+fn resolve_listener_auth(
+    configured: Option<Arc<AuthStore>>,
+    runtime: Option<Arc<AuthStore>>,
+) -> io::Result<Option<Arc<AuthStore>>> {
+    if let Some(active) = runtime.as_ref().filter(|store| store.is_enabled()) {
+        if configured
+            .as_ref()
+            .is_some_and(|store| !Arc::ptr_eq(store, active))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "RedWire authentication authority conflicts with the runtime",
+            ));
+        }
+        return Ok(Some(Arc::clone(active)));
+    }
+    Ok(configured.or(runtime))
 }
 
 /// Start a RedWire listener on an already-bound TCP listener (used by

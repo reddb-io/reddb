@@ -268,3 +268,57 @@ async fn bearer_required_when_anonymous_unsupported() {
     .expect_err("anonymous should be refused");
     assert_eq!(err.code, reddb_client::ErrorCode::AuthRefused);
 }
+
+#[tokio::test]
+async fn configured_listener_cannot_bypass_runtime_authentication() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+    let mut auth = reddb::auth::AuthConfig::default();
+    auth.enabled = true;
+    let store = Arc::new(reddb::auth::store::AuthStore::new(auth));
+    store
+        .create_user("runtime-user", "runtime-password", reddb::auth::Role::Write)
+        .unwrap();
+    runtime.set_auth_store(Arc::clone(&store));
+    let cfg = RedWireConfig {
+        bind_addr: addr.to_string(),
+        auth_store: None,
+        oauth: None,
+    };
+    let server_runtime = Arc::clone(&runtime);
+    let handle = tokio::spawn(async move {
+        let _ = start_redwire_listener(cfg, server_runtime).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let options = || ConnectOptions::new(addr.ip().to_string(), addr.port());
+    let anonymous = RedWireClient::connect(options().with_auth(Auth::Anonymous)).await;
+    assert!(
+        anonymous.is_err(),
+        "enabled runtime authentication must reject anonymous access"
+    );
+    let mut client = RedWireClient::connect(options().with_auth(Auth::Basic {
+        user: "runtime-user".into(),
+        pass: "runtime-password".into(),
+    }))
+    .await
+    .expect("runtime credentials must work");
+    client.query("SELECT 1").await.expect("authenticated query");
+    client.close().await.expect("close");
+    handle.abort();
+
+    let conflicting = RedWireConfig {
+        bind_addr: "127.0.0.1:0".into(),
+        auth_store: Some(Arc::new(reddb::auth::store::AuthStore::new(
+            Default::default(),
+        ))),
+        oauth: None,
+    };
+    assert!(
+        start_redwire_listener(conflicting, runtime).await.is_err(),
+        "an explicit different or disabled authority must fail closed"
+    );
+}
