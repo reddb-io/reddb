@@ -641,6 +641,33 @@ impl<V: Vfs> OperationalManifest<V> {
             .unwrap_or_default())
     }
 
+    /// Select bounded retention candidates without cloning segment checksums,
+    /// bloom filters or other payload-sized metadata into the runtime.
+    pub fn append_only_retention_candidates(
+        &self,
+        cutoffs: &BTreeMap<String, i64>,
+        limit: usize,
+    ) -> io::Result<Vec<(String, u64)>> {
+        if limit == 0 || cutoffs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(manifest) = self.load_current()? else {
+            return Ok(Vec::new());
+        };
+        Ok(manifest
+            .append_only_segments
+            .iter()
+            .filter(|segment| segment.state == AppendOnlySegmentState::Active)
+            .filter(|segment| {
+                cutoffs
+                    .get(&segment.collection)
+                    .is_some_and(|cutoff| segment.retention_max_ms.is_some_and(|max| max < *cutoff))
+            })
+            .take(limit)
+            .map(|segment| (segment.collection.clone(), segment.segment_id))
+            .collect())
+    }
+
     pub fn append_only_segments_with_pending_for_test(
         &self,
     ) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {

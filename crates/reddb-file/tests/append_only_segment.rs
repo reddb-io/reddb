@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 
 use reddb_file::{
@@ -88,6 +89,64 @@ fn operational_manifest_publishes_closed_append_only_segment_once() {
 
     let loaded = manifest.append_only_segments_for_test().unwrap();
     assert_eq!(loaded, vec![segment]);
+}
+
+#[test]
+fn retention_candidates_obey_cutoff_budget_and_recovery_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("data.rdb");
+    let manifest = OperationalManifest::for_db_path(&db_path);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let encoded = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: b"v".to_vec(),
+        }],
+    )
+    .unwrap();
+    for (id, max) in [(1, Some(5)), (2, Some(9)), (3, Some(10)), (4, None)] {
+        manifest
+            .publish_append_only_segment_with_retention_bounds(
+                "events",
+                id,
+                AppendOnlySegmentCodec::None,
+                &encoded,
+                max,
+                max,
+            )
+            .unwrap();
+    }
+    let cutoffs = BTreeMap::from([("events".to_string(), 10)]);
+    assert_eq!(
+        manifest
+            .append_only_retention_candidates(&cutoffs, 1)
+            .unwrap(),
+        vec![("events".into(), 1)]
+    );
+    assert!(manifest
+        .append_only_retention_candidates(&cutoffs, 0)
+        .unwrap()
+        .is_empty());
+    manifest
+        .begin_retire_append_only_segment("events", 1)
+        .unwrap();
+    assert_eq!(
+        manifest
+            .append_only_retention_candidates(&cutoffs, 10)
+            .unwrap(),
+        vec![("events".into(), 2)]
+    );
+    drop(manifest);
+    let reopened = OperationalManifest::for_db_path(&db_path);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert_eq!(
+        reopened
+            .append_only_retention_candidates(&cutoffs, 10)
+            .unwrap(),
+        vec![("events".into(), 2)]
+    );
+    assert_eq!(reopened.append_only_segments().unwrap().len(), 3);
 }
 
 #[test]

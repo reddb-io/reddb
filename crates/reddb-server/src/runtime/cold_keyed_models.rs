@@ -7,6 +7,73 @@ use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[test]
+fn cold_retention_sweeps_persisted_rows_in_bounded_batches() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = RedDBOptions::persistent(directory.path().join("retention.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .unwrap();
+    {
+        let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+        rt.background_tasks.as_ref().unwrap().shutdown();
+        rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true")
+            .unwrap();
+        rt.execute_query("INSERT INTO events (id) VALUES (1), (2), (3), (4), (5)")
+            .unwrap();
+        let manager = rt.db().store().get_collection("events").unwrap();
+        for mut row in manager.query_all(|_| true) {
+            row.created_at = 1;
+            if let EntityData::Row(data) = &mut row.data {
+                if let Some(named) = &mut data.named {
+                    named.insert("created_at".into(), Value::UnsignedInteger(1));
+                }
+                if let Some(schema) = &data.schema {
+                    let index = schema.iter().position(|name| name == "created_at").unwrap();
+                    data.columns[index] = Value::UnsignedInteger(1);
+                }
+                assert_eq!(
+                    data.get_field("created_at"),
+                    Some(&Value::UnsignedInteger(1))
+                );
+            }
+            manager.update(row).unwrap();
+        }
+        rt.flush().unwrap();
+    }
+    for (previous, expected) in [(5, 3), (3, 1), (1, 0)] {
+        let rt = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .unwrap();
+        rt.background_tasks.as_ref().unwrap().shutdown();
+        assert!(rt
+            .db()
+            .store()
+            .get_collection("events")
+            .unwrap()
+            .has_backing());
+        let before = rt.execute_query("SELECT id FROM events").unwrap();
+        assert_eq!(before.result.records.len(), previous, "before sweep");
+        rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+            .unwrap();
+        rt.sweep_retention_tick(2);
+        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+            .unwrap();
+        assert_eq!(
+            rt.execute_query("SELECT id FROM events")
+                .unwrap()
+                .result
+                .records
+                .len(),
+            expected
+        );
+        rt.flush().unwrap();
+    }
+}
+
 fn runtime() -> (tempfile::TempDir, RedDBRuntime) {
     let directory = tempfile::tempdir().expect("cold model fixture");
     let options = RedDBOptions::persistent(directory.path().join("models.rdb"))

@@ -1559,7 +1559,8 @@ fn append_only_retention_bounds(
     let mut max_ts: Option<i64> = None;
     for entity in entities {
         let Some(ts) = append_only_entity_timestamp_ms(entity, &ts_column) else {
-            continue;
+            // An unknown timestamp cannot prove that every row has expired.
+            return (None, None);
         };
         min_ts = Some(min_ts.map_or(ts, |min| min.min(ts)));
         max_ts = Some(max_ts.map_or(ts, |max| max.max(ts)));
@@ -1569,18 +1570,24 @@ fn append_only_retention_bounds(
 
 fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> Option<i64> {
     match ts_column {
-        "created_at" => entity
+        "created_at" | "updated_at" => match entity
             .data
             .as_row()
-            .and_then(|row| row.get_field("created_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.created_at as i64)),
-        "updated_at" => entity
-            .data
-            .as_row()
-            .and_then(|row| row.get_field("updated_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.updated_at as i64)),
+            .and_then(|row| row.get_field(ts_column))
+        {
+            Some(value) => value_as_retention_ms(value),
+            None => {
+                let seconds = if ts_column == "created_at" {
+                    entity.created_at
+                } else {
+                    entity.updated_at
+                };
+                i64::try_from(seconds)
+                    .ok()?
+                    .checked_mul(1_000)?
+                    .checked_add(999)
+            }
+        },
         other => entity
             .data
             .as_row()
@@ -1608,6 +1615,35 @@ thread_local! {
 mod append_only_publication_tests {
     use super::*;
     use crate::storage::RowData;
+
+    #[test]
+    fn retention_bounds_require_all_rows_and_convert_system_seconds() {
+        let runtime = crate::RedDBRuntime::in_memory().unwrap();
+        runtime
+            .execute_query("CREATE TABLE events (id INTEGER, ts TIMESTAMP) APPEND ONLY")
+            .unwrap();
+        let contract = runtime.db().collection_contract("events").unwrap();
+        let mut timed = UnifiedEntity::table_row(EntityId::new(1), "events", 1, Vec::new());
+        timed.data = EntityData::Row(RowData::with_names(
+            vec![Value::Timestamp(10)],
+            vec!["ts".into()],
+        ));
+        let missing = UnifiedEntity::table_row(EntityId::new(2), "events", 2, Vec::new());
+        assert_eq!(
+            append_only_retention_bounds(&contract, &[&timed]),
+            (Some(10_000), Some(10_000))
+        );
+        assert_eq!(
+            append_only_retention_bounds(&contract, &[&timed, &missing]),
+            (None, None)
+        );
+        let mut system = missing;
+        system.created_at = 10;
+        assert_eq!(
+            append_only_entity_timestamp_ms(&system, "created_at"),
+            Some(10_999)
+        );
+    }
 
     #[test]
     fn already_published_append_only_checkpoint_does_not_clone_payloads() {

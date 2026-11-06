@@ -406,51 +406,38 @@ impl RedDBRuntime {
             return Ok(0);
         };
         let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let segments = manifest
-            .append_only_segments()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        if segments.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total_retired = 0u64;
-        for contract in self
+        let cutoffs: std::collections::BTreeMap<_, _> = self
             .inner
             .db
             .collection_contracts()
             .into_iter()
             .filter(|contract| contract.append_only)
-        {
-            let Some(retention_ms) = contract.retention_duration_ms else {
-                continue;
-            };
-            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
-            let mut retired_for_collection = 0u64;
-            for segment in segments
-                .iter()
-                .filter(|segment| segment.collection == contract.name)
-                .filter(|segment| segment.retention_max_ms.is_some_and(|max| max < cutoff))
-                .take(max_segments.saturating_sub(total_retired as usize))
+            .filter_map(|contract| {
+                contract.retention_duration_ms.map(|retention_ms| {
+                    (
+                        contract.name,
+                        super::retention_sweeper::cutoff_ms(now_ms, retention_ms),
+                    )
+                })
+            })
+            .collect();
+        let candidates = manifest
+            .append_only_retention_candidates(&cutoffs, max_segments)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let mut total_retired = 0u64;
+        for (collection, segment_id) in candidates {
+            manifest
+                .begin_retire_append_only_segment(&collection, segment_id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if manifest
+                .finish_retire_append_only_segment(&collection, segment_id)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
             {
-                manifest
-                    .begin_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                if manifest
-                    .finish_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?
-                {
-                    retired_for_collection = retired_for_collection.saturating_add(1);
-                }
-            }
-            if retired_for_collection > 0 {
                 self.inner
                     .retention_sweeper
                     .write()
-                    .record_segments_retired(&contract.name, retired_for_collection, now_ms);
-                total_retired = total_retired.saturating_add(retired_for_collection);
-            }
-            if total_retired >= max_segments as u64 {
-                break;
+                    .record_segments_retired(&collection, 1, now_ms);
+                total_retired = total_retired.saturating_add(1);
             }
         }
         Ok(total_retired)

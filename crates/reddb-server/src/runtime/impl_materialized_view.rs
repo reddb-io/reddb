@@ -68,12 +68,9 @@ impl RedDBRuntime {
     /// sweeper's deletes via the same WAL stream with no special
     /// handling on the replication side.
     ///
-    /// Batching is enforced by tightening the cutoff: if more than
-    /// `batch_size` rows are expired, the cutoff is dropped to the
-    /// `batch_size`-th oldest expired timestamp + 1 so the predicate
-    /// matches roughly `batch_size` rows; the remainder is reported
-    /// as `current_rows_pending_sweep_estimate` and drained on the
-    /// next tick.
+    /// The normal DML target scan stops after `batch_size` matching rows,
+    /// including when timestamps tie. A full batch indicates possible
+    /// remaining work, which is retried on the next tick.
     pub fn sweep_retention_tick(&self, batch_size: usize) {
         if batch_size == 0 {
             return;
@@ -105,74 +102,22 @@ impl RedDBRuntime {
             else {
                 continue;
             };
-            let Some(manager) = store.get_collection(&name) else {
-                continue;
-            };
-            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
-
-            // Single pass: collect expired timestamps. We keep the
-            // full Vec rather than a bounded heap because the partial
-            // sort below is the simplest correct way to find the
-            // batch-th oldest; for the slice's "1000-row default
-            // batch" target this is bounded enough for production
-            // operation, and the alternative (in-place heap of size
-            // batch+1) is a follow-up optimisation.
-            let mut expired_ts: Vec<i64> = Vec::new();
-            manager.for_each_entity(|entity| {
-                let ts = match ts_column.as_str() {
-                    "created_at" => Some(entity.created_at as i64),
-                    "updated_at" => Some(entity.updated_at as i64),
-                    other => entity
-                        .data
-                        .as_row()
-                        .and_then(|row| row.get_field(other))
-                        .and_then(|v| match v {
-                            reddb_types::Value::TimestampMs(t) => Some(*t),
-                            reddb_types::Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
-                            reddb_types::Value::BigInt(t) => Some(*t),
-                            reddb_types::Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
-                            reddb_types::Value::Integer(t) => Some(*t),
-                            _ => None,
-                        }),
-                };
-                if let Some(t) = ts {
-                    if t < cutoff {
-                        expired_ts.push(t);
-                    }
-                }
-                true
-            });
-
-            let total_expired = expired_ts.len() as u64;
-            if total_expired == 0 {
-                self.inner
-                    .retention_sweeper
-                    .write()
-                    .record_tick(&name, 0, 0, now_ms);
+            if store.get_collection(&name).is_none() {
                 continue;
             }
+            let cutoff = super::retention_sweeper::cutoff_ms(now_ms, retention_ms);
 
-            let (effective_cutoff, pending) = if (total_expired as usize) <= batch_size {
-                (cutoff, 0u64)
-            } else {
-                // Tighten the cutoff to the (batch_size)-th oldest
-                // expired timestamp + 1 so DELETE matches roughly
-                // `batch_size` rows.
-                expired_ts.sort_unstable();
-                let nth = expired_ts[batch_size - 1];
-                (
-                    nth.saturating_add(1),
-                    total_expired.saturating_sub(batch_size as u64),
-                )
-            };
-
-            let stmt = format!(
-                "DELETE FROM {} WHERE {} < {}",
-                name, ts_column, effective_cutoff
-            );
-            let deleted = match self.execute_query(&stmt) {
-                Ok(r) => r.affected_rows,
-                Err(_) => 0,
+            let stmt = format!("DELETE FROM {} WHERE {} < {}", name, ts_column, cutoff);
+            let result =
+                super::retention_sweeper::with_delete_limit(batch_size, &name, &ts_column, || {
+                    self.execute_query(&stmt)
+                });
+            let (deleted, pending) = match result {
+                Ok(r) => (
+                    r.affected_rows,
+                    u64::from(r.affected_rows >= batch_size as u64),
+                ),
+                Err(_) => (0, 1),
             };
 
             self.inner

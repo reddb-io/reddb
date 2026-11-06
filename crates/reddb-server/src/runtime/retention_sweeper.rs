@@ -10,7 +10,7 @@
 //!
 //! Mutable-collection sweeps execute deletes through the standard
 //! `RedDBRuntime::execute_query` chokepoint (`DELETE FROM <collection>
-//! WHERE id IN (...)`) so that WAL participation, snapshot guards and
+//! WHERE <timestamp> < <cutoff>`) so that WAL participation, snapshot guards and
 //! event emission ride on the same single code path as user-issued
 //! DELETEs — replicas replay sweeper deletes deterministically with
 //! no special handling on the replication side. Append-only sweeps
@@ -23,7 +23,89 @@
 //! State is in-memory only — counters reset across restart, mirroring
 //! the existing materialized-view scheduler state.
 
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+thread_local! {
+    static DELETE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
+    static TIMESTAMP_CONTEXT: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+/// Scope the limit to the synchronous maintenance statement and restore it on
+/// every exit, including unwinding. The DELETE consumes it before publication.
+pub(crate) fn with_delete_limit<T>(
+    limit: usize,
+    collection: &str,
+    column: &str,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<usize>, Option<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DELETE_LIMIT.with(|slot| slot.set(self.0));
+            TIMESTAMP_CONTEXT.with(|slot| *slot.borrow_mut() = self.1.take());
+        }
+    }
+    let previous = DELETE_LIMIT.with(|slot| slot.replace(Some(limit)));
+    let previous_context = TIMESTAMP_CONTEXT
+        .with(|slot| slot.replace(Some((collection.to_owned(), column.to_owned()))));
+    let _restore = Restore(previous, previous_context);
+    f()
+}
+
+pub(crate) fn take_delete_limit() -> Option<usize> {
+    DELETE_LIMIT.with(Cell::take)
+}
+
+pub(crate) fn cutoff_ms(now_ms: u64, retention_ms: u64) -> i64 {
+    let cutoff = i128::from(now_ms) - i128::from(retention_ms);
+    cutoff.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// Resolve automatic timestamps in milliseconds only within the scoped
+/// maintenance DELETE. Missing legacy values use the conservative end of the
+/// stored second; malformed values do not qualify for deletion.
+pub(crate) fn maintenance_timestamp(
+    entity: &crate::storage::UnifiedEntity,
+    field: &str,
+) -> Option<reddb_types::Value> {
+    let active = TIMESTAMP_CONTEXT.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|(collection, column)| {
+            collection == entity.kind.collection()
+                && column == field
+                && matches!(field, "created_at" | "updated_at")
+        })
+    });
+    if !active {
+        return None;
+    }
+    let value = entity.data.as_row().and_then(|row| row.get_field(field));
+    let millis = match value {
+        Some(reddb_types::Value::TimestampMs(value))
+        | Some(reddb_types::Value::BigInt(value))
+        | Some(reddb_types::Value::Integer(value)) => Some(*value),
+        Some(reddb_types::Value::Timestamp(value)) => value.checked_mul(1_000),
+        Some(reddb_types::Value::UnsignedInteger(value)) => i64::try_from(*value).ok(),
+        Some(_) => None,
+        None => {
+            let seconds = if field == "created_at" {
+                entity.created_at
+            } else {
+                entity.updated_at
+            };
+            i64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .and_then(|millis| millis.checked_add(999))
+        }
+    };
+    Some(
+        millis
+            .map(reddb_types::Value::Integer)
+            .unwrap_or(reddb_types::Value::Null),
+    )
+}
 
 /// Default per-tick batch size for the background sweeper. Acceptance
 /// criterion: `default batch size red.retention.sweeper_batch (e.g.
@@ -41,10 +123,8 @@ pub(crate) struct SweeperState {
     pub rows_swept_total: u64,
     /// Cumulative append-only segments retired since boot.
     pub segments_retired_total: u64,
-    /// Number of rows the last tick observed as expired *but not yet
-    /// swept* — i.e. either still inside the batch or queued for the
-    /// next tick. Surfaced as
-    /// `red.retention.current_rows_pending_sweep_estimate`.
+    /// Conservative signal that a full batch or an error may have left
+    /// work for the next tick. This is not an exact backlog count.
     pub last_pending_estimate: u64,
 }
 
@@ -112,6 +192,43 @@ impl RetentionSweeperState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_delete_limit_is_consumed_and_restored_on_unwind() {
+        assert_eq!(take_delete_limit(), None);
+        with_delete_limit(2, "events", "created_at", || {
+            assert_eq!(take_delete_limit(), Some(2));
+            assert_eq!(take_delete_limit(), None);
+            let _ = std::panic::catch_unwind(|| {
+                with_delete_limit(3, "events", "created_at", || panic!("test unwind"))
+            });
+            assert_eq!(take_delete_limit(), None);
+        });
+        assert_eq!(take_delete_limit(), None);
+    }
+
+    #[test]
+    fn retention_cutoff_never_wraps_long_durations() {
+        assert_eq!(cutoff_ms(10, 3), 7);
+        assert_eq!(cutoff_ms(10, u64::MAX), i64::MIN);
+        assert_eq!(cutoff_ms(u64::MAX, 0), i64::MAX);
+    }
+
+    #[test]
+    fn legacy_timestamp_fallback_is_conservative_and_scoped() {
+        use crate::storage::{EntityId, UnifiedEntity};
+        let mut entity = UnifiedEntity::table_row(EntityId::new(1), "events", 1, vec![]);
+        entity.created_at = 10;
+        assert_eq!(maintenance_timestamp(&entity, "created_at"), None);
+        with_delete_limit(1, "events", "created_at", || {
+            assert_eq!(
+                maintenance_timestamp(&entity, "created_at"),
+                Some(reddb_types::Value::Integer(10_999))
+            );
+            assert_eq!(maintenance_timestamp(&entity, "updated_at"), None);
+        });
+        assert_eq!(maintenance_timestamp(&entity, "created_at"), None);
+    }
 
     #[test]
     fn record_tick_accumulates_rows_swept_total() {
