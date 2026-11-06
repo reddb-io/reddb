@@ -73,6 +73,33 @@ loss. This is a standalone public-contract fixture; it does not contain the
 private Hunter schema, migration sequence or client application from #2536.
 Its success must not be described as reproducing or qualifying that private run.
 
+Each reopen records monotonic durations from process launch to HTTP readiness,
+readiness to the first successful RedWire query, and launch to its result in
+`reopenTimings`. The first query checks an acknowledged table row; subsequent
+checks verify the named secondary index, all expected table and KV values and
+collection models. The first-query duration includes starting the CLI client.
+On Linux, each sample also records the server's peak RSS, process read-byte
+count and bytes returned by read calls through the first result. These counters
+include all server activity, not just the database; missing counters are null.
+No universal latency threshold is imposed: use repeated runs on the target
+hardware and compare against the POC's chosen SLO. Restarting a process does not
+flush the OS page cache, simulate remote object storage, or prove a hosted
+scale-to-zero orchestrator. These receipts therefore measure local reopens,
+not a production cold-cache or remote-hydration SLO.
+The four-case fixture remains available through the manually dispatched storage
+recovery workflow, which retains its receipt. A single case can be selected
+locally with `--case serverless`.
+
+The Linux sparse-file startup regression measures pager data-file reads on the
+calling thread through the first query for identical live data at compact and
+50 GiB logical sizes.
+The physical allocation remains small. This guards against work proportional to
+logical file length, but does not emulate 50 GiB of populated data or count all
+WAL, metadata and network I/O. The serverless generation crash matrix separately
+checks that the selected published generation hydrates to queryable rows after
+each publication interruption; the partial-cache/source fixture checks failed
+hydration and retry. They do not model a process kill at every hydration write.
+
 ## Interpreting space checks
 
 The crash matrix uses four warmup generations, then allows at most two database

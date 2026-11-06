@@ -911,7 +911,9 @@ mod tests {
         let rendered = err.to_string();
         assert!(matches!(err, PagerError::SuperblockZoneUnrecoverable(_)));
         assert!(rendered.contains("superblock zone"), "{rendered}");
-        assert!(rendered.contains("salvage"), "{rendered}");
+        assert!(rendered.contains("Preserve the database"), "{rendered}");
+        assert!(rendered.contains("verified backup"), "{rendered}");
+        assert!(!rendered.contains("salvage"), "{rendered}");
 
         cleanup(&path);
     }

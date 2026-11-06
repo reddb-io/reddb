@@ -1843,15 +1843,15 @@ fn scrub_reports_corrupt_manifest_finding_without_repairing_store() {
 
     // With both slots corrupt, neither superblock generation can be
     // validated, so the open fails didactically at the zone that roots the
-    // store (ADR 0038 §2 fail-closed reads) and points at the salvage tool
-    // (ADR 0074 §4). The SQL surface is unreachable on this store by design,
-    // so the scrub over a manifest-corrupt store is the OFFLINE pass.
+    // store (ADR 0038 §2 fail-closed reads). The common pager error cannot
+    // distinguish formats, so it advises preserving the files and restoring a
+    // verified backup. SQL is unreachable here; scrub uses the offline API.
     let open_err = reddb::RedDBRuntime::with_options(reddb::RedDBOptions::persistent(&db_path))
         .err()
         .expect("a corrupt manifest must fail the open");
     let rendered = format!("{open_err:?}");
     assert!(
-        rendered.contains("unrecoverable") && rendered.contains("salvage"),
+        rendered.contains("unrecoverable") && rendered.contains("verified backup"),
         "open error should be the didactic unrecoverable-zone message: {rendered}"
     );
 
