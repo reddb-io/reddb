@@ -5,12 +5,16 @@ Uses only temporary databases and loopback listeners. No running application,
 external server, credential, or real customer database is required.
 """
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
 
 def main():
     root = Path(__file__).resolve().parents[1]
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise SystemExit("cargo was not found on PATH")
     commands = [
         ["cargo", "test", "--locked", "-p", "reddb-io-client", "--features", "redwire",
          "--test", "embedded_result_contract", "--test", "redwire_cancellation_contract",
@@ -24,6 +28,8 @@ def main():
     ]
     failed = []
     for command in commands:
+        # Resolve Windows .cmd toolchain shims as well as native executables.
+        command[0] = cargo
         print("\nRunning: " + " ".join(command), flush=True)
         try:
             code = subprocess.run(command, cwd=root, timeout=1800).returncode
