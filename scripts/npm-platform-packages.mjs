@@ -49,6 +49,14 @@ export const PLATFORMS = [
   { key: 'win32-x64', os: 'win32', cpu: 'x64', asset: 'red-windows-x86_64.exe', required: false },
 ]
 
+// Unset flags preserve local tooling; CI validates explicit true/false values.
+export function enabledPlatforms(env = process.env) {
+  return PLATFORMS.filter((p) => {
+    const os = p.os === 'win32' ? 'WINDOWS' : p.os === 'darwin' ? 'MACOS' : 'LINUX'
+    return env[`ENABLE_${os}_${p.cpu.toUpperCase()}`] !== 'false'
+  })
+}
+
 export const packageName = (p) => `@reddb-io/red-${p.key}`
 
 /** Release asset name of the Node addon built for platform `p`. */
@@ -80,13 +88,13 @@ export function platformManifest(p, version, { addon = false } = {}) {
   return manifest
 }
 
-export function buildPackages({ version, assetsDir, outDir, allowMissing = false }) {
+export function buildPackages({ version, assetsDir, outDir, allowMissing = false, platforms = PLATFORMS }) {
   const sumsPath = join(assetsDir, 'SHA256SUMS')
   if (!existsSync(sumsPath)) throw new Error(`SHA256SUMS not found in ${assetsDir}`)
   const sums = parseSha256Sums(readFileSync(sumsPath, 'utf8'))
 
   const built = []
-  for (const p of PLATFORMS) {
+  for (const p of platforms) {
     const assetPath = join(assetsDir, p.asset)
     if (!existsSync(assetPath)) {
       if (p.required && !allowMissing) throw new Error(`required asset missing: ${p.asset}`)
@@ -123,10 +131,11 @@ export function buildPackages({ version, assetsDir, outDir, allowMissing = false
   return built
 }
 
-export function injectOptionalDependencies(manifestPath, version) {
+export function injectOptionalDependencies(manifestPath, version, platforms = PLATFORMS) {
   const json = JSON.parse(readFileSync(manifestPath, 'utf8'))
   json.optionalDependencies = { ...json.optionalDependencies }
-  for (const p of PLATFORMS) json.optionalDependencies[packageName(p)] = version
+  for (const p of PLATFORMS) delete json.optionalDependencies[packageName(p)]
+  for (const p of platforms) json.optionalDependencies[packageName(p)] = version
   writeFileSync(manifestPath, JSON.stringify(json, null, 2) + '\n')
 }
 
@@ -152,12 +161,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         assetsDir: opts.assets,
         outDir: opts.out,
         allowMissing: opts.allowMissing,
+        platforms: enabledPlatforms(),
       })
       if (dirs.length === 0) throw new Error('no platform packages were built')
       process.stdout.write(dirs.join('\n') + '\n')
     } else if (cmd === 'inject') {
       if (!opts.version || opts._.length === 0) throw new Error('inject needs --version and at least one package.json')
-      for (const file of opts._) injectOptionalDependencies(file, opts.version)
+      for (const file of opts._) injectOptionalDependencies(file, opts.version, enabledPlatforms())
     } else {
       throw new Error('usage: npm-platform-packages.mjs build|inject (see file header)')
     }
