@@ -1,5 +1,6 @@
 use std::io::{self, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reddb_file::{OpenMode, OperationalManifest, StdVfs, Vfs, VfsDirEntry, VfsFile};
@@ -7,6 +8,7 @@ use reddb_file::{OpenMode, OperationalManifest, StdVfs, Vfs, VfsDirEntry, VfsFil
 #[derive(Clone, Default)]
 struct RecordingVfs {
     events: Arc<Mutex<Vec<String>>>,
+    fail_manifest_rename: Arc<AtomicBool>,
 }
 
 impl RecordingVfs {
@@ -75,6 +77,13 @@ impl Vfs for RecordingVfs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.record(format!("rename:{}->{}", from.display(), to.display()));
+        if from
+            .file_name()
+            .is_some_and(|name| name == "manifest.json.next")
+            && self.fail_manifest_rename.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected manifest rename failure"));
+        }
         StdVfs.rename(from, to)
     }
 
@@ -109,6 +118,48 @@ impl Vfs for RecordingVfs {
     fn is_file(&self, path: &Path) -> bool {
         StdVfs.is_file(path)
     }
+}
+
+#[test]
+fn interrupted_collection_rename_keeps_old_manifest_and_can_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.create_collection("red_config").unwrap();
+    let marker = manifest.collection_path_for_test("red_config");
+    std::fs::write(&marker, b"existing data").unwrap();
+    let manifest_path = marker
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("manifest.json");
+    let before = std::fs::read(&manifest_path).unwrap();
+
+    vfs.fail_manifest_rename.store(true, Ordering::SeqCst);
+    assert!(manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .is_err());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"existing data");
+    manifest
+        .recover_or_bootstrap(&["red_config".into()])
+        .unwrap();
+    manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .unwrap();
+    manifest
+        .recover_or_bootstrap(&["red.config".into()])
+        .unwrap();
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    assert!(published["collections"].get("red_config").is_none());
+    assert_eq!(
+        published["collections"]["red.config"]["path"],
+        "red_config.rcol"
+    );
+    assert_eq!(std::fs::read(marker).unwrap(), b"existing data");
 }
 
 #[test]
