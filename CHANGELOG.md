@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.28.22
+
+### Patch Changes
+
+- [#2697](https://github.com/reddb-io/reddb/pull/2697) [`4ae7e01`](https://github.com/reddb-io/reddb/commit/4ae7e01acd86babb481c755a0647f76d88327b4d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore snapshots containing an empty system collection alias alongside its populated predecessor, preserving all records while continuing to reject collisions between populated aliases.
+
+## 1.28.21
+
+### Patch Changes
+
+- [#2695](https://github.com/reddb-io/reddb/pull/2695) [`7971bac`](https://github.com/reddb-io/reddb/commit/7971baca120cc93d97d26b72352785c6a87d2de0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit offline compaction repair that retires a divergent legacy `red_config` collection while preserving `red.config` as the canonical system configuration store, leaving the source unchanged and failing closed on ambiguous catalog shapes or cross-references.
+
 ## 1.28.20
 
 ### Patch Changes

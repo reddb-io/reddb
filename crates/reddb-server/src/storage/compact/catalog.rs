@@ -107,6 +107,43 @@ impl Catalog {
             resume,
         })
     }
+
+    pub fn retain_canonical_system_config(&mut self) -> Result<()> {
+        let legacy_roots = self
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red_config")
+            .count();
+        let canonical_roots = self
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red.config")
+            .count();
+        ensure(
+            legacy_roots == 1 && canonical_roots == 1,
+            "canonical config repair requires exactly one red_config and one red.config root",
+        )?;
+        ensure(
+            self.references
+                .iter()
+                .all(|reference| reference.target_collection != "red_config"),
+            "legacy red_config has cross-references and cannot be retired",
+        )?;
+        let resume = self
+            .resume
+            .as_mut()
+            .ok_or("canonical config repair requires a resume catalog")?;
+        ensure(
+            resume.collections.contains_key("red_config")
+                && resume.collections.contains_key("red.config"),
+            "canonical config repair requires both resume identities",
+        )?;
+        resume.collections.remove("red_config");
+        self.roots.retain(|root| root.collection != "red_config");
+        self.header.collection_count = u32::try_from(self.roots.len())?;
+        Ok(())
+    }
+
     pub fn encode(&self, roots: &BTreeMap<u32, u32>) -> Result<Vec<u8>> {
         let remap = |root: u32| -> Result<u32> {
             if root == 0 {
@@ -190,4 +227,92 @@ pub(super) fn write_catalog(target: &Pager, data: &[u8]) -> Result<()> {
     target.sync()?;
     target.write_page(1, root)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resume(root_page: u32) -> f::native_resume::CollectionResume {
+        f::native_resume::CollectionResume {
+            root_page,
+            entities: 1,
+            entity_id_next: 2,
+            row_id_next: 2,
+            sequence_id_next: 2,
+            key_index_root: None,
+            secondary_indices: BTreeMap::new(),
+        }
+    }
+
+    fn duplicate_config_catalog() -> Catalog {
+        Catalog {
+            header: f::NativePagedMetadataHeader {
+                format_version: 11,
+                collection_count: 3,
+            },
+            roots: vec![
+                f::NativePagedCollectionRoot {
+                    collection: "users".into(),
+                    root_page: 10,
+                },
+                f::NativePagedCollectionRoot {
+                    collection: "red_config".into(),
+                    root_page: 20,
+                },
+                f::NativePagedCollectionRoot {
+                    collection: "red.config".into(),
+                    root_page: 30,
+                },
+            ],
+            references: Vec::new(),
+            epoch: Some(7),
+            resume: Some(f::native_resume::CatalogResume {
+                entity_id_next: 100,
+                xid_high_water_mark: Some(8),
+                collections: [
+                    ("users".into(), resume(10)),
+                    ("red_config".into(), resume(20)),
+                    ("red.config".into(), resume(30)),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn explicit_repair_retires_only_legacy_config_identity() {
+        let mut catalog = duplicate_config_catalog();
+        catalog.retain_canonical_system_config().unwrap();
+        assert_eq!(catalog.header.collection_count, 2);
+        assert_eq!(
+            catalog
+                .roots
+                .iter()
+                .map(|root| root.collection.as_str())
+                .collect::<Vec<_>>(),
+            ["users", "red.config"]
+        );
+        let resume = catalog.resume.unwrap();
+        assert!(!resume.collections.contains_key("red_config"));
+        assert_eq!(resume.collections["red.config"].root_page, 30);
+        assert_eq!(resume.collections["users"].root_page, 10);
+    }
+
+    #[test]
+    fn explicit_repair_rejects_legacy_cross_references() {
+        let mut catalog = duplicate_config_catalog();
+        catalog.references.push(f::NativePagedCrossRef {
+            source_id: 1,
+            target_id: 2,
+            ref_type: 0,
+            target_collection: "red_config".into(),
+        });
+        assert!(catalog
+            .retain_canonical_system_config()
+            .unwrap_err()
+            .to_string()
+            .contains("cross-references"));
+    }
 }

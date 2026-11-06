@@ -68,7 +68,7 @@ pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedI
     }
     ensure(!indexes.is_empty(), "no damaged secondary index to recover")?;
     let report = PagedIndexSalvageReport { indexes };
-    compact_paged_inner(source, destination, Some(&report), None)?;
+    compact_paged_inner(source, destination, Some(&report), None, false)?;
     Ok(report)
 }
 
@@ -178,7 +178,7 @@ pub fn salvage_paged_collections(
         "no damaged collection root to recover",
     )?;
     let report = PagedCollectionSalvageReport { collections };
-    compact_paged_inner(source, destination, None, Some(&report))?;
+    compact_paged_inner(source, destination, None, Some(&report), false)?;
     Ok(report)
 }
 
