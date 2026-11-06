@@ -36,7 +36,7 @@ pub enum RdbFileError {
     InvalidOperation(String),
     Io(std::io::Error),
     /// A named zone of the `.rdb` cannot be trusted, so the store does not
-    /// open. ADR 0074 §2 requires the zone be named and §4 requires the
+    /// open. ADR 0074 Â§2 requires the zone be named and Â§4 requires the
     /// operator be pointed at `red salvage` rather than left with a panic.
     ZoneUnrecoverable {
         zone: &'static str,
@@ -62,7 +62,7 @@ impl std::fmt::Display for RdbFileError {
                  (opening it could only return data the zone can no longer vouch for). \
                  Run the `SCRUB` statement to classify the fault and `red salvage` to \
                  extract every entity the damage did not touch; `red salvage` never writes \
-                 into the damaged file (ADR 0074 §2/§4).",
+                 into the damaged file (ADR 0074 Â§2/Â§4).",
                 path.display()
             ),
         }
@@ -93,7 +93,7 @@ pub const EMBEDDED_RDB_SUPERBLOCK_1_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE;
 /// leaves a window in which the durable superblock still names the old
 /// checksum while the bytes are already the new ones. Publishing into the
 /// *inactive* slot and only then pointing a fresh superblock at it means every
-/// valid superblock always references an intact manifest — pre-update or
+/// valid superblock always references an intact manifest â€” pre-update or
 /// post-update, never a mixture.
 pub const EMBEDDED_RDB_MANIFEST_SLOT_SIZE: u64 = 4096;
 pub const EMBEDDED_RDB_MANIFEST_0_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE * 2;
@@ -225,7 +225,7 @@ impl EmbeddedRdbArtifact {
             // The manifest a valid superblock names is always intact: it was
             // fsynced into an inactive slot before this generation existed. A
             // checksum failure here is therefore bit rot, not a torn update,
-            // and ADR 0074 §2 says it fails the open by name — never falls
+            // and ADR 0074 Â§2 says it fails the open by name â€” never falls
             // back to a stale root that would resurrect superseded state.
             let mut manifest = read_manifest(file, selected_superblock).map_err(|_| {
                 RdbFileError::ZoneUnrecoverable {
@@ -288,7 +288,7 @@ fn read_superblock_copy(
 /// The manifest slot the given superblock does not reference.
 ///
 /// With two superblock copies and two manifest slots this is always the slot
-/// belonging to the *stale* superblock copy — the same copy the update is about
+/// belonging to the *stale* superblock copy â€” the same copy the update is about
 /// to overwrite. That coincidence is what makes the pair safe: a crash can only
 /// ever clobber the manifest of a superblock that was already being replaced.
 fn inactive_manifest_offset(superblock: EmbeddedRdbSuperblock) -> RdbFileResult<u64> {
@@ -497,7 +497,7 @@ fn wal_region_start_checked(open: &EmbeddedRdbOpen) -> RdbFileResult<Option<u64>
     Ok(Some(wal_start))
 }
 
-/// Scan the WAL through an already-open handle — see
+/// Scan the WAL through an already-open handle â€” see
 /// [`EmbeddedRdbArtifact::open_inner_with_file`] for why the writer path
 /// cannot open a second one.
 fn scan_wal_with_file(
@@ -1302,64 +1302,4 @@ fn write_superblock_copy(
 }
 
 #[cfg(test)]
-mod startup_read_tests {
-    use super::*;
-    use std::io::{self, Read, Seek, Write};
-
-    struct CountingFile {
-        file: std::fs::File,
-        bytes_read: u64,
-    }
-
-    impl VfsFile for CountingFile {
-        fn try_clone(&self) -> io::Result<Self> {
-            Err(io::ErrorKind::Unsupported.into())
-        }
-        fn file_len(&self) -> io::Result<u64> {
-            Ok(self.file.metadata()?.len())
-        }
-        fn set_len(&self, len: u64) -> io::Result<()> {
-            self.file.set_len(len)
-        }
-        fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-            self.file.write_all(bytes)
-        }
-        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-            let count = self.file.read(bytes)?;
-            self.bytes_read += count as u64;
-            Ok(count)
-        }
-        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-            self.file.seek(pos)
-        }
-        fn sync_all(&self) -> io::Result<()> {
-            self.file.sync_all()
-        }
-    }
-
-    #[test]
-    fn opening_embedded_snapshot_reads_its_bytes_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("snapshot.rdb");
-        let mut snapshot = vec![42u8; 8 * 1024 * 1024];
-        snapshot[..4].copy_from_slice(b"RDST");
-        EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot).unwrap();
-        let mut file = CountingFile {
-            file: std::fs::File::open(&path).unwrap(),
-            bytes_read: 0,
-        };
-        let (_, loaded) = EmbeddedRdbArtifact::open_inner_with_snapshot(&mut file, &path).unwrap();
-        assert_eq!(loaded.as_deref(), Some(snapshot.as_slice()));
-        eprintln!(
-            "embedded startup: snapshot_bytes={} read_bytes={}",
-            snapshot.len(),
-            file.bytes_read
-        );
-        assert!(
-            file.bytes_read <= snapshot.len() as u64 + 128 * 1024,
-            "embedded open read {} bytes for a {}-byte snapshot",
-            file.bytes_read,
-            snapshot.len()
-        );
-    }
-}
+mod startup_read_tests;

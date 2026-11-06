@@ -220,6 +220,13 @@ fn compare_sparse_startup(path: &std::path::Path, options: RedDBOptions, profile
     assert!(
         matches!(row.result.records[0].get("payload"), Some(Value::Text(text)) if text.as_ref() == "tail-proof")
     );
+    let original = reopened
+        .execute_query("SELECT payload FROM startup_rows WHERE id = 0")
+        .unwrap();
+    let expected = "payload".repeat(512);
+    assert!(
+        matches!(original.result.records[0].get("payload"), Some(Value::Text(text)) if text.as_ref() == expected.as_str())
+    );
 }
 
 fn measure_fresh_process(path: &std::path::Path, profile: &str, size: &str) {
