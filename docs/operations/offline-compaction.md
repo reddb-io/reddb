@@ -51,6 +51,21 @@ files are refused because this operation cannot verify them. The compaction qual
 also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
 publish the output file.
 
+For a legacy paged store with no cross references or physical metadata, if a
+collection's entire tree is one checksum-damaged leaf, the following command
+copies the intact collections to a new directory:
+
+```sh
+red salvage-paged-collections --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+Each damaged collection is empty in the result. Its loss report identifies the
+root page but records the number of lost entities as unknown. Interior-root or
+descendant damage, system collection damage, ambiguous pages, authenticated
+Vaults, pending recovery, and more recent catalog formats are refused. This
+does not recover healthy records from inside an unreadable page. Validate the
+recovered store and its application-level relationships before serving it.
+
 `VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
 or shrink a native paged file. Use the explicit offline operation to reclaim
 historical physical allocation:

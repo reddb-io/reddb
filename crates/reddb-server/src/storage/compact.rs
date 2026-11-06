@@ -21,7 +21,10 @@ mod salvage;
 mod scrub;
 mod source;
 use catalog::Catalog;
-pub use salvage::{salvage_paged_indexes, PagedIndexSalvageFinding, PagedIndexSalvageReport};
+pub use salvage::{
+    salvage_paged_collections, salvage_paged_indexes, PagedCollectionLoss,
+    PagedCollectionSalvageReport, PagedIndexSalvageFinding, PagedIndexSalvageReport,
+};
 pub use scrub::{
     scrub_paged, scrub_paged_trees, PagedScrubReport, PagedTreeFinding, PagedTreeScrubReport,
 };
@@ -62,13 +65,14 @@ impl CompactionReport {
 /// directory. On failure the source is unchanged and the incomplete output is
 /// retained for diagnosis. This does not switch a serving database or vacuum MVCC.
 pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionReport> {
-    compact_paged_inner(source, destination, None)
+    compact_paged_inner(source, destination, None, None)
 }
 
 fn compact_paged_inner(
     source: &Path,
     destination: &Path,
     salvage: Option<&PagedIndexSalvageReport>,
+    lost_collections: Option<&PagedCollectionSalvageReport>,
 ) -> Result<CompactionReport> {
     let source_path = source.canonicalize()?;
     let source = Arc::new(Source::open(&source_path)?);
@@ -96,6 +100,24 @@ fn compact_paged_inner(
                 index.root_page == finding.root_page,
                 "index root changed during salvage",
             )?;
+        }
+    }
+    if let Some(losses) = lost_collections {
+        ensure(
+            catalog.resume.is_none() && !catalog.has_cross_references(),
+            "collection recovery requires a reference-free legacy catalog",
+        )?;
+        for loss in &losses.collections {
+            let root = catalog
+                .roots
+                .iter_mut()
+                .find(|root| root.collection == loss.collection)
+                .ok_or("collection missing from catalog")?;
+            ensure(
+                root.root_page == loss.root_page,
+                "collection root changed during salvage",
+            )?;
+            root.root_page = 0;
         }
     }
     let name = source_path
@@ -165,10 +187,17 @@ fn compact_paged_inner(
     assets.vault()?;
     let physical = assets.physical()?;
     assets.metadata(&source_path, Some(&output))?;
-    if let Some(salvage) = salvage {
-        for index in &salvage.indexes {
-            if index.root_page != 0 {
-                source.claim(index.root_page)?;
+    if salvage.is_some() || lost_collections.is_some() {
+        if let Some(salvage) = salvage {
+            for index in &salvage.indexes {
+                if index.root_page != 0 {
+                    source.claim(index.root_page)?;
+                }
+            }
+        }
+        if let Some(losses) = lost_collections {
+            for collection in &losses.collections {
+                source.claim(collection.root_page)?;
             }
         }
         ensure(
@@ -237,6 +266,12 @@ fn compact_paged_inner(
         write_new(
             &destination.join("salvage.json"),
             salvage.machine_json().as_bytes(),
+        )?;
+    }
+    if let Some(losses) = lost_collections {
+        write_new(
+            &destination.join("salvage.json"),
+            losses.machine_json().as_bytes(),
         )?;
     }
     sync_directory(destination)?;

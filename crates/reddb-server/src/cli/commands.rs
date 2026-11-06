@@ -159,6 +159,15 @@ pub fn all_commands() -> Vec<CommandDef> {
       ],
     },
     CommandDef {
+      name: "salvage-paged-collections",
+      summary: "Recover intact collections from a restricted legacy paged store",
+      usage: "red salvage-paged-collections --source data.rdb --destination-dir recovered [--json]",
+      flags: vec![
+        FlagSchema::new("source").with_description("Closed, checkpointed source .rdb; preserved unchanged"),
+        FlagSchema::new("destination-dir").with_description("New output directory; must not exist"),
+      ],
+    },
+    CommandDef {
       name: "salvage",
       summary: "Extract verified data from a damaged embedded store into a fresh .rdb",
       usage: "red salvage --source damaged.rdb --destination recovered.rdb [--json]",
@@ -1032,6 +1041,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("scrub-paged-trees".to_string(), vec![]),
         ("scrub-paged".to_string(), vec![]),
         ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),

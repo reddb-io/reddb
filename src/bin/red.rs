@@ -1776,6 +1776,10 @@ fn main() {
             std::process::exit(run_salvage_paged_indexes_command(&result.flags));
         }
 
+        "salvage-paged-collections" => {
+            std::process::exit(run_salvage_paged_collections_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -3449,6 +3453,40 @@ fn run_salvage_paged_indexes_command(flags: &HashMap<String, FlagValue>) -> i32 
     }
 }
 
+fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_collections(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-collections", &report.machine_json());
+            } else {
+                println!("Recovered intact collections; {} damaged collections were emptied. Lost record counts are unknown; see salvage.json.", report.collections.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-collections", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-collections: {error}");
+            }
+            1
+        }
+    }
+}
+
 fn run_salvage_command(flags: &HashMap<String, FlagValue>) -> i32 {
     let json_mode = wants_json(flags);
     let Some(source) = flag_string(flags, "source").filter(|value| !value.is_empty()) else {
@@ -4082,6 +4120,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("scrub-paged-trees".to_string(), vec![]),
         ("scrub-paged".to_string(), vec![]),
         ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),

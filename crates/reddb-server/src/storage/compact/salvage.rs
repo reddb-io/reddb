@@ -41,6 +41,8 @@ impl PagedIndexSalvageReport {
 /// retains index definitions but omits damaged physical roots so the runtime
 /// can rebuild them from the surviving rows. Other corruption fails closed.
 pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedIndexSalvageReport> {
+    let canonical_path = source.canonicalize()?;
+    let source = canonical_path.as_path();
     // Hold the source lock across both verification and publication.
     let guard = Source::open(source)?;
     verify_supported_source(source, &guard)?;
@@ -65,7 +67,101 @@ pub fn salvage_paged_indexes(source: &Path, destination: &Path) -> Result<PagedI
     }
     ensure(!indexes.is_empty(), "no damaged secondary index to recover")?;
     let report = PagedIndexSalvageReport { indexes };
-    compact_paged_inner(source, destination, Some(&report))?;
+    compact_paged_inner(source, destination, Some(&report), None)?;
+    Ok(report)
+}
+
+#[derive(Debug)]
+pub struct PagedCollectionLoss {
+    pub collection: String,
+    pub root_page: u32,
+}
+
+#[derive(Debug)]
+pub struct PagedCollectionSalvageReport {
+    pub collections: Vec<PagedCollectionLoss>,
+}
+
+impl PagedCollectionSalvageReport {
+    pub fn machine_json(&self) -> String {
+        let collections: Vec<_> = self
+            .collections
+            .iter()
+            .map(|loss| {
+                crate::serde_json::json!({
+                    "collection": loss.collection.clone(), "root_page": loss.root_page,
+                    "action": "collection_emptied", "reason": "root_checksum_mismatch",
+                    "skipped_entities": crate::serde_json::Value::Null,
+                })
+            })
+            .collect();
+        crate::serde_json::json!({"scope": "legacy_collection_root_only", "collections": collections}).to_string_compact()
+    }
+}
+
+/// Recover intact collections while dropping a checksum-failed single-page
+/// collection in a reference-free legacy store. The number lost is unknown.
+pub fn salvage_paged_collections(
+    source: &Path,
+    destination: &Path,
+) -> Result<PagedCollectionSalvageReport> {
+    let canonical_path = source.canonicalize()?;
+    let source = canonical_path.as_path();
+    let guard = Source::open(source)?;
+    verify_supported_source(source, &guard)?;
+    ensure(
+        guard.header.physical == f::PhysicalFileHeader::default(),
+        "physical metadata requires separate data recovery verification",
+    )?;
+    ensure(
+        !f::physical_metadata_binary_path(source).exists()
+            && !f::physical_metadata_json_path(source).exists(),
+        "metadata sidecar requires separate data recovery verification",
+    )?;
+    let catalog = Catalog::read(&guard)?;
+    ensure(
+        catalog.resume.is_none() && !catalog.has_cross_references(),
+        "collection recovery requires a reference-free legacy catalog",
+    )?;
+    let scrub = scrub_paged_trees(source)?;
+    let mut collections = Vec::new();
+    for finding in scrub.findings {
+        ensure(
+            finding.tree == "collection",
+            "only collection root damage is supported",
+        )?;
+        let canonical =
+            reddb_engine::storage::system_collection_names::canonical_or_self(&finding.collection);
+        ensure(
+            !canonical.starts_with("red.") && !canonical.starts_with('_'),
+            "system collections cannot be dropped",
+        )?;
+        let error = match guard.raw_page(finding.root_page, true) {
+            Ok(_) => return Err("collection root is not checksum damaged".into()),
+            Err(error) => error,
+        };
+        ensure(
+            matches!(
+                error.downcast_ref::<reddb_engine::storage::page::PageError>(),
+                Some(reddb_engine::storage::page::PageError::ChecksumMismatch { .. })
+            ),
+            "collection root failure is not a checksum mismatch",
+        )?;
+        ensure(
+            guard.raw_page(finding.root_page, false)?.page_type()? == PageType::BTreeLeaf,
+            "only leaf-root collection damage is supported",
+        )?;
+        collections.push(PagedCollectionLoss {
+            collection: finding.collection,
+            root_page: finding.root_page,
+        });
+    }
+    ensure(
+        !collections.is_empty(),
+        "no damaged collection root to recover",
+    )?;
+    let report = PagedCollectionSalvageReport { collections };
+    compact_paged_inner(source, destination, None, Some(&report))?;
     Ok(report)
 }
 

@@ -1,5 +1,5 @@
 use reddb_server::storage::compact::{
-    compact_paged, salvage_paged_indexes, scrub_paged, scrub_paged_trees,
+    compact_paged, salvage_paged_collections, salvage_paged_indexes, scrub_paged, scrub_paged_trees,
 };
 use reddb_server::storage::engine::{BTree, Page, PageType, Pager, PagerConfig, HEADER_SIZE};
 use std::sync::Arc;
@@ -359,6 +359,170 @@ fn physical_scrub_detects_native_metadata_damage_without_writes() {
 }
 
 #[test]
+fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
+    use reddb_server::storage::{EntityId, UnifiedEntity, UnifiedStore};
+    use reddb_types::Value;
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().expect("directory");
+    let initial = directory.path().join("initial.rdb");
+    {
+        let store = UnifiedStore::open(&initial).expect("store");
+        for (collection, first_id) in [("healthy", 1), ("damaged", 101)] {
+            store.create_collection(collection).unwrap();
+            for id in first_id..first_id + 5 {
+                let entity = UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    collection,
+                    id,
+                    vec![Value::Integer(id as i64)],
+                );
+                store.insert(collection, entity).unwrap();
+            }
+        }
+        store.persist().expect("checkpoint");
+    }
+    let compacted = directory.path().join("input");
+    compact_paged(&initial, &compacted).expect("prepare fully owned store");
+    let source = compacted.join("initial.rdb");
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .unwrap();
+    let catalog = pager.read_page(1).unwrap();
+    let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .unwrap()
+        .unwrap();
+    let mut pos = reddb_file::METADATA_HEADER_BYTES;
+    let mut root = 0;
+    for _ in 0..header.collection_count {
+        let entry =
+            reddb_file::decode_native_paged_collection_root(catalog.content(), &mut pos).unwrap();
+        if entry.collection == "damaged" {
+            root = entry.root_page;
+        }
+    }
+    assert_ne!(root, 0);
+    assert_eq!(
+        pager.read_page(root).unwrap().page_type().unwrap(),
+        PageType::BTreeLeaf
+    );
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(root) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("recovered");
+    let report =
+        salvage_paged_collections(&source, &destination).expect("recover healthy collection");
+    assert_eq!(report.collections.len(), 1);
+    assert_eq!(report.collections[0].collection, "damaged");
+    assert_eq!(report.collections[0].root_page, root);
+    let loss_report = std::fs::read_to_string(destination.join("salvage.json")).unwrap();
+    assert!(loss_report.contains("\"skipped_entities\":null"));
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let reopened =
+        UnifiedStore::open(destination.join("initial.rdb")).expect("reopen recovered store");
+    assert_eq!(reopened.get_collection("healthy").unwrap().count(), 5);
+    assert_eq!(reopened.get_collection("damaged").unwrap().count(), 0);
+    let entity = reopened
+        .try_get("healthy", EntityId::new(1), 1024 * 1024)
+        .unwrap()
+        .unwrap();
+    let reddb_server::storage::EntityData::Row(row) = entity.data else {
+        panic!("expected row")
+    };
+    assert_eq!(row.columns[0], Value::Integer(1));
+}
+
+#[test]
+fn collection_salvage_refuses_a_damaged_interior_root() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let pager = Pager::open_default(&source).unwrap();
+    let catalog = pager.read_page(1).unwrap();
+    let mut pos = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut pos)
+        .unwrap()
+        .root_page;
+    assert_eq!(
+        pager.read_page(root).unwrap().page_type().unwrap(),
+        PageType::BTreeInterior
+    );
+    drop(pager);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::from(root) * 16384 + 100))
+        .unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&[byte[0] ^ 1]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let before = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("rejected");
+    let error =
+        salvage_paged_collections(&source, &destination).expect_err("cannot classify descendants");
+    assert!(error.to_string().contains("leaf-root"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
+#[test]
+fn collection_salvage_refuses_catalog_cross_references() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let pager = Pager::open_default(&source).unwrap();
+    let page = pager.read_page(1).unwrap();
+    let mut pos = reddb_file::METADATA_HEADER_BYTES;
+    let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos).unwrap();
+    let mut metadata = Vec::new();
+    reddb_file::encode_native_paged_metadata_header(
+        &mut metadata,
+        reddb_file::NativePagedMetadataHeader {
+            format_version: 11,
+            collection_count: 1,
+        },
+    );
+    reddb_file::encode_native_paged_collection_root(&mut metadata, "rows", root.root_page);
+    metadata.extend_from_slice(&1u32.to_le_bytes());
+    reddb_file::encode_native_paged_cross_ref(&mut metadata, 1, 2, 0, "rows");
+    let mut catalog = Page::new(PageType::Header, 1);
+    catalog.content_mut()[..metadata.len()].copy_from_slice(&metadata);
+    pager.write_page(1, catalog).unwrap();
+    pager.sync().unwrap();
+    drop(pager);
+    let before = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("rejected");
+    let error = salvage_paged_collections(&source, &destination)
+        .expect_err("cross references require separate recovery");
+    assert!(error.to_string().contains("reference-free"), "{error}");
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
+#[test]
 fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     use std::io::{Seek, SeekFrom, Write};
     let directory = tempfile::tempdir().expect("directory");
@@ -390,6 +554,26 @@ fn compact_rejects_pending_wal_and_does_not_publish_corruption() {
     assert!(scrub_paged_trees(&source).is_err());
     assert!(compact_paged(&source, &destination).is_err());
     assert!(!destination.join("source.rdb").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_tools_use_real_source_sidecars_for_symlink_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.rdb");
+    let alias = directory.path().join("alias.rdb");
+    fixture(&source);
+    std::os::unix::fs::symlink(&source, &alias).unwrap();
+    let mut pending = reddb_file::encode_wal_file_header().to_vec();
+    pending.extend_from_slice(b"uncheckpointed");
+    std::fs::write(reddb_file::unified_wal_path(&source), pending).unwrap();
+    let before = std::fs::read(&source).unwrap();
+    assert!(scrub_paged_trees(&alias).is_err());
+    assert!(scrub_paged(&alias).is_err());
+    let destination = directory.path().join("recovered");
+    assert!(salvage_paged_indexes(&alias, &destination).is_err());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), before);
 }
 
 #[test]

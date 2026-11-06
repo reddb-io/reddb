@@ -13,6 +13,8 @@ pub(super) struct Source {
 }
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
+        let canonical_path = path.canonicalize()?;
+        let path = canonical_path.as_path();
         for unsupported in [
             f::primary_replica_root(path),
             f::layout::serverless_root(path),
