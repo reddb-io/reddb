@@ -37,6 +37,24 @@ pub fn canonical_name(name: &str) -> Option<&'static str> {
         .find_map(|(legacy, canonical)| (*legacy == name).then_some(*canonical))
 }
 
+/// Plan migrations without changing the store. A destination already present
+/// alongside its legacy name is ambiguous and must never be merged implicitly.
+pub fn migration_plan<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<(&'static str, &'static str)>, (&'static str, &'static str)> {
+    let existing: std::collections::HashSet<&str> = names.into_iter().collect();
+    let mut plan = Vec::new();
+    for &(legacy, canonical) in LEGACY_NAMES {
+        if existing.contains(legacy) {
+            if existing.contains(canonical) {
+                return Err((legacy, canonical));
+            }
+            plan.push((legacy, canonical));
+        }
+    }
+    Ok(plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +74,26 @@ mod tests {
         }
         assert_eq!(canonical_name("red_queue_meta_user"), None);
         assert_eq!(canonical_name("users"), None);
+    }
+
+    #[test]
+    fn migration_plan_rejects_collisions_and_is_idempotent() {
+        let plan = migration_plan(["users", "red_config", "red_queue_meta"])
+            .expect("distinct destinations");
+        assert_eq!(
+            plan,
+            vec![
+                ("red_config", "red.config"),
+                ("red_queue_meta", "red.queue.meta")
+            ]
+        );
+        assert_eq!(
+            migration_plan(["red.config", "red.queue.meta"]),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            migration_plan(["red_config", "red.config", "red_queue_meta"]),
+            Err(("red_config", "red.config")),
+        );
     }
 }
