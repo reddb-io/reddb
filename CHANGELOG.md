@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.28.21
+
+### Patch Changes
+
+- [#2695](https://github.com/reddb-io/reddb/pull/2695) [`7971bac`](https://github.com/reddb-io/reddb/commit/7971baca120cc93d97d26b72352785c6a87d2de0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit offline compaction repair that retires a divergent legacy `red_config` collection while preserving `red.config` as the canonical system configuration store, leaving the source unchanged and failing closed on ambiguous catalog shapes or cross-references.
+
 ## 1.28.20
 
 ### Patch Changes
