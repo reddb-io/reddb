@@ -295,15 +295,16 @@ fn embedded_fixture_payload() -> String {
 }
 
 #[test]
-fn embedded_startup_reads_snapshot_once() {
+fn embedded_startup_bounds_snapshot_reads() {
     const ENV_PATH: &str = "REDDB_TEST_EMBEDDED_STARTUP_IO_PATH";
     if let Some(path) = std::env::var_os(ENV_PATH) {
         let path = std::path::PathBuf::from(path);
+        let read_only = std::env::var("REDDB_TEST_EMBEDDED_STARTUP_READ_ONLY").unwrap() == "1";
         let before = process_read_bytes();
         let start = Instant::now();
         let runtime =
-            RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true))
-                .expect("read-only embedded reopen");
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(read_only))
+                .expect("embedded reopen");
         let ready = start.elapsed();
         let count = count_rows(&runtime);
         let first_result = start.elapsed();
@@ -319,10 +320,13 @@ fn embedded_startup_reads_snapshot_once() {
             .unwrap()
             .parse()
             .unwrap();
-        eprintln!("embedded: snapshot_bytes={snapshot_len}, read_bytes={bytes}, ready={ready:?}, first_result={first_result:?}");
+        eprintln!("embedded: read_only={read_only}, snapshot_bytes={snapshot_len}, read_bytes={bytes}, ready={ready:?}, first_result={first_result:?}");
         assert_eq!(count, "32");
+        // A writable boot durably replaces red.system keys in one batch,
+        // whose publication validates the existing snapshot once more.
+        let snapshot_passes = if read_only { 1 } else { 2 };
         assert!(
-            bytes <= snapshot_len + 2 * 1024 * 1024,
+            bytes <= snapshot_len * snapshot_passes + 2 * 1024 * 1024,
             "startup read {bytes} bytes for a {snapshot_len}-byte snapshot"
         );
         return;
@@ -351,27 +355,30 @@ fn embedded_startup_reads_snapshot_once() {
         snapshot_len >= 3 * 1024 * 1024,
         "fixture snapshot too small: {snapshot_len}"
     );
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "runtime::startup_io_budget::embedded_startup_reads_snapshot_once",
-            "--nocapture",
-        ])
-        .env(ENV_PATH, &path)
-        .env(
-            "REDDB_TEST_EMBEDDED_STARTUP_SNAPSHOT_BYTES",
-            snapshot_len.to_string(),
-        )
-        .output()
-        .unwrap();
-    eprint!(
-        "{}{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(
-        result.status.success(),
-        "embedded startup child failed: {}",
-        result.status
-    );
+    for read_only in ["1", "0"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::startup_io_budget::embedded_startup_bounds_snapshot_reads",
+                "--nocapture",
+            ])
+            .env(ENV_PATH, &path)
+            .env("REDDB_TEST_EMBEDDED_STARTUP_READ_ONLY", read_only)
+            .env(
+                "REDDB_TEST_EMBEDDED_STARTUP_SNAPSHOT_BYTES",
+                snapshot_len.to_string(),
+            )
+            .output()
+            .unwrap();
+        eprint!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.status.success(),
+            "embedded startup child failed: {}",
+            result.status
+        );
+    }
 }

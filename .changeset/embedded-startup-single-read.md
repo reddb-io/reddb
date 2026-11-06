@@ -2,4 +2,4 @@
 "@reddb-io/cli": patch
 ---
 
-Read and validate embedded database snapshots once during startup, reducing cold-start I/O without changing recovery selection.
+Reduce embedded cold-start I/O by reusing the validated snapshot and publishing boot-time system configuration in one WAL batch.
