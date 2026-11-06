@@ -262,7 +262,8 @@ async fn handle_standalone_unix(
     let mut magic = [0u8; 1];
     crate::wire::admission::with_handshake_deadline(stream.read_exact(&mut magic)).await??;
     validate_startup_magic(magic[0]).map_err(io::Error::other)?;
-    handle_session(stream, runtime, None, None).await
+    let auth_store = runtime.auth_store();
+    handle_session(stream, runtime, auth_store, None).await
 }
 
 async fn handle_standalone_tls<S>(
