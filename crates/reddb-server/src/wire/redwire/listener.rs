@@ -299,3 +299,21 @@ where
     let auth_store = runtime.auth_store();
     handle_session(stream, runtime, auth_store, None).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_listener_accepts_the_same_runtime_authority() {
+        let config = crate::auth::AuthConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let store = Arc::new(AuthStore::new(config));
+        let resolved = resolve_listener_auth(Some(Arc::clone(&store)), Some(Arc::clone(&store)))
+            .expect("matching authorities")
+            .expect("authority");
+        assert!(Arc::ptr_eq(&store, &resolved));
+    }
+}
