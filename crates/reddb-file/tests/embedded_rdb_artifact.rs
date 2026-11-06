@@ -84,6 +84,7 @@ fn append_revalidates_snapshot_after_external_corruption() {
     assert!(error.to_string().contains("snapshot zone"), "{error}");
     assert!(EmbeddedRdbArtifact::read_snapshot(&open).is_err());
     assert!(EmbeddedRdbArtifact::open(&path).is_err());
+    assert!(EmbeddedRdbArtifact::open_with_snapshot(&path).is_err());
     rot_bit(&path, open.manifest.snapshot_offset + 5);
     let repaired = EmbeddedRdbArtifact::append_wal_payloads(&path, &[b"repaired".to_vec()])
         .expect("failed append must invalidate cache");
