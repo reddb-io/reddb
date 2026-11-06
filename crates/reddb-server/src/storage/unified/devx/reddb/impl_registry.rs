@@ -279,6 +279,17 @@ impl RedDB {
         Ok(result)
     }
 
+    /// Supply missing system contracts during read-only boot without creating
+    /// a metadata sidecar. Runtime schema rehydration consumes this private view.
+    pub(crate) fn cache_read_only_bootstrap_contract(
+        &self,
+        contract: crate::physical::CollectionContract,
+    ) {
+        assert!(self.options.read_only);
+        self.contract_cache_map();
+        self.collection_contract_cache.insert(contract);
+    }
+
     pub fn save_collection_contract(
         &self,
         contract: crate::physical::CollectionContract,
@@ -350,6 +361,9 @@ impl RedDB {
         &self,
         collection: &str,
     ) -> Result<Option<crate::physical::CollectionContract>, Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Err("physical metadata operations are not allowed in read-only mode".into());
+        }
         let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             defaults.remove(collection);

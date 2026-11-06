@@ -111,6 +111,7 @@ fn verify(runtime: &RedDBRuntime, recovered: bool) {
         .execute_query("CREATE TABLE forbidden (id INT)")
         .is_err());
     runtime.flush().expect("read-only flush");
+    assert!(runtime.db().remove_collection_contract("samples").is_err());
 }
 
 #[test]
@@ -293,4 +294,23 @@ fn native_paged_read_only_applies_pending_manifest_drop_without_cleanup() {
     }
     let writer = UnifiedStore::open(&path).expect("ordinary manifest recovery");
     assert!(writer.get_collection("retired").is_none());
+}
+
+#[test]
+fn native_paged_read_only_does_not_start_replica_apply() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    drop(seed(&path, false));
+    let before = tree_bytes(directory.path());
+    let mut config = options(&path, false).with_read_only(true);
+    config.replication = reddb_server::replication::ReplicationConfig::replica("127.0.0.1:1");
+    config.replica_loop_enabled = true;
+    let reader = RedDBRuntime::with_options(config).expect("read-only replica inspection");
+    verify(&reader, false);
+    drop(reader);
+    assert_eq!(tree_bytes(directory.path()), before);
+    // A spawned replica loop would retain the runtime and its shared file lock.
+    let writer =
+        RedDBRuntime::with_options(options(&path, false)).expect("reader released its lock");
+    drop(writer);
 }

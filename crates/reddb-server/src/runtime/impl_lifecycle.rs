@@ -1030,7 +1030,9 @@ impl RedDBRuntime {
                 .inner
                 .ec_registry
                 .load_from_config_store(runtime.inner.db.store().as_ref());
-            if !runtime.inner.ec_registry.async_configs().is_empty() {
+            if !runtime.inner.db.options().read_only
+                && !runtime.inner.ec_registry.async_configs().is_empty()
+            {
                 runtime.inner.ec_worker.start(
                     Arc::clone(&runtime.inner.ec_registry),
                     Arc::clone(&runtime.inner.db.store()),
@@ -1039,7 +1041,8 @@ impl RedDBRuntime {
         }
 
         if let (true, crate::replication::ReplicationRole::Replica { primary_addr }) = (
-            runtime.inner.db.options().replica_loop_enabled,
+            runtime.inner.db.options().replica_loop_enabled
+                && !runtime.inner.db.options().read_only,
             runtime.inner.db.options().replication.role.clone(),
         ) {
             let rt = runtime.clone();
@@ -1283,10 +1286,15 @@ impl RedDBRuntime {
                 changed = true;
             }
             if self.inner.db.collection_contract(name).is_none() {
-                self.inner
-                    .db
-                    .save_collection_contract(system_keyed_collection_contract(name, model))
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                let contract = system_keyed_collection_contract(name, model);
+                if self.inner.db.options().read_only {
+                    self.inner.db.cache_read_only_bootstrap_contract(contract);
+                } else {
+                    self.inner
+                        .db
+                        .save_collection_contract(contract)
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                }
                 changed = true;
             }
         }
