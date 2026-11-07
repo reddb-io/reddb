@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 // accidentally qualify because reads also verify the full fingerprint.
 const NAME: &str = "\0reddb/visibility-count-v1";
 const MIXED_BATCH_ROWS: usize = 64;
-const UNIFORM_BATCH_ROWS: usize = 256;
+const UNIFORM_BATCH_ROWS: usize = 512;
 
 fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();

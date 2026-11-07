@@ -364,7 +364,16 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
             .unwrap()
             .bulk_insert(
                 (1..=rows)
-                    .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                    .map(|id| {
+                        let mut entity =
+                            UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]);
+                        // Make the first batch small so the following full batch
+                        // splits its already-published root before the crash.
+                        if stage == "split" && id == 1 {
+                            entity.xmin = 1;
+                        }
+                        entity
+                    })
                     .collect(),
             )
             .unwrap();
