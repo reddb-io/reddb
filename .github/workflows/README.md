@@ -13,6 +13,31 @@ Existing issue/comment routing remains available; releases only react to
 intentional version tags, release events or an explicit manual action.
 Artifact source/version/checksum and publication checks stay with publication.
 
+## Standard public runners
+
+CI, stable/RC builds and publication use standard GitHub-hosted runners:
+`ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2025` and `macos-15`.
+The ARM64 release leg remains native. Platform switches below retain their
+existing defaults; this migration does not enable additional targets.
+
+The paid `blacksmith-testbox.yml` is only an explicit hardware-comparison tool;
+it requires a manually created Testbox session and is never called by CI or
+release. The quick policy rejects Blacksmith labels in other workflows,
+including labels embedded in JSON platform matrices.
+
+Validate the actual stable release build path without publication:
+
+```sh
+gh workflow run release.yml --repo reddb-io/reddb --ref <branch> \
+  -f channel=stable -f build_only=true -f publish_cargo=false
+```
+
+`build_only` defaults to the checked-out version and skips every publishing
+job plus public-release asset verification. Binary builds, native smoke tests,
+checksums and the artifact-size gate still execute. Normal tag/manual releases
+retain their publication conditions. Rust compilation uses two concurrent jobs
+on standard runners; the native runner capacity is recorded in job summaries.
+
 ## Run an optional workflow
 
 In GitHub Actions, select its workflow, choose **Run workflow**, then select

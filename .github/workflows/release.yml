@@ -21,6 +21,10 @@ on:
         required: false
         default: true
         type: boolean
+      build_only:
+        description: Validate stable release builds without publishing (defaults to the checked-out version)
+        default: false
+        type: boolean
 
       preview_platforms:
         type: boolean
@@ -32,6 +36,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
   BINARY_NAME: red
 
   ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
@@ -80,7 +86,7 @@ jobs:
                 {
                   "flag": "linux_x64",
                   "row": {
-                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "os": "ubuntu-24.04",
                     "target": "x86_64-unknown-linux-gnu",
                     "asset_name": "linux-x86_64",
                     "cross": false
@@ -89,7 +95,7 @@ jobs:
                 {
                   "flag": "linux_arm64",
                   "row": {
-                    "os": "blacksmith-8vcpu-ubuntu-2404-arm",
+                    "os": "ubuntu-24.04-arm",
                     "target": "aarch64-unknown-linux-gnu",
                     "asset_name": "linux-aarch64",
                     "cross": false
@@ -98,7 +104,7 @@ jobs:
                 {
                   "flag": "linux_arm64",
                   "row": {
-                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "os": "ubuntu-24.04",
                     "target": "aarch64-unknown-linux-musl",
                     "asset_name": "linux-aarch64-static",
                     "cross": true
@@ -107,7 +113,7 @@ jobs:
                 {
                   "flag": "linux_x64",
                   "row": {
-                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "os": "ubuntu-24.04",
                     "target": "x86_64-unknown-linux-musl",
                     "asset_name": "linux-x86_64-static",
                     "cross": true
@@ -116,7 +122,7 @@ jobs:
                 {
                   "flag": "macos_arm64",
                   "row": {
-                    "os": "blacksmith-6vcpu-macos-15",
+                    "os": "macos-15",
                     "target": "aarch64-apple-darwin",
                     "asset_name": "macos-aarch64",
                     "cross": false,
@@ -126,7 +132,7 @@ jobs:
                 {
                   "flag": "windows_x64",
                   "row": {
-                    "os": "blacksmith-8vcpu-windows-2025",
+                    "os": "windows-2025",
                     "target": "x86_64-pc-windows-msvc",
                     "asset_name": "windows-x86_64",
                     "cross": false,
@@ -203,6 +209,7 @@ jobs:
   plan:
     name: Plan release
     runs-on: ubuntu-latest
+    permissions: {contents: read}
     outputs:
       should_skip: ${{ steps.plan.outputs.should_skip }}
       release_channel: ${{ steps.plan.outputs.release_channel }}
@@ -218,6 +225,7 @@ jobs:
         id: plan
         env:
           HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          BUILD_ONLY: ${{ inputs.build_only || false }}
         run: |
           set -euo pipefail
           EVENT_NAME="${{ github.event_name }}"
@@ -255,6 +263,11 @@ jobs:
               IS_PRERELEASE=true
             fi
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$BUILD_ONLY" == "true" ]]; then
+              [[ "$INPUT_CHANNEL" == "stable" ]] || { echo "build_only requires the stable channel"; exit 1; }
+              INPUT_VERSION="${INPUT_VERSION:-$(node -p "require('./package.json').version")}"
+              INPUT_PUBLISH_CARGO=false
+            fi
             if [[ "$INPUT_CHANNEL" == "stable" ]]; then
               [[ -z "$INPUT_VERSION" ]] && { echo "Stable requires version"; exit 1; }
               RELEASE_CHANNEL="stable"
@@ -323,6 +336,7 @@ jobs:
     if: |-
       ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') && (needs.platforms.outputs.enabled_build == 'true')) }}
     runs-on: ${{ matrix.os }}
+    permissions: {contents: read}
     # The Node addon is a second engine compile on the legs that build it.
     timeout-minutes: 60
     continue-on-error: ${{ matrix.optional == true }}
@@ -331,6 +345,17 @@ jobs:
       matrix: ${{ fromJSON(needs.platforms.outputs.matrix_build) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Record standard runner capacity
+        shell: bash
+        run: |
+          node <<'JS'
+          const os = require('node:os');
+          const fs = require('node:fs');
+          const disk = fs.statfsSync('.');
+          const capacity = {platform: os.platform(), arch: os.arch(), cpus: os.availableParallelism(), memoryBytes: os.totalmem(), diskFreeBytes: disk.bavail * disk.bsize};
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '### Build runner\n\n```json\n' + JSON.stringify(capacity, null, 2) + '\n```\n');
+          JS
 
       - name: Sync release version
         shell: bash
@@ -380,7 +405,7 @@ jobs:
         env:
           MUSL_IMAGE: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-musl' || 'x86_64-musl' }}
         run: |
-          docker run --rm -v "${PWD}:/volume" -w /volume "messense/rust-musl-cross:${MUSL_IMAGE}" \
+          docker run --rm -e CARGO_BUILD_JOBS -e CARGO_INCREMENTAL -v "${PWD}:/volume" -w /volume "messense/rust-musl-cross:${MUSL_IMAGE}" \
             bash -lc '
               set -euo pipefail
               rm -f rust-toolchain.toml
@@ -500,7 +525,8 @@ jobs:
     needs:
       - plan
       - platforms
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
+    permissions: {contents: read}
     if: |-
       ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') && needs.platforms.outputs.linux_x64 == 'true' }}
     steps:
@@ -537,7 +563,7 @@ jobs:
       attestations: write
       artifact-metadata: write
     if: |-
-      ${{ always() && !cancelled() && (!inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable')) && needs.plan.result == 'success' && needs.build.result == 'success' && (needs['artifact-sizes'].result == 'success' || (needs.platforms.outputs.linux_x64 == 'false' && needs['artifact-sizes'].result == 'skipped')) }}
+      ${{ !inputs.build_only && always() && !cancelled() && (!inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable')) && needs.plan.result == 'success' && needs.build.result == 'success' && (needs['artifact-sizes'].result == 'success' || (needs.platforms.outputs.linux_x64 == 'false' && needs['artifact-sizes'].result == 'skipped')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -785,7 +811,7 @@ jobs:
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Assert every npm-package-required asset is published
@@ -805,7 +831,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -852,7 +878,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -887,9 +913,9 @@ jobs:
     # Previously gated behind `publish-github` which forced a ~15-20 min
     # serial wait on the build matrix.
     needs: [plan]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.publish_cargo == 'true') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.publish_cargo == 'true') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
@@ -953,7 +979,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -990,7 +1016,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1025,7 +1051,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1060,7 +1086,7 @@ jobs:
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
     if: |-
-      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
+      ${{ !inputs.build_only && !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1096,12 +1122,12 @@ jobs:
       - plan
       - build
       - platforms
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
       packages: write
-    if: ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
+    if: ${{ !inputs.build_only && !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1205,12 +1231,12 @@ jobs:
       - plan
       - build
       - platforms
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
       packages: write
-    if: ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
+    if: ${{ !inputs.build_only && !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1321,7 +1347,7 @@ jobs:
       - plan
       - build
       - platforms
-    if: ${{ !inputs.preview_platforms && ((false) && (needs.platforms.outputs.enabled_publish-python-wheels == 'true')) }} # TODO: enable after creating PYPI_API_TOKEN secret
+    if: ${{ !inputs.build_only && !inputs.preview_platforms && ((false) && (needs.platforms.outputs.enabled_publish-python-wheels == 'true')) }} # TODO: enable after creating PYPI_API_TOKEN secret
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.platforms.outputs.matrix_publish-python-wheels) }}
@@ -1352,7 +1378,7 @@ jobs:
   publish-python-upload:
     name: Upload wheels to PyPI
     needs: [plan, publish-python-wheels]
-    if: ${{ !inputs.preview_platforms && (false) }} # TODO: enable after creating PYPI_API_TOKEN secret
+    if: ${{ !inputs.build_only && !inputs.preview_platforms && (false) }} # TODO: enable after creating PYPI_API_TOKEN secret
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8

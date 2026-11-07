@@ -11,11 +11,10 @@ on:
 # Cost guard: new pushes cancel older runs on the same ref. Release-grade
 # validation lives in release.yml; CI push runs should stay quick.
 #
-# Cost policy (August 2026, Blacksmith bill): pushes and pull requests run the
-# trunk correctness lane on free standard runners for this public repository.
+# This public repository uses standard GitHub-hosted runners for all CI lanes.
 # Feature matrices, cross-platform builds, driver conformance, containers,
-# fuzz smoke, and packaging are release-adjacent and run on Blacksmith only
-# through `workflow_dispatch` with full_ci=true. Stable release builds remain
+# fuzz smoke, and packaging remain opt-in through `workflow_dispatch` with
+# full_ci=true. Stable release builds remain
 # authoritative in release.yml. rust-cache saves are restricted to non-PR runs
 # (save-if) so PR branches never persist multi-GB caches.
 
@@ -32,6 +31,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
 
   ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
@@ -549,7 +549,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -754,7 +754,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -838,7 +838,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -907,7 +907,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -936,7 +936,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -976,7 +976,7 @@ jobs:
     # Runs the chaos tests plus backup/restore drills shipped in
     # the consolidated grouped test binaries. Failure is a release blocker.
     name: Chaos & Drill Suite
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
     timeout-minutes: 25
     needs:
@@ -1017,7 +1017,7 @@ jobs:
     # backend (Floci) so the LocalBackend coverage doesn't mask
     # backend-specific failure modes.
     name: Chaos Suite (Floci S3 backend)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
     timeout-minutes: 25
     needs:
@@ -1093,7 +1093,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.windows_x64 == 'true')) }}
-    runs-on: blacksmith-8vcpu-windows-2025
+    runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1129,7 +1129,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.macos_arm64 == 'true')) }}
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1154,7 +1154,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       FUZZ_PR_TIME_SECONDS: 30
@@ -1211,7 +1211,7 @@ jobs:
       - gate
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

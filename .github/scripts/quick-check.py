@@ -2,6 +2,7 @@
 """Fast repository sanity and the on-demand Actions cost policy."""
 import json
 from pathlib import Path
+import re
 import tomllib
 import yaml
 
@@ -18,6 +19,8 @@ for path in sorted((root / ".github/workflows").glob("*.y*ml")):
     workflow = yaml.safe_load(path.read_text())
     if not isinstance(workflow, dict) or not isinstance(workflow.get("jobs"), dict):
         raise SystemExit(f"{path}: expected a workflow with jobs")
+    if path.name != 'blacksmith-testbox.yml' and re.search(r'blacksmith-\d+vcpu-', json.dumps(workflow)):
+        raise SystemExit(f"{path}: use standard GitHub-hosted runners for this public repository")
     events = workflow.get("on", workflow.get(True, {}))
     if isinstance(events, str):
         events = {events: None}
@@ -25,6 +28,10 @@ for path in sorted((root / ".github/workflows").glob("*.y*ml")):
         events = dict.fromkeys(events)
     if not isinstance(events, dict):
         raise SystemExit(f"{path}: expected workflow triggers")
+    if path.name == 'blacksmith-testbox.yml':
+        manual = events.get('workflow_dispatch') or {}
+        if set(events) != {'workflow_dispatch'} or manual.get('inputs', {}).get('testbox_id', {}).get('required') is not True:
+            raise SystemExit(f"{path}: paid Testbox comparisons require an explicit manual session")
     if path.name == "quick-checks.yml":
         continue
     if "schedule" in events:
