@@ -560,20 +560,31 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn append_actions(&self, actions: &[StoreWalAction]) -> io::Result<()> {
-        self.append_actions_impl(actions, false).map(|_| ())
+        self.append_actions_impl(actions, false, false).map(|_| ())
     }
 
     pub(super) fn append_checkpoint_actions(
         &self,
         actions: &[StoreWalAction],
     ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
-        self.append_actions_impl(actions, true)
+        self.append_actions_impl(actions, true, false)
+    }
+
+    /// A publication already gathered callers before taking the store fence.
+    /// Flush it without charging a second group-formation window.
+    pub(super) fn append_ready_actions(
+        &self,
+        actions: &[StoreWalAction],
+        retain: bool,
+    ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
+        self.append_actions_impl(actions, retain, true)
     }
 
     fn append_actions_impl(
         &self,
         actions: &[StoreWalAction],
         retain: bool,
+        ready: bool,
     ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
         use super::checkpoint_wal::CheckpointWalBatch;
         if actions.is_empty() {
@@ -608,7 +619,7 @@ impl StoreCommitCoordinator {
         } else {
             let length = blob.len() as u64;
             let end = self.queue.enqueue(blob);
-            self.wait_until_durable(end, wal_bytes)?;
+            self.wait_until_durable_batch(end, wal_bytes, ready)?;
             end.checked_sub(length).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "invalid WAL batch offset")
             })?
@@ -1437,6 +1448,15 @@ impl StoreCommitCoordinator {
     }
 
     fn wait_until_durable(&self, target_lsn: u64, wal_bytes: u64) -> io::Result<()> {
+        self.wait_until_durable_batch(target_lsn, wal_bytes, false)
+    }
+
+    fn wait_until_durable_batch(
+        &self,
+        target_lsn: u64,
+        wal_bytes: u64,
+        ready: bool,
+    ) -> io::Result<()> {
         match self.mode {
             DurabilityMode::Strict => self.force_sync(),
             // Async: record the pending target so the background
@@ -1458,6 +1478,11 @@ impl StoreCommitCoordinator {
                 let mut state = state_lock.lock();
                 state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
                 state.pending_statements = state.pending_statements.saturating_add(1);
+                if ready {
+                    state.pending_statements = state
+                        .pending_statements
+                        .max(self.config.max_statements.max(1));
+                }
                 state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
                 state.first_pending_at.get_or_insert_with(Instant::now);
                 cond.notify_all();
@@ -3888,6 +3913,56 @@ mod tests {
         );
         drop(coordinator);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ready_publication_requests_flush_but_waits_for_durability() {
+        let path = temp_wal("ready-publication");
+        let options = GroupCommitOptions {
+            max_statements: 8,
+            window_ms: 1000,
+            ..Default::default()
+        };
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(path.clone(), DurabilityMode::WalDurableGrouped, options)
+                .expect("coordinator"),
+        );
+        let wal = coordinator.wal.lock();
+        let acknowledged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let coordinator = Arc::clone(&coordinator);
+            let acknowledged = Arc::clone(&acknowledged);
+            std::thread::spawn(move || {
+                coordinator
+                    .append_ready_actions(
+                        &[StoreWalAction::CreateCollection {
+                            name: "ready".into(),
+                        }],
+                        false,
+                    )
+                    .expect("durable publication");
+                acknowledged.store(true, Ordering::Release);
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while coordinator.state.0.lock().pending_statements == 0 {
+            assert!(Instant::now() < deadline, "writer did not enqueue");
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            coordinator.state.0.lock().pending_statements,
+            options.max_statements
+        );
+        assert!(
+            !acknowledged.load(Ordering::Acquire),
+            "must wait for WAL sync"
+        );
+        drop(wal);
+        writer.join().expect("writer");
+        assert!(acknowledged.load(Ordering::Acquire));
+        assert_eq!(coordinator.fsync_count(), 1);
+        drop(coordinator);
+        std::fs::remove_file(path).expect("remove fixture WAL");
     }
 
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs

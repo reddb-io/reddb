@@ -202,7 +202,21 @@ impl UnifiedStore {
                     "injected row publication failure",
                 )));
             }
-            self.finish_paged_write(actions.actions)
+            if let Some(commit) = self.commit.as_ref().filter(|_| {
+                self.config.durability_mode == DurabilityMode::WalDurableGrouped
+                    && !self.is_read_only()
+            }) {
+                let track = self.config.resident_memory_bytes_max.is_some();
+                let references = commit
+                    .append_ready_actions(&actions.actions, track)
+                    .map_err(StoreError::Io)?;
+                if track {
+                    self.remember_checkpoint_rows(actions.actions, references);
+                }
+                Ok(())
+            } else {
+                self.finish_paged_write(actions.actions)
+            }
         });
         if let Err(error) = committed {
             for (collection, id) in inserted {
