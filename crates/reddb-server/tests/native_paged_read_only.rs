@@ -278,6 +278,9 @@ fn native_paged_read_only_applies_pending_manifest_drop_without_cleanup() {
     writer.persist().expect("checkpoint");
     drop(writer);
     let manifest = reddb_file::OperationalManifest::for_db_path(&path);
+    manifest
+        .recover_or_bootstrap(&["retired".to_string()])
+        .expect("legacy manifest fixture");
     drop(
         manifest
             .prepare_collection_drop("retired")

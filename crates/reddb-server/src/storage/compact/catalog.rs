@@ -5,6 +5,8 @@ pub(super) struct Catalog {
     pub roots: Vec<f::NativePagedCollectionRoot>,
     references: Vec<f::NativePagedCrossRef>,
     epoch: Option<u64>,
+    retired_roots: Vec<u32>,
+    deferred_pages: Vec<u32>,
     pub resume: Option<f::native_resume::CatalogResume>,
 }
 impl Catalog {
@@ -82,8 +84,8 @@ impl Catalog {
         }
         // Offline ownership has no reader pins. Retired generations and deferred
         // frees are physical garbage, not MVCC versions in the current trees.
-        f::decode_native_paged_retired_trees(&data, &mut position)?;
-        f::decode_native_paged_deferred_pages(&data, &mut position)?;
+        let retired_roots = f::decode_native_paged_retired_trees(&data, &mut position)?;
+        let deferred_pages = f::decode_native_paged_deferred_pages(&data, &mut position)?;
         let epoch = f::native_store::decode_native_paged_ownership_epoch(&data, &mut position)?;
         let resume = f::native_resume::decode_catalog_resume(&data)?;
         if let Some(resume) = &resume {
@@ -104,8 +106,25 @@ impl Catalog {
             roots,
             references,
             epoch,
+            retired_roots,
+            deferred_pages,
             resume,
         })
+    }
+
+    /// Offline readers have no pins, but retired pages still need an explicit
+    /// ownership proof. Never treat arbitrary unclassified pages as garbage.
+    pub fn claim_retired(&self, source: &Arc<Source>) -> Result<()> {
+        for root in &self.retired_roots {
+            let tree = BTree::with_root(Arc::clone(source), *root);
+            for page in tree.retired_pages()? {
+                source.claim(page)?;
+            }
+        }
+        for page in &self.deferred_pages {
+            source.claim(*page)?;
+        }
+        Ok(())
     }
 
     pub(super) fn verify_alias_has_no_references(&self, legacy: &str) -> Result<()> {
@@ -276,6 +295,8 @@ mod tests {
             ],
             references: Vec::new(),
             epoch: Some(7),
+            retired_roots: Vec::new(),
+            deferred_pages: Vec::new(),
             resume: Some(f::native_resume::CatalogResume {
                 entity_id_next: 100,
                 xid_high_water_mark: Some(8),

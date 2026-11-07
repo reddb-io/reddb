@@ -436,8 +436,8 @@ fn server_does_not_redeclare_blob_cache_l2_file_format() {
         "result cache L2 path belongs in reddb-file layout"
     );
     assert!(
-        runtime.contains("reddb_file::layout::result_cache_l2_path"),
-        "runtime should route result cache L2 path through reddb-file"
+        !runtime.contains("reddb_file::layout::result_cache_l2_path"),
+        "runtime must not automatically create a persistent result-cache sidecar"
     );
 
     let l2 = read(root.join("crates/reddb-server/src/storage/cache/blob/l2.rs"));

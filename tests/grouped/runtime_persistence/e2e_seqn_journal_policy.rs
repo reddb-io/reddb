@@ -1,9 +1,5 @@
-//! Issue gh-473: seq-N catalog journal is opt-in. Default off outside the
-//! `Max` tier (which the tier-wiring slice will flip on). When enabled,
-//! retention follows [`seqn_journal_retention`] — 32 for `Max`, 4 for
-//! opt-in elsewhere. Recovery handles all three substrate states:
-//! present, absent, corrupt (passive — load falls through to the next
-//! viable source without panicking).
+//! Legacy journal policy applies only to explicit legacy file operations.
+//! Runtime metadata stays inside the database even when the old toggle is set.
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
@@ -34,10 +30,10 @@ fn reset_policy() {
 fn sidecar_options(path: &Path) -> RedDBOptions {
     RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
-        .expect("production HA profile should write physical metadata sidecars")
+        .expect("production HA profile")
 }
 
-fn run_a_few_saves(path: &Path, table: &str, n: usize) {
+fn run_a_few_saves(path: &Path, table: &str, n: usize) -> PhysicalMetadataFile {
     let rt = RedDBRuntime::with_options(sidecar_options(path)).expect("persistent runtime opens");
     rt.execute_query(&format!("CREATE TABLE {table} (name TEXT)"))
         .expect("ddl");
@@ -46,6 +42,7 @@ fn run_a_few_saves(path: &Path, table: &str, n: usize) {
             .expect("insert");
         rt.checkpoint().expect("flush");
     }
+    rt.db().physical_metadata().expect("internal metadata")
 }
 
 #[test]
@@ -63,11 +60,14 @@ fn journal_absent_by_default_outside_max_tier() {
         "seq-N journal must be absent when policy is off: {journals:?}",
     );
     let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
-    assert!(binary.exists(), "binary metadata is always written");
+    assert!(
+        !binary.exists(),
+        "runtime metadata must stay inside the database"
+    );
 }
 
 #[test]
-fn journal_written_when_opt_in_with_bounded_retention() {
+fn legacy_journal_opt_in_does_not_enable_runtime_sidecars() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     reset_policy();
     set_seqn_journal_enabled(true);
@@ -82,13 +82,8 @@ fn journal_written_when_opt_in_with_bounded_retention() {
 
     let journals = PhysicalMetadataFile::journal_paths_for_data_path(&path).expect("list journals");
     assert!(
-        !journals.is_empty(),
-        "seq-N journal must appear when opt-in is on",
-    );
-    assert!(
-        journals.len() <= 4,
-        "retention bound (4) must be enforced: got {} entries",
-        journals.len(),
+        journals.is_empty(),
+        "legacy opt-in must not publish runtime journals"
     );
 
     reset_policy();
@@ -105,7 +100,13 @@ fn recovery_handles_present_absent_and_corrupt_binary() {
     // === Case 2: CORRUPT — overwrite the binary with garbage; loader heals from journal.
     {
         let path = persistent_path("seqn_present");
-        run_a_few_saves(&path, "present", 3);
+        let metadata = run_a_few_saves(&path, "present", 3);
+        metadata
+            .save_for_data_path(&path)
+            .expect("explicit legacy fixture");
+        metadata
+            .save_for_data_path(&path)
+            .expect("journal the previous legacy generation");
         let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
             .expect("present binary loads");
         assert_eq!(source.as_str(), "binary");

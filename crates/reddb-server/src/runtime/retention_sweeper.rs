@@ -1,20 +1,20 @@
 //! Issue #584 — DeclarativeRetention slice 12.
 //!
-//! Background sweeper that physically removes rows or append-only
-//! segments whose timestamp column has fallen beyond the collection's
+//! Background sweeper that physically removes rows whose timestamp column has fallen beyond the collection's
 //! retention window. The
 //! lazy-on-scan filter from slice 11 (`retention_filter`) hides
 //! expired rows from reads the moment a policy is set; this slice
 //! complements that filter with a low-priority background task that
 //! reclaims storage in bounded batches.
 //!
-//! Mutable-collection sweeps execute deletes through the standard
+//! Mutable and append-only collection sweeps execute deletes through the standard
 //! `RedDBRuntime::execute_query` chokepoint (`DELETE FROM <collection>
 //! WHERE <timestamp> < <cutoff>`) so that WAL participation, snapshot guards and
 //! event emission ride on the same single code path as user-issued
 //! DELETEs — replicas replay sweeper deletes deterministically with
-//! no special handling on the replication side. Append-only sweeps
-//! retire whole expired segments through the operational manifest.
+//! no special handling on the replication side. The scoped maintenance
+//! context permits retention deletes on append-only collections while manual
+//! DELETE remains prohibited. No external segment manifest is published.
 //!
 //! Per-collection runtime state (`last_sweep_at_ms`, `rows_swept_total`,
 //! `segments_retired_total`, `last_pending_estimate`) lives on
@@ -49,6 +49,17 @@ pub(crate) fn with_delete_candidates<T>(
     let previous = DELETE_CANDIDATES.with(|slot| slot.replace(Some(candidates)));
     let _restore = Restore(previous);
     with_delete_limit(limit, collection, column, f)
+}
+
+/// Only the engine's scoped retention statement may delete append-only rows.
+/// The collection identity prevents the exemption leaking into trigger writes.
+pub(crate) fn is_retention_delete(collection: &str) -> bool {
+    DELETE_CANDIDATES.with(|slot| slot.borrow().is_some())
+        && TIMESTAMP_CONTEXT.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|(name, _)| name == collection)
+        })
 }
 
 pub(crate) fn take_delete_candidates() -> Option<Vec<crate::storage::EntityId>> {
@@ -157,7 +168,6 @@ pub(crate) struct RetentionSweeperState {
     states: HashMap<String, SweeperState>,
     cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
     next_collection: Option<String>,
-    append_only_revalidation_after: Option<(String, u64)>,
 }
 
 impl RetentionSweeperState {
@@ -166,7 +176,6 @@ impl RetentionSweeperState {
             states: HashMap::new(),
             cursors: HashMap::new(),
             next_collection: None,
-            append_only_revalidation_after: None,
         }
     }
 
@@ -201,16 +210,6 @@ impl RetentionSweeperState {
         self.next_collection = Some(collection);
     }
 
-    pub(crate) fn append_only_revalidation_after(&self) -> Option<(&str, u64)> {
-        self.append_only_revalidation_after
-            .as_ref()
-            .map(|(name, id)| (name.as_str(), *id))
-    }
-
-    pub(crate) fn advance_append_only_revalidation(&mut self, collection: String, id: u64) {
-        self.append_only_revalidation_after = Some((collection, id));
-    }
-
     /// Snapshot of every tracked collection's sweeper state.
     pub(crate) fn snapshot(&self) -> Vec<(String, SweeperState)> {
         self.states
@@ -240,6 +239,7 @@ impl RetentionSweeperState {
         entry.last_pending_estimate = pending_estimate;
     }
 
+    #[cfg(test)]
     pub(crate) fn record_segments_retired(
         &mut self,
         collection: &str,

@@ -368,6 +368,11 @@ fn run_multimodel_wal_recovery(probabilistic_before_ddl: bool) {
         assert!(records.iter().any(|record| matches!(record, reddb_server::storage::wal::WalRecord::ProbabilisticDelta { kind: found, operation: 1, .. } if *found == kind)), "kind {kind}");
     }
     let snapshot = reddb_file::support_dir_for(&source).join("snapshots/embeddings.tv");
+    // Synthesize a legacy empty cache so recovery still validates and retires
+    // old derived artifacts, although new runtimes no longer publish them.
+    assert!(!snapshot.exists());
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    reddb_file::write_turboquant_snapshot(&snapshot, 2, 0x7155_8807_FED4_2913, 0, &[]).unwrap();
     let snapshot_before = std::fs::read(&snapshot).unwrap();
     let destination = directory.path().join("recovered");
     recover_paged_wal(&source, &destination).unwrap();
@@ -1292,13 +1297,17 @@ fn recover_pending_runtime_wal_preserves_sql_and_index_results() {
     let before = std::fs::read(&source).unwrap();
     let wal_before = std::fs::read(&wal).unwrap();
     let metadata = reddb_file::physical_metadata_binary_path(&source);
-    let metadata_before = std::fs::read(&metadata).unwrap();
+    assert!(
+        !metadata.exists(),
+        "runtime metadata belongs inside the database"
+    );
     assert!(wal_before.len() > reddb_file::WAL_FILE_HEADER_BYTES);
     let output = directory.path().join("runtime-recovered");
     recover_paged_wal(&source, &output).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
-    assert_eq!(std::fs::read(&metadata).unwrap(), metadata_before);
+    assert!(!metadata.exists());
+    assert!(!reddb_file::physical_metadata_binary_path(&output.join("runtime.rdb")).exists());
     let options = RedDBOptions::persistent(output.join("runtime.rdb"))
         .with_memory_budget(64 * 1024 * 1024)
         .with_bounded_disk_residency(true);
@@ -2941,6 +2950,9 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     assert_eq!(scrub.trees.findings.len(), 1);
     assert_eq!(std::fs::read(&source).unwrap(), damaged);
     let nested = source.with_file_name("source.rdb.ops").join("recovered");
+    reddb_file::OperationalManifest::for_db_path(&source)
+        .recover_or_bootstrap(&["records".into()])
+        .expect("legacy operational manifest fixture");
     let error = salvage_paged_indexes(&source, &nested).expect_err("destination inside source");
     assert!(
         error.to_string().contains("destination is inside source"),
@@ -3498,5 +3510,68 @@ fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
             }
         }
         assert_eq!(std::fs::read(&source).expect("unchanged source"), before);
+    }
+}
+
+#[test]
+fn compact_relocates_internal_vector_metadata_without_sidecars() {
+    use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+    let directory = tempfile::tempdir().expect("fixture");
+    let source = directory.path().join("vectors.rdb");
+    let options = |path| {
+        RedDBOptions::persistent(path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("native profile")
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(false)
+    };
+    {
+        let runtime = RedDBRuntime::with_options(options(&source)).expect("runtime");
+        runtime
+            .execute_query("CREATE VECTOR embeddings DIM 2 METRIC cosine")
+            .expect("vector collection");
+        runtime
+            .execute_query(
+                "INSERT INTO embeddings VECTOR (embedding, content) VALUES ([1, 0], 'kept')",
+            )
+            .expect("vector");
+        runtime
+            .execute_query("VECTOR SEARCH embeddings SIMILAR TO [1,0] LIMIT 1")
+            .expect("build index");
+        runtime.checkpoint().expect("checkpoint");
+        runtime
+            .db()
+            .rebuild_index_registry(Some("embeddings"))
+            .expect("publish artifact references");
+        let metadata = runtime.db().physical_metadata().expect("internal metadata");
+        assert!(
+            metadata
+                .indexes
+                .iter()
+                .any(|index| index.artifact_root_page.is_some()),
+            "fixture must exercise native artifact addresses"
+        );
+        runtime.graceful_shutdown(false).expect("shutdown");
+    }
+    assert!(!reddb_file::physical_metadata_binary_path(&source).exists());
+    let before = std::fs::read(&source).expect("source bytes");
+    let destination = directory.path().join("compacted-vectors");
+    compact_paged(&source, &destination).expect("relocate internal metadata");
+    assert_eq!(std::fs::read(&source).expect("source bytes"), before);
+    let compacted = destination.join("vectors.rdb");
+    assert!(!reddb_file::physical_metadata_binary_path(&compacted).exists());
+    for _ in 0..2 {
+        let runtime = RedDBRuntime::with_options(options(&compacted)).expect("cold boot");
+        let result = runtime
+            .execute_query("VECTOR SEARCH embeddings SIMILAR TO [1,0] LIMIT 1")
+            .expect("native index after relocation");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("content"),
+            Some(&reddb_types::Value::text("kept"))
+        );
+        runtime
+            .graceful_shutdown(false)
+            .expect("checkpoint relocated metadata");
     }
 }

@@ -32,6 +32,35 @@ mod tests {
         assert!(!reader.step(512).expect("cold bounded replay").complete);
     }
 
+    #[test]
+    fn imported_manifest_is_not_replayed_on_subsequent_boots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.rdb");
+        {
+            let store = UnifiedStore::open(&path).unwrap();
+            store.create_collection("kept").unwrap();
+            store.persist().unwrap();
+        }
+        let legacy = OperationalManifest::for_db_path(&path);
+        legacy.recover_or_bootstrap(&["kept".into()]).unwrap();
+        {
+            let store = UnifiedStore::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .try_get_config("red.storage.legacy_manifest_imported")
+                    .unwrap(),
+                Some(reddb_types::Value::Boolean(true))
+            );
+            store.persist().unwrap();
+        }
+        // A retired source is neither read nor repaired after import.
+        let manifest_path = legacy.current_manifest_path_for_test();
+        fs::write(&manifest_path, b"retired source").unwrap();
+        let cold = UnifiedStore::open(&path).unwrap();
+        assert!(cold.get_collection("kept").is_some());
+        assert_eq!(fs::read(manifest_path).unwrap(), b"retired source");
+    }
+
     fn temp_db_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -55,6 +84,7 @@ mod tests {
         }
 
         let manifest = OperationalManifest::for_db_path(&path);
+        manifest.recover_or_bootstrap(&["users".into()]).unwrap();
         let generation = manifest.read_generation_for_test().unwrap();
         manifest.write_next_manifest_for_test("ghost").unwrap();
 
@@ -65,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_create_quarantines_prepared_unpublished_file() {
+    fn interrupted_create_preserves_legacy_unpublished_file() {
         let path = temp_db_path("interrupted_create");
         {
             let _store = UnifiedStore::open(&path).unwrap();
@@ -77,8 +107,8 @@ mod tests {
 
         let reopened = UnifiedStore::open(&path).unwrap();
         assert!(reopened.get_collection("half_created").is_none());
-        assert!(!orphan.exists());
-        assert!(manifest
+        assert_eq!(fs::read(&orphan).unwrap(), b"prepared but unpublished");
+        assert!(!manifest
             .quarantine_path_for_test("half_created.rcol")
             .exists());
     }
@@ -91,28 +121,38 @@ mod tests {
             store.create_collection("gone").unwrap();
         }
         let manifest = OperationalManifest::for_db_path(&path);
+        manifest.recover_or_bootstrap(&["gone".into()]).unwrap();
         let _drop = manifest.prepare_collection_drop("gone").unwrap();
 
         let reopened = UnifiedStore::open(&path).unwrap();
         assert!(reopened.get_collection("gone").is_none());
-        assert!(!manifest.collection_path_for_test("gone").exists());
+        assert!(manifest.collection_path_for_test("gone").exists());
+        reopened.create_collection("gone").unwrap();
+        reopened.persist().unwrap();
+        drop(reopened);
+        let recovered = UnifiedStore::open(&path).unwrap();
+        assert!(
+            recovered.get_collection("gone").is_some(),
+            "imported drop must not repeat"
+        );
     }
 
     #[test]
-    fn recovery_quarantines_unreferenced_physical_files() {
+    fn recovery_does_not_rewrite_unreferenced_legacy_files() {
         let path = temp_db_path("orphan_quarantine");
         {
             let store = UnifiedStore::open(&path).unwrap();
             store.create_collection("live").unwrap();
         }
         let manifest = OperationalManifest::for_db_path(&path);
+        manifest.recover_or_bootstrap(&["live".into()]).unwrap();
         let orphan = manifest.collection_path_for_test("orphan");
         fs::write(&orphan, b"unreferenced").unwrap();
 
         let reopened = UnifiedStore::open(&path).unwrap();
         assert!(reopened.get_collection("live").is_some());
-        assert!(!orphan.exists());
-        assert!(manifest.quarantine_path_for_test("orphan.rcol").exists());
+        assert_eq!(fs::read(&orphan).unwrap(), b"unreferenced");
+        assert!(!manifest.quarantine_path_for_test("orphan.rcol").exists());
     }
 
     #[test]
@@ -159,8 +199,9 @@ mod tests {
             let store = UnifiedStore::open(&path).unwrap();
             store.create_collection("users").unwrap();
         }
-        let manifest_path =
-            OperationalManifest::for_db_path(&path).current_manifest_path_for_test();
+        let manifest = OperationalManifest::for_db_path(&path);
+        manifest.recover_or_bootstrap(&["users".into()]).unwrap();
+        let manifest_path = manifest.current_manifest_path_for_test();
         let mut document: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         let generation = document["generation"].as_u64().unwrap();

@@ -234,19 +234,10 @@ impl RedDBRuntime {
                 Err(err) => RedDBError::Internal(err.to_string()),
             }
         })?);
-        // The RAM tier is sized from its share. L2's disk extent is not memory
-        // and keeps its own ceiling; only L1 and L2's resident metadata are
-        // accounted against `blob_cache_l1`.
-        let result_blob_cache_config = if embedded_single_file || options.read_only {
-            crate::storage::cache::BlobCacheConfig::default()
-        } else {
-            crate::storage::cache::BlobCacheConfig::default().with_l2_path(
-                reddb_file::layout::result_cache_l2_path(
-                    &options.resolved_path(reddb_file::default_database_path()),
-                ),
-            )
-        }
-        .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
+        // Query results are disposable. Do not create a second persistent
+        // database outside the .rdb and its WAL for the cache.
+        let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
+            .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
         let result_blob_cache =
             crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
                 |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
@@ -337,7 +328,6 @@ impl RedDBRuntime {
                 retention_sweeper: parking_lot::RwLock::new(
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
-                append_only_revalidation: parking_lot::Mutex::new(Default::default()),
                 transaction_state: crate::runtime::transaction_state::TransactionState::new(),
                 env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
                 lock_manager: Arc::new({

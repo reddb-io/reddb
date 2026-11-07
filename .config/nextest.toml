@@ -31,7 +31,7 @@ final-status-level = "slow"
 # Fixed-work storage campaigns reserve the runner while measuring their finite
 # I/O workload. Keep the ordinary timeout and every operation/assertion.
 [[profile.default.overrides]]
-filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc)'
+filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc) | test(=aborted_update_removals_preserve_earlier_wal_projection)'
 threads-required = "num-cpus"
 
 # Building a 200-table persistent catalog is intentionally CPU- and I/O-heavy:
@@ -81,7 +81,7 @@ retries = 0
 # These storage correctness regressions must fail on their first execution.
 # Keep their ordinary timeouts; retries must not turn a race into a green run.
 [[profile.ci.overrides]]
-filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc)'
+filter = 'binary(=bounded_write_progress) | test(=runtime::mvcc_maintenance::tests::constant_live_data_churn_reuses_pages_after_cold_gc) | test(=aborted_update_removals_preserve_earlier_wal_projection)'
 threads-required = "num-cpus"
 retries = 0
 

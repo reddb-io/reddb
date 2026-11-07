@@ -263,7 +263,7 @@ impl PhysicalMetadataFile {
         Self::from_document_json(&value.to_string_compact(), "invalid physical metadata JSON")
     }
 
-    fn to_document_json(&self, pretty: bool) -> io::Result<String> {
+    pub(crate) fn to_document_json(&self, pretty: bool) -> io::Result<String> {
         reddb_file::encode_physical_metadata_document_root_json(
             &self.to_document_envelope(),
             pretty,
@@ -271,7 +271,7 @@ impl PhysicalMetadataFile {
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
     }
 
-    fn from_document_json(text: &str, context: &'static str) -> io::Result<Self> {
+    pub(crate) fn from_document_json(text: &str, context: &'static str) -> io::Result<Self> {
         let envelope =
             reddb_file::decode_physical_metadata_document_root_json(text).map_err(|err| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{context}: {err}"))

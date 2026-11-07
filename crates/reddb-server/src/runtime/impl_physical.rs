@@ -363,8 +363,7 @@ impl RedDBRuntime {
 
     pub fn apply_retention_policy(&self) -> RedDBResult<()> {
         self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
-        let now_ms = current_unix_ms_u64();
-        self.retire_expired_append_only_segments(now_ms, usize::MAX)?;
+        self.sweep_retention_tick(usize::MAX);
         let expired = self
             .inner
             .db
@@ -392,63 +391,6 @@ impl RedDBRuntime {
         self.enforce_metrics_raw_retention()?;
         self.invalidate_result_cache();
         Ok(())
-    }
-
-    pub(crate) fn retire_expired_append_only_segments(
-        &self,
-        now_ms: u64,
-        max_segments: usize,
-    ) -> RedDBResult<u64> {
-        if max_segments == 0 {
-            return Ok(0);
-        }
-        let Some(path) = self.inner.db.path() else {
-            return Ok(0);
-        };
-        // Flush publishes segments under the same fence. Do not interleave its
-        // manifest updates with selection and the two retirement phases.
-        let store = self.inner.db.store();
-        let _publication = store.vault_publication_lock.lock();
-        let manifest = self.inner.db.store().operational_manifest_for_path(path);
-        let cutoffs: std::collections::BTreeMap<_, _> = self
-            .inner
-            .db
-            .collection_contracts()
-            .into_iter()
-            .filter(|contract| contract.append_only)
-            .filter_map(|contract| {
-                let retention_ms = contract.retention_duration_ms?;
-                let column = super::retention_filter::resolve_timestamp_column(&contract)?;
-                Some((
-                    contract.name,
-                    (
-                        super::retention_sweeper::cutoff_ms(now_ms, retention_ms),
-                        column,
-                    ),
-                ))
-            })
-            .collect();
-        let candidates = if max_segments == usize::MAX {
-            // The explicit administrative operation remains synchronous.
-            let mut candidates =
-                self.maintain_append_only_tick(&manifest, &store, &cutoffs, max_segments)?;
-            candidates.extend(
-                manifest
-                    .retire_append_only_retention_batch(&cutoffs, max_segments)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?,
-            );
-            candidates
-        } else {
-            self.maintain_append_only_tick(&manifest, &store, &cutoffs, max_segments)?
-        };
-        let total_retired = candidates.len() as u64;
-        for (collection, _) in candidates {
-            self.inner
-                .retention_sweeper
-                .write()
-                .record_segments_retired(&collection, 1, now_ms);
-        }
-        Ok(total_retired)
     }
 
     fn enforce_metrics_raw_retention(&self) -> RedDBResult<()> {
@@ -746,11 +688,4 @@ impl RedDBRuntime {
             }
         }
     }
-}
-
-fn current_unix_ms_u64() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

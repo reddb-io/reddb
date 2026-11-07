@@ -272,8 +272,7 @@ impl UnifiedStore {
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = reddb_engine::storage::system_collection_names::canonical_owned(name.into());
-        // Collection creation publishes the same manifest that flush and
-        // retention update. Fence the entire create, including registry/WAL.
+        // Serialize collection identity changes with catalog/WAL publication.
         let _publication = self.vault_publication_lock.lock();
         let mut collections = self.resident.collections.write();
 
@@ -284,22 +283,6 @@ impl UnifiedStore {
         let manager = SegmentManager::with_config(&name, self.config.manager_config.clone());
         collections.insert(name.clone(), Arc::new(manager));
         drop(collections);
-
-        let create = match self.prepare_operational_collection_create(&name) {
-            Ok(create) => create,
-            Err(err) => {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        };
-        if let Some(create) = create {
-            if let Err(err) = create.publish().map_err(StoreError::Io) {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        }
 
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
@@ -358,8 +341,26 @@ impl UnifiedStore {
         prefix: &str,
         json: &crate::serde_json::Value,
     ) -> Result<usize, StoreError> {
+        self.try_set_key_value_tree("red_config", prefix, json)
+    }
+
+    /// Storage control documents are isolated from application CONFIG reads.
+    pub fn try_set_storage_metadata(
+        &self,
+        key: &str,
+        value: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        self.try_set_key_value_tree("red.storage.metadata", key, value)
+    }
+
+    fn try_set_key_value_tree(
+        &self,
+        collection: &str,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
         let _publication = self.vault_publication_lock.lock();
-        let manager = self.get_or_create_collection("red_config");
+        let manager = self.get_or_create_collection(collection);
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
         // Existing rows per key, with the value each one holds.
@@ -384,7 +385,8 @@ impl UnifiedStore {
         } else {
             manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
-        let batch_system = prefix == "red.system"
+        let batch_system = collection == "red_config"
+            && prefix == "red.system"
             && self.config.embedded_wal_path.is_some()
             && !Self::deferred_store_wal_capture_active();
         let mut system_rows = Vec::new();
@@ -404,7 +406,7 @@ impl UnifiedStore {
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
-                    table: Arc::from("red_config"),
+                    table: Arc::from(collection),
                     row_id: 0,
                 },
                 EntityData::Row(RowData {
@@ -427,10 +429,10 @@ impl UnifiedStore {
             }
             // Insert before removing multiple old rows: a failure in between
             // leaves a duplicate that readers resolve to the newest row.
-            self.insert_auto("red_config", entity)?;
+            self.insert_auto(collection, entity)?;
             saved += 1;
             if !stale.is_empty() {
-                self.delete_batch("red_config", &stale)?;
+                self.delete_batch(collection, &stale)?;
             }
         }
         if !system_rows.is_empty() {
@@ -449,7 +451,22 @@ impl UnifiedStore {
     }
 
     pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
-        let Some(manager) = self.get_collection("red_config") else {
+        self.try_get_key_value("red_config", key)
+    }
+
+    pub fn try_get_storage_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<reddb_types::Value>, StoreError> {
+        self.try_get_key_value("red.storage.metadata", key)
+    }
+
+    fn try_get_key_value(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Result<Option<reddb_types::Value>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
             return Ok(None);
         };
         let _publication = manager
@@ -505,7 +522,6 @@ impl UnifiedStore {
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
         let name = Self::canonical_collection(name);
         let _vault_guard = self.vault_publication_lock.lock();
-        let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
             let mut collections = self.resident.collections.write();
 
@@ -559,9 +575,6 @@ impl UnifiedStore {
         self.finish_paged_write([StoreWalAction::DropCollection {
             name: name.to_string(),
         }])?;
-        if let Some(drop) = drop {
-            drop.finish().map_err(StoreError::Io)?;
-        }
 
         Ok(())
     }

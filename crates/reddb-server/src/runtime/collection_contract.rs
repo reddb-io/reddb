@@ -83,6 +83,7 @@ impl CollectionContractGate {
                         table
                     )));
                 }
+                MutationKind::Delete if super::retention_sweeper::is_retention_delete(table) => {}
                 MutationKind::Delete => {
                     return Err(RedDBError::Query(format!(
                         "table '{}' is APPEND ONLY — DELETE is rejected. \

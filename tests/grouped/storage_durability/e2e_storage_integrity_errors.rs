@@ -149,8 +149,11 @@ fn manifest_checksum_failure_reports_manifest_zone() {
         rt.checkpoint().expect("checkpoint fixture");
     }
 
-    let manifest =
-        reddb_file::OperationalManifest::for_db_path(db.path()).current_manifest_path_for_test();
+    let legacy = reddb_file::OperationalManifest::for_db_path(db.path());
+    legacy
+        .recover_or_bootstrap(&["manifest_probe".into()])
+        .expect("legacy manifest fixture");
+    let manifest = legacy.current_manifest_path_for_test();
     let mut bytes = fs::read(&manifest).expect("read manifest");
     let checksum_pos = bytes
         .windows(b"checksum".len())
