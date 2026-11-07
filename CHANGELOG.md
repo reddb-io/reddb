@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.28.28
+
+### Patch Changes
+
+- [#2726](https://github.com/reddb-io/reddb/pull/2726) [`8fc8a1e`](https://github.com/reddb-io/reddb/commit/8fc8a1e29f62ba5342f929fa3bcef811e1228f94) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Index queue producer deduplication and expiry inside the database, bound indexed expiry cleanup, and check queue capacity without loading persisted payloads. Preserve source validation for legacy indices and visibility policies. Allow ordinary hot blob-cache hits under shared shard locks and prepare compressed writes before exclusive publication, preserving version and invalidation checks.
+
+  Read disk-only queue message payloads and retry limits after bounded cold boot, preserving delivery and ACK recovery.
+
+  Publish the visibility/count index alongside the first checkpoint of a new or empty collection. Keep historical backfills incremental, make the index immediately available to GC, and reuse it during cold append checkpoints instead of rereading the old payloads.
+
+- [#2725](https://github.com/reddb-io/reddb/pull/2725) [`d4923c6`](https://github.com/reddb-io/reddb/commit/d4923c6896464521272d748f501b647d7a35a104) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow old native catalogs without resume counters to reopen when a legacy system collection has a zero-root canonical alias. Preserve the populated tree and its records; continue rejecting two populated roots. Cover cold reopen and checkpoint recovery.
+
 ## 1.28.27
 
 ### Patch Changes
