@@ -282,16 +282,19 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 let Some(&message_id) = available.peek() else {
                     break;
                 };
-                let keyed = self.store.read_ordering_key(queue, message_id).is_some();
-                if keyed && !selected.is_empty() {
+                let ordering_key = self.store.read_ordering_key(queue, message_id);
+                if ordering_key.is_some() && !selected.is_empty() {
                     break;
                 }
                 available.next();
-                if self.ordering_key_blocked(queue, group, message_id) {
+                if ordering_key
+                    .as_deref()
+                    .is_some_and(|key| self.store.ordering_key_in_flight(queue, group, key))
+                {
                     continue;
                 }
                 selected.push(message_id);
-                if keyed {
+                if ordering_key.is_some() {
                     break;
                 }
             }
