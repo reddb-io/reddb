@@ -269,7 +269,9 @@ impl RedDB {
     fn bootstrap_replica_snapshot(
         primary_addr: &str,
         local_path: &Path,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+        replica_id: &str,
+        request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    ) -> Result<Option<u64>, Box<dyn std::error::Error>> {
         let endpoint = if primary_addr.starts_with("http") {
             primary_addr.to_string()
         } else {
@@ -279,13 +281,19 @@ impl RedDB {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let mut request = request_auth.request(crate::grpc::proto::Empty {});
+        request.metadata_mut().insert(
+            "x-reddb-replica-id",
+            replica_id.parse().map_err(|_| "invalid replica identity")?,
+        );
         let payload = runtime.block_on(async move {
             use crate::grpc::proto::red_db_client::RedDbClient;
-            use crate::grpc::proto::Empty;
-            let mut client = RedDbClient::connect(endpoint).await?;
-            let response = client
-                .replication_snapshot(tonic::Request::new(Empty {}))
-                .await?;
+            let max_message_bytes = crate::grpc::RedDBGrpcServer::max_message_bytes();
+            let mut client = RedDbClient::connect(endpoint)
+                .await?
+                .max_decoding_message_size(max_message_bytes)
+                .max_encoding_message_size(max_message_bytes);
+            let response = client.replication_snapshot(request).await?;
             Ok::<String, Box<dyn std::error::Error>>(response.into_inner().payload)
         })?;
 
@@ -294,8 +302,12 @@ impl RedDB {
             .get("snapshot_hex")
             .and_then(crate::json::Value::as_str)
         else {
-            return Ok(false);
+            return Ok(None);
         };
+        let snapshot_lsn = json
+            .get("snapshot_lsn")
+            .and_then(crate::json::Value::as_u64)
+            .ok_or("replication snapshot omitted its WAL position")?;
 
         let bytes = hex::decode(snapshot_hex)?;
         if let Some(parent) = local_path.parent() {
@@ -310,7 +322,7 @@ impl RedDB {
         let metadata_json_path =
             crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
         write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
-        Ok(true)
+        Ok(Some(snapshot_lsn))
     }
 
     /// Construct an ephemeral RedDB instance backed by a unique tempfile.
@@ -386,10 +398,29 @@ impl RedDB {
             }
         }
 
+        let mut replica_bootstrap = None;
         if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
+            let request_auth = crate::replication::request_auth::ReplicaRequestAuth::from_env()?;
             let local_path = options.resolved_path(reddb_file::default_database_path());
             if !local_path.exists() {
-                let _ = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
+                let replica_id = request_auth
+                    .principal()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::crypto::uuid::Uuid::new_v4().to_string());
+                let snapshot = Self::bootstrap_replica_snapshot(
+                    primary_addr,
+                    &local_path,
+                    &replica_id,
+                    &request_auth,
+                );
+                if request_auth.principal().is_some() {
+                    let snapshot_lsn = snapshot
+                        .map_err(|_| "authenticated replica snapshot bootstrap failed")?
+                        .ok_or("authenticated replica snapshot was unavailable")?;
+                    replica_bootstrap = Some((snapshot_lsn, replica_id));
+                } else if let Ok(Some(snapshot_lsn)) = snapshot {
+                    replica_bootstrap = Some((snapshot_lsn, replica_id));
+                }
             }
         }
 
@@ -658,6 +689,15 @@ impl RedDB {
         let remote_key = options.remote_key.clone();
 
         let store = Arc::new(store);
+        if let Some((snapshot_lsn, replica_id)) = &replica_bootstrap {
+            store.set_config_tree(
+                "red.replication",
+                &crate::json!({
+                    "last_applied_lsn": snapshot_lsn,
+                    "replica_id": replica_id,
+                }),
+            );
+        }
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
             ReplicationRole::Primary if !options.read_only => {
@@ -686,7 +726,7 @@ impl RedDB {
             .cloned()
             .map(super::EphemeralDataPathCleanup::new);
 
-        Self {
+        let db = Self {
             store,
             runtime: std::sync::OnceLock::new(),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
@@ -713,7 +753,11 @@ impl RedDB {
             _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()
-        .map_err(|err| format!("initialize RedDB metadata: {err}").into())
+        .map_err(|err| format!("initialize RedDB metadata: {err}"))?;
+        if replica_bootstrap.is_some() {
+            db.flush_local_only()?;
+        }
+        Ok(db)
     }
 
     /// Flush changes to disk (if persistence is enabled).
