@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.28.26
+
+### Patch Changes
+
+- [#2711](https://github.com/reddb-io/reddb/pull/2711) [`50ca925`](https://github.com/reddb-io/reddb/commit/50ca925f283e5d54b3586d3521891e3e8ebdeeb7) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reduce embedded cold-start I/O by reusing the validated snapshot and publishing boot-time system configuration in one WAL batch.
+
+- [#2710](https://github.com/reddb-io/reddb/pull/2710) [`ebc6588`](https://github.com/reddb-io/reddb/commit/ebc6588ecdde8b7793a2bb3621f4ebb83369cbe3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow read-only opens of native paged databases, including WAL and interrupted-checkpoint recovery into a private memory view, without rewriting database or recovery files. Enforce shared-reader locking and retain paged indexes in bounded residency mode.
+
+- [#2718](https://github.com/reddb-io/reddb/pull/2718) [`2dc0e53`](https://github.com/reddb-io/reddb/commit/2dc0e5397bf748549f0987d4a3a45a676978fe2a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix routed B-tree bulk inserts and PostgreSQL binary text parameters, refuse unsafe legacy pager migrations without changing source files, and authenticate replica bootstrap, WAL, and acknowledgement requests while preserving explicit no-auth deployments.
+
+- [#2708](https://github.com/reddb-io/reddb/pull/2708) [`d11d984`](https://github.com/reddb-io/reddb/commit/d11d9843ee9b73f404d8b11451f10f7b561e51a6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Speed up vector.turbo snapshot checksums and index reconstruction, and correctly refresh changed vector codes during recovery.
+
 ## 1.28.25
 
 ### Patch Changes
