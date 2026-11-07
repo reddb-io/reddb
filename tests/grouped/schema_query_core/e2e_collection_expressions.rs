@@ -363,14 +363,7 @@ fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
         .save_to_path(&fixture)
         .expect("encode invalid contract fixture");
     {
-        let store = reddb::storage::UnifiedStore::open_with_config(
-            &path,
-            reddb::storage::UnifiedStoreConfig {
-                resident_memory_bytes_max: Some(64 * 1024 * 1024),
-                ..Default::default()
-            },
-        )
-        .expect("fixture editor");
+        let store = reddb::storage::UnifiedStore::open(&path).expect("fixture editor");
         store
             .try_set_storage_metadata(
                 "physical",

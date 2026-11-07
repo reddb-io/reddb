@@ -75,8 +75,6 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # CI profile: fail on the first execution so intermittent regressions stay
 # visible. Keep the hard per-test timeout and the runner's JUnit report.
 [profile.ci]
-# Collect the complete regression set while validating the metadata rollback.
-fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 2 }
 retries = 0
 

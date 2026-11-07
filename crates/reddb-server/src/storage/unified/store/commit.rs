@@ -817,6 +817,32 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    /// Control records need a durable boundary even when user DML is async.
+    /// Observe the queue's end under the epoch lease: syncing only WalWriter
+    /// would miss records that have been accepted but not drained yet.
+    fn sync_pending(&self) -> io::Result<()> {
+        if matches!(self.mode, DurabilityMode::Strict) {
+            return self.force_sync();
+        }
+        let _epoch = self.queue.epoch.read();
+        let target = self.queue.pending.lock().next_lsn;
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.pending_target_lsn = state.pending_target_lsn.max(target);
+        state.pending_statements = state.pending_statements.saturating_add(1);
+        state.first_pending_at.get_or_insert_with(Instant::now);
+        cond.notify_all();
+        loop {
+            if let Some(error) = &state.last_error {
+                return Err(io::Error::other(error.clone()));
+            }
+            if state.durable_lsn >= target {
+                return Ok(());
+            }
+            cond.wait(&mut state);
+        }
+    }
+
     pub(crate) fn truncate(&self) -> io::Result<()> {
         self.truncate_inner(false)
     }
@@ -1553,6 +1579,14 @@ impl Drop for StoreCommitCoordinator {
 }
 
 impl UnifiedStore {
+    pub(crate) fn sync_control_metadata(&self) -> Result<(), StoreError> {
+        if let Some(commit) = &self.commit {
+            commit.sync_pending().map_err(StoreError::Io)?;
+        }
+        // Embedded appends wait for their own group-commit completion.
+        Ok(())
+    }
+
     pub(crate) fn deferred_store_wal_capture_active() -> bool {
         deferred_store_wal_capture_active()
     }

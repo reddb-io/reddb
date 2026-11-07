@@ -182,14 +182,7 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
         .save_to_path(&fixture)
         .expect("encode invalid contract");
     {
-        let store = reddb::storage::UnifiedStore::open_with_config(
-            path.path(),
-            reddb::storage::UnifiedStoreConfig {
-                resident_memory_bytes_max: Some(64 * 1024 * 1024),
-                ..Default::default()
-            },
-        )
-        .expect("fixture editor");
+        let store = reddb::storage::UnifiedStore::open(path.path()).expect("fixture editor");
         store
             .try_set_storage_metadata(
                 "physical",

@@ -656,11 +656,16 @@ impl RedDB {
 
         let remote_key = options.remote_key.clone();
 
+        let store = Arc::new(store);
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
-            ReplicationRole::Primary if !options.read_only => Some(Arc::new(
-                PrimaryReplication::new_with_config(path.as_deref(), &options.replication),
-            )),
+            ReplicationRole::Primary if !options.read_only => {
+                Some(Arc::new(PrimaryReplication::new_with_store(
+                    path.as_deref(),
+                    &options.replication,
+                    Arc::clone(&store),
+                )?))
+            }
             _ => None,
         };
 
@@ -681,7 +686,7 @@ impl RedDB {
             .map(super::EphemeralDataPathCleanup::new);
 
         Self {
-            store: Arc::new(store),
+            store,
             runtime: std::sync::OnceLock::new(),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),

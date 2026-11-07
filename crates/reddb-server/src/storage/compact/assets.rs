@@ -287,10 +287,10 @@ impl<'a> Assets<'a> {
     }
 
     fn relocate_metadata_document(&mut self, text: &str) -> Result<String> {
-        let mut document: serde_json::Value = serde_json::from_str(&text)?;
+        let mut document: serde_json::Value = serde_json::from_str(text)?;
         // Validate the complete native contract, then edit only physical addresses
         // in the JSON value so unrelated and forward-compatible fields survive.
-        let envelope = f::decode_physical_metadata_document_root_json(&text)?;
+        let envelope = f::decode_physical_metadata_document_root_json(text)?;
         for hypertable in envelope.hypertables_json {
             let hypertable = f::decode_persisted_physical_hypertable_json(&hypertable)?;
             ensure(

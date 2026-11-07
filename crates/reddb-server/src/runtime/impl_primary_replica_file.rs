@@ -17,6 +17,32 @@ impl RedDBRuntime {
         Some(plan.relay_manifest_path(replica_id))
     }
 
+    pub fn replica_relay_manifest(
+        &self,
+        replica_id: &str,
+    ) -> RedDBResult<Option<reddb_file::ReplicaRelayLogManifest>> {
+        let key = format!("replication.relay.{}", hex::encode(replica_id));
+        if let Some(bytes) = crate::replication::metadata::read(&self.inner.db.store(), &key)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?
+        {
+            return reddb_file::ReplicaRelayLogManifest::decode(&bytes)
+                .map(Some)
+                .map_err(|err| RedDBError::Internal(err.to_string()));
+        }
+        let Some(path) = self.replica_relay_manifest_path(replica_id) else {
+            return Ok(None);
+        };
+        match reddb_file::ReplicaRelayLogManifest::read_from_path(path) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(reddb_file::RdbFileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(RedDBError::Internal(error.to_string())),
+        }
+    }
+
     pub fn primary_replica_file_plan(&self) -> Option<reddb_file::PrimaryReplicaFilePlan> {
         self.primary_replica_file_plan_result().ok().flatten()
     }
@@ -44,17 +70,13 @@ impl RedDBRuntime {
     ) -> RedDBResult<reddb_file::TimelineId> {
         let path = reddb_file::PrimaryReplicaFilePlan::new(root, reddb_file::TimelineId::initial())
             .timeline_history_path();
-        match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => Ok(history
-                .current()
-                .unwrap_or_else(reddb_file::TimelineId::initial)),
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Ok(reddb_file::TimelineId::initial())
-            }
-            Err(err) => Err(RedDBError::Internal(err.to_string())),
-        }
+        crate::replication::metadata::timeline(&self.inner.db.store(), &path)
+            .map(|history| {
+                history
+                    .current()
+                    .unwrap_or_else(reddb_file::TimelineId::initial)
+            })
+            .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 
     pub fn create_primary_replica_basebackup(
@@ -299,6 +321,21 @@ impl RedDBRuntime {
     pub fn primary_replica_slot_catalog(
         &self,
     ) -> RedDBResult<Option<reddb_file::ReplicationSlotCatalog>> {
+        if let Some(primary) = self.inner.db.replication.as_ref() {
+            primary
+                .ensure_slot_metadata_durable()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        if let Some(bytes) = crate::replication::metadata::read(
+            &self.inner.db.store(),
+            crate::replication::metadata::SLOTS,
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?
+        {
+            return reddb_file::ReplicationSlotCatalog::decode(&bytes)
+                .map(Some)
+                .map_err(|err| RedDBError::Internal(err.to_string()));
+        }
         let Some(plan) = self.primary_replica_file_plan_result()? else {
             return Ok(None);
         };
@@ -369,23 +406,26 @@ impl RedDBRuntime {
         )
     }
 
+    /// Authoritative history in the database, with read-only legacy import fallback.
+    pub fn primary_replica_timeline_history(
+        &self,
+    ) -> RedDBResult<Option<reddb_file::TimelineHistory>> {
+        let Some(path) = self.primary_replica_timeline_history_path() else {
+            return Ok(None);
+        };
+        crate::replication::metadata::timeline(&self.inner.db.store(), &path)
+            .map(Some)
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
     pub fn primary_replica_rejoin_decision(
         &self,
         node_timeline: reddb_file::TimelineId,
         node_flushed_lsn: u64,
         available_from_lsn: u64,
     ) -> RedDBResult<Option<reddb_file::RejoinDecision>> {
-        let Some(path) = self.primary_replica_timeline_history_path() else {
+        let Some(history) = self.primary_replica_timeline_history()? else {
             return Ok(None);
-        };
-        let history = match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => history,
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::TimelineHistory::new(crate::utils::now_unix_millis())
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
         };
         Ok(Some(history.rejoin_decision(
             node_timeline,
@@ -502,21 +542,14 @@ impl RedDBRuntime {
         replica_id: &str,
         applied_lsn: u64,
     ) -> RedDBResult<reddb_file::TimelineHistory> {
-        let Some(path) = self.primary_replica_timeline_history_path() else {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let Some(history) = self.primary_replica_timeline_history()? else {
             return Ok(reddb_file::TimelineHistory::new(
                 crate::utils::now_unix_millis(),
             ));
         };
         let now_ms = crate::utils::now_unix_millis();
-        let history = match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => history,
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::TimelineHistory::new(now_ms)
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
-        };
         let parent = history
             .current()
             .unwrap_or_else(reddb_file::TimelineId::initial);
@@ -530,9 +563,16 @@ impl RedDBRuntime {
         let promoted = history
             .promotion_history(&candidate, parent.next(), now_ms)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        promoted
-            .write_to_path(path)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::write(
+            &self.inner.db.store(),
+            crate::replication::metadata::TIMELINE,
+            &promoted.encode(),
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(path) = self.primary_replica_timeline_history_path() {
+            crate::replication::metadata::retire_legacy(&path)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
         Ok(promoted)
     }
 
@@ -542,6 +582,8 @@ impl RedDBRuntime {
         records: &[(u64, T)],
         applied_lsn: u64,
     ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let Some(plan) = self.primary_replica_file_plan_result()? else {
             return Ok(());
         };
@@ -554,8 +596,8 @@ impl RedDBRuntime {
             .map(|(lsn, _)| *lsn)
             .max()
             .unwrap_or(*first_lsn);
-        let mut manifest = match reddb_file::ReplicaRelayLogManifest::read_from_path(&path) {
-            Ok(manifest) => {
+        let mut manifest = match self.replica_relay_manifest(replica_id)? {
+            Some(manifest) => {
                 let relay_dir = path.parent().ok_or_else(|| {
                     RedDBError::Internal("relay manifest path has no parent".into())
                 })?;
@@ -564,15 +606,10 @@ impl RedDBRuntime {
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 manifest
             }
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::ReplicaRelayLogManifest::new(
-                    replica_id,
-                    reddb_file::TimelineId::initial(),
-                )
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
+            None => reddb_file::ReplicaRelayLogManifest::new(
+                replica_id,
+                reddb_file::TimelineId::initial(),
+            ),
         };
         if manifest.replica_id != replica_id {
             return Err(RedDBError::Internal(format!(
@@ -628,8 +665,16 @@ impl RedDBRuntime {
         manifest
             .mark_applied(applied_lsn.min(manifest.flushed_lsn))
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        manifest
-            .write_to_path(path)
+        let bytes = manifest
+            .encode()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::write(
+            &self.inner.db.store(),
+            &format!("replication.relay.{}", hex::encode(replica_id)),
+            &bytes,
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::retire_legacy(&path)
             .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 }

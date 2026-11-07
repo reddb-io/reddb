@@ -354,7 +354,11 @@ mod tests {
         let path = runtime
             .primary_replica_timeline_history_path()
             .expect("timeline history path");
-        let timeline = reddb_file::TimelineHistory::read_from_path(path).expect("read timeline");
+        assert!(!path.exists(), "timeline metadata stays inside database");
+        let timeline = runtime
+            .primary_replica_timeline_history()
+            .expect("read timeline")
+            .expect("history");
         assert_eq!(timeline.current(), Some(reddb_file::TimelineId(2)));
         assert_eq!(timeline.ancestor_lsn(reddb_file::TimelineId(2)), Some(42));
         assert_eq!(timeline.entries[1].reason, "promote replica-a");
@@ -369,10 +373,9 @@ mod tests {
         }
 
         for point in [
-            "atomic_after_tmp_write",
-            "atomic_after_tmp_sync",
-            "atomic_after_rename",
-            "atomic_after_dir_sync",
+            "timeline_before_wal",
+            "timeline_after_wal",
+            "timeline_after_sync",
         ] {
             let data_path = temp_data_path(&format!("timeline_crash_{point}"));
             let database_key = format!("admin-promote-crash-{}", crate::utils::now_unix_nanos());
@@ -402,8 +405,14 @@ mod tests {
                 "child should crash at {point}, status={child:?}"
             );
 
-            let history = reddb_file::TimelineHistory::read_from_path(plan.timeline_history_path())
-                .expect("timeline history remains decodable");
+            let recovered = replica_runtime_for_promote(&data_path, &database_key);
+            let history = recovered
+                .primary_replica_timeline_history()
+                .expect("read timeline")
+                .expect("history");
+            if point == "timeline_after_sync" {
+                assert_eq!(history.current(), Some(reddb_file::TimelineId(2)));
+            }
             assert!(
                 history.current() == Some(reddb_file::TimelineId(1))
                     || history.current() == Some(reddb_file::TimelineId(2)),
@@ -415,6 +424,7 @@ mod tests {
                 assert_eq!(history.entries[1].reason, "promote replica-a");
             }
 
+            drop(recovered);
             cleanup(&data_path, &database_key);
         }
     }

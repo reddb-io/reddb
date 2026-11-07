@@ -1440,7 +1440,7 @@ impl UnifiedStore {
         };
         self.operational_manifest_for_path(path)
             .read_only_pending_drops_if_present()
-            .map_err(StoreError::Io)
+            .map_err(|err| storage_integrity("manifest", "current", None, err.to_string()))
     }
 
     fn recover_operational_manifest(
