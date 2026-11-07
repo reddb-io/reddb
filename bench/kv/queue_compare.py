@@ -155,6 +155,10 @@ async def run(args):
     adapter = {"reddb": RedQueue, "rabbitmq": RabbitQueue, "kafka": KafkaQueue}[args.engine]()
     await adapter.open(args, create=args.mode in ("run", "seed"))
     try:
+        if args.mode in ("run", "seed") and args.settle_ms:
+            # Explicit established-topology profile, outside timing. Keep the
+            # zero-delay crash profile separately; never overwrite its failures.
+            await asyncio.sleep(args.settle_ms / 1000)
         if args.mode == "empty":
             values = await adapter.consume(1, empty=True)
             if values:
@@ -196,9 +200,10 @@ def main():
     parser.add_argument("--batch", type=int, choices=[1, 16], default=1)
     parser.add_argument("--operations", type=int, default=256)
     parser.add_argument("--bytes", type=int, default=100)
+    parser.add_argument("--settle-ms", type=int, default=0)
     parser.add_argument("--mode", choices=["run", "seed", "recover", "empty"], default="run")
     args = parser.parse_args()
-    if args.operations < 1 or args.bytes < 13 or not args.name.replace("_", "").isalnum():
+    if args.operations < 1 or args.bytes < 13 or not 0 <= args.settle_ms <= 10_000 or not args.name.replace("_", "").isalnum():
         parser.error("positive operations, >=13 bytes and an alphanumeric queue name are required")
     result = {"config": vars(args), "status": "invalid", "classification": "shared-host-diagnostic",
               "latency_contract": "whole batch through consume/ACK; never divided by batch size",

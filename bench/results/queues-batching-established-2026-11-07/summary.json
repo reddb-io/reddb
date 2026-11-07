@@ -1,0 +1,193 @@
+{
+  "classification": "shared-host diagnostic; medians of three rounds; batch latency is not per-operation latency",
+  "kv": [
+    {
+      "engine": "native-before",
+      "connections": 1,
+      "pipeline": 1,
+      "throughput_ops_s": 127.62780980281913,
+      "batch_p99_ms": 12.982144,
+      "source": "native-before-w1-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-before",
+      "connections": 1,
+      "pipeline": 16,
+      "throughput_ops_s": 131.56338304694498,
+      "batch_p99_ms": 152.827922,
+      "source": "native-before-w1-p16.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-before",
+      "connections": 8,
+      "pipeline": 1,
+      "throughput_ops_s": 125.7714733743732,
+      "batch_p99_ms": 87.69025,
+      "source": "native-before-w8-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-before",
+      "connections": 8,
+      "pipeline": 16,
+      "throughput_ops_s": 113.61461214711306,
+      "batch_p99_ms": 1208.197824,
+      "source": "native-before-w8-p16.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-after",
+      "connections": 1,
+      "pipeline": 1,
+      "throughput_ops_s": 260.28315055039866,
+      "batch_p99_ms": 6.022435000000001,
+      "source": "native-after-w1-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-after",
+      "connections": 1,
+      "pipeline": 16,
+      "throughput_ops_s": 277.64521724975697,
+      "batch_p99_ms": 93.355148,
+      "source": "native-after-w1-p16.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-after",
+      "connections": 8,
+      "pipeline": 1,
+      "throughput_ops_s": 277.39949468474117,
+      "batch_p99_ms": 48.163701,
+      "source": "native-after-w8-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "native-after",
+      "connections": 8,
+      "pipeline": 16,
+      "throughput_ops_s": 255.85469449023523,
+      "batch_p99_ms": 529.854633,
+      "source": "native-after-w8-p16.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "redis",
+      "connections": 1,
+      "pipeline": 1,
+      "throughput_ops_s": 310.0405158039833,
+      "batch_p99_ms": 5.0973999999999995,
+      "source": "redis-w1-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "redis",
+      "connections": 1,
+      "pipeline": 16,
+      "throughput_ops_s": 4388.050830214453,
+      "batch_p99_ms": 4.9066670000000006,
+      "source": "redis-w1-p16.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "redis",
+      "connections": 8,
+      "pipeline": 1,
+      "throughput_ops_s": 1321.0522536238818,
+      "batch_p99_ms": 8.907658999999999,
+      "source": "redis-w8-p1.json",
+      "recovery": "passed"
+    },
+    {
+      "engine": "redis",
+      "connections": 8,
+      "pipeline": 16,
+      "throughput_ops_s": 14566.9755965695,
+      "batch_p99_ms": 9.437843999999998,
+      "source": "redis-w8-p16.json",
+      "recovery": "passed"
+    }
+  ],
+  "queues": [
+    {
+      "engine": "native-after",
+      "batch": 1,
+      "cycle_ops_s": 27.435645202127187,
+      "publication_ops_s": 165.4106726301891,
+      "batch_p99_ms": 212.8482520001853,
+      "round_cycle_ops_s": [
+        27.435645202127187,
+        29.84026494170609,
+        16.84578290259667
+      ],
+      "recovery": "passed; topology established before publishing"
+    },
+    {
+      "engine": "native-after",
+      "batch": 16,
+      "cycle_ops_s": 42.4510273340976,
+      "publication_ops_s": 276.9084100630326,
+      "batch_p99_ms": 479.3972620000204,
+      "round_cycle_ops_s": [
+        44.34758238749975,
+        42.4510273340976,
+        41.9228716507816
+      ],
+      "recovery": "passed; topology established before publishing"
+    },
+    {
+      "engine": "rabbit",
+      "batch": 1,
+      "cycle_ops_s": 130.06578068727597,
+      "publication_ops_s": 143.90160972982545,
+      "batch_p99_ms": 20.555448999857617,
+      "round_cycle_ops_s": [
+        121.04266411869496,
+        130.06578068727597,
+        154.22180897816523
+      ],
+      "recovery": "passed; topology established before publishing"
+    },
+    {
+      "engine": "rabbit",
+      "batch": 16,
+      "cycle_ops_s": 1331.902481598959,
+      "publication_ops_s": 1626.922206995452,
+      "batch_p99_ms": 13.028879000103188,
+      "round_cycle_ops_s": [
+        1390.5766454634365,
+        1275.25446569673,
+        1331.902481598959
+      ],
+      "recovery": "passed; topology established before publishing"
+    },
+    {
+      "engine": "kafka",
+      "batch": 1,
+      "cycle_ops_s": 63.51798388634894,
+      "publication_ops_s": 213.45521732983065,
+      "batch_p99_ms": 31.422051999925316,
+      "round_cycle_ops_s": [
+        61.072749583525564,
+        63.51798388634894,
+        66.67321534807994
+      ],
+      "recovery": "passed; topology established before publishing"
+    },
+    {
+      "engine": "kafka",
+      "batch": 16,
+      "cycle_ops_s": 783.9306514371782,
+      "publication_ops_s": 1728.5056557380012,
+      "batch_p99_ms": 39.87412400010726,
+      "round_cycle_ops_s": [
+        767.1446774124951,
+        783.9306514371782,
+        853.8523389389092
+      ],
+      "recovery": "passed; topology established before publishing"
+    }
+  ]
+}

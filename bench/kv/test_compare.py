@@ -86,6 +86,20 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_matrix_waits_for_listener_readiness(self):
+        import run_batch_matrix as matrix
+        with patch.object(matrix, "command", side_effect=[RuntimeError("booting"), ""]) as command, \
+                patch.object(matrix.time, "sleep"):
+            matrix.wait_ready("client", "server", 5000)
+        self.assertEqual(command.call_count, 2)
+
+    def test_matrix_readiness_timeout_fails_the_capture(self):
+        import run_batch_matrix as matrix
+        with patch.object(matrix, "command", side_effect=RuntimeError("unavailable")), \
+                patch.object(matrix.time, "monotonic", side_effect=[0, 61]):
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                matrix.wait_ready("client", "server", 5000)
+
     def test_queue_verification_rejects_loss_duplicates_and_wrong_payloads(self):
         from queue_compare import payload, validate
         validate([payload(1, 100), payload(0, 100)], [0, 1], 100)

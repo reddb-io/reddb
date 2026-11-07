@@ -62,6 +62,15 @@ claims or steady-state saturation measurements. Protocols, envelopes and client
 implementations differ. Review client/server CPU samples before inferring an
 engine bottleneck. Small operation counts do not establish tail-latency SLOs.
 
+The November capture keeps two distinct topology profiles. The zero-delay
+profile failed to recover a newly created RabbitMQ quorum queue after 32
+publisher confirmations; it remains a failed recovery, not a passing sample.
+The established-topology continuation waits two seconds **after declaration,
+before publishing any payload**, for every product. It adds no wait after the
+last publication confirmation and before SIGKILL. This isolates message-path
+durability from the observed queue-registration window. See the
+[results and qualifications](../../docs/perf/kv-batching-2026-11-07.md).
+
 ## Reproduction
 
 Build optimized Linux `red` binaries from the recorded before/after revisions:
@@ -112,6 +121,19 @@ python -m unittest discover -s bench/kv -p test_compare.py
 Run the orchestration command on the Docker host, not inside the client. It saves
 raw results plus resource samples, manifests and a `complete.json` only if every
 measurement and recovery check succeeds. A failed capture must remain invalid.
+The runner polls listener readiness; each adapter also performs an untimed
+protocol warmup. `--resume-queues` can continue only at fully completed engine
+boundaries, with identical binaries/containers and all KV recoveries passed.
+Partially consumed queue workloads require fresh fixtures instead of a retry
+that could conceal loss or duplicates.
+
+For the separate established-topology queue capture, create fresh client,
+`native-after`, `rabbit` and `kafka` containers/volumes under a different prefix:
+
+```sh
+python bench/kv/run_batch_matrix.py --prefix reddb-batch-mature --queues-only \
+  --queue-settle-ms 2000 --out /path/to/new-established-queue-capture
+```
 
 Engine regression commands:
 

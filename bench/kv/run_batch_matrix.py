@@ -22,27 +22,66 @@ def command(*args, timeout=180):
     return result.stdout
 
 
+def wait_ready(client, server, port):
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            command("docker", "exec", client, "python", "-c",
+                    f"import socket; socket.create_connection(({server!r}, {port}), timeout=1).close()",
+                    timeout=5)
+            return
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix", default="reddb-batch")
     parser.add_argument("--suffix", default="1107")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--operations", type=int, default=256)
+    parser.add_argument("--queues-only", action="store_true")
+    parser.add_argument("--queue-settle-ms", type=int, default=0)
+    parser.add_argument("--resume-queues", action="store_true",
+                        help="resume only between fully completed engines, preserving all prior samples")
     args = parser.parse_args()
-    args.out.mkdir(parents=True, exist_ok=False)
+    if args.queues_only and args.resume_queues:
+        parser.error("queue-only captures use a fresh output directory")
+    args.out.mkdir(parents=True, exist_ok=args.resume_queues)
     names = {key: f"{args.prefix}-{key}-{args.suffix}" for key in
-             ["client", "native-before", "native-after", "redis", "rabbit", "kafka"]}
+             (["client", "native-after", "rabbit", "kafka"] if args.queues_only else
+              ["client", "native-before", "native-after", "redis", "rabbit", "kafka"])}
     manifest = {"containers": {key: inspect(name) for key, name in names.items()},
                 "classification": "shared-host diagnostic; single-node local durability",
                 "git_head": command("git", "rev-parse", "HEAD").strip(),
                 "dirty_diff_sha256": hashlib.sha256(command("git", "diff").encode()).hexdigest(),
-                "operations": args.operations, "queue_rounds": 3, "kv_rounds": 3}
+                "operations": args.operations, "queue_rounds": 3,
+                "queue_settle_ms": args.queue_settle_ms, "kv_rounds": 0 if args.queues_only else 3}
     with tempfile.TemporaryDirectory() as temporary:
         for key in ("native-before", "native-after"):
+            if key not in names:
+                continue
             binary = Path(temporary) / key
             command("docker", "cp", f"{names[key]}:/usr/local/bin/red", str(binary))
             manifest["containers"][key]["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    resume_stamp = str(int(time.time()))
+    if args.resume_queues:
+        previous = json.loads((args.out / "manifest.json").read_text())
+        if (previous["containers"] != manifest["containers"]
+                or previous["operations"] != args.operations
+                or previous.get("queue_settle_ms", 0) != args.queue_settle_ms):
+            raise RuntimeError("resume requires identical containers, binaries and workload")
+        for key in ("native-before", "native-after", "redis"):
+            for workers in (1, 8):
+                for pipeline in (1, 16):
+                    recovery = args.out / f"{key}-w{workers}-p{pipeline}-recovery.json"
+                    if json.loads(recovery.read_text())["status"] != "valid-diagnostic":
+                        raise RuntimeError("resume requires all KV recoveries to have completed")
+        (args.out / f"resume-{resume_stamp}.json").write_text(json.dumps(manifest, indent=2))
+    else:
+        (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     def save(label, result):
         (args.out / f"{label}.json").write_text(json.dumps(result, indent=2))
     def activate(key):
@@ -50,13 +89,12 @@ def main():
             if other != "client" and other != key:
                 command("docker", "stop", name)
         command("docker", "start", names[key])
-        # A TCP connect does not guarantee Kafka's coordinator is ready. The
-        # adapter's untimed warmup verifies the complete path before sampling.
-        time.sleep(5)
+        # Adapter warmup additionally checks the full protocol and coordinator.
+        wait_ready(names["client"], names[key], {"redis": 6379, "rabbit": 5672, "kafka": 9092}.get(key, 5000))
     def restart(key):
         command("docker", "kill", "--signal=KILL", names[key])
         command("docker", "start", names[key])
-        time.sleep(5)
+        wait_ready(names["client"], names[key], {"redis": 6379, "rabbit": 5672, "kafka": 9092}.get(key, 5000))
     def kv(label, key, flags):
         path = f"/tmp/{label}.json"
         command("docker", "exec", names["client"], "python", "/source/bench/kv/compare.py",
@@ -69,7 +107,7 @@ def main():
         if result["status"] not in ("prepared", "valid-diagnostic"):
             raise RuntimeError(f"invalid KV result: {label}")
         return path
-    for key in ["native-before", "native-after", "redis"]:
+    for key in ([] if args.resume_queues or args.queues_only else ["native-before", "native-after", "redis"]):
         activate(key)
         resources = Resources(args.out, names[key], names["client"])
         try:
@@ -91,13 +129,25 @@ def main():
             {"native-after": "reddb", "rabbit": "rabbitmq", "kafka": "kafka"}[key],
             "--host", names[key], "--name", name or label.replace("-", "_"),
             "--batch", str(batch), "--mode", mode,
+            "--settle-ms", str(args.queue_settle_ms),
             "--operations", str(count or args.operations), timeout=900))
         save(label, result)
         if result["status"] != "valid-diagnostic":
             raise RuntimeError(f"invalid queue result: {label}")
     for key in ["native-after", "rabbit", "kafka"]:
+        if args.resume_queues:
+            expected = [f"queue-{key}-b{batch}-r{repeat}" for batch in (1, 16) for repeat in range(3)]
+            expected += [f"recovery_{key.replace('-', '_')}_{batch}_{mode}"
+                         for batch in (1, 16) for mode in ("seed", "recover", "empty")]
+            completed = [args.out / f"{label}.json" for label in expected
+                         if (args.out / f"{label}.json").exists()]
+            if completed:
+                if len(completed) != len(expected) or any(
+                        json.loads(path.read_text())["status"] != "valid-diagnostic" for path in completed):
+                    raise RuntimeError(f"partial {key} engine cannot be resumed; use fresh containers/capture")
+                continue
         activate(key)
-        resource_dir = args.out / "queue-resources"
+        resource_dir = args.out / (f"queue-resources-resume-{resume_stamp}" if args.resume_queues else "queue-resources")
         resource_dir.mkdir(exist_ok=True)
         resources = Resources(resource_dir, names[key], names["client"])
         try:
