@@ -180,7 +180,7 @@ fn operational_store_from_embedded_artifact(
     path: &Path,
     config: UnifiedStoreConfig,
 ) -> Result<Option<UnifiedStore>, Box<dyn std::error::Error>> {
-    let artifact = match crate::storage::EmbeddedRdbArtifact::open(path) {
+    let artifact = match crate::storage::EmbeddedRdbArtifact::try_open(path) {
         Ok(artifact) => artifact,
         Err(_) => return Ok(None),
     };
@@ -346,10 +346,9 @@ impl RedDB {
                 "bounded disk residency requires standalone single-file local storage".into(),
             );
         }
-        // Format probes use the embedded reader's blocking publication lock.
-        // A native writer holds its data lock for its whole lifetime, so reject
-        // it before probing instead of waiting indefinitely (POSIX flock).
-        // Keep this shared fence until the native pager owns its own lock.
+        // Readers keep a shared fence across format probes until the native
+        // pager owns its lock. The probes themselves are nonblocking, including
+        // for writable opens: native writers hold the data lock for their lifetime.
         let _read_only_open_lock = if options.read_only {
             let file = File::open(options.resolved_path(reddb_file::default_database_path()))?;
             fs2::FileExt::try_lock_shared(&file)?;
@@ -502,7 +501,7 @@ impl RedDB {
                 || Self::is_binary_dump(&path_buf)?
                 // Detect the embedded container without validating/copying its
                 // snapshot a second time before the actual open below.
-                || crate::storage::EmbeddedRdbArtifact::open_strict_manifest(&path_buf).is_ok())
+                || crate::storage::EmbeddedRdbArtifact::try_open_strict_manifest(&path_buf).is_ok())
         {
             Some(reddb_file::EmbeddedRdbWriterLock::acquire(&path_buf)?)
         } else {
@@ -521,7 +520,7 @@ impl RedDB {
             }
             if path_buf.exists()
                 && (Self::is_binary_dump(&path_buf)?
-                    || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+                    || crate::storage::EmbeddedRdbArtifact::try_open(&path_buf).is_ok())
             {
                 return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
             }
@@ -534,7 +533,7 @@ impl RedDB {
         } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
                 let validation_started = std::time::Instant::now();
-                match crate::storage::EmbeddedRdbArtifact::open_with_snapshot(&path_buf) {
+                match crate::storage::EmbeddedRdbArtifact::try_open_with_snapshot(&path_buf) {
                     Ok((artifact, snapshot)) => {
                         crate::storage::unified::store::trace_startup_phase(
                             &path_buf,

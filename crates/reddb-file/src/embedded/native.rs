@@ -170,6 +170,14 @@ impl EmbeddedRdbArtifact {
         Self::open_inner(path, true)
     }
 
+    /// Probe a format without waiting on a native pager's lifetime writer lock.
+    pub fn try_open(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        FileExt::try_lock_shared(&file)?;
+        Self::open_inner_with_file(&mut NativeFile(&mut file), path, true)
+    }
+
     /// Open the selected snapshot and return the validated image.
     pub fn open_with_snapshot(
         path: impl AsRef<Path>,
@@ -177,6 +185,16 @@ impl EmbeddedRdbArtifact {
         let path = path.as_ref();
         let mut file = File::open(path)?;
         FileExt::lock_shared(&file)?;
+        Self::open_inner_with_snapshot(&mut NativeFile(&mut file), path)
+    }
+
+    /// Nonblocking format probe that also reads the validated snapshot.
+    pub fn try_open_with_snapshot(
+        path: impl AsRef<Path>,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        FileExt::try_lock_shared(&file)?;
         Self::open_inner_with_snapshot(&mut NativeFile(&mut file), path)
     }
 
@@ -217,8 +235,20 @@ impl EmbeddedRdbArtifact {
 
     pub fn open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
         FileExt::lock_shared(&file)?;
+        Self::open_strict_manifest_file(file, path)
+    }
+
+    /// Nonblocking format probe without reading the snapshot payload twice.
+    pub fn try_open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        FileExt::try_lock_shared(&file)?;
+        Self::open_strict_manifest_file(file, path)
+    }
+
+    fn open_strict_manifest_file(mut file: File, path: &Path) -> RdbFileResult<EmbeddedRdbOpen> {
         let selected_superblock = [
             read_superblock_copy(&mut NativeFile(&mut file), 0)?,
             read_superblock_copy(&mut NativeFile(&mut file), 1)?,

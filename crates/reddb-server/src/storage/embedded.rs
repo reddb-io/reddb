@@ -72,6 +72,24 @@ impl EmbeddedRdbArtifact {
         map_result(reddb_file::EmbeddedRdbArtifact::open(path))
     }
 
+    pub(crate) fn try_open(path: impl AsRef<Path>) -> RedDBResult<EmbeddedRdbOpen> {
+        map_result(reddb_file::EmbeddedRdbArtifact::try_open(path))
+    }
+
+    pub(crate) fn try_open_with_snapshot(
+        path: impl AsRef<Path>,
+    ) -> RedDBResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
+        map_result(reddb_file::EmbeddedRdbArtifact::try_open_with_snapshot(
+            path,
+        ))
+    }
+
+    pub(crate) fn try_open_strict_manifest(path: impl AsRef<Path>) -> RedDBResult<EmbeddedRdbOpen> {
+        map_result(reddb_file::EmbeddedRdbArtifact::try_open_strict_manifest(
+            path,
+        ))
+    }
+
     pub fn open_with_snapshot(
         path: impl AsRef<Path>,
     ) -> RedDBResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {

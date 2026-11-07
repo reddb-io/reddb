@@ -185,6 +185,10 @@ fn forks_reject_read_only_transactions_and_busy_destinations() {
         .expect("path")
         .expect("fork");
     let child = RedDBRuntime::with_options(options(&child_path, preset)).expect("child");
+    // Even a format probe through a different profile must reject a live writer.
+    assert!(
+        RedDBRuntime::with_options(options(&child_path, StorageDeployPreset::Embedded)).is_err()
+    );
     assert!(runtime.promote_fork_store("busy").is_err());
     assert!(runtime.drop_fork_store("busy").is_err());
     assert_eq!(values(&child), ["original"]);
