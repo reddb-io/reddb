@@ -61,14 +61,12 @@ fn queue_dedup_and_capacity_recover_after_acknowledged_process_exit() {
         let delivery = runtime
             .execute_query("QUEUE READ jobs GROUP workers CONSUMER worker COUNT 1")
             .expect("deliver");
-        let delivery_id = match delivery.result.records[0].get("delivery_id") {
+        let message_id = match delivery.result.records[0].get("message_id") {
             Some(reddb_types::Value::Text(value)) => value.to_string(),
             other => panic!("delivery id: {other:?}"),
         };
         runtime
-            .execute_query(&format!(
-                "QUEUE ACK jobs WITH delivery_id = '{delivery_id}'"
-            ))
+            .execute_query(&format!("QUEUE ACK jobs GROUP workers '{message_id}'"))
             .expect("acknowledged ACK");
         runtime
             .execute_query("QUEUE PUSH jobs 'kept' DEDUP 'surviving-key'")

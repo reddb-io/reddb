@@ -810,10 +810,7 @@ impl QueueStore for PrimaryQueueStore {
         // queue message keeps the trait surface total — the caller
         // shouldn't have to handle "deleted underneath us" here.
         let store = self.store();
-        let Some(manager) = store.get_collection(queue) else {
-            return DEFAULT_READ_MAX_ATTEMPTS;
-        };
-        let Some(entity) = manager.get(EntityId::new(message_id)) else {
+        let Some(entity) = store.get(queue, EntityId::new(message_id)) else {
             return DEFAULT_READ_MAX_ATTEMPTS;
         };
         match entity.data {
@@ -882,8 +879,9 @@ impl QueueStore for PrimaryQueueStore {
 
     fn read_message(&self, queue: &str, message_id: MessageId) -> Option<Value> {
         let store = self.store();
-        let manager = store.get_collection(queue)?;
-        let entity = manager.get(EntityId::new(message_id))?;
+        // Queue selection can return a disk-only message after cold boot.
+        // The store lookup merges the resident overlay with the paged base.
+        let entity = store.get(queue, EntityId::new(message_id))?;
         match entity.data {
             EntityData::QueueMessage(data) if !data.acked => Some(data.payload),
             _ => None,
@@ -1485,7 +1483,7 @@ mod tests {
             .expect("profile");
         let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
         runtime
-            .execute_query("CREATE QUEUE indexed_queue")
+            .execute_query("CREATE QUEUE indexed_queue MAX_ATTEMPTS 7")
             .expect("queue");
         push(&runtime, "indexed_queue", "first");
         push(&runtime, "indexed_queue", "second");
@@ -1527,6 +1525,11 @@ mod tests {
                 .is_some()
         );
         let store = PrimaryQueueStore::new(reopened);
+        assert_eq!(
+            store.read_message("indexed_queue", message_id),
+            Some(Value::text("first"))
+        );
+        assert_eq!(store.read_max_attempts("indexed_queue", message_id), 7);
         let restored = store
             .read_pending_attempt(&delivery_id)
             .expect("pending after reopen");

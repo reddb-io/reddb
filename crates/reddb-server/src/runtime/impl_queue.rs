@@ -2574,7 +2574,7 @@ fn queue_capacity_reached_by_scan(
         reddb_rql::ast::PolicyTargetKind::Messages,
     );
     if runtime.is_rls_enabled(queue) && policy.is_none() {
-        return Ok(false);
+        return Ok(limit == 0);
     }
     let mut count = 0usize;
     manager.try_scan_for_each(
