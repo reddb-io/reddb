@@ -650,6 +650,7 @@ impl RedDBRuntime {
         // restart. Runs after the system-keyed collections bootstrap
         // and before the API opens.
         runtime.rehydrate_materialized_view_descriptors()?;
+        runtime.recover_store_forks()?;
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }

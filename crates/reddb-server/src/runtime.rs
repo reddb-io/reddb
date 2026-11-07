@@ -1650,6 +1650,7 @@ mod impl_replication_commit;
 mod impl_runtime_index_registry;
 mod impl_telemetry_accessors;
 mod impl_tenant_registry;
+mod store_forks;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]

@@ -125,21 +125,13 @@ pub(super) fn analytics_sources_snapshot(
 }
 
 pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
-    let db = runtime.db();
-    let Some(path) = db.options().data_path.as_ref() else {
-        return Ok(Vec::new());
-    };
     let schema = Arc::new(
         FORK_COLUMNS
             .iter()
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let forks = db
-        .store()
-        .operational_manifest_for_path(path)
-        .list_forks()
-        .map_err(RedDBError::Io)?;
+    let forks = runtime.list_store_forks()?;
     Ok(forks
         .into_iter()
         .map(|fork| {

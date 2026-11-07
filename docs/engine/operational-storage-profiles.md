@@ -8,6 +8,27 @@
 > Retention uses bounded row deletes through the regular WAL path. Physical
 > metadata sidecars are imported into the database before checkpointed cleanup.
 
+## Current independent store forks
+
+`FORK STORE AS experiment` creates an independent `.rdb` and reports its path.
+The parent catalog and child origin live in `red.storage.forks`, protected by
+their respective WAL/checkpoint boundaries. Opening the returned database uses
+the normal RedDB APIs and the same storage profile as the source. Data and
+collection contracts are copied from a committed checkpoint; later parent and
+fork writes are isolated. Creation copies the database rather than promising
+constant-time branching.
+
+`DROP FORK experiment` discards an owned fork. The library's
+`detach_fork_store` releases it as an independent database. `PROMOTE FORK
+experiment` returns the replacement database path: reopen the server with that
+path to use it as primary. The old database stays available for rollback.
+An active writer on the fork must close before detach, promotion or drop.
+
+`AT LSN` accepts the current committed LSN. Earlier points require retained
+backup/WAL restore; future points are rejected. `red.forks` lists ready forks
+and preserves read-only visibility of legacy external forks. New mutations do
+not write the historical operational layout described below.
+
 
 > [!NOTE]
 > This page describes a **target storage design**, not the current shipped
