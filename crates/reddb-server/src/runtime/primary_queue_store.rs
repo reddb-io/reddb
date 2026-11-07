@@ -1100,10 +1100,11 @@ impl QueueStore for PrimaryQueueStore {
             .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))
     }
 
-    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Result<Option<MessageId>> {
         let store = self.runtime.db().store();
         super::impl_queue::find_queue_dedup(store.as_ref(), queue, dedup_key, now_ns)
-            .map(|id| id.raw())
+            .map(|id| id.map(|id| id.raw()))
+            .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))
     }
 
     fn record_dedup(

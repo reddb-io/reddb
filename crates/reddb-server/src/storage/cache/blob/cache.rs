@@ -758,14 +758,14 @@ impl BlobCache {
         let dependencies = input.dependencies.clone();
 
         let shard_idx = self.shard_index(&key);
-        let mut shard = self.shards[shard_idx].write();
-        shard.clear_l2_hit_marker(&key);
-        self.check_version(
-            &shard,
-            &key,
-            input.policy.version_value(),
-            namespace_generation,
-        )?;
+        if self.l2.is_some() {
+            self.check_version(
+                &self.shards[shard_idx].read(),
+                &key,
+                input.policy.version_value(),
+                namespace_generation,
+            )?;
+        }
         let entry = Entry::new(
             input.bytes,
             input.content_metadata,
@@ -778,15 +778,14 @@ impl BlobCache {
             &key.key,
         );
         let entry_size = entry.size;
-        if let Some(l2) = &self.l2 {
-            let old_l2_size = l2.record_size(&key);
+        let compressed = if self.l2.is_some() {
             // Compression decision happens in the foreground put — the
             // outcome (`Compressed::Raw` or `Compressed::Zstd`) is what
             // gets framed and written to the chain (#192). When the knob
             // is `Off`, skip the compressor entirely (CPU savings) and
             // emit a `Raw` variant directly so the on-disk format stays
             // uniform.
-            let compressed = match self.config.l2_compression {
+            Some(match self.config.l2_compression {
                 L2Compression::Off => Compressed::Raw(entry.bytes.as_ref().to_vec()),
                 L2Compression::On => {
                     let content_type = entry
@@ -801,7 +800,23 @@ impl BlobCache {
                     )
                     .map_err(|err| CacheError::L2Io(err.to_string()))?
                 }
-            };
+            })
+        } else {
+            None
+        };
+        let mut shard = self.shards[shard_idx].write();
+        // Another writer may have published while compression ran. Recheck
+        // under the publication guard before changing either cache tier.
+        self.check_version(
+            &shard,
+            &key,
+            input.policy.version_value(),
+            namespace_generation,
+        )?;
+        shard.clear_l2_hit_marker(&key);
+        if let Some(l2) = &self.l2 {
+            let old_l2_size = l2.record_size(&key);
+            let compressed = compressed.expect("L2 payload prepared before publication");
             match l2.put(&key, &entry, old_l2_size, compressed) {
                 Ok(()) => {}
                 Err(err @ CacheError::L2Full { .. }) => {
@@ -854,6 +869,14 @@ impl BlobCache {
     fn get_at(&self, namespace: &str, key: &str, now_ms: u64) -> Option<BlobCacheHit> {
         let namespace_generation = self.current_generation(namespace);
         let shard_idx = self.shard_index_parts(namespace, key);
+        if let Some(hit) =
+            self.shards[shard_idx]
+                .read()
+                .shared_hit(namespace, key, now_ms, namespace_generation)
+        {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(hit);
+        }
         let mut shard = self.shards[shard_idx].write();
         match shard.get_by_parts(namespace, key, now_ms, namespace_generation) {
             Lookup::Hit(hit) => {

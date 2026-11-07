@@ -16,11 +16,18 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 pub(super) const META_COLLECTION: &str = "red.queue.meta";
+const CAPACITY: &str = "\0reddb/queue-capacity-v1";
+const CAPACITY_DEFINITION: &[u8] = b"queue-capacity-v1:message:xmin:xmax:hidden";
 const POSITION_ASC: &str = "\0reddb/queue-position-asc-v1";
 const POSITION_DESC: &str = "\0reddb/queue-position-desc-v1";
 const META_MESSAGE: &str = "\0reddb/queue-meta-message-v1";
 const META_GROUP: &str = "\0reddb/queue-meta-group-v1";
 const META_DELIVERY: &str = "\0reddb/queue-meta-delivery-v1";
+const META_DEDUP: &str = "\0reddb/queue-dedup-v1";
+const META_DEDUP_EXPIRY: &str = "\0reddb/queue-dedup-expiry-v1";
+const META_DEDUP_DEFINITION: &[u8] = b"queue-dedup-v1:queue-sha256:key-sha256";
+const META_DEDUP_EXPIRY_DEFINITION: &[u8] =
+    b"queue-dedup-v1:queue-sha256:expiry-be64:missing-zero:id-be64";
 const META_DEADLINE: &str = "\0reddb/queue-meta-deadline-v1";
 const POSITION_ASC_DEFINITION: &[u8] = b"queue-position-v1:position-be64:id-be64";
 const POSITION_DESC_DEFINITION: &[u8] = b"queue-position-v1:not-position-be64:not-id-be64";
@@ -171,6 +178,58 @@ impl SecondaryIndexProjector for MetaDeadlineProjection {
     }
 }
 
+struct DedupProjection {
+    expiry: bool,
+}
+
+impl SecondaryIndexProjector for DedupProjection {
+    fn project(
+        &self,
+        entity: &UnifiedEntity,
+        key: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+    ) -> Result<Option<usize>, StoreError> {
+        let Some((queue, dedup_key, expires)) =
+            reddb_engine::storage::segment_key_lookup::SegmentKeyLookup::queue_dedup(entity)
+        else {
+            return Ok(None);
+        };
+        key[0] = 1;
+        key[1..33].copy_from_slice(&digest(queue));
+        if self.expiry {
+            key[33..41].copy_from_slice(&expires.to_be_bytes());
+            key[41..49].copy_from_slice(&entity.id.raw().to_be_bytes());
+            Ok(Some(49))
+        } else if let Some(dedup_key) = dedup_key {
+            key[33..65].copy_from_slice(&digest(dedup_key));
+            Ok(Some(65))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+struct CapacityProjection;
+
+impl SecondaryIndexProjector for CapacityProjection {
+    fn project(
+        &self,
+        entity: &UnifiedEntity,
+        key: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+    ) -> Result<Option<usize>, StoreError> {
+        if !matches!(entity.kind, EntityKind::QueueMessage { .. })
+            || !matches!(entity.data, EntityData::QueueMessage(_))
+        {
+            return Ok(None);
+        }
+        key[..8].copy_from_slice(&entity.xmin.to_be_bytes());
+        key[8..16].copy_from_slice(&entity.xmax.to_be_bytes());
+        key[16] = u8::from(reddb_engine::storage::visibility::entity_moderation_hidden(
+            entity,
+        ));
+        Ok(Some(17))
+    }
+}
+
 fn enabled(runtime: &RedDBRuntime) -> bool {
     let store = runtime.db().store();
     store.config().resident_memory_bytes_max.is_some() && store.pager().is_some()
@@ -221,6 +280,12 @@ pub(super) fn prepare_queue_store(store: &UnifiedStore, queue: &str) -> RedDBRes
         identity(POSITION_DESC_DEFINITION),
         Arc::new(PositionProjection { descending: true }),
     )?;
+    store.register_secondary_index(
+        queue,
+        CAPACITY,
+        identity(CAPACITY_DEFINITION),
+        Arc::new(CapacityProjection),
+    )?;
     Ok(())
 }
 
@@ -260,6 +325,18 @@ pub(super) fn prepare_meta_store(store: &UnifiedStore) -> RedDBResult<()> {
         META_DEADLINE,
         identity(META_DEADLINE_DEFINITION),
         Arc::new(MetaDeadlineProjection),
+    )?;
+    store.register_secondary_index(
+        META_COLLECTION,
+        META_DEDUP,
+        identity(META_DEDUP_DEFINITION),
+        Arc::new(DedupProjection { expiry: false }),
+    )?;
+    store.register_secondary_index(
+        META_COLLECTION,
+        META_DEDUP_EXPIRY,
+        identity(META_DEDUP_EXPIRY_DEFINITION),
+        Arc::new(DedupProjection { expiry: true }),
     )?;
     Ok(())
 }
@@ -528,6 +605,192 @@ pub(super) fn deadline_rows(
     Ok(Some(out))
 }
 
+/// At most `limit` matching source rows leave this function. A missing old
+/// disk projection uses the fallible source visitor until its first checkpoint.
+pub(super) fn dedup_rows(
+    store: &UnifiedStore,
+    queue: &str,
+    dedup_key: Option<&str>,
+    now: u64,
+    limit: usize,
+) -> RedDBResult<Vec<(EntityId, Option<u64>)>> {
+    assert!(limit > 0, "dedup read limit must be positive");
+    let _publication = store.vault_publication_lock.lock();
+    let Some(manager) = store.get_collection(META_COLLECTION) else {
+        return Ok(Vec::new());
+    };
+    let snapshot = dedup_key.and_then(|_| super::impl_core::capture_current_snapshot());
+    let mut out = Vec::new();
+    let mut visit = |entity: &UnifiedEntity| {
+        let Some((candidate_queue, candidate_key, expires)) =
+            reddb_engine::storage::segment_key_lookup::SegmentKeyLookup::queue_dedup(entity)
+        else {
+            return true;
+        };
+        if candidate_queue == queue
+            && dedup_key.map_or(expires <= now, |key| {
+                candidate_key == Some(key) && expires > now
+            })
+        {
+            let message = entity
+                .data
+                .as_row()
+                .and_then(|row| row_u64(row, "message_id"));
+            if dedup_key.is_none() || message.is_some() {
+                out.push((entity.id, message));
+            }
+        }
+        out.len() < limit
+    };
+    let (name, definition) = if dedup_key.is_some() {
+        (META_DEDUP, META_DEDUP_DEFINITION)
+    } else {
+        (META_DEDUP_EXPIRY, META_DEDUP_EXPIRY_DEFINITION)
+    };
+    let index = store.secondary_index(META_COLLECTION, name, &identity(definition));
+    if manager.backing_root_page().is_some() && index.is_none() {
+        if dedup_key.is_some() {
+            manager.try_scan_for_each(snapshot.as_ref(), read_limit(&manager), &mut visit)?;
+        } else {
+            manager.try_for_each_entity(read_limit(&manager), &mut visit)?;
+        }
+        return Ok(out);
+    }
+    if let Some(index) = index {
+        let queue_hash = digest(queue);
+        let mut lower = vec![1];
+        lower.extend_from_slice(&queue_hash);
+        if let Some(key) = dedup_key {
+            lower.extend_from_slice(&digest(key));
+            let mut cursor = index.candidates(&lower)?;
+            while let Some(id) = cursor.next_id()? {
+                if manager.backing_row_is_shadowed(id) {
+                    continue;
+                }
+                let Some(entity) = manager.try_get(id, read_limit(&manager))? else {
+                    continue;
+                };
+                if SegmentManager::scan_entity_visible(snapshot.as_ref(), &entity)
+                    && !visit(&entity)
+                {
+                    return Ok(out);
+                }
+            }
+        } else {
+            // Include the physical ID in the projection so equal deadlines
+            // can resume without rescanning their prefix or skipping siblings.
+            let mut upper = lower.clone();
+            upper.extend_from_slice(&now.to_be_bytes());
+            upper.extend_from_slice(&u64::MAX.to_be_bytes());
+            let root = index.root_page_id();
+            let mut cursors = store.queue_dedup_cursors.lock();
+            let resume = cursors
+                .get(&queue_hash)
+                .filter(|(prior_root, _)| *prior_root == root)
+                .map(|(_, key)| *key);
+            let lower_bound = resume
+                .as_ref()
+                .map_or(Bound::Included(lower.as_slice()), |key| {
+                    Bound::Excluded(key.as_slice())
+                });
+            let mut cursor = index.ordered_range(lower_bound, Bound::Included(upper.as_slice()))?;
+            let mut posting = [0; SECONDARY_KEY_BYTES_MAX];
+            for _ in 0..limit {
+                let Some((length, id)) = cursor.next_posting(&mut posting)? else {
+                    cursors.remove(&queue_hash);
+                    break;
+                };
+                if length != 49 {
+                    return Err(RedDBError::Internal(
+                        "invalid dedup expiration projection".into(),
+                    ));
+                }
+                let entity = if manager.backing_row_is_shadowed(id) {
+                    None
+                } else {
+                    manager.try_get(id, read_limit(&manager))?
+                };
+                // Cap cursor memory independently of the number/name sizes of queues.
+                if cursors.len() >= 256 && !cursors.contains_key(&queue_hash) {
+                    if let Some(victim) = cursors.keys().next().copied() {
+                        cursors.remove(&victim);
+                    }
+                }
+                cursors.insert(
+                    queue_hash,
+                    (root, posting[..49].try_into().expect("49-byte cursor")),
+                );
+                if let Some(entity) = entity {
+                    if !visit(&entity) {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+    }
+    manager.visit_queue_dedup(queue, dedup_key, now, snapshot.as_ref(), visit);
+    Ok(out)
+}
+
+/// Capacity checks need visibility, never message bodies or ordering metadata.
+/// Policy/SSI callers retain their source-row checks instead of using this path.
+pub(super) fn capacity_reached(
+    runtime: &RedDBRuntime,
+    queue: &str,
+    limit: usize,
+) -> RedDBResult<Option<bool>> {
+    let snapshot = super::impl_core::capture_current_snapshot();
+    if runtime.is_rls_enabled(queue)
+        || snapshot
+            .as_ref()
+            .is_some_and(|context| context.serializable_reader.is_some())
+    {
+        return Ok(None);
+    }
+    let store = runtime.db().store();
+    let _publication = store.vault_publication_lock.lock();
+    let Some(manager) = store.get_collection(queue) else {
+        return Ok(None);
+    };
+    let index = store.secondary_index(queue, CAPACITY, &identity(CAPACITY_DEFINITION));
+    if manager.backing_root_page().is_some() && index.is_none() {
+        return Ok(None);
+    }
+    let mut count = 0usize;
+    if let Some(index) = index {
+        let mut cursor = index.ordered_range(Bound::Unbounded, Bound::Unbounded)?;
+        let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+        while let Some((length, id)) = cursor.next_posting(&mut key)? {
+            if length != 17 || key[16] > 1 {
+                return Err(RedDBError::Internal(
+                    "invalid queue capacity projection".into(),
+                ));
+            }
+            if manager.backing_row_is_shadowed(id) || key[16] != 0 {
+                continue;
+            }
+            let xmin = u64::from_be_bytes(key[..8].try_into().expect("eight-byte xmin"));
+            let xmax = u64::from_be_bytes(key[8..16].try_into().expect("eight-byte xmax"));
+            let visible = snapshot.as_ref().map_or(xmax == 0, |context| {
+                reddb_engine::transaction::read::visibility_check(context, xmin, xmax)
+            });
+            count += usize::from(visible);
+            if count >= limit {
+                return Ok(Some(true));
+            }
+        }
+    }
+    manager.scan_for_each(snapshot.as_ref(), |entity| {
+        if matches!(entity.kind, EntityKind::QueueMessage { .. })
+            && matches!(entity.data, EntityData::QueueMessage(_))
+        {
+            count += 1;
+        }
+        count < limit
+    });
+    Ok(Some(count >= limit))
+}
+
 pub(super) fn ordered_messages(
     runtime: &RedDBRuntime,
     queue: &str,
@@ -641,6 +904,13 @@ pub(super) fn position_boundary(
 #[cfg(test)]
 pub(super) fn published_roots(store: &UnifiedStore, queue: &str) -> Option<Vec<u32>> {
     [
+        (queue, CAPACITY, identity(CAPACITY_DEFINITION)),
+        (META_COLLECTION, META_DEDUP, identity(META_DEDUP_DEFINITION)),
+        (
+            META_COLLECTION,
+            META_DEDUP_EXPIRY,
+            identity(META_DEDUP_EXPIRY_DEFINITION),
+        ),
         (queue, POSITION_ASC, identity(POSITION_ASC_DEFINITION)),
         (queue, POSITION_DESC, identity(POSITION_DESC_DEFINITION)),
         (
@@ -668,3 +938,6 @@ pub(super) fn published_roots(store: &UnifiedStore, queue: &str) -> Option<Vec<u
     })
     .collect()
 }
+
+#[cfg(test)]
+mod tests;

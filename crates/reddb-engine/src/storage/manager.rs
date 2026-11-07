@@ -2255,6 +2255,38 @@ impl SegmentManager {
         best.map(|(_, projected)| projected)
     }
 
+    /// Indexed resident producer-dedup lookup; disk candidates are merged by
+    /// the store. The callback borrows rows under the segment read guard.
+    #[doc(hidden)]
+    pub fn visit_queue_dedup(
+        &self,
+        queue: &str,
+        key: Option<&str>,
+        now: u64,
+        snapshot: Option<&SnapshotContext>,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) {
+        let mut visible = |entity: &UnifiedEntity| {
+            (key.is_some() && !Self::scan_entity_visible(snapshot, entity)) || visit(entity)
+        };
+        if let Some(growing) = self.growing.read().as_ref() {
+            if !growing
+                .read()
+                .visit_queue_dedup(queue, key, now, &mut visible)
+            {
+                return;
+            }
+        }
+        for segment in self.sealed.read().iter() {
+            if !segment
+                .read()
+                .visit_queue_dedup(queue, key, now, &mut visible)
+            {
+                return;
+            }
+        }
+    }
+
     /// Collect visible graph items, pruning only under the segment read guard.
     #[doc(hidden)]
     pub fn scan_graph_kind(

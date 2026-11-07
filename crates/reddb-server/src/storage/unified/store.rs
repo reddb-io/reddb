@@ -332,6 +332,8 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
     secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    /// Disposable, bounded expiration cursors; never authoritative metadata.
+    pub(crate) queue_dedup_cursors: parking_lot::Mutex<HashMap<[u8; 32], (u32, [u8; 49])>>,
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,

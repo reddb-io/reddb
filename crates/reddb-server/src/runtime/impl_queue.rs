@@ -991,7 +991,7 @@ impl RedDBRuntime {
                     let now = now_ns();
                     reclaim_expired_queue_dedup(store.as_ref(), queue, now)?;
                     if let Some(existing_id) =
-                        find_queue_dedup(store.as_ref(), queue, dedup_key, now)
+                        find_queue_dedup(store.as_ref(), queue, dedup_key, now)?
                     {
                         let mut result = UnifiedResult::with_columns(vec![
                             "message_id".into(),
@@ -1024,10 +1024,15 @@ impl RedDBRuntime {
                     }
                 }
                 if let Some(max_size) = config.max_size {
-                    let current_len =
-                        load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                            .len();
-                    if current_len >= max_size {
+                    let full = match super::queue_storage_index::capacity_reached(
+                        self, queue, max_size,
+                    )? {
+                        Some(full) => full,
+                        None => {
+                            queue_capacity_reached_by_scan(self, store.as_ref(), queue, max_size)?
+                        }
+                    };
+                    if full {
                         return Err(RedDBError::Query(format!(
                             "queue '{}' is full (max_size={max_size})",
                             queue
@@ -2557,6 +2562,52 @@ fn load_queue_message_views(
 /// autocommit / embedded paths that only have the raw store (e.g.
 /// purge loops) we skip RLS because there's no session identity
 /// to match against.
+fn queue_capacity_reached_by_scan(
+    runtime: &RedDBRuntime,
+    store: &UnifiedStore,
+    queue: &str,
+    limit: usize,
+) -> RedDBResult<bool> {
+    let manager = store
+        .get_collection(queue)
+        .ok_or_else(|| RedDBError::NotFound(format!("queue '{queue}' not found")))?;
+    let snapshot = super::impl_core::capture_current_snapshot();
+    let policy = super::impl_core::rls_policy_filter_for_kind(
+        runtime,
+        queue,
+        reddb_rql::ast::PolicyAction::Select,
+        reddb_rql::ast::PolicyTargetKind::Messages,
+    );
+    if runtime.is_rls_enabled(queue) && policy.is_none() {
+        return Ok(false);
+    }
+    let mut count = 0usize;
+    manager.try_scan_for_each(
+        snapshot.as_ref(),
+        manager.backing_read_bytes_max().unwrap_or(usize::MAX),
+        |entity| {
+            if !matches!(entity.kind, EntityKind::QueueMessage { .. })
+                || !matches!(entity.data, EntityData::QueueMessage(_))
+            {
+                return true;
+            }
+            if policy.as_ref().is_none_or(|filter| {
+                super::query_exec::evaluate_entity_filter_with_db(
+                    Some(&runtime.inner.db),
+                    entity,
+                    filter,
+                    queue,
+                    queue,
+                )
+            }) {
+                count += 1;
+            }
+            count < limit
+        },
+    )?;
+    Ok(count >= limit)
+}
+
 pub(super) fn load_queue_message_views_with_runtime(
     runtime: Option<&RedDBRuntime>,
     store: &UnifiedStore,
@@ -3192,24 +3243,11 @@ pub(super) fn reclaim_expired_queue_dedup(
     queue: &str,
     now_ns: u64,
 ) -> RedDBResult<usize> {
-    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
-        return Ok(0);
-    };
-    let queue = queue.to_string();
-    let rows = manager.query_all(|entity| {
-        entity.data.as_row().is_some_and(|row| {
-            row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
-                && row_text(row, "queue").as_deref() == Some(&queue)
-                && row_u64(row, "expires_at_ns")
-                    .map(|expires_at| expires_at <= now_ns)
-                    .unwrap_or(true)
-        })
-    });
+    // Expiry is authoritative at lookup even while cleanup has a backlog.
+    let rows = super::queue_storage_index::dedup_rows(store, queue, None, now_ns, 64)?;
     let count = rows.len();
-    for row in rows {
-        store
-            .delete(QUEUE_META_COLLECTION, row.id)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    for (id, _) in rows {
+        store.delete(QUEUE_META_COLLECTION, id)?;
     }
     Ok(count)
 }
@@ -3219,28 +3257,14 @@ pub(super) fn find_queue_dedup(
     queue: &str,
     dedup_key: &str,
     now_ns: u64,
-) -> Option<EntityId> {
-    let manager = store.get_collection(QUEUE_META_COLLECTION)?;
-    let queue = queue.to_string();
-    let dedup_key = dedup_key.to_string();
-    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
-    manager
-        .scan(snap_ctx.as_ref(), |entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "kind").as_deref() == Some(KIND_QUEUE_PUSH_DEDUP)
-                    && row_text(row, "queue").as_deref() == Some(&queue)
-                    && row_text(row, "dedup_key").as_deref() == Some(&dedup_key)
-                    && row_u64(row, "expires_at_ns")
-                        .map(|expires_at| expires_at > now_ns)
-                        .unwrap_or(false)
-            })
-        })
-        .into_iter()
-        .filter_map(|entity| {
-            let row = entity.data.as_row()?;
-            row_u64(row, "message_id").map(EntityId::new)
-        })
-        .next()
+) -> RedDBResult<Option<EntityId>> {
+    Ok(
+        super::queue_storage_index::dedup_rows(store, queue, Some(dedup_key), now_ns, 1)?
+            .into_iter()
+            .next()
+            .and_then(|(_, message)| message)
+            .map(EntityId::new),
+    )
 }
 
 pub(super) fn record_queue_dedup(
