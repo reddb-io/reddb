@@ -618,9 +618,8 @@ impl RedDBRuntime {
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
-        runtime.prepare_paged_counts()?;
-        // Registry restoration can checkpoint missing projections on any
-        // collection. Register every internal projector before that epoch.
+        // Registry restoration can checkpoint missing required projections.
+        // Register their projectors before that epoch.
         super::control_event_index::prepare(&runtime)?;
         super::queue_storage_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
@@ -636,6 +635,10 @@ impl RedDBRuntime {
                 .store()
                 .checkpoint_missing_secondary_indices()?;
         }
+        // COUNT has a correct scan fallback. Register its optional projection
+        // for the next checkpoint without backfilling every existing row on
+        // the readiness path.
+        runtime.prepare_paged_counts()?;
         runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()

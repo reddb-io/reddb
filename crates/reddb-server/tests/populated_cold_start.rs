@@ -144,6 +144,11 @@ fn populated_startup_child() {
         return;
     };
     limit_memory();
+    if std::env::var_os("REDDB_POPULATED_STARTUP_TRACE").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("reddb::storage::startup=debug")
+            .try_init();
+    }
     let path = Path::new(&path);
     let rows: u64 = std::env::var("REDDB_POPULATED_STARTUP_ROWS")
         .unwrap()
@@ -210,6 +215,15 @@ fn populated_startup_child() {
             store.persist().expect("publish derived roots");
         }
         eprintln!("phase={phase} ready={ready:?} first_samples={first_samples:?} resident_segment_bytes={} peak_working_set_bytes={}", store.segment_memory_bytes(), peak_memory());
+        if phase == "runtime" {
+            let checkpoint = Instant::now();
+            runtime
+                .as_ref()
+                .unwrap()
+                .flush()
+                .expect("prepare visibility projection");
+            eprintln!("visibility_checkpoint={:?}", checkpoint.elapsed());
+        }
     }
     eprintln!(
         "phase={phase} elapsed={:?} peak_working_set_bytes={}",
@@ -222,7 +236,14 @@ fn run_fixture(rows: u64) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("populated.rdb");
     let legacy_runtime_path = directory.path().join("legacy-runtime.rdb");
-    for phase in ["seed", "runtime-legacy", "prepare", "open", "runtime"] {
+    for phase in [
+        "seed",
+        "runtime-legacy",
+        "prepare",
+        "open",
+        "runtime",
+        "runtime-reopen",
+    ] {
         eprintln!("starting phase={phase}");
         let phase_path = if phase == "runtime-legacy" {
             &legacy_runtime_path
