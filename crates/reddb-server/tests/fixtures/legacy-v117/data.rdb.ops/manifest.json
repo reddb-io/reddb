@@ -1,0 +1,15 @@
+{
+  "checksum": "e7152c4f",
+  "collections": {
+    "compatibility_fixture": {
+      "path": "compatibility_fixture.rcol",
+      "state": "active"
+    },
+    "red.topology.cluster": {
+      "path": "red.topology.cluster.rcol",
+      "state": "active"
+    }
+  },
+  "format_version": 1,
+  "generation": 2
+}
