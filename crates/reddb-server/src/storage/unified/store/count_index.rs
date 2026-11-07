@@ -7,6 +7,7 @@ use super::secondary_index::{
     SecondaryIndexIdentity, SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX,
 };
 use super::*;
+use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection, PagedCursor};
 use reddb_engine::storage::visibility::entity_moderation_hidden;
 use reddb_engine::transaction::read::{visibility_check, SnapshotContext};
 use sha2::{Digest, Sha256};
@@ -75,7 +76,178 @@ fn visible(snapshot: Option<&SnapshotContext>, xmin: u64, xmax: u64, hidden: boo
     !hidden && snapshot.map_or(xmax == 0, |context| visibility_check(context, xmin, xmax))
 }
 
+/// A private, retired tree is durably owned after each batch. It is never
+/// exposed as a secondary index until the complete source generation has been
+/// scanned. A crash leaves it in the ordinary retired-tree recovery ledger.
+pub(crate) struct CountBuild {
+    collection: String,
+    source: Arc<BTree>,
+    tree: Arc<BTree>,
+    cursor: PagedCursor<Pager>,
+    identity: SecondaryIndexIdentity,
+    projector: Arc<dyn SecondaryIndexProjector>,
+}
+
+impl CountBuild {
+    /// Decode at most 64 source rows outside the publication fence, then
+    /// publish only this small batch under a separate ownership epoch.
+    pub(crate) fn step(&mut self, store: &UnifiedStore) -> Result<bool, StoreError> {
+        let limit = usize::try_from(store.config.resident_memory_bytes_max.unwrap_or(0))
+            .unwrap_or(usize::MAX);
+        let mut postings = Vec::with_capacity(64);
+        let mut finished = false;
+        for _ in 0..64 {
+            let Some(record) = self.cursor.next_record(limit)? else {
+                finished = true;
+                break;
+            };
+            let (entity, _) = record.decode_with_budget(store.format_version(), limit)?;
+            let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+            if let Some(length) = self.projector.project(&entity, &mut key)? {
+                if length > key.len() {
+                    return Err(StoreError::Serialization(
+                        "count projection key too large".into(),
+                    ));
+                }
+                let mut posting = Vec::with_capacity(length + 8);
+                posting.extend_from_slice(&key[..length]);
+                posting.extend_from_slice(&entity.id.raw().to_be_bytes());
+                postings.push(posting);
+            }
+        }
+        let _publication = store.vault_publication_lock.lock();
+        let current = store.btree_indices.read().get(&self.collection).cloned();
+        let spec_matches = store
+            .secondary_index_specs
+            .read()
+            .get(&self.collection)
+            .and_then(|specs| specs.get(NAME))
+            .is_some_and(|spec| spec.deferred && spec.identity == self.identity);
+        if !current
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(source, &self.source))
+            || !spec_matches
+        {
+            return Ok(true);
+        }
+        let Some(commit) = &store.commit else {
+            return Ok(true);
+        };
+        let pager = store.pager.as_ref().expect("paged source");
+        let _ownership = pager.lock_ownership_mutations();
+        commit.force_sync().map_err(StoreError::Io)?;
+        let epoch = commit
+            .next_page_ownership_epoch(store)
+            .map_err(StoreError::Io)?;
+        commit
+            .begin_page_ownership_epoch(store, epoch)
+            .map_err(StoreError::Io)?;
+        struct Fence<'a> {
+            pager: &'a Pager,
+            active: bool,
+        }
+        impl Drop for Fence<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    self.pager.fence_interrupted_ownership();
+                }
+            }
+        }
+        let mut fence = Fence {
+            pager,
+            active: true,
+        };
+        for posting in postings {
+            self.tree
+                .insert(&posting, &[])
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_DURING_COUNT_BATCH").is_some() {
+            std::process::exit(183);
+        }
+        if finished {
+            let mut keys = store.key_indices.write();
+            let Some(generation) = keys.get_mut(&self.collection) else {
+                return Err(StoreError::Serialization(
+                    "count source generation disappeared".into(),
+                ));
+            };
+            if !generation.source.ptr_eq(&Arc::downgrade(&self.source)) {
+                return Err(StoreError::Serialization(
+                    "count source generation changed".into(),
+                ));
+            }
+            generation.secondary.insert(
+                NAME.to_string(),
+                super::secondary_index::PublishedSecondaryIndex {
+                    identity: self.identity.clone(),
+                    tree: Arc::clone(&self.tree),
+                },
+            );
+        } else {
+            store.retire_btree(Arc::clone(&self.tree));
+        }
+        store.flush_paged_registry()?;
+        commit
+            .finish_page_ownership_epoch(store, epoch)
+            .map_err(StoreError::Io)?;
+        fence.active = false;
+        Ok(finished)
+    }
+}
+
 impl UnifiedStore {
+    pub(crate) fn start_count_build(
+        &self,
+        collection: &str,
+    ) -> Result<Option<CountBuild>, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        let collection = Self::canonical_collection(collection);
+        let Some(spec) = self
+            .secondary_index_specs
+            .read()
+            .get(collection)
+            .and_then(|specs| specs.get(NAME))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if !spec.deferred
+            || self
+                .secondary_index(collection, NAME, &spec.identity)
+                .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(source) = self.btree_indices.read().get(collection).cloned() else {
+            return Ok(None);
+        };
+        if source.root_page_id() == 0 || self.commit.is_none() || self.is_read_only() {
+            return Ok(None);
+        }
+        if !self
+            .key_indices
+            .read()
+            .get(collection)
+            .is_some_and(|generation| generation.source.ptr_eq(&Arc::downgrade(&source)))
+        {
+            return Ok(None);
+        }
+        let source_view = PagedCollection::new(Arc::clone(&source));
+        let cursor = source_view.scan()?;
+        Ok(Some(CountBuild {
+            collection: collection.to_owned(),
+            source,
+            tree: Arc::new(BTree::new(Arc::clone(
+                self.pager.as_ref().expect("paged source"),
+            ))),
+            cursor,
+            identity: spec.identity,
+            projector: spec.projector,
+        }))
+    }
+
     /// The compact visibility inventory belongs to this exact immutable base.
     /// GC still rechecks any reclaimable posting against the current row.
     pub(super) fn count_visibility_cursor(
@@ -118,9 +290,25 @@ impl UnifiedStore {
         )
     }
 
+    /// Runtime COUNT projections are built incrementally by the background
+    /// worker; explicit storage callers retain synchronous checkpoint behavior.
+    pub(crate) fn register_count_index_deferred(&self, collection: &str) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        self.register_count_index(collection)?;
+        let collection = Self::canonical_collection(collection);
+        self.secondary_index_specs
+            .write()
+            .get_mut(collection)
+            .and_then(|specs| specs.get_mut(NAME))
+            .expect("registered count projection")
+            .deferred = true;
+        Ok(())
+    }
+
     /// None means the ordinary entity scan is required. In particular SSI
     /// readers retain per-entity logical read tracking on that existing path.
-    pub(crate) fn try_count_from_index(
+    #[doc(hidden)]
+    pub fn try_count_from_index(
         &self,
         collection: &str,
         snapshot: Option<&SnapshotContext>,

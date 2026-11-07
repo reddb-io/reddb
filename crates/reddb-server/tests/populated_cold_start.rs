@@ -216,13 +216,59 @@ fn populated_startup_child() {
         }
         eprintln!("phase={phase} ready={ready:?} first_samples={first_samples:?} resident_segment_bytes={} peak_working_set_bytes={}", store.segment_memory_bytes(), peak_memory());
         if phase == "runtime" {
+            let build_started = Instant::now();
+            store
+                .create_collection("fixture_writes")
+                .expect("collection during projection");
+            let write_started = Instant::now();
+            store
+                .insert(
+                    "fixture_writes",
+                    UnifiedEntity::table_row(
+                        EntityId::new(rows + 1),
+                        "fixture_writes",
+                        1,
+                        vec![Value::text("concurrent")],
+                    ),
+                )
+                .expect("write during projection");
+            let write_elapsed = write_started.elapsed();
+            assert!(store
+                .try_get("fixture_writes", EntityId::new(rows + 1), 64 * 1024 * 1024)
+                .unwrap()
+                .is_some());
+            while store.try_count_from_index("rows", None).unwrap().is_none() {
+                assert!(
+                    build_started.elapsed()
+                        < std::time::Duration::from_secs(if rows <= 1024 { 60 } else { 1800 }),
+                    "count projection did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            assert_eq!(
+                store.try_count_from_index("rows", None).unwrap(),
+                Some(rows)
+            );
+            eprintln!(
+                "projection_elapsed={:?} concurrent_write={write_elapsed:?}",
+                build_started.elapsed()
+            );
             let checkpoint = Instant::now();
             runtime
                 .as_ref()
                 .unwrap()
                 .flush()
-                .expect("prepare visibility projection");
+                .expect("checkpoint completed projection");
             eprintln!("visibility_checkpoint={:?}", checkpoint.elapsed());
+        }
+        if phase == "runtime-reopen" {
+            assert!(
+                store
+                    .try_get("fixture_writes", EntityId::new(rows + 1), 64 * 1024 * 1024)
+                    .unwrap()
+                    .is_some(),
+                "concurrent write survives reopen"
+            );
         }
     }
     eprintln!(

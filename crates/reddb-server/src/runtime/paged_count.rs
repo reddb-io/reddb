@@ -7,9 +7,43 @@ impl super::RedDBRuntime {
             return Ok(());
         }
         for collection in store.list_collections() {
-            store.register_count_index(&collection)?;
+            store.register_count_index_deferred(&collection)?;
         }
         Ok(())
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn start_count_projection_worker(&self) {
+        use std::sync::atomic::Ordering;
+        let weak = std::sync::Arc::downgrade(&self.inner);
+        self.background_tasks.as_ref().expect("foreground runtime").spawn(
+            std::thread::Builder::new().name("reddb-count-projection".into()),
+            move |stopped| {
+                let mut build = None;
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_millis(20));
+                    if stopped.load(Ordering::Acquire) { break; }
+                    let Some(inner) = weak.upgrade() else { break };
+                    let store = inner.db.store();
+                    if build.is_none() {
+                        for collection in store.list_collections() {
+                            match store.start_count_build(&collection) {
+                                Ok(Some(next)) => { build = Some(next); break; }
+                                Ok(None) => {}
+                                Err(error) => tracing::warn!(%error, %collection, "count projection preparation failed"),
+                            }
+                        }
+                    }
+                    if let Some(current) = build.as_mut() {
+                        match current.step(&store) {
+                            Ok(true) => build = None,
+                            Ok(false) => {}
+                            Err(error) => { tracing::warn!(%error, "count projection batch failed"); build = None; }
+                        }
+                    }
+                }
+            },
+        );
     }
 }
 
@@ -64,6 +98,11 @@ mod tests {
         seed.flush().expect("seed checkpoint");
         drop(seed);
         let runtime = open(&options);
+        runtime
+            .db()
+            .store()
+            .register_count_index("count_rows")
+            .expect("prepare synchronous test projection");
         runtime.flush().expect("prepare count projection");
         (directory, runtime, options)
     }
@@ -129,7 +168,11 @@ mod tests {
             None
         );
         assert_eq!(count(&runtime), 12, "scan fallback remains exact");
-        runtime.flush().expect("prepare projection at checkpoint");
+        let mut build = store
+            .start_count_build("count_rows")
+            .unwrap()
+            .expect("deferred build");
+        while !build.step(&store).unwrap() {}
         assert_eq!(
             store.try_count_from_index("count_rows", None).unwrap(),
             Some(12)

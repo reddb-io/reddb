@@ -1053,6 +1053,18 @@ impl RedDBRuntime {
         // 200 here; shutdown begins from this state.
         runtime.inner.lifecycle.mark_ready();
 
+        #[cfg(not(test))]
+        if runtime
+            .db()
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_some()
+            && !runtime.db().options().read_only
+        {
+            runtime.start_count_projection_worker();
+        }
+
         // Issue #583 slice 10 — ContinuousMaterializedView scheduler.
         // Low-priority background ticker that drains the cache's
         // `claim_due_at` set every ~50ms. Holds only a Weak<RuntimeInner>

@@ -17,6 +17,169 @@ fn fixture() -> (tempfile::TempDir, UnifiedStore) {
     (directory, store)
 }
 
+#[test]
+fn count_batch_does_not_hold_publication_lock_while_decoding() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex,
+    };
+    use std::time::Duration;
+    struct PausedProjection {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        first: AtomicBool,
+    }
+    impl SecondaryIndexProjector for PausedProjection {
+        fn project(
+            &self,
+            entity: &UnifiedEntity,
+            key: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+        ) -> Result<Option<usize>, StoreError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            VisibilityProjection { schema: None }.project(entity, key)
+        }
+    }
+    let (_directory, store) = fixture();
+    let store = Arc::new(store);
+    for id in 1..=65 {
+        store
+            .insert(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
+            )
+            .unwrap();
+    }
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    let (entered, entered_rx) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    build.projector = Arc::new(PausedProjection {
+        entered,
+        release: Mutex::new(release_rx),
+        first: AtomicBool::new(true),
+    });
+    let builder_store = Arc::clone(&store);
+    let builder = std::thread::spawn(move || {
+        let result = build.step(&builder_store);
+        (build, result)
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("builder reached source scan");
+    let writer_store = Arc::clone(&store);
+    let (written, written_rx) = mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let read = writer_store
+            .try_get("rows", EntityId::new(1), 1024 * 1024)
+            .unwrap()
+            .is_some();
+        let write = writer_store.insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(66), "rows", 66, vec![]),
+        );
+        written.send((read, write.is_ok())).unwrap();
+    });
+    let progress = written_rx.recv_timeout(Duration::from_secs(5));
+    release.send(()).unwrap();
+    writer.join().unwrap();
+    let (mut build, result) = builder.join().unwrap();
+    assert_eq!(
+        progress.expect("reads and writes must not wait for the source scan"),
+        (true, true)
+    );
+    assert!(!result.unwrap());
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, 66);
+}
+
+#[test]
+fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
+    let (directory, store) = fixture();
+    for id in 1..=192 {
+        store
+            .insert(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![Value::text("data")]),
+            )
+            .unwrap();
+    }
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    assert!(!build.step(&store).unwrap());
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    // Writes and reads proceed between batches while the partial tree is
+    // durable but invisible. A changed data root invalidates the builder.
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(193), "rows", 193, vec![]),
+        )
+        .unwrap();
+    assert!(store
+        .try_get("rows", EntityId::new(193), 1024 * 1024)
+        .unwrap()
+        .is_some());
+    store.persist().unwrap();
+    assert!(
+        build.step(&store).unwrap(),
+        "replaced generation must cancel the old build"
+    );
+    drop(build);
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, 193);
+    drop(build);
+    drop(store);
+    let reopened =
+        UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
+    compare(&reopened, None, 193);
+}
+
+#[test]
+fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
+    const CHILD: &str = "REDDB_TEST_COUNT_BATCH_PATH";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let store = UnifiedStore::open_with_config(path, config()).unwrap();
+        store.register_count_index_deferred("rows").unwrap();
+        let mut build = store.start_count_build("rows").unwrap().unwrap();
+        assert!(
+            !build.step(&store).unwrap(),
+            "publish one recoverable partial batch"
+        );
+        std::env::set_var("REDDB_TEST_EXIT_DURING_COUNT_BATCH", "1");
+        let _ = build.step(&store);
+        panic!("crash injection did not fire");
+    }
+    let (directory, store) = fixture();
+    for id in 1..=128 {
+        store
+            .insert(
+                "rows",
+                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
+            )
+            .unwrap();
+    }
+    store.persist().unwrap();
+    drop(store);
+    let path = directory.path().join("count.rdb");
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "storage::unified::store::count_index::tests::interrupted_count_batch_preserves_rows_and_can_rebuild", "--nocapture"])
+        .env(CHILD, &path).output().unwrap();
+    assert_eq!(result.status.code(), Some(183));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    assert_eq!(store.get_collection("rows").unwrap().count(), 128);
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, 128);
+}
+
 fn context(manager: &Arc<SnapshotManager>) -> SnapshotContext {
     SnapshotContext {
         snapshot: manager.fresh_read_snapshot(),
