@@ -58,6 +58,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_catalog_reuses_complete_identity_scan_for_xid_floor() {
+        let directory = tempfile::tempdir().expect("legacy XID fixture");
+        let path = directory.path().join("legacy.rdb");
+        {
+            // The resident profile publishes a catalog without resume metadata.
+            let store = UnifiedStore::open(&path).expect("legacy store");
+            store.create_collection("rows").expect("rows");
+            store.create_collection("other").expect("other");
+            let mut deleted = UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![]);
+            deleted.xmin = 8000;
+            deleted.xmax = 12000;
+            store.insert("rows", deleted).expect("deleted header");
+            let mut later = UnifiedEntity::table_row(EntityId::new(2), "other", 2, vec![]);
+            later.xmin = 90000;
+            store.insert("other", later).expect("later header");
+            store.persist().expect("legacy checkpoint");
+        }
+        let config = UnifiedStoreConfig {
+            page_cache_slots: Some(8),
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        {
+            let store = UnifiedStore::open_with_config(&path, config.clone()).expect("first open");
+            assert_eq!(store.startup_xid_high_water_mark(), Some(90000));
+            let mut overlay = UnifiedEntity::table_row(EntityId::new(3), "rows", 3, vec![]);
+            overlay.xmin = 100000;
+            store.insert("rows", overlay).expect("newer overlay");
+            store.persist().expect("publish newer floor");
+        }
+        let store = UnifiedStore::open_with_config(&path, config).expect("prepared reopen");
+        assert_eq!(store.startup_xid_high_water_mark(), Some(100000));
+    }
+
+    #[test]
     fn xid_summary_preserves_imported_and_deleted_headers_across_reopen() {
         let directory = tempfile::tempdir().expect("XID summary fixture");
         let path = directory.path().join("headers.rdb");
