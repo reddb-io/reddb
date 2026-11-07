@@ -1,0 +1,29 @@
+{
+  "runtime_commit": "5705a5a2ebe590ae0c0244fa2b8316bfcd4948c4",
+  "linux_results": {
+    "check": [
+      "    Finished `dev` profile [unoptimized] target(s) in 38.48s"
+    ],
+    "unit": [
+      "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 5345 filtered out; finished in 18.30s"
+    ],
+    "lifecycle": [
+      "test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 5312 filtered out; finished in 0.01s"
+    ],
+    "policy": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s"
+    ],
+    "recovery": [
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.52s"
+    ]
+  },
+  "python_harness_tests": 26,
+  "regression_before": {
+    "catalog_entity_visits": 354,
+    "expected_catalog_entity_visits": 0,
+    "policy_mode_actual": "WORK",
+    "policy_mode_expected": "FANOUT"
+  },
+  "regression_after": "both deterministic regression tests pass",
+  "ci_run": "https://github.com/reddb-io/reddb/actions/runs/42422761876"
+}
