@@ -151,3 +151,13 @@ cargo test -p reddb-io-server --lib keyed_write::tests
 cargo test -p reddb-io-server --lib cold_keyed_models
 cargo test -p reddb-io-server --test no_metadata_sidecars
 ```
+
+### Multi-message delivery and ACK comparison
+
+Use `--queues-only --queue-baseline --red-ack-batch --queue-settle-ms 2000`
+with `run_batch_matrix.py` to compare fresh `native-before`, `native-after`,
+RabbitMQ and Kafka fixtures without a preceding KV workload. Only `native-after`
+uses the new atomic ACK command; the baseline retains concurrent individual
+ACK requests. Each engine still consumes the same messages, checks every payload,
+and runs publication and post-ACK SIGKILL/restart checks. The manifest records
+this choice. The protocol and ACK durability differences described above remain.

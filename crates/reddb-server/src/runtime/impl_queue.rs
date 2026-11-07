@@ -1534,6 +1534,44 @@ impl RedDBRuntime {
                     "update",
                 ))
             }
+            QueueCommand::AckBatch {
+                queue,
+                group,
+                message_ids,
+            } => {
+                if message_ids.is_empty() || message_ids.len() > 256 {
+                    return Err(RedDBError::Query(
+                        "QUEUE ACK BATCH requires 1 to 256 messages".to_string(),
+                    ));
+                }
+                let store = self.inner.db.store();
+                let _publication = store.vault_publication_lock.lock();
+                ensure_queue_exists(store.as_ref(), queue)?;
+                require_queue_group(store.as_ref(), queue, group)?;
+                let (_, ps, txn) = runtime_lifecycle(self, queue);
+                let mut deliveries = Vec::with_capacity(message_ids.len());
+                for message_id in message_ids {
+                    let (_, message) =
+                        resolve_ack_nack_handle(store.as_ref(), queue, group, message_id, None)?;
+                    let delivery = ps
+                        .find_pending_by_key(queue, message.raw(), group)
+                        .ok_or_else(|| {
+                            RedDBError::NotFound(format!(
+                                "no pending delivery for message '{message_id}'"
+                            ))
+                        })?;
+                    deliveries.push(delivery);
+                }
+                let fanout =
+                    ps.lifecycle_config(queue).mode == crate::storage::queue::QueueMode::Fanout;
+                ps.ack_many(&txn, &deliveries, fanout).map_err(map_qse)?;
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    "messages acknowledged",
+                    "update",
+                ))
+            }
             QueueCommand::Nack {
                 queue,
                 group,

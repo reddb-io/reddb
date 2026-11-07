@@ -186,13 +186,20 @@ fn queue_delivery_batches_and_ack_recover_after_process_exit() {
                 .execute_query("QUEUE PENDING batches GROUP workers")
                 .expect("pending");
             assert_eq!(result.result.records.len(), 16);
-            for record in &result.result.records {
-                let Some(reddb_types::Value::Text(id)) = record.get("message_id") else {
-                    panic!("message id")
-                };
-                rt.execute_query(&format!("QUEUE ACK batches GROUP workers '{id}'"))
-                    .expect("durable ACK");
-            }
+            let ids = result
+                .result
+                .records
+                .iter()
+                .map(|record| {
+                    let Some(reddb_types::Value::Text(id)) = record.get("message_id") else {
+                        panic!("message id")
+                    };
+                    format!("'{id}'")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            rt.execute_query(&format!("QUEUE ACK batches BATCH GROUP workers ({ids})"))
+                .expect("durable batch ACK");
         }
         std::process::exit(0);
     }
@@ -619,5 +626,59 @@ fn embedded_options_reopening_native_store_do_not_create_an_auxiliary_lock() {
         );
         runtime.checkpoint().expect("checkpoint");
         assert_database_state_files_only(directory.path());
+    }
+}
+
+#[test]
+fn queue_table_relevance_join_survives_cold_boot() {
+    for bounded in [false, true] {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("data.rdb");
+        {
+            let rt = RedDBRuntime::with_options(options(&path, bounded)).expect("seed");
+            for sql in [
+                "CREATE QUEUE email_jobs",
+                "CREATE TABLE recipients (email TEXT, opened BOOLEAN)",
+                "INSERT INTO recipients (email, opened) VALUES ('a@example.com', false), ('b@example.com', true)",
+                "QUEUE PUSH email_jobs 'a@example.com'",
+                "QUEUE PUSH email_jobs 'b@example.com'",
+            ] { rt.execute_query(sql).expect("seed statement"); }
+            rt.checkpoint().expect("checkpoint");
+        }
+        for reopen in 0..3 {
+            let rt = RedDBRuntime::with_options(options(&path, bounded)).expect("cold boot");
+            let sql = "SELECT q.payload FROM email_jobs q JOIN recipients r ON q.payload = r.email WHERE r.opened = false";
+            let relevant = rt.execute_query(sql).expect("join cold queue with table");
+            assert_eq!(
+                relevant.result.records.len(),
+                if reopen == 0 { 1 } else { 0 }
+            );
+            if reopen == 0 {
+                assert_eq!(
+                    relevant.result.records[0].get("q.payload"),
+                    Some(&reddb_types::Value::text("a@example.com"))
+                );
+                rt.execute_query(
+                    "UPDATE recipients SET opened = true WHERE email = 'a@example.com'",
+                )
+                .expect("opened");
+                assert!(rt
+                    .execute_query(sql)
+                    .expect("updated relevance")
+                    .result
+                    .records
+                    .is_empty());
+            }
+            assert_eq!(
+                rt.execute_query("SELECT payload FROM QUEUE email_jobs")
+                    .expect("queue still contains both")
+                    .result
+                    .records
+                    .len(),
+                2
+            );
+            rt.checkpoint().expect("checkpoint relevance update");
+            assert_database_state_files_only(directory.path());
+        }
     }
 }

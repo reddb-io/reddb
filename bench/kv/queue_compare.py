@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Network queue diagnostics. Every produced payload is checked at consumption.
 
-Batch means outstanding operations, not an atomic transaction. Rabbit consumer
+Batch means outstanding operations; --red-ack-batch groups only RedDB ACKs
+atomically, not the entire produce/deliver cycle. Rabbit consumer
 ACK is one-way; Kafka commits offsets and retains records. Do not equate these
 completion contracts with RedDB's durable ACK response.
 """
@@ -51,7 +52,11 @@ class RedQueue:
     async def consume(self, count, empty=False):
         rows = await self.query(f"QUEUE READ {self.args.name} GROUP workers CONSUMER bench COUNT {count}")
         values = [row["payload"] for row in rows]
-        await asyncio.gather(*(self.query(f"QUEUE ACK {self.args.name} GROUP workers '{row['message_id']}'") for row in rows))
+        if self.args.red_ack_batch and rows:
+            ids = ",".join(f"'{row['message_id']}'" for row in rows)
+            await self.query(f"QUEUE ACK {self.args.name} BATCH GROUP workers ({ids})")
+        else:
+            await asyncio.gather(*(self.query(f"QUEUE ACK {self.args.name} GROUP workers '{row['message_id']}'") for row in rows))
         return values
 
     async def close(self):
@@ -195,6 +200,7 @@ async def run(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", choices=["reddb", "rabbitmq", "kafka"], required=True)
+    parser.add_argument("--red-ack-batch", action="store_true", help="use RedDB atomic multi-message ACK")
     parser.add_argument("--host", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--batch", type=int, choices=[1, 16], default=1)

@@ -221,6 +221,25 @@ pub(crate) trait QueueStore {
         Ok((delivery, attempts))
     }
 
+    /// Reserve a bounded group with a single durable publication when supported.
+    fn mark_pending_many_for_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_ids: &[MessageId],
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> Result<Vec<(DeliveryId, u32)>> {
+        message_ids
+            .iter()
+            .map(|&id| {
+                self.mark_pending_for_read(txn, queue, id, group, consumer, deadline, count_attempt)
+            })
+            .collect()
+    }
+
     /// Release a pending delivery back to the available pool. No-op if
     /// `delivery_id` is unknown (already released or never existed).
     fn release_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;
