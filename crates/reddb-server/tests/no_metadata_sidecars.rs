@@ -242,7 +242,9 @@ fn queue_delivery_batches_and_ack_recover_after_process_exit() {
                             Some(&reddb_types::Value::UnsignedInteger(1))
                         );
                     }
-                    let peek = rt.execute_query("QUEUE PEEK batches 32").expect("messages");
+                    let peek = rt
+                        .execute_query("SELECT payload FROM QUEUE batches LIMIT 32")
+                        .expect("stored messages");
                     assert_eq!(
                         peek.result.records.len(),
                         if stage == "deliver" { 16 } else { 0 }
