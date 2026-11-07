@@ -128,7 +128,10 @@ unit tests had passed before cancellation during the remaining crash matrices.
 No individual test failure was recorded; the other jobs passed. This is not
 counted as a complete successful run. The workflow and per-test limits remain
 unchanged; the [full rerun](https://github.com/reddb-io/reddb/actions/runs/42424492915)
-is pending.
+passed on `f7405adc3`: all unit tests, four integration shards, doctests,
+persistent multimodel tests, quality checks and driver/RQL conformance. The
+subsequent commits only document results; runtime Rust/Cargo inputs and the
+workflow are identical to the successful run.
 
 ## Reproduction
 

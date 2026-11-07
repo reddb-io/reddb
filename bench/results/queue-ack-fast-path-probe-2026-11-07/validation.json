@@ -25,5 +25,16 @@
     "policy_mode_expected": "FANOUT"
   },
   "regression_after": "both deterministic regression tests pass",
-  "ci_run": "https://github.com/reddb-io/reddb/actions/runs/42422761876"
+  "ci_runs": [
+    {
+      "url": "https://github.com/reddb-io/reddb/actions/runs/42422761876",
+      "conclusion": "cancelled",
+      "reason": "20-minute unit job budget; 8m17s compilation and 6751 tests passed before cancellation"
+    },
+    {
+      "url": "https://github.com/reddb-io/reddb/actions/runs/42424492915",
+      "commit": "f7405adc3e3e007eda4d8b303438c138195c7979",
+      "conclusion": "success"
+    }
+  ]
 }
