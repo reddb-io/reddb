@@ -220,38 +220,63 @@ fn populated_startup_child() {
             store
                 .create_collection("fixture_writes")
                 .expect("collection during projection");
-            let write_started = Instant::now();
-            store
-                .insert(
-                    "fixture_writes",
-                    UnifiedEntity::table_row(
-                        EntityId::new(rows + 1),
-                        "fixture_writes",
-                        1,
-                        vec![Value::text("concurrent")],
-                    ),
-                )
-                .expect("write during projection");
-            let write_elapsed = write_started.elapsed();
-            assert!(store
-                .try_get("fixture_writes", EntityId::new(rows + 1), 64 * 1024 * 1024)
-                .unwrap()
-                .is_some());
-            while store.try_count_from_index("rows", None).unwrap().is_none() {
+            if rows >= 1024 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                assert!(
+                    store.try_count_from_index("rows", None).unwrap().is_none(),
+                    "fixture must exercise an unfinished projection"
+                );
+            }
+            let mut samples = 0u64;
+            let mut max_write = std::time::Duration::ZERO;
+            let mut max_read = std::time::Duration::ZERO;
+            loop {
+                let ready = store.try_count_from_index("rows", None).unwrap();
+                if ready.is_some() && samples > 0 {
+                    assert_eq!(ready, Some(rows));
+                    break;
+                }
                 assert!(
                     build_started.elapsed()
                         < std::time::Duration::from_secs(if rows <= 1024 { 60 } else { 1800 }),
                     "count projection did not complete"
                 );
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                if samples >= 128 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                samples += 1;
+                let write_started = Instant::now();
+                store
+                    .insert(
+                        "fixture_writes",
+                        UnifiedEntity::table_row(
+                            EntityId::new(rows + samples),
+                            "fixture_writes",
+                            samples,
+                            vec![Value::text("concurrent")],
+                        ),
+                    )
+                    .expect("write during projection");
+                max_write = max_write.max(write_started.elapsed());
+                let read_started = Instant::now();
+                assert!(store
+                    .try_get(
+                        "rows",
+                        EntityId::new((samples - 1) % rows + 1),
+                        64 * 1024 * 1024
+                    )
+                    .unwrap()
+                    .is_some());
+                max_read = max_read.max(read_started.elapsed());
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
             assert_eq!(
                 store.try_count_from_index("rows", None).unwrap(),
                 Some(rows)
             );
             eprintln!(
-                "projection_elapsed={:?} concurrent_write={write_elapsed:?}",
-                build_started.elapsed()
+                "projection_elapsed={:?} concurrent_samples={samples} max_write={max_write:?} max_read={max_read:?}", build_started.elapsed()
             );
             let checkpoint = Instant::now();
             runtime
@@ -262,13 +287,21 @@ fn populated_startup_child() {
             eprintln!("visibility_checkpoint={:?}", checkpoint.elapsed());
         }
         if phase == "runtime-reopen" {
-            assert!(
-                store
-                    .try_get("fixture_writes", EntityId::new(rows + 1), 64 * 1024 * 1024)
-                    .unwrap()
-                    .is_some(),
-                "concurrent write survives reopen"
-            );
+            let samples = store.get_collection("fixture_writes").unwrap().count() as u64;
+            assert!(samples > 0);
+            for sample in 1..=samples {
+                assert!(
+                    store
+                        .try_get(
+                            "fixture_writes",
+                            EntityId::new(rows + sample),
+                            64 * 1024 * 1024
+                        )
+                        .unwrap()
+                        .is_some(),
+                    "concurrent write survives reopen"
+                );
+            }
         }
     }
     eprintln!(
