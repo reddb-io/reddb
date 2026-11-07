@@ -343,7 +343,7 @@ async fn postgres_extended_query_supports_binary_text_params_insert_and_close() 
         bind_body(
             "ins_portal",
             "ins",
-            &[1, 0],
+            &[1, 1],
             &[Some(&7i64.to_be_bytes()), Some(b"alice".as_slice())],
             &[],
         ),
