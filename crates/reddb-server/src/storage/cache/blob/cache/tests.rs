@@ -160,8 +160,8 @@ fn content_metadata_round_trips_and_is_capped() {
         )
         .unwrap();
     assert_eq!(
-        cache.get("http", "home").unwrap().content_metadata,
-        metadata
+        cache.get("http", "home").unwrap().content_metadata(),
+        &metadata
     );
 
     let too_many = BTreeMap::from([
@@ -187,6 +187,58 @@ fn content_metadata_round_trips_and_is_capped() {
         )
         .expect_err("metadata bytes too large");
     assert!(matches!(err, CacheError::MetadataTooLarge { .. }));
+}
+
+#[test]
+fn hot_hits_share_metadata_without_allocations_and_keep_old_versions_alive() {
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+    let cache = small_cache(1024);
+    let metadata = BTreeMap::from([("etag".to_string(), "a".repeat(256))]);
+    cache
+        .put(
+            "http",
+            "home",
+            BlobCachePut::new(vec![1]).with_content_metadata(metadata.clone()),
+        )
+        .expect("put");
+    let old = cache.get("http", "home").expect("hit");
+    let second = cache.get("http", "home").expect("second hit");
+    assert!(std::ptr::eq(
+        old.content_metadata(),
+        second.content_metadata()
+    ));
+    let (_, allocations) = measure_allocations(|| {
+        for _ in 0..1000 {
+            assert_eq!(
+                cache
+                    .get("http", "home")
+                    .expect("hot hit")
+                    .content_metadata(),
+                &metadata
+            );
+        }
+    });
+    assert_eq!(allocations.allocs, 0, "{allocations:?}");
+    cache
+        .put(
+            "http",
+            "home",
+            BlobCachePut::new(vec![2])
+                .with_content_metadata(BTreeMap::from([("etag".into(), "new".into())])),
+        )
+        .expect("replace");
+    let new = cache.get("http", "home").expect("replacement");
+    assert!(!std::ptr::eq(
+        old.content_metadata(),
+        new.content_metadata()
+    ));
+    cache.invalidate_key("http", "home");
+    assert_eq!(old.content_metadata(), &metadata);
+    assert_eq!(old.value(), &[1]);
+    assert_eq!(
+        new.content_metadata().get("etag").map(String::as_str),
+        Some("new")
+    );
 }
 
 #[test]

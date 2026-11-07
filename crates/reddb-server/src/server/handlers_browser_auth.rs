@@ -105,7 +105,7 @@ impl RedDBServer {
 
         let caller_id = crate::auth::UserId::from_parts(tenant_id.as_deref(), &username);
         let session =
-            match auth_store.authenticate_in_tenant(tenant_id.as_deref(), &username, &password) {
+            match auth_store.authenticate_active(tenant_id.as_deref(), &username, &password) {
                 Ok(session) => session,
                 Err(err) => {
                     tracing::warn!(
@@ -122,6 +122,9 @@ impl RedDBServer {
             tenant: session.tenant_id.clone(),
             role: session.role,
         };
+        // The password session is only an admission proof for the browser
+        // token pair; it is never returned to the client.
+        auth_store.revoke_session(&session.token);
         let tokens = match authority.issue(&identity, now_unix_secs()) {
             Ok(t) => t,
             Err(e) => return json_error(500, format!("failed to issue tokens: {e}")),

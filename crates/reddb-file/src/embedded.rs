@@ -29,10 +29,14 @@ pub const DEFAULT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum RdbFileError {
+    ReadLimitExceeded {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     InvalidOperation(String),
     Io(std::io::Error),
     /// A named zone of the `.rdb` cannot be trusted, so the store does not
-    /// open. ADR 0074 §2 requires the zone be named and §4 requires the
+    /// open. ADR 0074 Â§2 requires the zone be named and Â§4 requires the
     /// operator be pointed at `red salvage` rather than left with a panic.
     ZoneUnrecoverable {
         zone: &'static str,
@@ -43,6 +47,13 @@ pub enum RdbFileError {
 impl std::fmt::Display for RdbFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadLimitExceeded {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "native decode needs {required_bytes} bytes over read memory limit {limit_bytes}"
+            ),
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::ZoneUnrecoverable { zone, path } => write!(
@@ -51,7 +62,7 @@ impl std::fmt::Display for RdbFileError {
                  (opening it could only return data the zone can no longer vouch for). \
                  Run the `SCRUB` statement to classify the fault and `red salvage` to \
                  extract every entity the damage did not touch; `red salvage` never writes \
-                 into the damaged file (ADR 0074 §2/§4).",
+                 into the damaged file (ADR 0074 Â§2/Â§4).",
                 path.display()
             ),
         }
@@ -82,7 +93,7 @@ pub const EMBEDDED_RDB_SUPERBLOCK_1_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE;
 /// leaves a window in which the durable superblock still names the old
 /// checksum while the bytes are already the new ones. Publishing into the
 /// *inactive* slot and only then pointing a fresh superblock at it means every
-/// valid superblock always references an intact manifest — pre-update or
+/// valid superblock always references an intact manifest â€” pre-update or
 /// post-update, never a mixture.
 pub const EMBEDDED_RDB_MANIFEST_SLOT_SIZE: u64 = 4096;
 pub const EMBEDDED_RDB_MANIFEST_0_OFFSET: u64 = EMBEDDED_RDB_SUPERBLOCK_SIZE * 2;
@@ -177,6 +188,21 @@ impl EmbeddedRdbArtifact {
         path: &Path,
         validate_snapshot_refs: bool,
     ) -> RdbFileResult<EmbeddedRdbOpen> {
+        Self::open_inner_selected(file, path, validate_snapshot_refs).map(|(open, _)| open)
+    }
+
+    fn open_inner_with_snapshot(
+        file: &mut impl VfsFile,
+        path: &Path,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
+        Self::open_inner_selected(file, path, true)
+    }
+
+    fn open_inner_selected(
+        file: &mut impl VfsFile,
+        path: &Path,
+        validate_snapshot_refs: bool,
+    ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
         // An I/O error propagates as an I/O error; only bytes that were read
         // and failed to decode count towards "the zone is unrecoverable".
         let mut superblocks: Vec<EmbeddedRdbSuperblock> = [
@@ -199,7 +225,7 @@ impl EmbeddedRdbArtifact {
             // The manifest a valid superblock names is always intact: it was
             // fsynced into an inactive slot before this generation existed. A
             // checksum failure here is therefore bit rot, not a torn update,
-            // and ADR 0074 §2 says it fails the open by name — never falls
+            // and ADR 0074 Â§2 says it fails the open by name â€” never falls
             // back to a stale root that would resurrect superseded state.
             let mut manifest = read_manifest(file, selected_superblock).map_err(|_| {
                 RdbFileError::ZoneUnrecoverable {
@@ -209,14 +235,22 @@ impl EmbeddedRdbArtifact {
             })?;
             manifest.wal_recovery_boundary = selected_superblock.wal_recovery_boundary;
             manifest.wal_live_bytes = selected_superblock.wal_live_bytes;
-            if validate_snapshot_refs && !snapshot_reference_valid(file, &manifest)? {
-                continue;
-            }
-            return Ok(EmbeddedRdbOpen {
-                path: path.to_path_buf(),
-                selected_superblock,
-                manifest,
-            });
+            let snapshot = if validate_snapshot_refs {
+                let Some(snapshot) = read_valid_snapshot_reference(file, &manifest)? else {
+                    continue;
+                };
+                (manifest.snapshot_bytes != 0).then_some(snapshot)
+            } else {
+                None
+            };
+            return Ok((
+                EmbeddedRdbOpen {
+                    path: path.to_path_buf(),
+                    selected_superblock,
+                    manifest,
+                },
+                snapshot,
+            ));
         }
 
         Err(RdbFileError::ZoneUnrecoverable {
@@ -254,7 +288,7 @@ fn read_superblock_copy(
 /// The manifest slot the given superblock does not reference.
 ///
 /// With two superblock copies and two manifest slots this is always the slot
-/// belonging to the *stale* superblock copy — the same copy the update is about
+/// belonging to the *stale* superblock copy â€” the same copy the update is about
 /// to overwrite. That coincidence is what makes the pair safe: a crash can only
 /// ever clobber the manifest of a superblock that was already being replaced.
 fn inactive_manifest_offset(superblock: EmbeddedRdbSuperblock) -> RdbFileResult<u64> {
@@ -304,33 +338,33 @@ fn read_manifest(
     decode_manifest(&bytes)
 }
 
-fn snapshot_reference_valid(
+fn read_valid_snapshot_reference(
     file: &mut impl VfsFile,
     manifest: &EmbeddedRdbManifest,
-) -> RdbFileResult<bool> {
+) -> RdbFileResult<Option<Vec<u8>>> {
     if manifest.snapshot_bytes == 0 {
-        return Ok(true);
+        return Ok(Some(Vec::new()));
     }
     let snapshot_end = manifest
         .snapshot_offset
         .checked_add(manifest.snapshot_bytes)
         .ok_or_else(|| RdbFileError::InvalidOperation("embedded snapshot end overflow".into()))?;
     if snapshot_end > file.file_len()? {
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut bytes = vec![0u8; manifest.snapshot_bytes as usize];
     file.seek(SeekFrom::Start(manifest.snapshot_offset))?;
     if file.read_exact(&mut bytes).is_err() {
-        return Ok(false);
+        return Ok(None);
     }
     if crc32(&bytes) != manifest.snapshot_checksum {
-        return Ok(false);
+        return Ok(None);
     }
     if bytes.len() >= SNAPSHOT_MAGIC.len() && &bytes[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(true)
+    Ok(Some(bytes))
 }
 
 /// Byte-for-byte comparison with the published image; the checksum match
@@ -463,7 +497,7 @@ fn wal_region_start_checked(open: &EmbeddedRdbOpen) -> RdbFileResult<Option<u64>
     Ok(Some(wal_start))
 }
 
-/// Scan the WAL through an already-open handle — see
+/// Scan the WAL through an already-open handle â€” see
 /// [`EmbeddedRdbArtifact::open_inner_with_file`] for why the writer path
 /// cannot open a second one.
 fn scan_wal_with_file(
@@ -1266,3 +1300,6 @@ fn write_superblock_copy(
     write_at(file, offset, &encode_superblock(*superblock)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod startup_read_tests;

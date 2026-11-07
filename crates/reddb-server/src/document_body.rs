@@ -187,6 +187,33 @@ mod tests {
     }
 
     #[test]
+    fn numeric_field_reads_do_not_allocate_offset_tables() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        let fields: Vec<_> = (0..100)
+            .map(|index| (format!("field_{index}"), Value::Integer(index)))
+            .collect();
+        let references: Vec<_> = fields
+            .iter()
+            .map(|(key, value)| (key.as_str(), value))
+            .collect();
+        let mut bytes = Vec::new();
+        document_body_codec::encode(&references, &mut bytes).expect("numeric body");
+        let (_, allocations) = measure_allocations(|| {
+            for _ in 0..1000 {
+                for index in [0, 50, 99] {
+                    let name = match index {
+                        0 => "field_0",
+                        50 => "field_50",
+                        _ => "field_99",
+                    };
+                    assert_eq!(read_body_field(&bytes, name), Some(Value::Integer(index)));
+                }
+            }
+        });
+        assert_eq!(allocations.allocs, 0, "{allocations:?}");
+    }
+
+    #[test]
     fn body_field_helpers_ignore_plain_json_bodies() {
         let bytes = serialize_document_body(&body(), false).expect("serialize");
         assert_eq!(read_body_field(&bytes, "name"), None);

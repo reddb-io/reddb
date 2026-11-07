@@ -1,6 +1,6 @@
 use super::index_store::MutationTestPhase;
 use crate::application::entity::{
-    CreateDocumentInput, CreateNodeInput, DeleteEntityInput, PatchEntityInput,
+    CreateDocumentInput, CreateNodeInput, CreateRowInput, DeleteEntityInput, PatchEntityInput,
     PatchEntityOperation, PatchEntityOperationType,
 };
 use crate::application::ports::RuntimeEntityPort;
@@ -13,6 +13,256 @@ use std::time::Duration;
 const COLLECTION: &str = "mutation_records";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BLOCKING_PROBE: Duration = Duration::from_millis(100);
+
+#[test]
+fn native_insert_keeps_indexed_reads_visible_during_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let (published_send, published_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let release_receive = Mutex::new(release_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            published_send.send(()).expect("storage published");
+            release_receive
+                .lock()
+                .expect("release receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("resume writer");
+        }
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            runtime.create_row(CreateRowInput {
+                collection: COLLECTION.to_string(),
+                fields: vec![("record_key".to_string(), reddb_types::Value::Integer(2))],
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            })
+        });
+        published_receive
+            .recv_timeout(TIMEOUT)
+            .expect("writer paused");
+        let observed = runtime
+            .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+            .expect("indexed query")
+            .result
+            .records
+            .len();
+        release_send.send(()).expect("resume writer");
+        writer.join().expect("writer thread").expect("insert");
+        assert_eq!(
+            observed, 1,
+            "published row must not disappear behind a stale index"
+        );
+    });
+}
+
+#[test]
+fn native_patch_keeps_indexed_reads_visible_during_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let (published_send, published_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let release_receive = Mutex::new(release_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            published_send.send(()).expect("storage published");
+            release_receive
+                .lock()
+                .expect("release receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("resume writer");
+        }
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| mutate(&runtime, "native_patch", id));
+        published_receive
+            .recv_timeout(TIMEOUT)
+            .expect("writer paused");
+        let observed = runtime
+            .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+            .expect("indexed query")
+            .result
+            .records
+            .len();
+        release_send.send(()).expect("resume writer");
+        writer.join().expect("writer thread").expect("patch");
+        assert_eq!(
+            observed, 1,
+            "published row must not disappear behind a stale index"
+        );
+    });
+}
+
+#[test]
+fn native_patch_marks_the_storage_index_publication_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    mutate(&runtime, "native_patch", id).expect("patch");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "native patch publication must be guarded"
+    );
+}
+
+#[test]
+fn native_delete_marks_the_storage_index_publication_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::StoragePublished {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    mutate(&runtime, "native_delete", id).expect("delete");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "native delete publication must be guarded"
+    );
+}
+
+#[test]
+fn index_publication_guard_is_scoped_to_one_database() {
+    let first = RedDBRuntime::in_memory().expect("first runtime");
+    let second = RedDBRuntime::in_memory().expect("second runtime");
+    let first_index = first.index_store_ref();
+    let second_index = second.index_store_ref();
+    let initial_generation = second_index.indexed_mutation_generation();
+    {
+        let _guard = first_index.begin_indexed_mutation();
+        assert!(first_index.indexed_mutation_active());
+        assert!(!second_index.indexed_mutation_active());
+        assert_eq!(
+            second_index.indexed_mutation_generation(),
+            initial_generation
+        );
+    }
+    assert!(!first_index.indexed_mutation_active());
+    assert_eq!(
+        second_index.indexed_mutation_generation(),
+        initial_generation
+    );
+}
+
+#[test]
+fn index_rebuild_and_drop_guard_partial_topology_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let rebuild_seen = Arc::new(AtomicBool::new(false));
+    let drop_seen = Arc::new(AtomicBool::new(false));
+    let rebuilding = Arc::clone(&rebuild_seen);
+    let dropping = Arc::clone(&drop_seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::IndexTopologyPublishing {
+            rebuilding.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+        if collection == COLLECTION && phase == MutationTestPhase::IndexTopologyDropping {
+            dropping.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime
+        .rebuild_runtime_indexes_for_table(COLLECTION)
+        .expect("rebuild");
+    assert!(runtime
+        .index_store_ref()
+        .drop_index("mutation_lookup", COLLECTION));
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        rebuild_seen.load(Ordering::SeqCst),
+        "index rebuild publication must be guarded"
+    );
+    assert!(
+        drop_seen.load(Ordering::SeqCst),
+        "index drop publication must be guarded"
+    );
+}
+
+#[test]
+fn rollback_guards_the_index_undo_window() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let id = seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    runtime.execute_query("BEGIN").expect("begin");
+    mutate(&runtime, "sql_update", id).expect("update");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::UndoIndexRemoved {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime.execute_query("ROLLBACK").expect("rollback");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "rollback index undo must be guarded"
+    );
+}
+
+#[test]
+fn deferred_delete_guards_commit_and_index_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let seen = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&seen);
+    let probe = runtime.clone();
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::DeleteVisibilityCommitted {
+            marked.store(
+                probe.index_store_ref().indexed_mutation_active(),
+                Ordering::SeqCst,
+            );
+        }
+    }));
+    runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            runtime.execute_query("DELETE FROM mutation_records WHERE record_key = 1")
+        })
+        .expect("deferred delete");
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "deferred delete commit must be guarded"
+    );
+}
 
 fn seed(runtime: &RedDBRuntime, model: &str) -> EntityId {
     match model {
@@ -470,10 +720,39 @@ fn shared_mutation_guard_allows_other_writers_and_unrelated_ddl() {
 
 #[test]
 fn rollback_restores_indexes_after_waiting_for_backfill() {
-    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    rollback_backfill_with_gc(false);
+}
+
+#[test]
+fn savepoint_rollback_restores_indexes_after_waiting_for_backfill() {
+    rollback_backfill_with_gc(true);
+}
+
+fn rollback_backfill_with_gc(savepoint: bool) {
+    let mut runtime = RedDBRuntime::in_memory().expect("runtime");
+    // Drive the real collector at a controlled point, without a timer race.
+    drop(runtime.background_tasks.take());
     let id = seed(&runtime, "table");
     runtime.execute_query("BEGIN").expect("begin");
+    if savepoint {
+        runtime
+            .execute_query("SAVEPOINT before_update")
+            .expect("savepoint");
+    }
     mutate(&runtime, "sql_update", id).expect("pending update");
+    let (undo_send, undo_receive) = mpsc::channel();
+    let (collect_send, collect_receive) = mpsc::channel();
+    let collect_receive = Mutex::new(collect_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == COLLECTION && phase == MutationTestPhase::BeforeUndoTopology {
+            undo_send.send(()).expect("undo reached topology");
+            collect_receive
+                .lock()
+                .expect("collector receiver")
+                .recv_timeout(TIMEOUT)
+                .expect("collector finished");
+        }
+    }));
     let (snapshot_send, snapshot_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
     let release_receive = Mutex::new(release_receive);
@@ -485,7 +764,7 @@ fn rollback_restores_indexes_after_waiting_for_backfill() {
             .recv_timeout(TIMEOUT)
             .expect("resume builder");
     }));
-    let completed_early = std::thread::scope(|scope| {
+    let (completed_early, reclaimed) = std::thread::scope(|scope| {
         let ddl = scope.spawn(|| create_index(&runtime, COLLECTION, "mutation_lookup", true));
         snapshot_receive
             .recv_timeout(TIMEOUT)
@@ -495,19 +774,45 @@ fn rollback_restores_indexes_after_waiting_for_backfill() {
         let runtime = &runtime;
         let rollback = scope.spawn(move || {
             started_send.send(()).expect("rollback started");
-            let result = mutate(runtime, "rollback", id);
+            let result = if savepoint {
+                runtime
+                    .execute_query("ROLLBACK TO SAVEPOINT before_update")
+                    .map(|_| ())
+            } else {
+                mutate(runtime, "rollback", id)
+            };
             done_send.send(()).expect("rollback complete");
             result
         });
         started_receive
             .recv_timeout(TIMEOUT)
             .expect("rollback attempted");
+        undo_receive.recv_timeout(TIMEOUT).expect("undo paused");
+        let store = runtime.db().store();
+        let mut cursor = store
+            .mvcc_reclaim_cursor(COLLECTION.into())
+            .expect("GC cursor");
+        let reclaimed = store
+            .reclaim_mvcc_tick(
+                &mut cursor,
+                &runtime.snapshot_manager(),
+                runtime.mvcc_vacuum_cutoff_xid(),
+                4096,
+                256,
+            )
+            .expect("controlled GC");
+        assert!(cursor.finished(), "fixture fits one collector tick");
+        collect_send.send(()).expect("resume undo");
         let completed_early = done_receive.recv_timeout(BLOCKING_PROBE).is_ok();
         release_send.send(()).expect("release backfill");
         ddl.join().expect("DDL thread").expect("index");
         rollback.join().expect("rollback thread").expect("rollback");
-        completed_early
+        (completed_early, reclaimed)
     });
+    assert_eq!(
+        reclaimed, 0,
+        "GC cannot reclaim row fields needed by pending index undo"
+    );
     assert!(!completed_early, "undo must not race index backfill");
     assert!(runtime
         .index_store_ref()

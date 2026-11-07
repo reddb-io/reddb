@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::id::{LogId, LogIdGenerator};
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
-use crate::storage::unified::store::UnifiedStore;
+use crate::storage::unified::store::{StoreError, UnifiedStore};
 use reddb_types::Value;
 
 /// Retention policy for log collections.
@@ -122,6 +122,33 @@ impl LogCollection {
 
     /// Append a single log entry. Returns the assigned ID.
     pub fn append(&self, fields: HashMap<String, Value>) -> LogId {
+        let (id, entity) = self.make_entry(fields);
+        let batch_size = self.config.batch_size;
+        let should_flush = {
+            let mut buf = self.write_buffer.lock().unwrap_or_else(|e| e.into_inner());
+            buf.push(entity);
+            buf.len() >= batch_size
+        };
+
+        if should_flush {
+            self.flush_buffer();
+        }
+
+        id
+    }
+
+    /// Write one entry before returning its ID. Used by the per-request HTTP
+    /// log collection, which has no previously buffered entries.
+    pub(crate) fn append_checked(
+        &self,
+        fields: HashMap<String, Value>,
+    ) -> Result<LogId, StoreError> {
+        let (id, entity) = self.make_entry(fields);
+        self.store.insert_auto(&self.config.name, entity)?;
+        Ok(id)
+    }
+
+    fn make_entry(&self, fields: HashMap<String, Value>) -> (LogId, UnifiedEntity) {
         let id = self.id_gen.next();
 
         let mut named = HashMap::with_capacity(fields.len() + 1);
@@ -143,18 +170,7 @@ impl LogCollection {
             }),
         );
 
-        let batch_size = self.config.batch_size;
-        let should_flush = {
-            let mut buf = self.write_buffer.lock().unwrap_or_else(|e| e.into_inner());
-            buf.push(entity);
-            buf.len() >= batch_size
-        };
-
-        if should_flush {
-            self.flush_buffer();
-        }
-
-        id
+        (id, entity)
     }
 
     /// Append a log entry from (key, value) pairs.

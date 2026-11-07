@@ -27,6 +27,18 @@ pub const CASES: &[(&str, fn())] = &[
         "runtime_expression_secret_policy_and_depth",
         secret_policy_and_depth,
     ),
+    (
+        "fallible_runtime_expression_error_propagation",
+        fallible_error_propagation,
+    ),
+    (
+        "fallible_runtime_expression_lazy_branches",
+        fallible_lazy_branches,
+    ),
+    (
+        "fallible_runtime_expression_missing_values",
+        fallible_missing_values,
+    ),
 ];
 
 #[derive(Default)]
@@ -437,4 +449,178 @@ fn secret_policy_and_depth() {
         host.events.borrow().len(),
         reddb_rql::limits::JSON_LITERAL_MAX_DEPTH as usize + 1
     );
+}
+
+#[derive(Default)]
+struct FallibleProbe {
+    reads: std::cell::Cell<usize>,
+    functions: std::cell::Cell<usize>,
+}
+impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost for FallibleProbe {
+    type Error = &'static str;
+    fn secret_query_input(&self, value: Value) -> Result<Option<Value>, Self::Error> {
+        if matches!(value, Value::Secret(_)) {
+            Err("secret read failed")
+        } else {
+            Ok(Some(value))
+        }
+    }
+    fn resolve_field(&self, field: &FieldRef) -> Result<Option<Value>, Self::Error> {
+        if matches!(field, FieldRef::TableColumn { column, .. } if column == "fault") {
+            Err("field read failed")
+        } else {
+            Ok(None)
+        }
+    }
+    fn evaluate_special_function(
+        &self,
+        _name: &str,
+        arguments: &[Expr],
+        evaluate: &dyn Fn(&Expr) -> Result<Option<Value>, Self::Error>,
+    ) -> Result<Option<Value>, Self::Error> {
+        self.reads.set(self.reads.get() + 1);
+        match arguments.first() {
+            Some(Expr::Literal {
+                value: Value::Text(key),
+                ..
+            }) if key.as_ref() == "unreadable" => Err("read failed"),
+            Some(Expr::Literal {
+                value: Value::Text(key),
+                ..
+            }) if key.as_ref() == "present" => Ok(Some(Value::Integer(7))),
+            _ => match arguments.get(1) {
+                Some(default) => evaluate(default),
+                None => Ok(Some(Value::Null)),
+            },
+        }
+    }
+    fn evaluate_function(
+        &self,
+        _name: &str,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Self::Error> {
+        self.functions.set(self.functions.get() + 1);
+        Ok(arguments.first().cloned())
+    }
+}
+fn try_evaluate(host: &FallibleProbe, expression: &Expr) -> Result<Option<Value>, &'static str> {
+    reddb_engine::query::runtime::expression::try_evaluate_runtime_expr_with_host(host, expression)
+}
+fn unreadable() -> Expr {
+    function("CONFIG", vec![literal(Value::text("unreadable"))])
+}
+fn fallible_error_propagation() {
+    for expression in [
+        unary(UnaryOp::Not, unreadable()),
+        binary(BinOp::Add, integer(1), unreadable()),
+        function("EFFECT", vec![unreadable(), integer(1)]),
+        Expr::IsNull {
+            operand: Box::new(unreadable()),
+            negated: false,
+            span: Span::synthetic(),
+        },
+        Expr::Cast {
+            inner: Box::new(unreadable()),
+            target: DataType::Text,
+            span: Span::synthetic(),
+        },
+        Expr::Case {
+            branches: vec![(unreadable(), integer(1))],
+            else_: Some(Box::new(integer(2))),
+            span: Span::synthetic(),
+        },
+        Expr::InList {
+            target: Box::new(integer(1)),
+            values: vec![unreadable()],
+            negated: false,
+            span: Span::synthetic(),
+        },
+        Expr::Between {
+            target: Box::new(integer(1)),
+            low: Box::new(unreadable()),
+            high: Box::new(integer(2)),
+            negated: false,
+            span: Span::synthetic(),
+        },
+        function(
+            "CONFIG",
+            vec![literal(Value::text("missing")), unreadable()],
+        ),
+    ] {
+        let host = FallibleProbe::default();
+        assert_eq!(try_evaluate(&host, &expression), Err("read failed"));
+        assert_eq!(
+            host.functions.get(),
+            0,
+            "no scalar effect after an argument read failure"
+        );
+    }
+    assert_eq!(
+        try_evaluate(&FallibleProbe::default(), &field("fault")),
+        Err("field read failed")
+    );
+    assert_eq!(
+        try_evaluate(&FallibleProbe::default(), &literal(Value::Secret(vec![1]))),
+        Err("secret read failed")
+    );
+}
+fn fallible_lazy_branches() {
+    for (expression, expected) in [
+        (
+            binary(BinOp::And, literal(Value::Boolean(false)), unreadable()),
+            Value::Boolean(false),
+        ),
+        (
+            binary(BinOp::Or, literal(Value::Boolean(true)), unreadable()),
+            Value::Boolean(true),
+        ),
+        (
+            Expr::Case {
+                branches: vec![(literal(Value::Boolean(false)), unreadable())],
+                else_: Some(Box::new(integer(3))),
+                span: Span::synthetic(),
+            },
+            Value::Integer(3),
+        ),
+    ] {
+        let host = FallibleProbe::default();
+        assert_eq!(try_evaluate(&host, &expression), Ok(Some(expected)));
+        assert_eq!(
+            host.reads.get(),
+            0,
+            "an unselected branch must perform no read"
+        );
+    }
+    let host = FallibleProbe::default();
+    assert_eq!(
+        try_evaluate(
+            &host,
+            &function(
+                "CONFIG",
+                vec![literal(Value::text("present")), unreadable()]
+            )
+        ),
+        Ok(Some(Value::Integer(7)))
+    );
+    assert_eq!(
+        host.reads.get(),
+        1,
+        "an existing value must not evaluate its default"
+    );
+}
+fn fallible_missing_values() {
+    let host = FallibleProbe::default();
+    assert_eq!(try_evaluate(&host, &field("missing")), Ok(None));
+    assert_eq!(
+        try_evaluate(
+            &host,
+            &function("CONFIG", vec![literal(Value::text("missing")), integer(9)])
+        ),
+        Ok(Some(Value::Integer(9)))
+    );
+    assert_eq!(
+        try_evaluate(&host, &function("IDENTITY", vec![field("missing")])),
+        Ok(Some(Value::Null))
+    );
+    assert_eq!(host.functions.get(), 1);
 }

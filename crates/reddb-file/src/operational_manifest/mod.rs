@@ -13,15 +13,19 @@ use serde_json::{Map, Value};
 use crate::{OpenMode, StdVfs, Vfs, VfsFile};
 
 use crate::append_only_segment::{
-    append_only_segment_chunk_checksums, decode_append_only_segment, AppendOnlySegmentBloom,
-    AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec, APPEND_ONLY_SEGMENT_CHUNK_BYTES,
+    AppendOnlySegmentBloom, AppendOnlySegmentChunkChecksum, AppendOnlySegmentCodec,
 };
 
+mod append_only;
 mod fork;
+mod incremental;
+mod journal;
+mod offline;
 
 // Fork lifecycle types live in the `fork` submodule; re-export so the public
 // path (`operational_manifest::ForkInfo`, etc.) is unchanged.
 pub use fork::{ForkHydrationState, ForkInfo, ForkOrigin, PromoteForkOutcome};
+pub use incremental::{IncrementalManifest, ManifestReadStep};
 
 const FORMAT_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -36,7 +40,7 @@ pub const QUARANTINE_DIR: &str = "quarantine";
 /// storage mechanics for experiment-and-discard workflows; it is never a branch.
 pub const FORKS_DIR: &str = "forks";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum CollectionState {
     Active,
     PendingDrop,
@@ -61,7 +65,7 @@ impl CollectionState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct CollectionEntry {
     state: CollectionState,
     path: String,
@@ -82,7 +86,7 @@ struct Manifest {
     fork_origin: Option<ForkOrigin>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppendOnlySegmentState {
     Active,
     PendingDrop,
@@ -107,7 +111,7 @@ impl AppendOnlySegmentState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppendOnlySegmentManifestEntry {
     pub collection: String,
     pub segment_id: u64,
@@ -118,13 +122,16 @@ pub struct AppendOnlySegmentManifestEntry {
     pub row_count: u64,
     pub retention_min_ms: Option<i64>,
     pub retention_max_ms: Option<i64>,
+    /// Column used by the producer when checking every row for the bounds.
+    /// Legacy manifests lack this provenance and cannot justify deletion.
+    pub retention_timestamp_column: Option<String>,
     pub primary_min: Option<String>,
     pub primary_max: Option<String>,
     pub primary_bloom: Option<AppendOnlySegmentBloom>,
     pub chunk_checksums: Vec<AppendOnlySegmentChunkChecksum>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AppendOnlyRetiredState {
     row_count: u64,
     segment_high_water: u64,
@@ -134,6 +141,7 @@ struct AppendOnlyRetiredState {
 pub struct OperationalManifest<V = StdVfs> {
     root: PathBuf,
     vfs: V,
+    cache: std::sync::Arc<std::sync::Mutex<Option<journal::CachedManifest>>>,
 }
 
 /// Manifest-owned create operation. Construction durably prepares the physical
@@ -176,6 +184,7 @@ impl<V: Vfs> OperationalManifest<V> {
         Self {
             root: PathBuf::from(root),
             vfs,
+            cache: Default::default(),
         }
     }
 
@@ -249,11 +258,10 @@ impl<V: Vfs> OperationalManifest<V> {
             .collect::<Vec<_>>();
         if !pending_segments.is_empty() {
             for entry in &pending_segments {
-                let _ = self
-                    .vfs
-                    .remove_file(&self.append_only_segments_dir().join(&entry.path));
+                self.remove_append_only_segment_file(entry)?;
                 record_retired_append_only_segment(&mut manifest, entry);
             }
+            self.vfs.sync_dir(&self.append_only_segments_dir())?;
             manifest
                 .append_only_segments
                 .retain(|entry| entry.state != AppendOnlySegmentState::PendingDrop);
@@ -268,8 +276,205 @@ impl<V: Vfs> OperationalManifest<V> {
         Ok(completed_pending_drops)
     }
 
+    /// Validate the published view without bootstrap, rename, quarantine or
+    /// cleanup. Pending drops are applied only to the reader's resident view.
+    pub fn read_only_pending_drops(&self) -> io::Result<Vec<String>> {
+        Ok(self
+            .read_only_pending_drops_if_present()?
+            .unwrap_or_default())
+    }
+
+    /// Distinguish an absent manifest from an imported manifest with no drops.
+    /// Importers can record completion without replaying an old manifest on
+    /// every subsequent cold boot.
+    pub fn read_only_pending_drops_if_present(&self) -> io::Result<Option<Vec<String>>> {
+        let Some(manifest) = self.load_current()? else {
+            return Ok(None);
+        };
+        self.validate_manifest_artifacts(&manifest)?;
+        Ok(Some(
+            manifest
+                .collections
+                .iter()
+                .filter(|(_, entry)| entry.state == CollectionState::PendingDrop)
+                .map(|(name, _)| name.clone())
+                .collect(),
+        ))
+    }
+
     pub fn create_collection(&self, name: &str) -> io::Result<()> {
         self.prepare_collection_create(name)?.publish()
+    }
+
+    /// Atomically change manifest identities while retaining their physical files.
+    /// The caller must fence writers and coordinate the paged catalogue and WAL.
+    /// Repeating a completed operation is a no-op.
+    pub fn rename_collections(&self, names: &[(&str, &str)]) -> io::Result<()> {
+        let Some(mut manifest) = self.load_current()? else {
+            return Ok(());
+        };
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for &(source, target) in names {
+            if source == target || !sources.insert(source) || !targets.insert(target) {
+                return Err(invalid_data("invalid collection rename mapping"));
+            }
+        }
+        if sources.iter().any(|name| targets.contains(name)) {
+            return Err(invalid_data("overlapping collection rename mappings"));
+        }
+
+        for &(source, target) in names {
+            let source_exists = manifest.collections.contains_key(source)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == source)
+                || manifest.append_only_retired.contains_key(source);
+            if !source_exists {
+                continue;
+            }
+            if manifest.collections.contains_key(target)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == target)
+                || manifest.append_only_retired.contains_key(target)
+            {
+                return Err(invalid_data(format!(
+                    "collection rename collision: {source} and {target}"
+                )));
+            }
+        }
+
+        let mut changed = false;
+        for &(source, target) in names {
+            if let Some(entry) = manifest.collections.remove(source) {
+                manifest.collections.insert(target.to_string(), entry);
+                changed = true;
+            }
+            for segment in &mut manifest.append_only_segments {
+                if segment.collection == source {
+                    segment.collection = target.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(retired) = manifest.append_only_retired.remove(source) {
+                manifest
+                    .append_only_retired
+                    .insert(target.to_string(), retired);
+                changed = true;
+            }
+        }
+        if changed {
+            manifest.generation = manifest
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("manifest generation overflow"))?;
+            self.publish(&manifest)?;
+        }
+        Ok(())
+    }
+
+    /// Apply catalogue-proven empty-duplicate decisions to operational
+    /// identities. The paged catalogue is authoritative for which side is
+    /// empty; this method deliberately does not inspect or infer row counts.
+    /// Losing artifacts are quarantined after the replacement manifest is
+    /// durably published. Repeating a completed reconciliation is a no-op.
+    pub fn reconcile_collection_collisions(
+        &self,
+        collisions: &[(&str, &str, &str)],
+    ) -> io::Result<()> {
+        if collisions.is_empty() {
+            return Ok(());
+        }
+        let Some(mut manifest) = self.load_current()? else {
+            return Ok(());
+        };
+        let mut identities = BTreeSet::new();
+        for &(survivor, loser, canonical) in collisions {
+            if survivor == loser
+                || (canonical != survivor && canonical != loser)
+                || !identities.insert(survivor)
+                || !identities.insert(loser)
+            {
+                return Err(invalid_data("invalid collection collision reconciliation"));
+            }
+            let loser_rows = append_only_published_rows(&manifest, loser);
+            if loser_rows != 0 {
+                return Err(invalid_data(format!(
+                    "collection collision loser {loser} still owns {loser_rows} append-only rows"
+                )));
+            }
+        }
+
+        let mut changed = false;
+        for &(survivor, loser, canonical) in collisions {
+            if survivor == canonical {
+                if manifest.collections.remove(loser).is_some() {
+                    changed = true;
+                }
+                let before = manifest.append_only_segments.len();
+                manifest
+                    .append_only_segments
+                    .retain(|segment| segment.collection != loser);
+                changed |= before != manifest.append_only_segments.len();
+                changed |= manifest.append_only_retired.remove(loser).is_some();
+                continue;
+            }
+
+            let source_present = manifest.collections.contains_key(survivor)
+                || manifest
+                    .append_only_segments
+                    .iter()
+                    .any(|segment| segment.collection == survivor)
+                || manifest.append_only_retired.contains_key(survivor);
+            if !source_present {
+                // The previous attempt already published the canonical
+                // identity. Keeping it is the crash-idempotent outcome.
+                continue;
+            }
+
+            if manifest.collections.remove(loser).is_some() {
+                changed = true;
+            }
+            let before = manifest.append_only_segments.len();
+            manifest
+                .append_only_segments
+                .retain(|segment| segment.collection != loser);
+            changed |= before != manifest.append_only_segments.len();
+            changed |= manifest.append_only_retired.remove(loser).is_some();
+
+            if let Some(entry) = manifest.collections.remove(survivor) {
+                manifest.collections.insert(canonical.to_string(), entry);
+                changed = true;
+            }
+            for segment in &mut manifest.append_only_segments {
+                if segment.collection == survivor {
+                    segment.collection = canonical.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(retired) = manifest.append_only_retired.remove(survivor) {
+                manifest
+                    .append_only_retired
+                    .insert(canonical.to_string(), retired);
+                changed = true;
+            }
+        }
+
+        if changed {
+            manifest.generation = manifest
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("manifest generation overflow"))?;
+            self.publish(&manifest)?;
+            let protected_paths = self.protected_collection_paths(&manifest)?;
+            self.quarantine_unreferenced_collection_files(&protected_paths)?;
+            self.quarantine_unreferenced_append_only_segments(&manifest)?;
+            self.validate_manifest_artifacts(&manifest)?;
+        }
+        Ok(())
     }
 
     pub fn prepare_collection_create(&self, name: &str) -> io::Result<PreparedCollectionCreate<V>> {
@@ -286,6 +491,16 @@ impl<V: Vfs> OperationalManifest<V> {
         }
 
         let path = self.collection_file_name(name);
+        if manifest
+            .collections
+            .values()
+            .any(|entry| entry.path == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("collection artifact already belongs to another collection: {name}"),
+            ));
+        }
         self.prepare_collection_file_by_name(&path)?;
         Ok(PreparedCollectionCreate {
             manifest: self.clone(),
@@ -302,6 +517,16 @@ impl<V: Vfs> OperationalManifest<V> {
             return Ok(());
         }
         let path = self.collection_file_name(name);
+        if manifest
+            .collections
+            .values()
+            .any(|entry| entry.path == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("collection artifact already belongs to another collection: {name}"),
+            ));
+        }
         manifest.collections.insert(
             name.to_string(),
             CollectionEntry {
@@ -364,154 +589,6 @@ impl<V: Vfs> OperationalManifest<V> {
         self.root.to_string_lossy().into_owned()
     }
 
-    pub fn publish_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.publish_append_only_segment_with_retention_bounds(
-            collection, segment_id, codec, bytes, None, None,
-        )
-    }
-
-    pub fn publish_append_only_segment_with_retention_bounds(
-        &self,
-        collection: &str,
-        segment_id: u64,
-        codec: AppendOnlySegmentCodec,
-        bytes: &[u8],
-        retention_min_ms: Option<i64>,
-        retention_max_ms: Option<i64>,
-    ) -> io::Result<AppendOnlySegmentManifestEntry> {
-        self.ensure_dirs()?;
-        let decoded = decode_append_only_segment(bytes).map_err(invalid_data)?;
-        if decoded.codec != codec {
-            return Err(invalid_data("append-only segment codec metadata mismatch"));
-        }
-        let mut manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        if manifest
-            .append_only_segments
-            .iter()
-            .any(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("append-only segment already published: {collection}/{segment_id}"),
-            ));
-        }
-
-        let path = self.append_only_segment_file_name(collection, segment_id);
-        let segment_path = self.append_only_segments_dir().join(&path);
-        if self.vfs.exists(&segment_path) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("closed append-only segment already exists: {path}"),
-            ));
-        }
-        {
-            let mut file = self.vfs.open(&segment_path, OpenMode::create_new())?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        self.vfs.sync_dir(&self.append_only_segments_dir())?;
-
-        let entry = AppendOnlySegmentManifestEntry {
-            collection: collection.to_string(),
-            segment_id,
-            state: AppendOnlySegmentState::Active,
-            path,
-            codec,
-            chunk_size: APPEND_ONLY_SEGMENT_CHUNK_BYTES,
-            row_count: decoded.rows.len() as u64,
-            retention_min_ms,
-            retention_max_ms,
-            primary_min: decoded.primary_min.as_ref().map(hex::encode),
-            primary_max: decoded.primary_max.as_ref().map(hex::encode),
-            primary_bloom: decoded.primary_bloom.clone(),
-            chunk_checksums: append_only_segment_chunk_checksums(bytes),
-        };
-        manifest.append_only_segments.push(entry.clone());
-        manifest
-            .append_only_segments
-            .sort_by(|a, b| (&a.collection, a.segment_id).cmp(&(&b.collection, b.segment_id)));
-        let retired = manifest
-            .append_only_retired
-            .entry(collection.to_string())
-            .or_default();
-        retired.segment_high_water = retired.segment_high_water.max(segment_id);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(entry)
-    }
-
-    pub fn begin_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(entry) = manifest
-            .append_only_segments
-            .iter_mut()
-            .find(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if entry.state == AppendOnlySegmentState::PendingDrop {
-            return Ok(true);
-        }
-        entry.state = AppendOnlySegmentState::PendingDrop;
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
-    pub fn finish_retire_append_only_segment(
-        &self,
-        collection: &str,
-        segment_id: u64,
-    ) -> io::Result<bool> {
-        self.ensure_dirs()?;
-        let mut manifest = match self.load_current()? {
-            Some(manifest) => manifest,
-            None => return Ok(false),
-        };
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        if manifest.append_only_segments[index].state != AppendOnlySegmentState::PendingDrop {
-            manifest.append_only_segments[index].state = AppendOnlySegmentState::PendingDrop;
-            manifest.generation += 1;
-            self.publish(&manifest)?;
-            manifest = self.load_current()?.unwrap_or_else(empty_manifest);
-        }
-        let Some(index) = manifest
-            .append_only_segments
-            .iter()
-            .position(|entry| entry.collection == collection && entry.segment_id == segment_id)
-        else {
-            return Ok(false);
-        };
-        let entry = manifest.append_only_segments.remove(index);
-        let _ = self
-            .vfs
-            .remove_file(&self.append_only_segments_dir().join(&entry.path));
-        record_retired_append_only_segment(&mut manifest, &entry);
-        manifest.generation += 1;
-        self.publish(&manifest)?;
-        Ok(true)
-    }
-
     fn protected_collection_paths(&self, manifest: &Manifest) -> io::Result<BTreeSet<String>> {
         let mut paths = active_collection_paths(manifest);
         paths.extend(self.fork_referenced_collection_paths()?);
@@ -528,6 +605,15 @@ impl<V: Vfs> OperationalManifest<V> {
         self.collections_dir().join(self.collection_file_name(name))
     }
 
+    /// Encode the historical format for compatibility fixtures and offline inspection.
+    pub fn legacy_manifest_bytes_for_test(&self) -> io::Result<Vec<u8>> {
+        manifest_to_bytes(
+            &self
+                .load_current()?
+                .ok_or_else(|| invalid_data("missing manifest"))?,
+        )
+    }
+
     pub fn current_manifest_path_for_test(&self) -> PathBuf {
         self.root.join(MANIFEST_FILE)
     }
@@ -538,44 +624,6 @@ impl<V: Vfs> OperationalManifest<V> {
 
     pub fn append_only_segment_path_for_test(&self, file_name: &str) -> PathBuf {
         self.append_only_segments_dir().join(file_name)
-    }
-
-    pub fn append_only_segments_for_test(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        self.append_only_segments()
-    }
-
-    pub fn append_only_segments(&self) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| active_append_only_segments(&manifest))
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_segments_with_pending_for_test(
-        &self,
-    ) -> io::Result<Vec<AppendOnlySegmentManifestEntry>> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| manifest.append_only_segments)
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| append_only_published_rows(&manifest, collection))
-            .unwrap_or_default())
-    }
-
-    pub fn append_only_published_rows_for_test(&self, collection: &str) -> io::Result<u64> {
-        self.append_only_published_rows(collection)
-    }
-
-    pub fn next_append_only_segment_id(&self, collection: &str) -> io::Result<u64> {
-        Ok(self
-            .load_current()?
-            .map(|manifest| next_append_only_segment_id(&manifest, collection))
-            .unwrap_or(1))
     }
 
     pub fn write_next_manifest_for_test(&self, name: &str) -> io::Result<()> {
@@ -603,26 +651,25 @@ impl<V: Vfs> OperationalManifest<V> {
     }
 
     fn load_current(&self) -> io::Result<Option<Manifest>> {
-        let path = self.root.join(MANIFEST_FILE);
-        match self.read_file(&path) {
-            Ok(bytes) => manifest_from_bytes(&bytes).map(Some),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
+        };
+        while !reader.step(64 * 1024)?.complete {}
+        Ok(Some(reader.snapshot()?.clone()))
+    }
+
+    fn load_current_bounded(&self, limit: usize) -> io::Result<Option<Manifest>> {
+        let Some(mut reader) = self.begin_incremental_read()? else {
+            return Ok(None);
+        };
+        if !reader.step(limit)?.complete {
+            return Ok(None);
         }
+        Ok(Some(reader.snapshot()?.clone()))
     }
 
     fn publish(&self, manifest: &Manifest) -> io::Result<()> {
-        self.ensure_dirs()?;
-        let current = self.root.join(MANIFEST_FILE);
-        let next = self.root.join(NEXT_MANIFEST_FILE);
-        let bytes = manifest_to_bytes(manifest)?;
-        {
-            let mut file = self.vfs.open(&next, OpenMode::create_truncate())?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        self.vfs.rename(&next, &current)?;
-        self.vfs.sync_dir(&self.root)
+        self.publish_journal(manifest)
     }
 
     fn prepare_collection_file_by_name(&self, file_name: &str) -> io::Result<()> {
@@ -859,33 +906,71 @@ fn next_append_only_segment_id(manifest: &Manifest, collection: &str) -> u64 {
     active_high_water.max(retired_high_water).saturating_add(1)
 }
 
-fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
-    let checksum = checksum_manifest(manifest);
+struct ManifestChecksumWriter(crc32fast::Hasher);
+
+impl io::Write for ManifestChecksumWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn checksum_manifest_body(body: &Map<String, Value>) -> io::Result<u32> {
+    let mut writer = ManifestChecksumWriter(crc32fast::Hasher::new());
+    serde_json::to_writer(&mut writer, body).map_err(invalid_data)?;
+    Ok(writer.0.finalize())
+}
+
+fn write_manifest(writer: impl io::Write, manifest: &Manifest) -> io::Result<()> {
     let mut object = manifest_body_json(manifest);
+    let checksum = checksum_manifest_body(&object)?;
     object.insert(
         "checksum".to_string(),
         Value::String(format!("{checksum:08x}")),
     );
-    serde_json::to_vec_pretty(&Value::Object(object)).map_err(invalid_data)
+    serde_json::to_writer_pretty(writer, &object).map_err(manifest_json_error)
+}
+
+fn manifest_json_error(error: serde_json::Error) -> io::Error {
+    if let Some(kind) = error.io_error_kind() {
+        io::Error::new(kind, error)
+    } else {
+        invalid_data(error)
+    }
+}
+
+fn manifest_to_bytes(manifest: &Manifest) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_manifest(&mut bytes, manifest)?;
+    Ok(bytes)
 }
 
 fn manifest_from_bytes(bytes: &[u8]) -> io::Result<Manifest> {
-    let value: Value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    let value = serde_json::from_slice(bytes).map_err(invalid_data)?;
+    manifest_from_value(value)
+}
+
+fn manifest_from_value(mut value: Value) -> io::Result<Manifest> {
     let object = value
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| invalid_data("manifest root must be an object"))?;
     let checksum = object
-        .get("checksum")
-        .and_then(Value::as_str)
+        .remove("checksum")
+        .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or_else(|| invalid_data("manifest checksum is missing"))?;
-    let manifest = manifest_from_object(object)?;
-    let expected = format!("{:08x}", checksum_manifest(&manifest));
+    // Check the persisted shape before adding defaults for older formats.
+    // Historical manifests did not contain segment state or retirement data.
+    let expected = format!("{:08x}", checksum_manifest_body(object)?);
     if checksum != expected {
         return Err(invalid_data(format!(
             "manifest checksum mismatch: expected {expected}, got {checksum}"
         )));
     }
-    Ok(manifest)
+    manifest_from_object(object)
 }
 
 fn manifest_from_object(object: &Map<String, Value>) -> io::Result<Manifest> {
@@ -1040,6 +1125,15 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         .transpose()?;
     let retention_min_ms = object.get("retention_min_ms").and_then(Value::as_i64);
     let retention_max_ms = object.get("retention_max_ms").and_then(Value::as_i64);
+    let retention_timestamp_column = object
+        .get("retention_timestamp_column")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid_data("invalid retention timestamp column"))
+        })
+        .transpose()?;
     let chunk_checksums = object
         .get("chunk_checksums")
         .and_then(Value::as_array)
@@ -1057,6 +1151,7 @@ fn append_only_segment_from_value(value: &Value) -> io::Result<AppendOnlySegment
         row_count,
         retention_min_ms,
         retention_max_ms,
+        retention_timestamp_column,
         primary_min,
         primary_max,
         primary_bloom,
@@ -1161,12 +1256,6 @@ fn fork_origin_from_object(object: &Map<String, Value>) -> io::Result<ForkOrigin
     })
 }
 
-fn checksum_manifest(manifest: &Manifest) -> u32 {
-    let body = serde_json::to_vec(&Value::Object(manifest_body_json(manifest)))
-        .expect("manifest body is JSON encodable");
-    crc32fast::hash(&body)
-}
-
 fn manifest_body_json(manifest: &Manifest) -> Map<String, Value> {
     let mut collections = Map::new();
     for (name, entry) in &manifest.collections {
@@ -1257,6 +1346,12 @@ fn append_only_segment_to_value(entry: &AppendOnlySegmentManifestEntry) -> Value
             Value::from(retention_max_ms),
         );
     }
+    if let Some(column) = &entry.retention_timestamp_column {
+        object.insert(
+            "retention_timestamp_column".to_string(),
+            Value::String(column.clone()),
+        );
+    }
     if let Some(primary_min) = &entry.primary_min {
         object.insert(
             "primary_min".to_string(),
@@ -1342,478 +1437,4 @@ fn invalid_data(message: impl ToString) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-
-    fn temp_db_path(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "reddb_file_operational_manifest_{name}_{}_{}",
-            std::process::id(),
-            nanos
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("data.rdb")
-    }
-
-    #[test]
-    fn manifest_round_trip_validates_checksum() {
-        let mut manifest = empty_manifest();
-        manifest.generation = 7;
-        manifest.collections.insert(
-            "users".to_string(),
-            CollectionEntry {
-                state: CollectionState::Active,
-                path: "users.rcol".to_string(),
-                source: None,
-            },
-        );
-
-        let bytes = manifest_to_bytes(&manifest).unwrap();
-        let decoded = manifest_from_bytes(&bytes).unwrap();
-
-        assert_eq!(decoded.generation, 7);
-        assert_eq!(decoded.collections["users"].path, "users.rcol");
-    }
-
-    #[test]
-    fn checksum_rejects_corruption() {
-        let mut manifest = empty_manifest();
-        manifest.generation = 1;
-        let mut text = String::from_utf8(manifest_to_bytes(&manifest).unwrap()).unwrap();
-        text = text.replace("\"generation\": 1", "\"generation\": 9");
-
-        let err = manifest_from_bytes(text.as_bytes()).unwrap_err();
-        assert!(err.to_string().contains("checksum mismatch"));
-    }
-
-    #[test]
-    fn recover_removes_pending_drop_and_quarantines_orphans() {
-        let path = temp_db_path("recover");
-        let manifest = OperationalManifest::for_db_path(&path);
-        manifest
-            .recover_or_bootstrap(&["live".to_string(), "gone".to_string()])
-            .unwrap();
-        fs::write(manifest.collection_path_for_test("orphan"), b"orphan").unwrap();
-        let _drop = manifest.prepare_collection_drop("gone").unwrap();
-
-        let completed = manifest.recover_or_bootstrap(&[]).unwrap();
-
-        assert_eq!(completed, vec!["gone".to_string()]);
-        assert!(manifest.collection_path_for_test("live").exists());
-        assert!(!manifest.collection_path_for_test("gone").exists());
-        assert!(!manifest.collection_path_for_test("orphan").exists());
-        assert!(manifest.quarantine_path_for_test("orphan.rcol").exists());
-    }
-
-    #[test]
-    fn create_and_drop_collection_are_idempotent_and_escape_names() {
-        let path = temp_db_path("create_drop");
-        let manifest = OperationalManifest::for_db_path(&path);
-
-        manifest.create_collection("tenant/a b").unwrap();
-        let first_generation = manifest.read_generation_for_test().unwrap();
-        manifest.create_collection("tenant/a b").unwrap();
-        assert_eq!(
-            manifest.read_generation_for_test().unwrap(),
-            first_generation
-        );
-        assert!(manifest.collection_path_for_test("tenant/a b").exists());
-        assert!(manifest
-            .collection_path_for_test("tenant/a b")
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .contains("%2F"));
-
-        let _drop = manifest.prepare_collection_drop("missing").unwrap();
-        assert_eq!(
-            manifest.read_generation_for_test().unwrap(),
-            first_generation
-        );
-        manifest
-            .prepare_collection_drop("tenant/a b")
-            .unwrap()
-            .finish()
-            .unwrap();
-        assert!(!manifest.collection_path_for_test("tenant/a b").exists());
-        assert!(manifest.read_generation_for_test().unwrap() > first_generation);
-    }
-
-    #[test]
-    fn next_manifest_helper_writes_next_file_without_publishing() {
-        let path = temp_db_path("next");
-        let manifest = OperationalManifest::for_db_path(&path);
-        manifest.recover_or_bootstrap(&[]).unwrap();
-        manifest.write_next_manifest_for_test("future").unwrap();
-
-        assert!(manifest.root.join(NEXT_MANIFEST_FILE).exists());
-        assert!(manifest
-            .load_current()
-            .unwrap()
-            .unwrap()
-            .collections
-            .is_empty());
-    }
-
-    #[test]
-    fn manifest_parser_rejects_malformed_shapes() {
-        assert!(manifest_from_bytes(b"[]").is_err());
-        assert!(manifest_from_bytes(br#"{"format_version":1}"#).is_err());
-        assert!(CollectionState::parse("bad").is_err());
-
-        let mut object = Map::new();
-        object.insert("format_version".to_string(), Value::from(2));
-        object.insert("generation".to_string(), Value::from(0));
-        object.insert("collections".to_string(), Value::Object(Map::new()));
-        assert!(manifest_from_object(&object).is_err());
-
-        object.insert("format_version".to_string(), Value::from(FORMAT_VERSION));
-        object.remove("generation");
-        assert!(manifest_from_object(&object).is_err());
-
-        object.insert("generation".to_string(), Value::from(0));
-        object.remove("collections");
-        assert!(manifest_from_object(&object).is_err());
-
-        let mut collections = Map::new();
-        collections.insert("users".to_string(), Value::String("bad".to_string()));
-        object.insert("collections".to_string(), Value::Object(collections));
-        assert!(manifest_from_object(&object).is_err());
-
-        let mut entry = Map::new();
-        entry.insert("path".to_string(), Value::String("users.rcol".to_string()));
-        let mut collections = Map::new();
-        collections.insert("users".to_string(), Value::Object(entry));
-        object.insert("collections".to_string(), Value::Object(collections));
-        assert!(manifest_from_object(&object).is_err());
-
-        let mut entry = Map::new();
-        entry.insert("state".to_string(), Value::String("active".to_string()));
-        let mut collections = Map::new();
-        collections.insert("users".to_string(), Value::Object(entry));
-        object.insert("collections".to_string(), Value::Object(collections));
-        assert!(manifest_from_object(&object).is_err());
-    }
-
-    #[test]
-    fn unique_quarantine_path_adds_suffix_when_needed() {
-        let path = temp_db_path("unique_quarantine");
-        let manifest = OperationalManifest::for_db_path(&path);
-        manifest.ensure_dirs().unwrap();
-        fs::write(manifest.quarantine_dir().join("orphan.rcol"), b"one").unwrap();
-        fs::write(manifest.quarantine_dir().join("orphan.rcol.1"), b"two").unwrap();
-
-        assert_eq!(
-            manifest.unique_quarantine_path("orphan.rcol"),
-            manifest.quarantine_dir().join("orphan.rcol.2")
-        );
-    }
-
-    // Write bytes straight to a collection's file so the fork isolation tests
-    // have observable per-collection content to diverge.
-    fn write_collection(manifest: &OperationalManifest, name: &str, bytes: &[u8]) {
-        fs::write(manifest.collection_path_for_test(name), bytes).unwrap();
-    }
-
-    fn read_collection(manifest: &OperationalManifest, name: &str) -> Vec<u8> {
-        fs::read(manifest.collection_path_for_test(name)).unwrap()
-    }
-
-    #[test]
-    fn fork_create_is_metadata_only_and_copies_no_data() {
-        let path = temp_db_path("fork_metadata");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"parent-rows");
-
-        parent.create_fork("exp", 42).unwrap();
-        let fork = parent.fork_handle("exp");
-
-        // The fork references the parent's collection file by path; it did not
-        // materialize its own copy at create time.
-        assert!(!fork.collection_path_for_test("users").exists());
-        // Listing reports the parent identity and the pinned fork LSN.
-        let forks = parent.list_forks().unwrap();
-        assert_eq!(forks.len(), 1);
-        assert_eq!(forks[0].name, "exp");
-        assert_eq!(forks[0].fork_lsn, 42);
-        assert_eq!(forks[0].parent_store, parent.store_identity());
-        // The fork's own manifest carries the origin.
-        assert_eq!(fork.fork_origin().unwrap().unwrap().fork_lsn, 42);
-        // The parent is not itself a fork.
-        assert!(parent.fork_origin().unwrap().is_none());
-    }
-
-    #[test]
-    fn fork_writes_are_invisible_to_parent() {
-        let path = temp_db_path("fork_to_parent");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"v0");
-        parent.create_fork("exp", 1).unwrap();
-        let fork = parent.fork_handle("exp");
-
-        // Fork writes: hydrate (copy-on-write) then mutate the fork's own copy.
-        fork.hydrate_collection("users").unwrap();
-        write_collection(&fork, "users", b"fork-only");
-
-        assert_eq!(read_collection(&fork, "users"), b"fork-only");
-        // Parent is untouched by the fork's write.
-        assert_eq!(read_collection(&parent, "users"), b"v0");
-        // Hydration dropped the shared reference.
-        assert!(fork.fork_origin().unwrap().is_some());
-    }
-
-    #[test]
-    fn fork_recovery_quarantines_partial_hydration_artifact() {
-        let path = temp_db_path("fork_partial_hydration");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"complete-parent-copy");
-        parent.create_fork("exp", 1).unwrap();
-        let fork = parent.fork_handle("exp");
-
-        write_collection(&fork, "users", b"partial");
-
-        fork.recover_or_bootstrap(&[]).unwrap();
-
-        assert!(
-            !fork.collection_path_for_test("users").exists(),
-            "shared-by-reference fork recovery must not keep half-hydrated local artifacts"
-        );
-        assert_eq!(read_collection(&parent, "users"), b"complete-parent-copy");
-        let forks = parent.list_forks().unwrap();
-        assert_eq!(forks.len(), 1);
-        assert_eq!(
-            forks[0].hydration_state,
-            ForkHydrationState::SharedByReference
-        );
-    }
-
-    #[test]
-    fn recovery_rejects_manifest_referencing_missing_artifact() {
-        let path = temp_db_path("missing_artifact");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        fs::remove_file(parent.collection_path_for_test("users")).unwrap();
-
-        let err = parent.recover_or_bootstrap(&[]).unwrap_err();
-
-        assert!(err.to_string().contains("missing collection artifact"));
-    }
-
-    #[test]
-    fn parent_writes_after_fork_are_invisible_to_fork() {
-        let path = temp_db_path("parent_to_fork");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"as-of-fork");
-        parent.create_fork("exp", 5).unwrap();
-        let fork = parent.fork_handle("exp");
-
-        // Parent write: snapshot referencing forks first (copy-on-write on the
-        // parent side), then mutate the parent's file in place.
-        parent.materialize_forks_before_write("users").unwrap();
-        write_collection(&parent, "users", b"parent-moved-on");
-
-        // Fork still sees the as-of-fork snapshot; parent's later write is invisible.
-        assert_eq!(read_collection(&fork, "users"), b"as-of-fork");
-        assert_eq!(read_collection(&parent, "users"), b"parent-moved-on");
-    }
-
-    #[test]
-    fn drop_fork_removes_private_files_and_leaves_parent_intact() {
-        let path = temp_db_path("drop_fork");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"keep-me");
-        parent.create_fork("exp", 9).unwrap();
-        let fork = parent.fork_handle("exp");
-        fork.hydrate_collection("users").unwrap();
-        write_collection(&fork, "users", b"fork-private");
-        let fork_root = fork.root.clone();
-
-        assert!(parent.drop_fork("exp").unwrap());
-        // Fork-private files are gone; the parent's data survives untouched.
-        assert!(!fork_root.exists());
-        assert_eq!(read_collection(&parent, "users"), b"keep-me");
-        assert!(parent.list_forks().unwrap().is_empty());
-        // Dropping again is idempotent.
-        assert!(!parent.drop_fork("exp").unwrap());
-    }
-
-    #[test]
-    fn parent_recovery_retains_dropped_collection_file_referenced_by_live_fork() {
-        let path = temp_db_path("fork_retains_parent_drop");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"as-of-fork");
-        parent.create_fork("exp", 12).unwrap();
-
-        let _drop = parent.prepare_collection_drop("users").unwrap();
-        let completed = parent.recover_or_bootstrap(&[]).unwrap();
-
-        assert_eq!(completed, vec!["users".to_string()]);
-        assert!(
-            parent.collection_path_for_test("users").exists(),
-            "live fork source must keep the parent artifact available"
-        );
-        let fork = parent.fork_handle("exp");
-        fork.hydrate_collection("users").unwrap();
-        assert_eq!(read_collection(&fork, "users"), b"as-of-fork");
-    }
-
-    #[test]
-    fn dropping_last_referencing_fork_releases_parent_file_to_retention() {
-        let path = temp_db_path("fork_drop_releases_parent_file");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"as-of-fork");
-        parent.create_fork("exp", 12).unwrap();
-        let _drop = parent.prepare_collection_drop("users").unwrap();
-        parent.recover_or_bootstrap(&[]).unwrap();
-
-        assert!(parent.drop_fork("exp").unwrap());
-
-        assert!(!parent.collection_path_for_test("users").exists());
-        assert!(parent.quarantine_path_for_test("users.rcol").exists());
-    }
-
-    #[test]
-    fn detach_fork_hydrates_and_survives_parent_removal() {
-        let path = temp_db_path("detach_fork");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"successful-experiment");
-        parent.create_fork("exp", 21).unwrap();
-
-        let detached = parent.detach_fork("exp").unwrap().unwrap();
-
-        assert!(parent.list_forks().unwrap().is_empty());
-        assert!(detached.fork_origin().unwrap().is_none());
-        assert_eq!(
-            read_collection(&detached, "users"),
-            b"successful-experiment"
-        );
-
-        fs::remove_dir_all(&parent.root).unwrap();
-        assert_eq!(
-            detached.recover_or_bootstrap(&[]).unwrap(),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            read_collection(&detached, "users"),
-            b"successful-experiment"
-        );
-    }
-
-    #[test]
-    fn promote_fork_replaces_primary_and_archives_parent() {
-        let path = temp_db_path("promote_fork");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"old-primary");
-        parent.create_fork("exp", 21).unwrap();
-        let fork = parent.fork_handle("exp");
-        fork.hydrate_collection("users").unwrap();
-        write_collection(&fork, "users", b"new-primary");
-
-        let outcome = parent.promote_fork("exp").unwrap().unwrap();
-
-        assert_eq!(outcome.name, "exp");
-        assert_eq!(outcome.fork_lsn, 21);
-        assert_eq!(read_collection(&parent, "users"), b"new-primary");
-        assert!(parent.fork_origin().unwrap().is_none());
-        assert!(parent.list_forks().unwrap().is_empty());
-        assert_eq!(
-            read_collection(&outcome.archived_parent, "users"),
-            b"old-primary"
-        );
-    }
-
-    #[test]
-    fn promotion_recovery_resumes_after_fork_moves_to_staging() {
-        let path = temp_db_path("promote_fork_resume_staging");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"old-primary");
-        parent.create_fork("exp", 21).unwrap();
-        let fork = parent.fork_handle("exp");
-        fork.hydrate_collection("users").unwrap();
-        write_collection(&fork, "users", b"new-primary");
-        let staging = parent.promoting_fork_handle("exp");
-        fs::rename(&fork.root, &staging.root).unwrap();
-
-        parent.recover_or_bootstrap(&[]).unwrap();
-
-        assert_eq!(read_collection(&parent, "users"), b"new-primary");
-        assert!(parent.fork_origin().unwrap().is_none());
-        assert!(parent.list_forks().unwrap().is_empty());
-        assert_eq!(
-            read_collection(&parent.archived_parent_handle("exp"), "users"),
-            b"old-primary"
-        );
-    }
-
-    #[test]
-    fn detach_fork_resumes_after_move_before_origin_clear() {
-        let path = temp_db_path("detach_fork_resume");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"as-of-fork");
-        parent.create_fork("exp", 34).unwrap();
-
-        let fork = parent.fork_handle("exp");
-        fork.hydrate_shared_collections().unwrap();
-        let detached = parent.detached_fork_handle("exp");
-        fs::rename(&fork.root, &detached.root).unwrap();
-
-        let resumed = parent.detach_fork("exp").unwrap().unwrap();
-
-        assert_eq!(resumed.root, detached.root);
-        assert!(parent.list_forks().unwrap().is_empty());
-        assert!(resumed.fork_origin().unwrap().is_none());
-        assert_eq!(read_collection(&resumed, "users"), b"as-of-fork");
-    }
-
-    #[test]
-    fn detach_fork_releases_parent_retention_pin() {
-        let path = temp_db_path("detach_releases_parent_pin");
-        let parent = OperationalManifest::for_db_path(&path);
-        parent.recover_or_bootstrap(&["users".to_string()]).unwrap();
-        write_collection(&parent, "users", b"as-of-fork");
-        parent.create_fork("exp", 55).unwrap();
-        let _drop = parent.prepare_collection_drop("users").unwrap();
-        parent.recover_or_bootstrap(&[]).unwrap();
-        assert!(parent.collection_path_for_test("users").exists());
-
-        let detached = parent.detach_fork("exp").unwrap().unwrap();
-        parent.recover_or_bootstrap(&[]).unwrap();
-
-        assert!(!parent.collection_path_for_test("users").exists());
-        assert_eq!(read_collection(&detached, "users"), b"as-of-fork");
-    }
-
-    #[test]
-    fn fork_creation_rejects_duplicate_and_missing_parent() {
-        let path = temp_db_path("fork_errors");
-        let parent = OperationalManifest::for_db_path(&path);
-        // A store with no manifest cannot be forked.
-        assert_eq!(
-            parent.create_fork("exp", 0).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        parent.recover_or_bootstrap(&[]).unwrap();
-        parent.create_fork("exp", 0).unwrap();
-        assert_eq!(
-            parent.create_fork("exp", 0).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
-    }
-}
+mod tests;

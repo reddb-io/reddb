@@ -28,7 +28,12 @@ pub fn fill_bytes(buf: &mut [u8]) -> Result<(), String> {
         fill_bytes_windows(buf)
     }
 
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        getrandom::fill(buf).map_err(|_| "browser CSPRNG failed".to_string())
+    }
+
+    #[cfg(not(any(unix, windows, target_arch = "wasm32")))]
     {
         let _ = buf;
         Err("OS CSPRNG not supported on this platform".to_string())
@@ -41,7 +46,9 @@ fn fill_bytes_windows(buf: &mut [u8]) -> Result<(), String> {
         return Ok(());
     }
 
-    let ok = unsafe { SystemFunction036(buf.as_mut_ptr(), buf.len() as u32) };
+    let length = u32::try_from(buf.len())
+        .map_err(|_| "OS CSPRNG buffer exceeds the Windows length limit".to_string())?;
+    let ok = unsafe { SystemFunction036(buf.as_mut_ptr(), length) };
     if ok == 0 {
         return Err("OS CSPRNG failed".to_string());
     }

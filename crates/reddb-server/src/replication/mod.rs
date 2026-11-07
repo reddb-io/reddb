@@ -33,6 +33,7 @@ pub mod fence;
 pub mod flow_control;
 pub mod lease;
 pub mod logical;
+pub(crate) mod metadata;
 pub mod primary;
 pub mod quorum;
 pub mod reconnect;

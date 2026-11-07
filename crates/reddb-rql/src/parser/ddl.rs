@@ -20,7 +20,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Table)?;
 
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let (columns, unique_constraints) = self.parse_create_table_elements()?;
 
@@ -157,7 +157,7 @@ impl<'a> Parser<'a> {
     /// Parse the body of CREATE TABLE after CREATE TABLE has been consumed
     pub fn parse_create_table_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         // Didactic (#1704): `CREATE TABLE <name> DOCUMENT (…)` is a Postgres-ism
         // a document-model newcomer predictably tries. Teach the native form
@@ -430,7 +430,7 @@ impl<'a> Parser<'a> {
         model: CollectionModel,
     ) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.parse_drop_collection_name()?;
+        let name = self.parse_collection_name()?;
         let vault_own_master_key =
             if model == CollectionModel::Vault && self.consume(&Token::With)? {
                 if !self.consume_ident_ci("OWN")? {
@@ -613,7 +613,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_create_collection_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.parse_drop_collection_name()?;
+        let name = self.parse_collection_name()?;
         if !self.consume_ident_ci("KIND")? {
             return Err(ParseError::expected(
                 vec!["KIND"],
@@ -735,7 +735,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_create_vector_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_not_exists = self.match_if_not_exists()?;
-        let name = self.parse_drop_collection_name()?;
+        let name = self.parse_collection_name()?;
         if !self.consume_ident_ci("DIM")? {
             return Err(ParseError::expected(
                 vec!["DIM"],
@@ -811,16 +811,8 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_drop_collection_name(&mut self) -> Result<String, ParseError> {
-        let mut name = self.expect_ident()?;
-        while self.consume(&Token::Dot)? {
-            if self.consume(&Token::Star)? {
-                name.push_str(".*");
-                break;
-            }
-            let next = self.expect_ident_or_keyword()?;
-            name = format!("{name}.{next}");
-        }
-        Ok(name)
+        let name = self.collection_name_segment(false)?;
+        self.finish_collection_name(name, true)
     }
 
     /// Parse: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
@@ -841,7 +833,7 @@ impl<'a> Parser<'a> {
                 self.position(),
             ));
         }
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut operations = Vec::new();
         loop {
@@ -866,7 +858,7 @@ impl<'a> Parser<'a> {
     pub fn parse_alter_graph_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Alter)?;
         self.expect(Token::Graph)?;
-        let name = self.expect_ident()?;
+        let name = self.parse_collection_name()?;
 
         let mut operations = Vec::new();
         loop {

@@ -165,7 +165,7 @@ pub(super) fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<
     Ok(())
 }
 
-pub(super) fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
+pub(crate) fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
     let mut columns = Vec::with_capacity(pairs.len());
     let mut values = Vec::with_capacity(pairs.len());
 
@@ -210,7 +210,7 @@ pub(super) fn find_column_value_string(
     }
 }
 
-pub(super) fn find_document_body_json(
+pub(crate) fn find_document_body_json(
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<crate::json::Value> {
@@ -863,6 +863,46 @@ pub(super) fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
         }
     }
     !matches!(cursor, crate::json::Value::Null)
+}
+
+pub(super) fn dotted_tenant_text(value: &Value, tail: &str) -> RedDBResult<Option<String>> {
+    let json = match value {
+        Value::Null => return Ok(None),
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            crate::json::from_slice(bytes).map_err(|err| {
+                RedDBError::Query(format!(
+                    "tenant discriminator: root column is not valid JSON ({err})"
+                ))
+            })?
+        }
+        Value::Text(text) => crate::json::from_str(text).map_err(|err| {
+            RedDBError::Query(format!(
+                "tenant discriminator: text root is not valid JSON ({err})"
+            ))
+        })?,
+        other => {
+            return Err(RedDBError::Query(format!(
+                "tenant discriminator: root column must be JSON / NULL, got {other:?}"
+            )))
+        }
+    };
+    let mut cursor = &json;
+    for segment in tail.split('.') {
+        let crate::json::Value::Object(map) = cursor else {
+            return Ok(None);
+        };
+        let Some(value) = map.get(segment) else {
+            return Ok(None);
+        };
+        cursor = value;
+    }
+    match cursor {
+        crate::json::Value::Null => Ok(None),
+        crate::json::Value::String(value) => Ok(Some(value.clone())),
+        _ => Err(RedDBError::Query(
+            "tenant discriminator must be a string".to_string(),
+        )),
+    }
 }
 
 /// Phase 2 PG parity: take a column value (possibly Null / Text /

@@ -325,7 +325,7 @@ impl RedDBGrpcServer {
     /// 256 MiB: that let one request pin a quarter gigabyte of decoded
     /// protobuf per stream before any handler ran. Override with
     /// `REDDB_GRPC_MAX_MESSAGE_BYTES`; a malformed value keeps the default.
-    fn max_message_bytes() -> usize {
+    pub(crate) fn max_message_bytes() -> usize {
         const DEFAULT: usize = 32 * 1024 * 1024;
         std::env::var("REDDB_GRPC_MAX_MESSAGE_BYTES")
             .ok()
@@ -359,6 +359,12 @@ struct GrpcRuntime {
     /// when the operator enables OAuth. `None` means JWT bearers fall
     /// back to the AuthStore lookup path.
     oauth_validator: Option<Arc<crate::auth::OAuthValidator>>,
+}
+
+#[derive(Clone)]
+struct ResolvedGrpcAuth {
+    result: AuthResult,
+    identity: Option<(crate::auth::UserId, Role)>,
 }
 
 impl GrpcRuntime {
@@ -420,6 +426,7 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
 /// The executor is synchronous, so the thread-local holds for the call.
 struct GrpcIdentityGuard {
     previous_identity: Option<(String, crate::auth::Role)>,
+    previous_principal: Option<crate::auth::UserId>,
     previous_tenant: Option<String>,
 }
 
@@ -427,14 +434,15 @@ impl GrpcIdentityGuard {
     fn install(identity: Option<(crate::auth::UserId, crate::auth::Role)>) -> Self {
         use crate::runtime::execution_context as ctx;
         let previous_identity = ctx::current_auth_identity_for_audit();
+        let previous_principal = ctx::current_auth_principal();
         let previous_tenant = ctx::current_tenant();
         match identity {
             Some((id, role)) => {
-                match id.tenant {
-                    Some(tenant) => ctx::set_current_tenant(tenant),
+                match &id.tenant {
+                    Some(tenant) => ctx::set_current_tenant(tenant.clone()),
                     None => ctx::clear_current_tenant(),
                 }
-                ctx::set_current_auth_identity(id.username, role);
+                ctx::set_current_auth_principal(id, role);
             }
             None => {
                 ctx::clear_current_auth_identity();
@@ -443,6 +451,7 @@ impl GrpcIdentityGuard {
         }
         Self {
             previous_identity,
+            previous_principal,
             previous_tenant,
         }
     }
@@ -451,9 +460,12 @@ impl GrpcIdentityGuard {
 impl Drop for GrpcIdentityGuard {
     fn drop(&mut self) {
         use crate::runtime::execution_context as ctx;
-        match self.previous_identity.take() {
-            Some((username, role)) => ctx::set_current_auth_identity(username, role),
-            None => ctx::clear_current_auth_identity(),
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => ctx::set_current_auth_principal(principal, role),
+            _ => ctx::clear_current_auth_identity(),
         }
         match self.previous_tenant.take() {
             Some(tenant) => ctx::set_current_tenant(tenant),
@@ -462,27 +474,51 @@ impl Drop for GrpcIdentityGuard {
     }
 }
 
-/// Resolve the `(UserId, Role)` a gRPC request executes as, from the
-/// dispatch context the catalog interceptor attached plus the metadata
-/// bearer (for the role).
+/// Resolve the `(UserId, Role)` a gRPC request executes as from the typed
+/// dispatch context installed by the catalog interceptor.
 fn grpc_request_identity<T>(
-    runtime: &GrpcRuntime,
     request: &Request<T>,
 ) -> Option<(crate::auth::UserId, crate::auth::Role)> {
-    let principal = request
+    request
         .extensions()
         .get::<catalog_dispatch::GrpcDispatchContext>()
-        .and_then(|context| context.principal.clone())?;
-    let role = match runtime.resolve_auth(request.metadata()) {
-        crate::auth::middleware::AuthResult::Authenticated { role, .. } => role,
-        _ => return None,
-    };
-    let (tenant, username) = principal
-        .split_once('/')
-        .map_or((None, principal.as_str()), |(tenant, username)| {
-            (Some(tenant), username)
-        });
-    Some((crate::auth::UserId::from_parts(tenant, username), role))
+        .and_then(|context| context.identity.clone())
+}
+
+async fn grpc_spawn_blocking<F, R>(runtime: &RedDBRuntime, f: F) -> Result<R, Status>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    use crate::transport::execution_admission::ExecutionAdmissionError;
+
+    let admission = runtime.execution_admission();
+    let permit =
+        match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                return Err(Status::resource_exhausted(
+                    "execution_queue_full: engine execution queue is full",
+                ))
+            }
+            Ok(Err(ExecutionAdmissionError::Closed)) => {
+                return Err(Status::unavailable(
+                    "execution_admission_closed: engine execution admission is unavailable",
+                ))
+            }
+            Err(_) => {
+                return Err(Status::deadline_exceeded(
+                    "execution_queue_timeout: deadline expired while waiting to execute",
+                ))
+            }
+        };
+    let bundle = crate::runtime::execution_context::snapshot_bundle();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::runtime::execution_context::with_snapshot_bundle(&bundle, f)
+    })
+    .await
+    .map_err(|error| Status::internal(format!("engine execution task failed: {error}")))
 }
 
 fn execute_grpc_query_request(
@@ -492,7 +528,7 @@ fn execute_grpc_query_request(
     query: String,
     params: Vec<QueryValue>,
     commit_policy: Option<crate::replication::CommitPolicy>,
-) -> Result<RuntimeQueryResult, Status> {
+) -> Result<crate::runtime::OwnedQueryResult, Status> {
     if query.trim().is_empty() {
         return Err(Status::invalid_argument("query field cannot be empty"));
     }
@@ -575,6 +611,34 @@ fn grpc_query_request_error(error: crate::api::RedDBError) -> Status {
 mod grpc_query_value_tests {
     use super::*;
     use proto::query_value::Kind;
+
+    #[tokio::test]
+    async fn grpc_execution_refuses_when_shared_runtime_queue_is_full() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.configure_execution_admission(1, 0, 100);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let status = grpc_spawn_blocking(&runtime, || ()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(status.message().contains("execution_queue_full"));
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn grpc_execution_reports_queue_deadline_separately() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.configure_execution_admission(1, 1, 1);
+        let admission = runtime.execution_admission();
+        let active = admission.acquire().await.expect("active slot");
+
+        let status = grpc_spawn_blocking(&runtime, || ()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert!(status.message().contains("execution_queue_timeout"));
+        drop(active);
+    }
 
     #[test]
     fn grpc_query_value_maps_to_request_param_variants() {

@@ -8,6 +8,8 @@ let release
 let ownership
 let queue = Promise.resolve()
 let initialized
+let databaseName
+const vaultKeys = new Map()
 
 function initialize() {
   return initialized ??= (async () => {
@@ -85,6 +87,7 @@ async function open(name, sqlDatabase = false, create = false, backup) {
         else artifact = fileIo.getSize() === 0
             ? wasm.BrowserArtifact.create(fileIo, name, Date.now())
             : wasm.BrowserArtifact.open(fileIo, name)
+        databaseName = sqlDatabase ? name : undefined
         opened = true
         const lifetime = new Promise((resolveRelease) => { release = resolveRelease })
         resolve()
@@ -98,6 +101,7 @@ async function open(name, sqlDatabase = false, create = false, backup) {
         artifact = undefined
         database?.free()
         database = undefined
+        databaseName = undefined
         if (access) synchronous(access.close())
         access = undefined
         // Reject through ownership.catch only after cleanup, before the SDK can
@@ -163,6 +167,50 @@ async function execute(method, params) {
   }
   if (!artifact && !database) throw error('CLOSED', 'The file is not open')
   if (database) {
+    if (method.startsWith('vault')) {
+      if (typeof database.vaultInitialized !== 'function') throw error('VERSION_MISMATCH', 'WASM local Vault support is missing')
+      if (method === 'vaultLock') { vaultKeys.get(databaseName)?.free(); vaultKeys.delete(databaseName); return }
+      if (method === 'vaultStatus') {
+        const initialized = database.vaultInitialized()
+        const key = vaultKeys.get(databaseName)
+        if (key) {
+          try { database.vaultKeys(key) }
+          catch (failure) {
+            key.free(); vaultKeys.delete(databaseName)
+            if (failure.code !== 'VAULT_LOCKED') throw failure
+          }
+        }
+        return { initialized, locked: !vaultKeys.has(databaseName) }
+      }
+      if (method === 'vaultUnlock') {
+        if (typeof params.password !== 'string' || typeof params.create !== 'boolean') throw error('INVALID_ARGUMENT', 'Expected a Vault password and explicit creation option')
+        // Drop an earlier key even on failed unlock; never keep a stale unlocked state.
+        vaultKeys.get(databaseName)?.free(); vaultKeys.delete(databaseName)
+        const key = database.vaultUnlock(params.password, params.create)
+        params.password = undefined
+        vaultKeys.set(databaseName, key)
+        return
+      }
+      const key = vaultKeys.get(databaseName)
+      if (!key) throw error('VAULT_LOCKED', 'Unlock this local Vault first')
+      if (method === 'vaultKeys') return database.vaultKeys(key)
+      if (typeof params.name !== 'string') throw error('INVALID_ARGUMENT', 'Expected a Vault key name')
+      if (method === 'vaultReveal') return database.vaultReveal(key, params.name) ?? null
+      if (method === 'vaultPut' || method === 'vaultDelete') {
+        if (method === 'vaultPut' && typeof params.value !== 'string') throw error('INVALID_ARGUMENT', 'Expected a string secret')
+        return database.vaultPut(key, params.name, method === 'vaultDelete' ? undefined : params.value)
+      }
+      throw error('INVALID_ARGUMENT', 'Unknown Vault operation')
+    }
+    if (method === 'catalog') {
+      if (typeof database.catalog !== 'function') throw error('VERSION_MISMATCH', 'WASM catalog inspection is missing')
+      return database.catalog()
+    }
+    if (method === 'readQuery') {
+      if (typeof params.sql !== 'string' || !Array.isArray(params.params) || params.params.length > MAX_QUERY_PARAMETERS || !Array.isArray(params.scopes) || params.scopes.length > 64) throw error('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes')
+      if (typeof database.readQuery !== 'function') throw error('VERSION_MISMATCH', 'WASM scoped reads are missing')
+      return database.readQuery(params.sql, params.params, params.scopes)
+    }
     if (method === 'exportBackup') {
       try { return exportBackup() }
       catch (failure) {

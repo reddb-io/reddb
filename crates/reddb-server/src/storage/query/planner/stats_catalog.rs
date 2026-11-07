@@ -10,7 +10,7 @@ use crate::storage::UnifiedStore;
 use crate::storage::{EntityData, EntityKind, UnifiedEntity};
 use reddb_types::{value_to_canonical_key, CanonicalKey, Value};
 
-pub(crate) const STATS_COLLECTION: &str = "red_stats";
+pub(crate) const STATS_COLLECTION: &str = "red.query.stats_catalog";
 const DEFAULT_ROWS_PER_PAGE: u64 = 100;
 const DEFAULT_SAMPLE_TARGET: usize = 30_000;
 const DEFAULT_BUCKETS: usize = 100;
@@ -302,6 +302,18 @@ fn analyze_column(
             visit(field_value(fields, column));
         }
     })
+}
+
+pub(crate) fn analyze_column_scan(
+    column: &str,
+    row_count: usize,
+    scan: impl FnOnce(&mut dyn FnMut(Option<&Value>)),
+) -> AnalyzedColumnStats {
+    analyze_column_values(
+        column,
+        &sample_indices(row_count, DEFAULT_SAMPLE_TARGET),
+        scan,
+    )
 }
 
 fn analyze_column_values(

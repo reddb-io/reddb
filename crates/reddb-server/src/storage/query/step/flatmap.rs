@@ -185,7 +185,7 @@ impl Step for VertexStep {
 }
 
 impl FlatMapStep for VertexStep {
-    fn flat_map(&self, traverser: &Traverser) -> Vec<Traverser> {
+    fn flat_map(&self, _traverser: &Traverser) -> Vec<Traverser> {
         // In real implementation, this would query the graph store
         // For now, return empty - execution engine will populate
         Vec::new()

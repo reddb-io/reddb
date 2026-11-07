@@ -75,6 +75,9 @@ mod e2e_storage_integrity_errors;
 #[path = "storage_durability/mixed_bulk_kind_index.rs"]
 mod mixed_bulk_kind_index;
 
+#[path = "storage_durability/temp_db_cleanup_harness.rs"]
+mod temp_db_cleanup_harness;
+
 #[path = "runtime_persistence/e2e_seqn_journal_policy.rs"]
 mod e2e_seqn_journal_policy;
 

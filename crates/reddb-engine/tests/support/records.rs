@@ -1,4 +1,6 @@
-//! Identical native/WASM assertions over the original native record oracle.
+//! Identical native/WASM assertions over the native record oracle.
+//! Borrowed lean document goldens include the body-field parity fix: they
+//! expose the same promoted fields and precedence as the owned lean reader.
 use crate::record_corpus;
 use reddb_engine::query::{records::*, unified::*};
 use reddb_engine::storage::entity::*;

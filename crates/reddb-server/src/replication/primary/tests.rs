@@ -2,6 +2,44 @@ use super::*;
 use crate::replication::cdc::{ChangeOperation, ChangeRecord};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn failed_internal_slot_publication_blocks_wal_pruning_until_durable_retry() {
+    use crate::storage::unified::{store::StoreWalCaptureGuard, UnifiedStore};
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let store = Arc::new(UnifiedStore::open(&path).expect("store"));
+    let primary = PrimaryReplication::new_with_store(
+        Some(&path),
+        &crate::replication::ReplicationConfig::primary(),
+        Arc::clone(&store),
+    )
+    .expect("primary");
+    primary.register_replica("replica-a".into());
+    primary.ack_replica_lsn("replica-a", 10, 8);
+    assert_eq!(primary.retention_floor_lsn(), Some(8));
+    {
+        // An independent ACK must never be swallowed by a user transaction.
+        let _capture = StoreWalCaptureGuard::begin(None);
+        primary.ack_replica_lsn("replica-a", 100, 80);
+        assert!(primary.ensure_slot_metadata_durable().is_err());
+        assert_eq!(primary.retention_floor_lsn(), Some(0));
+        assert_eq!(
+            primary.prune_retained_wal_through(100).expect("no prune"),
+            0
+        );
+    }
+    let bytes = crate::replication::metadata::read(&store, crate::replication::metadata::SLOTS)
+        .expect("durable slots")
+        .expect("catalog");
+    let catalog = reddb_file::ReplicationSlotCatalog::decode(&bytes).expect("decode");
+    assert_eq!(catalog.slots[0].confirmed_flush_lsn, 8);
+    primary.ack_replica_lsn("replica-a", 100, 80);
+    primary
+        .ensure_slot_metadata_durable()
+        .expect("durable retry");
+    assert_eq!(primary.retention_floor_lsn(), Some(80));
+}
+
 fn temp_data_path(name: &str) -> PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -517,9 +555,13 @@ fn plan_replica_resume_partial_within_window_full_past_cap() {
 #[test]
 fn ensure_replica_registered_self_registers_then_is_a_noop() {
     let primary = PrimaryReplication::new(None);
+    for lsn in 1..=5 {
+        primary.wal_buffer.append(lsn, vec![lsn as u8]);
+    }
 
-    assert!(primary.ensure_replica_registered("r1"));
+    assert!(primary.ensure_replica_registered("r1", 0));
     assert_eq!(primary.replica_count(), 1);
+    assert_eq!(primary.slot_snapshots()[0].restart_lsn, 0);
     let epoch_after_register = primary.topology_epoch();
 
     primary.note_replica_pull("r1", 7);
@@ -532,7 +574,7 @@ fn ensure_replica_registered_self_registers_then_is_a_noop() {
         Some(7)
     );
 
-    assert!(!primary.ensure_replica_registered("r1"));
+    assert!(!primary.ensure_replica_registered("r1", 0));
     assert_eq!(primary.replica_count(), 1);
     assert_eq!(primary.topology_epoch(), epoch_after_register);
     assert_eq!(

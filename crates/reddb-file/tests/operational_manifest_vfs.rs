@@ -1,12 +1,194 @@
+use std::collections::BTreeMap;
 use std::io::{self, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reddb_file::{OpenMode, OperationalManifest, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
+#[test]
+fn retention_batch_recovers_at_both_manifest_publication_boundaries() {
+    use reddb_file::{
+        encode_append_only_segment, AppendOnlySegmentCodec, AppendOnlySegmentRow,
+        AppendOnlySegmentState,
+    };
+    for (failed_phase, incremental) in [(1, false), (2, false), (1, true), (2, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("data.rdb");
+        let vfs = RecordingVfs::default();
+        let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+        manifest.recover_or_bootstrap(&[]).unwrap();
+        let bytes = encode_append_only_segment(
+            AppendOnlySegmentCodec::None,
+            &[AppendOnlySegmentRow {
+                primary_key: b"1".to_vec(),
+                payload: b"row".to_vec(),
+            }],
+        )
+        .unwrap();
+        let expired = manifest
+            .publish_append_only_segment_with_retention_column(
+                "events",
+                1,
+                AppendOnlySegmentCodec::None,
+                &bytes,
+                (Some(1), Some(1)),
+                Some("ts"),
+            )
+            .unwrap();
+        let live = manifest
+            .publish_append_only_segment_with_retention_column(
+                "events",
+                2,
+                AppendOnlySegmentCodec::None,
+                &bytes,
+                (Some(20), Some(20)),
+                Some("ts"),
+            )
+            .unwrap();
+        let expired_path = manifest.append_only_segment_path_for_test(&expired.path);
+        let live_path = manifest.append_only_segment_path_for_test(&live.path);
+        let cutoffs = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
+        let current = vfs.manifest_rename_attempts.load(Ordering::SeqCst);
+        vfs.fail_manifest_rename_at
+            .store(current + failed_phase, Ordering::SeqCst);
+        if incremental {
+            let mut snapshot = manifest.begin_incremental_read().unwrap().unwrap();
+            while !snapshot.step(17).unwrap().complete {}
+            assert!(snapshot
+                .retire_append_only_retention_batch(&cutoffs, 1)
+                .is_err());
+            assert!(!snapshot.is_current().unwrap());
+        } else {
+            assert!(manifest
+                .retire_append_only_retention_batch(&cutoffs, 1)
+                .is_err());
+        }
+        let pending = manifest
+            .append_only_segments_with_pending_for_test()
+            .unwrap();
+        assert_eq!(
+            pending[0].state,
+            if failed_phase == 1 {
+                AppendOnlySegmentState::Active
+            } else {
+                AppendOnlySegmentState::PendingDrop
+            }
+        );
+        assert_eq!(expired_path.exists(), failed_phase == 1);
+        assert!(live_path.exists());
+        vfs.fail_manifest_rename_at.store(0, Ordering::SeqCst);
+        drop(manifest);
+        let reopened = OperationalManifest::with_vfs(&db_path, vfs);
+        reopened.recover_or_bootstrap(&[]).unwrap();
+        if failed_phase == 1 {
+            assert_eq!(reopened.append_only_segments().unwrap().len(), 2);
+            reopened
+                .retire_append_only_retention_batch(&cutoffs, 1)
+                .unwrap();
+        }
+        assert!(!expired_path.exists());
+        assert!(live_path.exists());
+        assert_eq!(reopened.append_only_segments().unwrap().len(), 1);
+        assert_eq!(reopened.append_only_published_rows("events").unwrap(), 2);
+    }
+}
+
+#[test]
+fn interrupted_retention_batch_stays_pending_until_deletions_succeed() {
+    use reddb_file::{
+        encode_append_only_segment, AppendOnlySegmentCodec, AppendOnlySegmentRow,
+        AppendOnlySegmentState,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    let bytes = encode_append_only_segment(
+        AppendOnlySegmentCodec::None,
+        &[AppendOnlySegmentRow {
+            primary_key: b"1".to_vec(),
+            payload: b"row".to_vec(),
+        }],
+    )
+    .unwrap();
+    let mut paths = Vec::new();
+    for (id, timestamp) in [(1, 1), (2, 2), (3, 20)] {
+        let entry = manifest
+            .publish_append_only_segment_with_retention_column(
+                "events",
+                id,
+                AppendOnlySegmentCodec::None,
+                &bytes,
+                (Some(timestamp), Some(timestamp)),
+                Some("ts"),
+            )
+            .unwrap();
+        paths.push(manifest.append_only_segment_path_for_test(&entry.path));
+    }
+    let cutoffs = BTreeMap::from([("events".to_string(), (10, "ts".to_string()))]);
+    let events_before = vfs.events().len();
+    vfs.fail_segment_removal.store(2, Ordering::SeqCst);
+    assert!(manifest
+        .retire_append_only_retention_batch(&cutoffs, 2)
+        .is_err());
+    let batch_events = vfs.events();
+    assert_eq!(
+        batch_events[events_before..]
+            .iter()
+            .filter(|event| event.starts_with("open:") && event.ends_with("manifest.json"))
+            .count(),
+        1
+    );
+    assert!(!paths[0].exists());
+    assert!(paths[1].exists());
+    assert!(paths[2].exists());
+    let entries = manifest
+        .append_only_segments_with_pending_for_test()
+        .unwrap();
+    assert_eq!(
+        entries.iter().map(|entry| entry.state).collect::<Vec<_>>(),
+        vec![
+            AppendOnlySegmentState::PendingDrop,
+            AppendOnlySegmentState::PendingDrop,
+            AppendOnlySegmentState::Active
+        ]
+    );
+
+    vfs.fail_segment_removal.store(4, Ordering::SeqCst);
+    assert!(manifest.recover_or_bootstrap(&[]).is_err());
+    assert!(paths[1].exists());
+    assert_eq!(
+        manifest
+            .append_only_segments_with_pending_for_test()
+            .unwrap(),
+        entries
+    );
+    vfs.fail_segment_removal.store(0, Ordering::SeqCst);
+    manifest.recover_or_bootstrap(&[]).unwrap();
+    assert!(!paths[1].exists());
+    assert!(paths[2].exists());
+    assert_eq!(manifest.append_only_segments().unwrap().len(), 1);
+    assert_eq!(manifest.append_only_published_rows("events").unwrap(), 3);
+}
+
 #[derive(Clone, Default)]
 struct RecordingVfs {
     events: Arc<Mutex<Vec<String>>>,
+    fail_manifest_rename: Arc<AtomicBool>,
+    manifest_rename_attempts: Arc<AtomicUsize>,
+    fail_manifest_rename_at: Arc<AtomicUsize>,
+    manifest_writes: Arc<AtomicUsize>,
+    fail_manifest_write_at: Arc<AtomicUsize>,
+    manifest_reads: Arc<AtomicUsize>,
+    fail_manifest_read_at: Arc<AtomicUsize>,
+    fail_journal_sync: Arc<AtomicBool>,
+    fail_head_write: Arc<AtomicBool>,
+    fail_after_manifest_rename: Arc<AtomicBool>,
+    manifest_renamed: Arc<AtomicBool>,
+    segment_removals: Arc<AtomicUsize>,
+    fail_segment_removal: Arc<AtomicUsize>,
 }
 
 impl RecordingVfs {
@@ -34,6 +216,10 @@ impl VfsFile for RecordingFile {
         })
     }
 
+    fn same_file(&self, other: &Self) -> io::Result<bool> {
+        self.file.same_file(&other.file)
+    }
+
     fn file_len(&self) -> io::Result<u64> {
         self.file.file_len()
     }
@@ -44,10 +230,33 @@ impl VfsFile for RecordingFile {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.vfs.record(format!("write:{}", self.path));
+        if self.path.ends_with("manifest.json.next")
+            && self.vfs.fail_head_write.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected head write failure"));
+        }
+        if self.path.ends_with("manifest.records") {
+            let attempt = self.vfs.manifest_writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.vfs.fail_manifest_write_at.load(Ordering::SeqCst) == attempt {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected manifest write failure",
+                ));
+            }
+        }
         self.file.write_all(buf)
     }
 
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.path.ends_with("manifest.records") {
+            let attempt = self.vfs.manifest_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.vfs.fail_manifest_read_at.load(Ordering::SeqCst) == attempt {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected manifest read failure",
+                ));
+            }
+        }
         self.file.read(buf)
     }
 
@@ -57,8 +266,100 @@ impl VfsFile for RecordingFile {
 
     fn sync_all(&self) -> io::Result<()> {
         self.vfs.record(format!("sync_file:{}", self.path));
+        if self.path.ends_with("manifest.records")
+            && self.vfs.fail_journal_sync.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected journal sync failure"));
+        }
         self.file.sync_all()
     }
+}
+
+#[test]
+fn journal_and_head_failures_preserve_legacy_and_current_generations() {
+    for legacy in [true, false] {
+        for fail_sync in [true, false] {
+            let directory = tempfile::tempdir().expect("temp directory");
+            let path = directory.path().join("data.rdb");
+            let vfs = RecordingVfs::default();
+            let manifest = OperationalManifest::with_vfs(&path, vfs.clone());
+            manifest.create_collection("live").expect("create");
+            let head = manifest.current_manifest_path_for_test();
+            if legacy {
+                std::fs::write(
+                    &head,
+                    manifest.legacy_manifest_bytes_for_test().expect("fixture"),
+                )
+                .expect("legacy head");
+            }
+            let before = std::fs::read(&head).expect("head");
+            vfs.fail_journal_sync.store(fail_sync, Ordering::SeqCst);
+            vfs.fail_head_write.store(!fail_sync, Ordering::SeqCst);
+            assert!(manifest.create_collection("new").is_err());
+            assert_eq!(std::fs::read(&head).expect("head"), before);
+            drop(manifest);
+            let cold = OperationalManifest::with_vfs(&path, vfs);
+            cold.recover_or_bootstrap(&[]).expect("cold recovery");
+            assert!(cold.collection_path_for_test("live").exists());
+            cold.create_collection("new").expect("retry");
+            let cold = OperationalManifest::for_db_path(&path);
+            cold.recover_or_bootstrap(&[])
+                .expect("second cold recovery");
+            assert!(cold.collection_path_for_test("live").exists());
+            assert!(cold.collection_path_for_test("new").exists());
+        }
+    }
+}
+
+#[test]
+fn interrupted_streamed_manifest_write_preserves_previous_generation_on_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.create_collection("existing").unwrap();
+    for id in 0..150 {
+        manifest
+            .create_collection(&format!("collection-{id:04}"))
+            .unwrap();
+    }
+    let current_path = manifest.current_manifest_path_for_test();
+    let previous = std::fs::read(&current_path).unwrap();
+    assert!(previous.len() < 256);
+    assert!(
+        std::fs::metadata(current_path.with_file_name("manifest.records"))
+            .unwrap()
+            .len()
+            > 8192
+    );
+    let previous_generation = manifest.read_generation_for_test().unwrap();
+    let current = vfs.manifest_writes.load(Ordering::SeqCst);
+    vfs.fail_manifest_write_at
+        .store(current + 2, Ordering::SeqCst);
+    let error = manifest.create_collection("new").unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read(&current_path).unwrap(), previous);
+    vfs.fail_manifest_write_at.store(0, Ordering::SeqCst);
+    drop(manifest);
+
+    let reopened = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    let reads = vfs.manifest_reads.load(Ordering::SeqCst);
+    vfs.fail_manifest_read_at.store(reads + 2, Ordering::SeqCst);
+    assert_eq!(
+        reopened.recover_or_bootstrap(&[]).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(std::fs::read(&current_path).unwrap(), previous);
+    assert!(reopened.collection_path_for_test("existing").exists());
+    vfs.fail_manifest_read_at.store(0, Ordering::SeqCst);
+    reopened.recover_or_bootstrap(&[]).unwrap();
+    assert_eq!(
+        reopened.read_generation_for_test().unwrap(),
+        previous_generation
+    );
+    assert!(reopened.collection_path_for_test("existing").exists());
+    reopened.create_collection("new").unwrap();
+    assert!(reopened.collection_path_for_test("new").exists());
 }
 
 impl Vfs for RecordingVfs {
@@ -75,11 +376,33 @@ impl Vfs for RecordingVfs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.record(format!("rename:{}->{}", from.display(), to.display()));
-        StdVfs.rename(from, to)
+        let is_manifest = from
+            .file_name()
+            .is_some_and(|name| name == "manifest.json.next");
+        if is_manifest {
+            let attempt = self.manifest_rename_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_manifest_rename.swap(false, Ordering::SeqCst)
+                || self.fail_manifest_rename_at.load(Ordering::SeqCst) == attempt
+            {
+                return Err(io::Error::other("injected manifest rename failure"));
+            }
+        }
+        StdVfs.rename(from, to)?;
+        if is_manifest {
+            self.manifest_renamed.store(true, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         self.record(format!("sync_dir:{}", dir.display()));
+        if self.manifest_renamed.swap(false, Ordering::SeqCst)
+            && self
+                .fail_after_manifest_rename
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other("injected post-rename sync failure"));
+        }
         StdVfs.sync_dir(dir)
     }
 
@@ -94,6 +417,15 @@ impl Vfs for RecordingVfs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.record(format!("remove_file:{}", path.display()));
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "raos")
+        {
+            let count = self.segment_removals.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_segment_removal.load(Ordering::SeqCst) == count {
+                return Err(io::Error::other("injected segment removal failure"));
+            }
+        }
         StdVfs.remove_file(path)
     }
 
@@ -109,6 +441,71 @@ impl Vfs for RecordingVfs {
     fn is_file(&self, path: &Path) -> bool {
         StdVfs.is_file(path)
     }
+}
+
+#[test]
+fn interrupted_collection_rename_keeps_old_manifest_and_can_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.create_collection("red_config").unwrap();
+    let marker = manifest.collection_path_for_test("red_config");
+    std::fs::write(&marker, b"existing data").unwrap();
+    let manifest_path = marker
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("manifest.json");
+    let before = std::fs::read(&manifest_path).unwrap();
+
+    vfs.fail_manifest_rename.store(true, Ordering::SeqCst);
+    assert!(manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .is_err());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"existing data");
+    manifest
+        .recover_or_bootstrap(&["red_config".into()])
+        .unwrap();
+    manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .unwrap();
+    manifest
+        .recover_or_bootstrap(&["red.config".into()])
+        .unwrap();
+    let published: serde_json::Value =
+        serde_json::from_slice(&manifest.legacy_manifest_bytes_for_test().unwrap()).unwrap();
+    assert!(published["collections"].get("red_config").is_none());
+    assert_eq!(
+        published["collections"]["red.config"]["path"],
+        "red_config.rcol"
+    );
+    assert_eq!(std::fs::read(marker).unwrap(), b"existing data");
+}
+
+#[test]
+fn collection_rename_can_retry_after_publication_sync_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("data.rdb");
+    let vfs = RecordingVfs::default();
+    let manifest = OperationalManifest::with_vfs(&db_path, vfs.clone());
+    manifest.create_collection("red_config").unwrap();
+    let marker = manifest.collection_path_for_test("red_config");
+    std::fs::write(&marker, b"existing data").unwrap();
+    vfs.fail_after_manifest_rename.store(true, Ordering::SeqCst);
+
+    assert!(manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .is_err());
+    manifest
+        .recover_or_bootstrap(&["red.config".into()])
+        .unwrap();
+    manifest
+        .rename_collections(&[("red_config", "red.config")])
+        .unwrap();
+    assert_eq!(std::fs::read(marker).unwrap(), b"existing data");
 }
 
 #[test]

@@ -1,63 +1,46 @@
 use super::*;
 
-const SINGLE_FILE_FORK_GUIDANCE: &str = "store fork is not available directly on embedded \
-single-file stores. Export the .rdb through the operational-directory layout first, then fork \
-that operational store. See docs/engine/operational-storage-profiles.md#forking-an-embedded-single-file-store";
+pub(super) const EXTERNAL_FORK_DISABLED: &str =
+    "store forks using external manifests are disabled: database state must remain in the .rdb and WAL";
 
 impl RedDBRuntime {
-    pub fn fork_store(&self, name: &str) -> RedDBResult<reddb_file::ForkInfo> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(RedDBError::InvalidOperation(
-                "store fork name cannot be empty".to_string(),
-            ));
-        }
-        if self.inner.embedded_single_file {
-            return Err(RedDBError::InvalidOperation(
-                SINGLE_FILE_FORK_GUIDANCE.to_string(),
-            ));
-        }
-        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
-            RedDBError::InvalidOperation("store fork requires a data path".into())
-        })?;
-
-        self.flush()?;
-        let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
-        let manifest =
-            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
-        manifest
-            .create_fork(name, fork_lsn)
-            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?;
-        manifest
-            .list_forks()
-            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))?
-            .into_iter()
-            .find(|fork| fork.name == name)
-            .ok_or_else(|| RedDBError::Internal(format!("created store fork {name} is missing")))
+    pub fn fork_store(&self, _name: &str) -> RedDBResult<reddb_file::ForkInfo> {
+        Err(RedDBError::InvalidOperation(EXTERNAL_FORK_DISABLED.into()))
     }
 
-    pub fn detach_fork_store(&self, name: &str) -> RedDBResult<bool> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(RedDBError::InvalidOperation(
-                "store fork name cannot be empty".to_string(),
-            ));
-        }
-        let data_path = self.inner.db.options().data_path.as_ref().ok_or_else(|| {
-            RedDBError::InvalidOperation("store fork requires a data path".into())
-        })?;
-
-        let manifest =
-            crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path);
-        manifest
-            .detach_fork(name)
-            .map(|detached| detached.is_some())
-            .map_err(|err| RedDBError::InvalidOperation(err.to_string()))
+    pub fn detach_fork_store(&self, _name: &str) -> RedDBResult<bool> {
+        Err(RedDBError::InvalidOperation(EXTERNAL_FORK_DISABLED.into()))
     }
 
     pub fn replica_relay_manifest_path(&self, replica_id: &str) -> Option<std::path::PathBuf> {
         let plan = self.primary_replica_file_plan()?;
         Some(plan.relay_manifest_path(replica_id))
+    }
+
+    pub fn replica_relay_manifest(
+        &self,
+        replica_id: &str,
+    ) -> RedDBResult<Option<reddb_file::ReplicaRelayLogManifest>> {
+        let key = format!("replication.relay.{}", hex::encode(replica_id));
+        if let Some(bytes) = crate::replication::metadata::read(&self.inner.db.store(), &key)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?
+        {
+            return reddb_file::ReplicaRelayLogManifest::decode(&bytes)
+                .map(Some)
+                .map_err(|err| RedDBError::Internal(err.to_string()));
+        }
+        let Some(path) = self.replica_relay_manifest_path(replica_id) else {
+            return Ok(None);
+        };
+        match reddb_file::ReplicaRelayLogManifest::read_from_path(path) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(reddb_file::RdbFileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(RedDBError::Internal(error.to_string())),
+        }
     }
 
     pub fn primary_replica_file_plan(&self) -> Option<reddb_file::PrimaryReplicaFilePlan> {
@@ -87,17 +70,13 @@ impl RedDBRuntime {
     ) -> RedDBResult<reddb_file::TimelineId> {
         let path = reddb_file::PrimaryReplicaFilePlan::new(root, reddb_file::TimelineId::initial())
             .timeline_history_path();
-        match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => Ok(history
-                .current()
-                .unwrap_or_else(reddb_file::TimelineId::initial)),
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Ok(reddb_file::TimelineId::initial())
-            }
-            Err(err) => Err(RedDBError::Internal(err.to_string())),
-        }
+        crate::replication::metadata::timeline(&self.inner.db.store(), &path)
+            .map(|history| {
+                history
+                    .current()
+                    .unwrap_or_else(reddb_file::TimelineId::initial)
+            })
+            .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 
     pub fn create_primary_replica_basebackup(
@@ -183,7 +162,8 @@ impl RedDBRuntime {
         let intent_log = crate::telemetry::admin_intent_log::AdminIntentLog::open(intent_log_path)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         let replica_id = self.resolve_replica_id();
-        let bootstrapper = crate::replication::replica::ReplicaBootstrapper::new(replica_id);
+        let bootstrapper =
+            crate::replication::replica::ReplicaBootstrapper::new(replica_id.clone());
         let source_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
         let _ = std::fs::remove_file(&pending_path);
 
@@ -209,6 +189,12 @@ impl RedDBRuntime {
 
         loop {
             let mut request = tonic::Request::new(crate::grpc::proto::Empty {});
+            request.metadata_mut().insert(
+                "x-reddb-replica-id",
+                replica_id
+                    .parse()
+                    .map_err(|err| RedDBError::Internal(format!("replica id metadata: {err}")))?,
+            );
             request.metadata_mut().insert(
                 "x-reddb-snapshot-max-bytes",
                 chunk_bytes
@@ -335,6 +321,23 @@ impl RedDBRuntime {
     pub fn primary_replica_slot_catalog(
         &self,
     ) -> RedDBResult<Option<reddb_file::ReplicationSlotCatalog>> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        if let Some(primary) = self.inner.db.replication.as_ref() {
+            primary
+                .ensure_slot_metadata_durable()
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        if let Some(bytes) = crate::replication::metadata::read(
+            &self.inner.db.store(),
+            crate::replication::metadata::SLOTS,
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?
+        {
+            return reddb_file::ReplicationSlotCatalog::decode(&bytes)
+                .map(Some)
+                .map_err(|err| RedDBError::Internal(err.to_string()));
+        }
         let Some(plan) = self.primary_replica_file_plan_result()? else {
             return Ok(None);
         };
@@ -353,7 +356,10 @@ impl RedDBRuntime {
         let Some(data_path) = self.inner.db.options().data_path.as_ref() else {
             return Ok(Vec::new());
         };
-        crate::storage::operational_manifest::OperationalManifest::for_db_path(data_path)
+        self.inner
+            .db
+            .store()
+            .operational_manifest_for_path(data_path)
             .list_forks()
             .map(|forks| forks.into_iter().map(|fork| fork.fork_lsn).collect())
             .map_err(|err| RedDBError::Internal(err.to_string()))
@@ -402,23 +408,26 @@ impl RedDBRuntime {
         )
     }
 
+    /// Authoritative history in the database, with read-only legacy import fallback.
+    pub fn primary_replica_timeline_history(
+        &self,
+    ) -> RedDBResult<Option<reddb_file::TimelineHistory>> {
+        let Some(path) = self.primary_replica_timeline_history_path() else {
+            return Ok(None);
+        };
+        crate::replication::metadata::timeline(&self.inner.db.store(), &path)
+            .map(Some)
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
     pub fn primary_replica_rejoin_decision(
         &self,
         node_timeline: reddb_file::TimelineId,
         node_flushed_lsn: u64,
         available_from_lsn: u64,
     ) -> RedDBResult<Option<reddb_file::RejoinDecision>> {
-        let Some(path) = self.primary_replica_timeline_history_path() else {
+        let Some(history) = self.primary_replica_timeline_history()? else {
             return Ok(None);
-        };
-        let history = match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => history,
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::TimelineHistory::new(crate::utils::now_unix_millis())
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
         };
         Ok(Some(history.rejoin_decision(
             node_timeline,
@@ -535,21 +544,14 @@ impl RedDBRuntime {
         replica_id: &str,
         applied_lsn: u64,
     ) -> RedDBResult<reddb_file::TimelineHistory> {
-        let Some(path) = self.primary_replica_timeline_history_path() else {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let Some(history) = self.primary_replica_timeline_history()? else {
             return Ok(reddb_file::TimelineHistory::new(
                 crate::utils::now_unix_millis(),
             ));
         };
         let now_ms = crate::utils::now_unix_millis();
-        let history = match reddb_file::TimelineHistory::read_from_path(&path) {
-            Ok(history) => history,
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::TimelineHistory::new(now_ms)
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
-        };
         let parent = history
             .current()
             .unwrap_or_else(reddb_file::TimelineId::initial);
@@ -563,18 +565,27 @@ impl RedDBRuntime {
         let promoted = history
             .promotion_history(&candidate, parent.next(), now_ms)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        promoted
-            .write_to_path(path)
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::write(
+            &self.inner.db.store(),
+            crate::replication::metadata::TIMELINE,
+            &promoted.encode(),
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(path) = self.primary_replica_timeline_history_path() {
+            crate::replication::metadata::retire_legacy(&path)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
         Ok(promoted)
     }
 
-    pub fn record_replica_relay_batch(
+    pub fn record_replica_relay_batch<T: AsRef<[u8]>>(
         &self,
         replica_id: &str,
-        records: &[(u64, Vec<u8>)],
+        records: &[(u64, T)],
         applied_lsn: u64,
     ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let Some(plan) = self.primary_replica_file_plan_result()? else {
             return Ok(());
         };
@@ -587,8 +598,8 @@ impl RedDBRuntime {
             .map(|(lsn, _)| *lsn)
             .max()
             .unwrap_or(*first_lsn);
-        let mut manifest = match reddb_file::ReplicaRelayLogManifest::read_from_path(&path) {
-            Ok(manifest) => {
+        let mut manifest = match self.replica_relay_manifest(replica_id)? {
+            Some(manifest) => {
                 let relay_dir = path.parent().ok_or_else(|| {
                     RedDBError::Internal("relay manifest path has no parent".into())
                 })?;
@@ -597,15 +608,10 @@ impl RedDBRuntime {
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 manifest
             }
-            Err(reddb_file::RdbFileError::Io(err))
-                if err.kind() == std::io::ErrorKind::NotFound =>
-            {
-                reddb_file::ReplicaRelayLogManifest::new(
-                    replica_id,
-                    reddb_file::TimelineId::initial(),
-                )
-            }
-            Err(err) => return Err(RedDBError::Internal(err.to_string())),
+            None => reddb_file::ReplicaRelayLogManifest::new(
+                replica_id,
+                reddb_file::TimelineId::initial(),
+            ),
         };
         if manifest.replica_id != replica_id {
             return Err(RedDBError::Internal(format!(
@@ -625,7 +631,9 @@ impl RedDBRuntime {
             let new_records = records
                 .iter()
                 .filter(|(lsn, _)| *lsn > manifest.flushed_lsn)
-                .map(|(lsn, payload)| reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.clone()))
+                .map(|(lsn, payload)| {
+                    reddb_file::ReplicaRelayLogRecord::new(*lsn, payload.as_ref().to_vec())
+                })
                 .collect::<Vec<_>>();
             let segment = reddb_file::ReplicaRelayLogSegment::from_records(
                 reddb_file::TimelineId::initial(),
@@ -659,8 +667,16 @@ impl RedDBRuntime {
         manifest
             .mark_applied(applied_lsn.min(manifest.flushed_lsn))
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        manifest
-            .write_to_path(path)
+        let bytes = manifest
+            .encode()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::write(
+            &self.inner.db.store(),
+            &format!("replication.relay.{}", hex::encode(replica_id)),
+            &bytes,
+        )
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        crate::replication::metadata::retire_legacy(&path)
             .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 }

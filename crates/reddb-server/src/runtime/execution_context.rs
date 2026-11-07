@@ -26,6 +26,11 @@ thread_local! {
     static CURRENT_AUTH_IDENTITY: std::cell::RefCell<Option<(String, crate::auth::Role)>> =
         const { std::cell::RefCell::new(None) };
 
+    /// Immutable principal produced by credential validation. Unlike
+    /// `CURRENT_TENANT_ID`, this value is never changed by routing/scope SQL.
+    static CURRENT_AUTH_PRINCIPAL: std::cell::RefCell<Option<crate::auth::UserId>> =
+        const { std::cell::RefCell::new(None) };
+
     /// MVCC snapshot scoped to the currently-executing statement (Phase
     /// 2.3.2d PG parity). `execute_query` captures it on entry and drops
     /// it on exit; every scan consults it via
@@ -106,6 +111,20 @@ pub fn current_connection_id() -> u64 {
 /// RLS enforcement). Transport layers call this right after resolving
 /// auth so the query dispatch can fold RLS policies into the filter.
 pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
+    set_current_auth_principal(crate::auth::UserId::platform(username), role);
+}
+
+/// Install the structured principal returned by credential validation.
+pub fn set_current_auth_principal(principal: crate::auth::UserId, role: crate::auth::Role) {
+    CURRENT_AUTH_IDENTITY.with(|cell| {
+        *cell.borrow_mut() = Some((principal.username.clone(), role));
+    });
+    CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = Some(principal));
+}
+
+/// Replace only the SQL/RLS projection while preserving the immutable
+/// credential principal used by authorization.
+pub(crate) fn set_current_auth_projection(username: String, role: crate::auth::Role) {
     CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = Some((username, role)));
 }
 
@@ -114,12 +133,18 @@ pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
 /// requests.
 pub fn clear_current_auth_identity() {
     CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = None);
+    CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = None);
 }
 
 /// Read the current-thread auth identity. `None` when no transport
 /// installed one (embedded mode / anonymous access).
 pub(crate) fn current_auth_identity() -> Option<(String, crate::auth::Role)> {
     CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone())
+}
+
+/// Read the immutable credential principal, independently of mutable scope.
+pub(crate) fn current_auth_principal() -> Option<crate::auth::UserId> {
+    CURRENT_AUTH_PRINCIPAL.with(|cell| cell.borrow().clone())
 }
 
 /// Public probe of the thread-local auth identity for callers outside
@@ -319,16 +344,22 @@ pub(crate) fn current_role_projected() -> Option<String> {
 }
 
 pub(crate) fn current_secret_value(path: &str) -> Option<Value> {
+    try_current_secret_value(path).ok().flatten()
+}
+
+pub(crate) fn try_current_secret_value(path: &str) -> RedDBResult<Option<Value>> {
     let key = path.to_ascii_lowercase();
     CURRENT_SECRET_RESOLVER.with(|cell| {
         let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
+        let Some(resolver) = resolver.as_mut() else {
+            return Ok(None);
+        };
         if let Some(value) = resolver.values.get(&key) {
-            return value.clone();
+            return Ok(value.clone());
         }
-        let value = resolver.runtime.query_secret_value(&key).ok().flatten();
+        let value = resolver.runtime.query_secret_value(&key)?;
         resolver.values.insert(key, value.clone());
-        value
+        Ok(value)
     })
 }
 
@@ -341,6 +372,21 @@ pub(crate) fn secret_query_input(value: Value) -> Option<Value> {
     CURRENT_SECRET_RESOLVER.with(|cell| {
         let resolver = cell.borrow();
         resolver.as_ref()?.runtime.secret_query_input(value)
+    })
+}
+
+pub(crate) fn try_secret_query_input(
+    value: Value,
+) -> Result<Option<Value>, super::impl_dml_crypto::SecretInputReadLimit> {
+    if !matches!(value, Value::Secret(_)) {
+        return Ok(Some(value));
+    }
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        let resolver = cell.borrow();
+        match resolver.as_ref() {
+            Some(resolver) => resolver.runtime.try_secret_query_input(value),
+            None => Ok(None),
+        }
     })
 }
 
@@ -521,12 +567,21 @@ pub(crate) fn update_current_kv_value(path: &str, value: Option<String>) {
 }
 
 pub(crate) fn current_config_value(path: &str) -> Option<Value> {
+    try_current_config_value(path).ok().flatten()
+}
+
+pub(crate) fn try_current_config_value(path: &str) -> RedDBResult<Option<Value>> {
     let key = path.to_ascii_lowercase();
     CURRENT_CONFIG_RESOLVER.with(|cell| {
         let mut resolver = cell.borrow_mut();
-        let resolver = resolver.as_mut()?;
+        let Some(resolver) = resolver.as_mut() else {
+            return Ok(None);
+        };
+        if !resolver.can_read(&key) {
+            return Ok(None);
+        }
         if resolver.values.is_none() {
-            resolver.values = Some(latest_config_snapshot(&resolver.db));
+            resolver.values = Some(latest_config_snapshot(&resolver.db)?);
         }
         // #1370 — `$config.<path>` desugars to `CONFIG("red.config/<path>")`,
         // but `SET CONFIG <path>` stores under the bare key. Mirror the secret
@@ -534,7 +589,10 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
         // key, then the dotted `red.config.<rest>` legacy form. Track the key
         // that matched so the `config:read` gate authorizes the real target.
         let found = {
-            let values = resolver.values.as_ref()?;
+            let values = resolver
+                .values
+                .as_ref()
+                .expect("invariant: successful snapshot is installed");
             values
                 .get(&key)
                 .map(|value| (key.clone(), value.clone()))
@@ -549,14 +607,15 @@ pub(crate) fn current_config_value(path: &str) -> Option<Value> {
                             })
                     })
                 })
-        }?;
+        };
+        let Some(found) = found else { return Ok(None) };
         // #1743 — hard-block the reserved `red.config.*` namespace and gate the
         // read on `config:read`, mirroring the `$secret` sibling. Denied reads
         // resolve to `None` (→ SQL NULL), never an error.
         if !resolver.can_read(&found.0) {
-            return None;
+            return Ok(None);
         }
-        Some(found.1)
+        Ok(Some(found.1))
     })
 }
 
@@ -623,6 +682,94 @@ mod tests {
             secret_value_from_snapshot(&values, "acme.key").as_deref(),
             Some("user-value")
         );
+    }
+
+    #[test]
+    fn config_snapshot_does_not_copy_superseded_values() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+        // Drive the selection in a known order. Two traversals of the live
+        // store need not have the same order (or see the same compaction), so
+        // counting replacements in a separate traversal is not a stable bound.
+        let observe = |payload_bytes| {
+            let values: Vec<_> = (1..=64)
+                .rev()
+                .map(|id| (id, Value::Blob(vec![id as u8; payload_bytes])))
+                .collect();
+            let (latest, allocations) = measure_allocations(|| {
+                let mut latest = HashMap::new();
+                for (id, value) in &values {
+                    let mut shared = None;
+                    insert_latest_config_value(
+                        &mut latest,
+                        "fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
+                    insert_latest_config_value(
+                        &mut latest,
+                        "red.config/fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
+                }
+                latest
+            });
+            assert_eq!(latest["fixture.copy"].0, 64);
+            assert_eq!(
+                *latest["fixture.copy"].1,
+                Value::Blob(vec![64; payload_bytes])
+            );
+            assert!(Arc::ptr_eq(
+                &latest["fixture.copy"].1,
+                &latest["red.config/fixture.copy"].1
+            ));
+            allocations
+        };
+        let empty = observe(0);
+        let large = observe(64 * 1024);
+        assert!(
+            large.allocated_bytes <= empty.allocated_bytes + 2 * 64 * 1024,
+            "superseded config payload copies: {empty:?} -> {large:?}"
+        );
+    }
+
+    #[test]
+    fn config_snapshot_keeps_legacy_and_namespaced_aliases_after_collection_migration() {
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        let store = runtime.db().store();
+        let manager = store.get_or_create_collection("red_config");
+        assert!(Arc::ptr_eq(
+            &manager,
+            &store.get_collection("red.config").unwrap()
+        ));
+        for (id, key, value, tombstone) in [
+            (1, "theme", "dark", false),
+            (2, "red.config.theme", "light", false),
+            (3, "other", "hidden", true),
+        ] {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(2_000_000 + id), "red_config", id, vec![]);
+            entity.data = EntityData::Row(RowData {
+                columns: vec![],
+                schema: None,
+                named: Some(HashMap::from([
+                    ("key".into(), Value::text(key)),
+                    ("value".into(), Value::text(value)),
+                    ("tombstone".into(), Value::Boolean(tombstone)),
+                ])),
+            });
+            manager.insert(entity).expect("config row");
+        }
+        let values = latest_config_snapshot(runtime.db().as_ref()).expect("snapshot");
+        assert_eq!(values.get("theme"), Some(&Value::text("dark")));
+        assert_eq!(values.get("red.config.theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("red.config/theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("other"), Some(&Value::text("hidden")));
+        assert!(!values.contains_key("red.config/other"));
     }
 
     fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
@@ -700,66 +847,74 @@ mod tests {
     }
 }
 
-fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
-    let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
+fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
+    let mut latest: HashMap<String, (u64, Arc<Value>)> = HashMap::new();
 
-    if let Some(manager) = db.store().get_collection("red_config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            let id = entity.id.raw();
-            let key = key.to_ascii_lowercase();
-            insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
-            if let Some(rest) = key.strip_prefix("red.config.") {
-                insert_latest_config_value(&mut latest, format!("red.config/{rest}"), id, value);
-            }
-            true
-        });
-    }
-
+    // The store canonicalizes the legacy `red_config` name to `red.config`.
+    // Scan it once, but preserve both legacy and namespaced resolver keys.
     if let Some(manager) = db.store().get_collection("red.config") {
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                return true;
-            }
-            let Some(Value::Text(key)) = row.get_field("key") else {
-                return true;
-            };
-            let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-            insert_latest_config_value(
-                &mut latest,
-                format!("red.config/{}", key.to_ascii_lowercase()),
-                entity.id.raw(),
-                value,
-            );
-            true
-        });
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                let Some(row) = entity.data.as_row() else {
+                    return true;
+                };
+                let Some(Value::Text(key)) = row.get_field("key") else {
+                    return true;
+                };
+                let value = row.get_field("value").unwrap_or(&Value::Null);
+                let id = entity.id.raw();
+                let key = key.to_ascii_lowercase();
+                // One value may be visible under several aliases. Clone the
+                // payload at most once for each advancing entity version.
+                let mut shared = None;
+                insert_latest_config_value(&mut latest, key.clone(), id, value, &mut shared);
+                if let Some(rest) = key.strip_prefix("red.config.") {
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{rest}"),
+                        id,
+                        value,
+                        &mut shared,
+                    );
+                }
+                if !matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{key}"),
+                        id,
+                        value,
+                        &mut shared,
+                    );
+                }
+                true
+            },
+        )?;
     }
 
-    latest
+    Ok(latest
         .into_iter()
-        .map(|(key, (_, value))| (key, value))
-        .collect()
+        .map(|(key, (_, value))| {
+            (
+                key,
+                Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()),
+            )
+        })
+        .collect())
 }
 
 fn insert_latest_config_value(
-    latest: &mut HashMap<String, (u64, Value)>,
+    latest: &mut HashMap<String, (u64, Arc<Value>)>,
     key: String,
     id: u64,
-    value: Value,
+    value: &Value,
+    shared: &mut Option<Arc<Value>>,
 ) {
     match latest.get(&key) {
         Some((prev_id, _)) if *prev_id > id => {}
         _ => {
-            latest.insert(key, (id, value));
+            let shared = shared.get_or_insert_with(|| Arc::new(value.clone()));
+            latest.insert(key, (id, Arc::clone(shared)));
         }
     }
 }
@@ -1060,6 +1215,7 @@ pub(crate) fn current_snapshot_requires_index_fallback() -> bool {
 pub struct SnapshotBundle {
     pub snapshot: Option<SnapshotContext>,
     pub auth: Option<(String, crate::auth::Role)>,
+    pub auth_principal: Option<crate::auth::UserId>,
     pub tenant: Option<String>,
 }
 
@@ -1069,6 +1225,7 @@ pub fn snapshot_bundle() -> SnapshotBundle {
     SnapshotBundle {
         snapshot: capture_current_snapshot(),
         auth: current_auth_identity(),
+        auth_principal: current_auth_principal(),
         tenant: CURRENT_TENANT_ID.with(|cell| cell.borrow().clone()),
     }
 }
@@ -1081,6 +1238,7 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
     struct Guard {
         prev_snapshot: Option<SnapshotContext>,
         prev_auth: Option<(String, crate::auth::Role)>,
+        prev_auth_principal: Option<crate::auth::UserId>,
         prev_tenant: Option<String>,
     }
     impl Drop for Guard {
@@ -1090,6 +1248,8 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
             CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = snap);
             HAS_SNAPSHOT.with(|c| c.set(has));
             CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = self.prev_auth.take());
+            CURRENT_AUTH_PRINCIPAL
+                .with(|cell| *cell.borrow_mut() = self.prev_auth_principal.take());
             CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = self.prev_tenant.take());
         }
     }
@@ -1097,6 +1257,7 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
     let _guard = {
         let prev_snapshot = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
         let prev_auth = CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone());
+        let prev_auth_principal = CURRENT_AUTH_PRINCIPAL.with(|cell| cell.borrow().clone());
         let prev_tenant = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
 
         match bundle.snapshot.clone() {
@@ -1104,11 +1265,13 @@ pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -
             None => clear_current_snapshot(),
         }
         CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = bundle.auth.clone());
+        CURRENT_AUTH_PRINCIPAL.with(|cell| *cell.borrow_mut() = bundle.auth_principal.clone());
         CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = bundle.tenant.clone());
 
         Guard {
             prev_snapshot,
             prev_auth,
+            prev_auth_principal,
             prev_tenant,
         }
     };

@@ -253,6 +253,11 @@ pub struct RedDBOptions {
     /// of physical RAM. There is no "unlimited" value: `Some(0)` is rejected
     /// at boot, exactly like an unparseable env var.
     pub memory_budget_bytes: Option<u64>,
+    /// Opt into bounded resident segments and generation-bound disk indexes.
+    /// Currently supported only for standalone, single-file databases. Preparing
+    /// the file upgrades its writer format; retain an unconverted downgrade copy.
+    /// This is not a guarantee that every server workspace is memory-bounded.
+    pub bounded_disk_residency: bool,
 }
 
 impl fmt::Debug for RedDBOptions {
@@ -292,6 +297,7 @@ impl fmt::Debug for RedDBOptions {
             .field("layout_overrides", &self.layout_overrides)
             .field("storage_profile", &self.storage_profile)
             .field("memory_budget_bytes", &self.memory_budget_bytes)
+            .field("bounded_disk_residency", &self.bounded_disk_residency)
             .finish()
     }
 }
@@ -330,6 +336,7 @@ impl Clone for RedDBOptions {
             storage_profile: self.storage_profile,
             layout_explicit: self.layout_explicit,
             memory_budget_bytes: self.memory_budget_bytes,
+            bounded_disk_residency: self.bounded_disk_residency,
         }
     }
 }
@@ -376,6 +383,7 @@ impl Default for RedDBOptions {
             ),
             layout_explicit: false,
             memory_budget_bytes: None,
+            bounded_disk_residency: false,
         }
     }
 }
@@ -657,6 +665,13 @@ impl RedDBOptions {
     /// opens, not silently swapped for a default.
     pub fn with_memory_budget(mut self, bytes: u64) -> Self {
         self.memory_budget_bytes = Some(bytes);
+        self
+    }
+
+    /// Select disk-backed residency explicitly, using the segment share of the
+    /// resolved memory budget. Opening an unsupported profile fails before I/O.
+    pub fn with_bounded_disk_residency(mut self, enabled: bool) -> Self {
+        self.bounded_disk_residency = enabled;
         self
     }
 

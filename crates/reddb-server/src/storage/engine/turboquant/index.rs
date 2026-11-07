@@ -11,6 +11,7 @@ use super::storage::{BlockedCodeStorage, BLOCK_LANES};
 use crate::storage::engine::distance::DistanceMetric;
 use crate::storage::EntityId;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct TurboSearchResult {
@@ -23,6 +24,7 @@ pub struct TurboQuantIndex {
     codec: Codec,
     storage: BlockedCodeStorage,
     ids: Vec<EntityId>,
+    positions: HashMap<EntityId, usize>,
     handles: Vec<EncodedVector>,
     vectors: Vec<Vec<f32>>,
 }
@@ -35,22 +37,24 @@ impl TurboQuantIndex {
             codec,
             storage,
             ids: Vec::new(),
+            positions: HashMap::new(),
             handles: Vec::new(),
             vectors: Vec::new(),
         }
     }
 
     pub fn insert(&mut self, entity_id: EntityId, vector: Vec<f32>) {
-        // In this slice the storage layer is append-only — there is no
-        // in-place lane rewrite yet (background rebuild is owned by
-        // PRD #688 / issue #673). Duplicate ids are accepted but only
-        // their latest raw vector is remembered; the search filter
-        // below picks them up by handle.
-        if let Some(pos) = self.ids.iter().position(|id| *id == entity_id) {
+        if let Some(&pos) = self.positions.get(&entity_id) {
+            // Reconciliation commonly sees the same vector in the snapshot,
+            // entity store and WAL. Only re-encode if its value has changed.
+            if self.vectors[pos] != vector {
+                self.handles[pos] = self.codec.encode_into(&mut self.storage, &vector);
+            }
             self.vectors[pos] = vector;
             return;
         }
         let handle = self.codec.encode_into(&mut self.storage, &vector);
+        self.positions.insert(entity_id, self.ids.len());
         self.ids.push(entity_id);
         self.handles.push(handle);
         self.vectors.push(vector);
@@ -158,5 +162,18 @@ mod tests {
         let results = index.search(&[1.0, 0.0], 2, DistanceMetric::Cosine);
         assert_eq!(results[0].entity_id, EntityId::new(1));
         assert_eq!(results[1].entity_id, EntityId::new(3));
+    }
+
+    #[test]
+    fn replacing_a_vector_updates_its_search_code() {
+        let mut index = TurboQuantIndex::new(2, 1);
+        index.insert(EntityId::new(1), vec![0.0, 1.0]);
+        index.insert(EntityId::new(2), vec![0.0, 1.0]);
+        index.insert(EntityId::new(1), vec![1.0, 0.0]);
+        index.insert(EntityId::new(1), vec![1.0, 0.0]);
+        assert_eq!(index.len(), 2);
+        let results = index.search(&[1.0, 0.0], 2, DistanceMetric::Cosine);
+        assert_eq!(results[0].entity_id, EntityId::new(1));
+        assert!(results[0].score > results[1].score);
     }
 }

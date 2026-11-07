@@ -11,7 +11,7 @@ use super::manager::ManagerConfig;
 use super::metadata::Metadata;
 use super::resident_store::ResidentStore;
 use super::snapshot::{visit_snapshot, SnapshotVisitor};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 impl ResidentStore {
     /// Return a complete recovery target only after decoding succeeds. Hosts
@@ -27,11 +27,35 @@ impl ResidentStore {
             manager_config: &'a ManagerConfig,
             auto_index_refs: bool,
             max_cross_refs: usize,
+            source_names: HashMap<String, (String, bool)>,
         }
         impl SnapshotVisitor for Restore<'_> {
             fn collection(&mut self, name: &str) -> Result<(), String> {
+                self.collection_with_count(name, 1)
+            }
+
+            fn collection_with_count(
+                &mut self,
+                name: &str,
+                entity_count: u32,
+            ) -> Result<(), String> {
+                let canonical = super::system_collection_names::canonical_or_self(name);
+                if let Some((previous, populated)) = self.source_names.get_mut(canonical) {
+                    if previous != name && *populated && entity_count > 0 {
+                        return Err(format!(
+                            "snapshot contains both populated system collection aliases '{previous}' and '{name}'"
+                        ));
+                    }
+                    if entity_count > 0 {
+                        *previous = name.to_owned();
+                        *populated = true;
+                    }
+                } else {
+                    self.source_names
+                        .insert(canonical.to_owned(), (name.to_owned(), entity_count > 0));
+                }
                 self.store
-                    .get_or_create_collection(name, self.manager_config);
+                    .get_or_create_collection(canonical, self.manager_config);
                 Ok(())
             }
 
@@ -66,11 +90,17 @@ impl ResidentStore {
                     .store
                     .get_any(EntityId::new(cross_ref.source_id))
                     .map(|(name, _)| name)
-                    .unwrap_or_else(|| cross_ref.target_collection.clone());
+                    .unwrap_or_else(|| {
+                        super::system_collection_names::canonical_owned(
+                            cross_ref.target_collection.clone(),
+                        )
+                    });
+                let target_collection =
+                    super::system_collection_names::canonical_or_self(&cross_ref.target_collection);
                 let _ = self.store.add_cross_ref_in_memory(
                     &source_collection,
                     EntityId::new(cross_ref.source_id),
-                    &cross_ref.target_collection,
+                    target_collection,
                     EntityId::new(cross_ref.target_id),
                     RefType::from_byte(cross_ref.ref_type),
                     1.0,
@@ -81,7 +111,9 @@ impl ResidentStore {
             }
 
             fn auxiliary(&mut self, bytes: &[u8]) -> Result<(), String> {
-                self.store.set_aux_metadata(bytes.to_vec());
+                let bytes = crate::catalog::codec::canonicalize_collection_contract_blob(bytes)
+                    .map_err(|err| err.to_string())?;
+                self.store.set_aux_metadata(bytes);
                 Ok(())
             }
         }
@@ -94,6 +126,7 @@ impl ResidentStore {
                 manager_config,
                 auto_index_refs,
                 max_cross_refs,
+                source_names: HashMap::new(),
             },
         )?;
         Ok((store, version))
@@ -108,6 +141,8 @@ impl ResidentStore {
         manager_config: &ManagerConfig,
         auto_index_refs: bool,
     ) -> Result<EntityId, StoreError> {
+        let collection = super::system_collection_names::canonical_or_self(collection);
+        entity.canonicalize_system_collection_names();
         let manager = self.get_or_create_collection(collection, manager_config);
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
@@ -164,13 +199,16 @@ impl ResidentStore {
 
         let fv = reddb_file::STORE_VERSION_CURRENT;
         for (name, manager) in collections.iter() {
+            let name = super::system_collection_names::canonical_or_self(name);
             // Get all entities from this collection
             let entities = manager.query_all(|entity| {
                 if pending_versions.contains(&entity.id) {
                     return false;
                 }
-                !matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                    || !excluded_xids.contains(&entity.xmin)
+                !matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                ) || !excluded_xids.contains(&entity.xmin)
             });
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
@@ -179,7 +217,10 @@ impl ResidentStore {
             for mut entity in entities {
                 // Unfinished and rolled-back deletions cannot become committed
                 // tombstones when recovery reconstructs the xid floor.
-                if matches!(entity.data, EntityData::Row(_)) && excluded_xids.contains(&entity.xmax)
+                if matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                ) && excluded_xids.contains(&entity.xmax)
                 {
                     entity.xmax = 0;
                 }
@@ -202,7 +243,7 @@ impl ResidentStore {
                     source_id.raw(),
                     target_id.raw(),
                     ref_type.to_byte(),
-                    collection,
+                    super::system_collection_names::canonical_or_self(collection),
                 );
             }
         }

@@ -65,7 +65,8 @@ fn transaction_docs_name_explicit_deferrals() {
     for required in [
         "Full multi-model rollout is out of scope",
         "full\n  multi-model SSI are out of scope",
-        "An autovacuum daemon is out of scope",
+        "Replicated profiles require a distributed retention",
+        "boundary and do not run this automatic collector",
         "Historical secondary indexes are out\n  of scope",
         "cross-node transaction atomicity are out of scope",
     ] {

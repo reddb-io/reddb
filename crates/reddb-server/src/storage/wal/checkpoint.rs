@@ -169,6 +169,11 @@ impl Checkpointer {
             last_lsn = lsn;
 
             match record {
+                WalRecord::PageOwnership { .. } => {
+                    return Err(CheckpointError::Io(io::Error::other(
+                        "page ownership journal requires recovery before checkpoint",
+                    )));
+                }
                 WalRecord::Begin { tx_id } => {
                     result_observe_tx_id(&mut max_transaction_id, tx_id);
                     tx_states.insert(tx_id, TxState::Active);

@@ -15,8 +15,8 @@ pub(super) fn tables_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         TABLE_COLUMNS
             .iter()
@@ -27,7 +27,7 @@ pub(super) fn tables_snapshot(
     let db = runtime.db();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Table)
@@ -73,7 +73,7 @@ pub(super) fn tables_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #745 — typed `red.documents` projection. Filtered to
 /// `model = document`. `inferred_field_count` reuses the same
@@ -83,8 +83,8 @@ pub(super) fn documents_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         DOCUMENT_COLUMNS
             .iter()
@@ -94,7 +94,7 @@ pub(super) fn documents_snapshot(
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Document)
@@ -128,7 +128,7 @@ pub(super) fn documents_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #745 — typed `red.kv` projection. Filtered to
 /// `model = kv`. `supports_prefix_scan` is a stable capability
@@ -139,8 +139,8 @@ pub(super) fn kv_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         KV_COLUMNS
             .iter()
@@ -151,7 +151,7 @@ pub(super) fn kv_snapshot(
     let db = runtime.db();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Kv)
@@ -216,7 +216,7 @@ pub(super) fn kv_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #746 — typed `red.vectors` projection. Filtered to
 /// `model = vector`. `dimensions` / `metric` come from the catalog
@@ -231,8 +231,8 @@ pub(super) fn vectors_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         VECTOR_COLUMNS
             .iter()
@@ -242,7 +242,7 @@ pub(super) fn vectors_snapshot(
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Vector)
@@ -292,7 +292,7 @@ pub(super) fn vectors_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #747 — typed `red.timeseries` projection. Filtered to
 /// `model = time_series`. When the underlying collection was created
@@ -303,8 +303,8 @@ pub(super) fn timeseries_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         TIMESERIES_COLUMNS
             .iter()
@@ -316,7 +316,7 @@ pub(super) fn timeseries_snapshot(
     let registry = db.hypertables();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| {
@@ -456,7 +456,7 @@ pub(super) fn timeseries_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #748 — read the `downsample_policies` array persisted in
 /// the `red_timeseries_meta` collection by
@@ -764,8 +764,8 @@ pub(super) fn graphs_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         GRAPH_COLUMNS
             .iter()
@@ -775,7 +775,7 @@ pub(super) fn graphs_snapshot(
     let store = runtime.db().store();
     let internal_registry = InternalCollectionRegistry::from_store(store.as_ref());
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Graph)
@@ -812,7 +812,7 @@ pub(super) fn graphs_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 /// Issue #746 — single-pass scan over a graph collection's segment
 /// manager that returns `(node_count, edge_count, node_labels,
@@ -898,19 +898,18 @@ pub(super) fn metrics_snapshot(
 fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
     let mut document_count: u64 = 0;
     let mut field_names: HashSet<String> = HashSet::new();
-    for (_, entity) in runtime
-        .db()
-        .store()
-        .query_all(|entity| entity.kind.collection() == collection)
-    {
-        let EntityData::Row(row) = entity.data else {
-            continue;
+    let Some(manager) = runtime.db().store().get_collection(collection) else {
+        return (0, 0);
+    };
+    manager.for_each_entity(|entity| {
+        let EntityData::Row(row) = &entity.data else {
+            return true;
         };
         if !row
             .iter_fields()
             .any(|(name, value)| name == "body" && matches!(value, Value::Json(_) | Value::Text(_)))
         {
-            continue;
+            return true;
         }
         document_count = document_count.saturating_add(1);
         for (name, _) in row.iter_fields() {
@@ -926,6 +925,7 @@ fn document_counts(runtime: &RedDBRuntime, collection: &str) -> (u64, u64) {
                 }
             }
         }
-    }
+        true
+    });
     (document_count, field_names.len() as u64)
 }

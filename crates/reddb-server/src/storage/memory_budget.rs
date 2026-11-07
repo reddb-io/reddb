@@ -202,11 +202,12 @@ pub fn host_inputs(profile: DeployProfile, configured_bytes: Option<u64>) -> Mem
         .or_else(|| std::env::var(MEMORY_BUDGET_ENV).ok())
         .filter(|raw| !raw.trim().is_empty());
 
+    let (cgroup_v2, cgroup_v1) = crate::utils::cgroup_memory::limits();
     MemoryBudgetInputs {
         configured,
         profile: Some(profile),
-        cgroup_v2_memory_max: read_cgroup_file(CGROUP_V2_MEMORY_MAX_PATH),
-        cgroup_v1_memory_limit: read_cgroup_file(CGROUP_V1_MEMORY_LIMIT_PATH),
+        cgroup_v2_memory_max: cgroup_v2.map(|bytes| bytes.to_string()),
+        cgroup_v1_memory_limit: cgroup_v1.map(|bytes| bytes.to_string()),
         physical_ram_bytes: physical_ram_bytes(),
     }
 }
@@ -298,12 +299,6 @@ fn physical_fraction_bytes(physical_ram_bytes: u64) -> u64 {
         .max(MINIMUM_DETECTED_BUDGET_BYTES)
 }
 
-/// A missing cgroup file is the common case (no container, or the other
-/// hierarchy version). Unreadable is treated the same as missing.
-fn read_cgroup_file(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok()
-}
-
 #[cfg(target_os = "linux")]
 fn physical_ram_bytes() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
@@ -318,7 +313,23 @@ fn physical_ram_bytes() -> u64 {
         .map_or(0, |kb| kb.saturating_mul(1024))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn physical_ram_bytes() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>())
+            .expect("Windows memory status size"),
+        ..Default::default()
+    };
+    // SAFETY: status is initialized, correctly sized, and exclusively borrowed
+    // for the synchronous Windows call. The API does not retain the pointer.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    status.ullTotalPhys
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn physical_ram_bytes() -> u64 {
     0
 }

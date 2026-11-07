@@ -188,6 +188,14 @@ pub struct BitmapIndexManager {
 }
 
 impl BitmapIndexManager {
+    /// Publish a fully built collection under the runtime topology fence.
+    /// Moving the backing preserves the old indexes if preparation fails.
+    pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let mut indices = self.indices.write();
+        indices.retain(|(table, _), _| table != collection);
+        indices.extend(prepared.indices.into_inner());
+    }
+
     /// Create a new manager
     pub fn new() -> Self {
         Self {

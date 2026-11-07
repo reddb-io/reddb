@@ -151,7 +151,7 @@ impl KShortestPaths {
     }
 
     /// Calculate path weight up to a given index
-    fn path_weight_up_to(path: &Path, idx: usize) -> f64 {
+    fn path_weight_up_to(_path: &Path, idx: usize) -> f64 {
         // Simplified: sum of edge weights up to idx
         // In real implementation, track weights in Path struct
         idx as f64 // Placeholder

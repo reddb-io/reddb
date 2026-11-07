@@ -59,6 +59,8 @@ static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and durable resume counters.
+    pub disk_residency: bool,
     /// Page cache capacity
     pub cache_size: usize,
     /// Whether to open read-only
@@ -80,6 +82,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: DEFAULT_CACHE_SIZE,
             read_only: false,
             create: true,
@@ -93,7 +96,6 @@ impl Default for PagerConfig {
 /// Native host adapter for the shared pager.
 pub struct Pager {
     core: SharedPager<NativePagerFile, NativeWalBarrier>,
-    _lock_file: Option<File>,
     config: PagerConfig,
     pub(crate) encryption: Option<(
         crate::storage::encryption::PageEncryptor,
@@ -103,6 +105,40 @@ pub struct Pager {
 
 #[doc(hidden)]
 pub struct NativePagerFile(File);
+
+#[cfg(test)]
+thread_local! {
+    static PAGER_READ_BYTES: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn measure_pager_read_bytes<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    PAGER_READ_BYTES.with(|bytes| {
+        assert!(bytes.get().is_none(), "pager read measurement cannot nest");
+        bytes.set(Some(0));
+    });
+    let result = operation();
+    let bytes = PAGER_READ_BYTES.with(|bytes| {
+        bytes
+            .take()
+            .expect("pager read measurement remains active until completion")
+    });
+    (result, bytes)
+}
+
+#[cfg(unix)]
+impl Drop for NativePagerFile {
+    fn drop(&mut self) {
+        // flock belongs to the open file description: a concurrent spawn can
+        // retain it until exec closes the inherited CLOEXEC descriptor. That
+        // descriptor is not a pager owner. Release our fence at the end of the
+        // actual owner's lifetime, rather than waiting for every inherited FD.
+        // File close remains the fallback if the explicit unlock fails.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 
 impl reddb_file::VfsFile for NativePagerFile {
     fn try_clone(&self) -> std::io::Result<Self> {
@@ -118,7 +154,19 @@ impl reddb_file::VfsFile for NativePagerFile {
         std::io::Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.0, bytes)
+        let count = std::io::Read::read(&mut self.0, bytes)?;
+        #[cfg(test)]
+        PAGER_READ_BYTES.with(|bytes| {
+            let Some(current) = bytes.get() else {
+                return;
+            };
+            bytes.set(Some(
+                current
+                    .checked_add(u64::try_from(count).expect("read size fits u64"))
+                    .expect("test pager read byte counter does not overflow"),
+            ));
+        });
+        Ok(count)
     }
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         std::io::Seek::seek(&mut self.0, pos)
@@ -128,11 +176,53 @@ impl reddb_file::VfsFile for NativePagerFile {
     }
 }
 
+/// Durable ownership callbacks installed only while a fenced epoch is active.
+pub(crate) trait PageOwnershipRecorder: Send + Sync {
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 #[derive(Default)]
-pub struct NativeWalBarrier(RwLock<Option<Arc<Mutex<WalWriter>>>>);
+pub struct NativeWalBarrier(
+    RwLock<Option<Arc<Mutex<WalWriter>>>>,
+    RwLock<Option<Arc<dyn PageOwnershipRecorder>>>,
+);
+
+impl NativeWalBarrier {
+    fn ownership_recorder(&self) -> std::io::Result<Option<Arc<dyn PageOwnershipRecorder>>> {
+        Ok(self
+            .1
+            .read()
+            .map_err(|_| std::io::Error::other("ownership recorder lock poisoned"))?
+            .clone())
+    }
+}
 
 impl WalBarrier for NativeWalBarrier {
+    fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+        Ok(self.ownership_recorder()?.is_some())
+    }
+
+    fn needs_page_image(&self, page_id: u32) -> std::io::Result<bool> {
+        self.ownership_recorder()?
+            .map_or(Ok(false), |recorder| recorder.needs_page_image(page_id))
+    }
+
+    fn capture_page_image(&self, page: &Page) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.capture_page_image(page)?;
+        }
+        Ok(())
+    }
+
     fn flush_until(&self, lsn: u64) -> std::io::Result<()> {
         let wal = self
             .0
@@ -142,6 +232,31 @@ impl WalBarrier for NativeWalBarrier {
         if let Some(wal) = wal {
             let mut writer = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             writer.flush_until(lsn)?;
+        } else if lsn != 0 {
+            return Err(std::io::Error::other(
+                "nonzero page LSN requires a WAL durability barrier",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.reserve_pages(start, count)?;
+        }
+        Ok(())
+    }
+
+    fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.detach_free_pages(pages)?;
+        }
+        Ok(())
+    }
+
+    fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.retire_pages(pages)?;
         }
         Ok(())
     }
@@ -194,6 +309,50 @@ mod tests {
     };
     use std::fs;
     use std::io::Write;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_pager_drop_releases_lock_with_inherited_descriptor() {
+        use fs2::FileExt;
+        let directory = tempfile::tempdir().expect("lock fixture");
+        let path = directory.path().join("owner.rdb");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("owner file");
+        file.try_lock_exclusive().expect("owner lock");
+        let owner = NativePagerFile(file);
+        // dup and fork retain the same open file description. A concurrent
+        // spawn may hold this non-owner descriptor until the child execs,
+        // even though Rust opens it with CLOEXEC.
+        let inherited = owner.0.try_clone().expect("inherited descriptor");
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("independent contender");
+        assert!(
+            contender.try_lock_exclusive().is_err(),
+            "live owner must exclude a second writer"
+        );
+        drop(owner);
+        contender
+            .try_lock_exclusive()
+            .expect("closed owner must permit immediate reopen, before the child execs");
+        // Releasing the inherited descriptor must not unlock the new owner.
+        drop(inherited);
+        let third = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("third handle");
+        assert!(
+            third.try_lock_exclusive().is_err(),
+            "replacement writer retains its independent fence"
+        );
+    }
 
     fn temp_db_path() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -316,6 +475,42 @@ mod tests {
     }
 
     #[test]
+    fn native_pager_lock_guards_own_io_and_releases_on_drop() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("locked-io.rdb");
+        let pager = Pager::open_default(&path).expect("locked pager opens");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate under lock");
+        let id = page.page_id();
+        page.insert_cell(b"key", b"kept").expect("cell");
+        pager.write_page(id, page).expect("write under lock");
+        pager.sync().expect("sync under lock");
+        assert_eq!(
+            pager
+                .read_page(id)
+                .expect("read under lock")
+                .read_cell(0)
+                .expect("cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+        assert!(
+            matches!(Pager::open_default(&path), Err(PagerError::Locked)),
+            "the writer fence remains exclusive"
+        );
+        drop(pager);
+        let reopened = Pager::open_default(&path).expect("last I/O handle releases writer fence");
+        assert_eq!(
+            reopened
+                .read_page(id)
+                .expect("durable page")
+                .read_cell(0)
+                .expect("durable cell"),
+            (b"key".to_vec(), b"kept".to_vec())
+        );
+    }
+
+    #[test]
     fn test_pager_reopen() {
         let path = temp_db_path();
         cleanup(&path);
@@ -421,12 +616,11 @@ mod tests {
             let page1 = pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
-            let page2 = pager
+            pager
                 .allocate_page(PageType::BTreeLeaf)
                 .expect("allocate_page() should succeed");
 
             let id1 = page1.page_id();
-            let id2 = page2.page_id();
 
             // Free page 1
             pager.free_page(id1).expect("free_page() should succeed");
@@ -913,6 +1107,32 @@ mod tests {
         let path = temp_db_path();
         let pager = Pager::open(&path, PagerConfig::default()).expect("open() should succeed");
         assert!(!pager.has_wal_writer());
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn flush_refuses_nonzero_lsn_without_a_wal_writer() {
+        let path = temp_db_path();
+        let pager = Pager::open(&path, PagerConfig::default()).expect("open pager");
+        let mut page = pager
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate page");
+        page.set_lsn(42);
+        pager.write_page(page.page_id(), page).expect("write page");
+
+        assert!(
+            pager.flush().is_err(),
+            "a page with an LSN needs a WAL barrier"
+        );
+        assert!(
+            pager.dirty_page_count() > 0,
+            "failed flush must retain dirty pages"
+        );
+        assert!(
+            pager.flush().is_err(),
+            "failed writeback must remain fenced"
+        );
         drop(pager);
         cleanup(&path);
     }

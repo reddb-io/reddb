@@ -1,8 +1,7 @@
 //! HTTP TLS termination for the embedded HTTP server.
 //!
-//! The HTTP server uses sync `std::net::TcpStream` + per-connection
-//! threads, so we wrap the stream with `rustls::StreamOwned` rather
-//! than the async `tokio-rustls` adapter used by the wire transport.
+//! The HTTP server terminates TLS with `tokio-rustls` and serves both
+//! HTTP/2 and HTTP/1.1 through the shared async hyper edge.
 //!
 //! Capabilities:
 //!   * PEM cert / key load from disk.
@@ -105,10 +104,10 @@ pub fn build_server_config(
             .map_err(|err| format!("install TLS cert/key: {err}"))?
     };
 
-    // ALPN: advertise both h2 and http/1.1. Our embedded server only
-    // speaks HTTP/1.1 today; advertising h2 keeps us forward-compatible
-    // with operator-side fronting and most clients negotiate h1.
-    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Prefer HTTP/2 while retaining HTTP/1.1 compatibility. The async hyper
+    // edge supports both protocols; omitting `h2` here silently forced every
+    // production HTTPS client back to HTTP/1.1.
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(server_config))
 }
@@ -262,6 +261,11 @@ mod tests {
         let cfg = auto_generate_dev_cert(&dir).expect("should generate");
         assert!(cfg.cert_path.exists());
         assert!(cfg.key_path.exists());
+        let server_config = build_server_config(&cfg).expect("TLS config");
+        assert_eq!(
+            server_config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
         unsafe {
             std::env::remove_var("RED_HTTP_TLS_DEV");
         }

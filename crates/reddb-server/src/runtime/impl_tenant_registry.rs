@@ -83,9 +83,9 @@ impl RedDBRuntime {
     /// Malformed rows (missing `name`/`source_sql`, parse errors) are
     /// skipped with a `SchemaCorruption` operator event so a single
     /// bad entry does not block startup.
-    pub(crate) fn rehydrate_materialized_view_descriptors(&self) {
+    pub(crate) fn rehydrate_materialized_view_descriptors(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let descriptors = crate::runtime::continuous_materialized_view::load_all(store.as_ref());
+        let descriptors = crate::runtime::continuous_materialized_view::load_all(store.as_ref())?;
         for descriptor in descriptors {
             let parsed = match reddb_rql::parser::parse(&descriptor.source_sql) {
                 Ok(qc) => qc,
@@ -149,6 +149,7 @@ impl RedDBRuntime {
         // A rehydrated view shape may differ from any plans the cache
         // bootstrapped before this method ran — flush to be safe.
         self.invalidate_plan_cache();
+        Ok(())
     }
 
     pub(crate) fn rehydrate_declared_column_schemas(&self) {
@@ -163,6 +164,7 @@ impl RedDBRuntime {
                 continue;
             };
             manager.set_column_schema_if_empty(columns);
+            manager.compact_recovered_rows();
         }
     }
 

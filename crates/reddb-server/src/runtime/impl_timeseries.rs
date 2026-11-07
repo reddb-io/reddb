@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use super::*;
 
-const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
-const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
-const TIMESERIES_TAG_INDEX_COLLECTION: &str = "red_timeseries_tag_index";
+const TIMESERIES_META_COLLECTION: &str = "red.timeseries.meta";
+const TIMESERIES_SERIES_COLLECTION: &str = "red.timeseries.series";
+const TIMESERIES_TAG_INDEX_COLLECTION: &str = "red.timeseries.tag_index";
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 const TIMESERIES_MAX_SERIES_GLOBAL_CONFIG: &str = "storage.time_series.max_series_per_collection";
 const DEFAULT_TIMESERIES_MAX_SERIES_PER_COLLECTION: usize = 1_000_000;
@@ -25,6 +25,9 @@ impl RedDBRuntime {
         query: &CreateTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if super::impl_ddl::is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         for spec in &query.downsample_policies {
             crate::storage::timeseries::retention::DownsamplePolicy::parse(spec).ok_or_else(
                 || RedDBError::Query(format!("invalid downsample policy '{}'", spec)),

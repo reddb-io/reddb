@@ -911,7 +911,7 @@ fn scalar_text_and_lengths() {
                 Value::text("a"),
                 Value::Integer(2),
             ],
-            Value::text("'a':2"),
+            Value::text("a:2"),
         ),
         (
             "CONCAT_WS",
@@ -921,7 +921,7 @@ fn scalar_text_and_lengths() {
         (
             "CONCAT_WS",
             vec![Value::Integer(7), Value::text("a"), Value::text("b")],
-            Value::text("'a'7'b'"),
+            Value::text("a7b"),
         ),
         ("UPPER", vec![Value::text("éa")], Value::text("ÉA")),
         ("LOWER", vec![Value::text("ÉA")], Value::text("éa")),

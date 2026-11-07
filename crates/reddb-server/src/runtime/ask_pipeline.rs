@@ -1151,12 +1151,14 @@ struct AskScopeGuard {
     _snapshot: super::execution_context::CurrentSnapshotGuard,
     prev_tenant: Option<String>,
     prev_auth: Option<(String, crate::auth::Role)>,
+    prev_principal: Option<crate::auth::UserId>,
 }
 
 impl AskScopeGuard {
     fn install(runtime: &RedDBRuntime, scope: &EffectiveScope) -> Self {
         let prev_tenant = crate::runtime::impl_core::current_tenant();
         let prev_auth = crate::runtime::impl_core::current_auth_identity();
+        let prev_principal = super::execution_context::current_auth_principal();
 
         match scope.effective_scope() {
             Some(tenant) => crate::runtime::impl_core::set_current_tenant(tenant.to_string()),
@@ -1164,7 +1166,7 @@ impl AskScopeGuard {
         }
         match scope.identity() {
             Some((user, role)) => {
-                crate::runtime::impl_core::set_current_auth_identity(user.to_string(), role)
+                super::execution_context::set_current_auth_projection(user.to_string(), role)
             }
             None => crate::runtime::impl_core::clear_current_auth_identity(),
         }
@@ -1175,6 +1177,7 @@ impl AskScopeGuard {
             ),
             prev_tenant,
             prev_auth,
+            prev_principal,
         }
     }
 }
@@ -1185,9 +1188,11 @@ impl Drop for AskScopeGuard {
             Some(tenant) => crate::runtime::impl_core::set_current_tenant(tenant),
             None => crate::runtime::impl_core::clear_current_tenant(),
         }
-        match self.prev_auth.take() {
-            Some((user, role)) => crate::runtime::impl_core::set_current_auth_identity(user, role),
-            None => crate::runtime::impl_core::clear_current_auth_identity(),
+        match (self.prev_principal.take(), self.prev_auth.take()) {
+            (Some(principal), Some((_, role))) => {
+                crate::runtime::impl_core::set_current_auth_principal(principal, role)
+            }
+            _ => crate::runtime::impl_core::clear_current_auth_identity(),
         }
     }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@reddb-io/browser",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "private": false,
   "type": "module",
   "description": "RedDB local browser table SQL, transactions and offline OPFS persistence through a shared Rust/WASM engine.",
@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs test/session.test.mjs",
+    "test": "node scripts/build-test.mjs && node --test test/runtime.test.mjs test/browser.test.mjs test/session.test.mjs test/local-vault.test.mjs",
     "prepack": "node scripts/verify-dist.mjs",
     "test:distribution": "node --test test/distribution.test.mjs",
     "build:interop": "node scripts/build-interop.mjs",

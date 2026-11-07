@@ -17,34 +17,6 @@ use reddb_rql::ast::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-fn operational_wal_retention_floor(durable_lsn: u64) -> u64 {
-    if durable_lsn == 0 {
-        0
-    } else {
-        1
-    }
-}
-
-fn validate_store_fork_lsn(
-    fork_lsn: u64,
-    retention_floor: u64,
-    durable_lsn: u64,
-) -> RedDBResult<()> {
-    if fork_lsn < retention_floor {
-        return Err(RedDBError::Query(format!(
-            "cannot fork store at LSN {fork_lsn}: below operational WAL retention floor \
-             {retention_floor}; restore from backup for older recovery points"
-        )));
-    }
-    if fork_lsn > durable_lsn {
-        return Err(RedDBError::Query(format!(
-            "cannot fork store at LSN {fork_lsn}: current durable LSN is {durable_lsn}; \
-             restore from backup for recovery points outside the retained WAL window"
-        )));
-    }
-    Ok(())
-}
-
 fn vault_master_key_ref(collection: &str) -> String {
     format!("red.vault.{collection}.master_key")
 }
@@ -73,6 +45,9 @@ impl RedDBRuntime {
             return self.execute_create_keyed_collection(raw_query, query);
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        if is_system_schema_name(&query.name) {
+            return Err(RedDBError::Query("system schema is read-only".to_string()));
+        }
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         // Reject an AI policy that wires a provider/model to a modality it
@@ -473,12 +448,12 @@ impl RedDBRuntime {
         if !query.allowed_signers.is_empty() {
             let actor = crate::runtime::impl_core::current_user_projected()
                 .unwrap_or_else(|| "@system/create-collection".to_string());
-            crate::runtime::signed_writes_kind::install(
+            crate::runtime::signed_writes_kind::try_install(
                 &self.inner.db.store(),
                 &query.name,
                 &query.allowed_signers,
                 &actor,
-            );
+            )?;
         }
         Ok(result)
     }
@@ -492,9 +467,9 @@ impl RedDBRuntime {
         use std::sync::Arc;
 
         let store = self.inner.db.store();
-        blockchain_kind::mark_as_chain(&store, name);
+        blockchain_kind::try_mark_as_chain(&store, name)?;
 
-        let existing_tip = blockchain_kind::chain_tip(&store, name);
+        let existing_tip = blockchain_kind::try_chain_tip(&store, name)?;
         if existing_tip.height.is_some() {
             return Ok(());
         }
@@ -519,7 +494,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         // #524: prime the in-memory tip cache so the chain-tip endpoint and
         // subsequent INSERTs don't have to scan the collection to find genesis.
-        if let Some(tip) = blockchain_kind::chain_tip_full(&store, name) {
+        if let Some(tip) = blockchain_kind::try_chain_tip_full(&store, name)? {
             self.inner
                 .chain_tip_cache
                 .lock()
@@ -699,10 +674,9 @@ impl RedDBRuntime {
         if let Some(store) = self.inner.auth_store.read().clone() {
             store.invalidate_visible_collections_cache();
         }
-        self.inner
-            .db
-            .persist_metadata()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The native registry and targeted contract metadata publication above
+        // are the DROP commit boundary; do not turn this into a full database
+        // fingerprint/checkpoint.
         // Issue #120 — drop both the collection entries *and* every
         // index entry that was scoped to this collection.  Dropping the
         // collection wipes columns + collection-name + type-tags +
@@ -1147,7 +1121,7 @@ impl RedDBRuntime {
                     // signed-writes registry installed so this isn't a
                     // covert way to retrofit one (use `CREATE COLLECTION
                     // ... SIGNED_BY (...)` for that).
-                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::try_is_signed(&store, &query.name)? {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION ADD SIGNER: '{}' has no signer registry; \
                              recreate it with CREATE COLLECTION ... SIGNED_BY (...)",
@@ -1156,12 +1130,12 @@ impl RedDBRuntime {
                     }
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
-                    let changed = crate::runtime::signed_writes_kind::add_signer(
+                    let changed = crate::runtime::signed_writes_kind::try_add_signer(
                         &store,
                         &query.name,
                         *pubkey,
                         &actor,
-                    );
+                    )?;
                     messages.push(format!(
                         "signer {} on '{}'",
                         if changed { "added" } else { "already present" },
@@ -1169,7 +1143,7 @@ impl RedDBRuntime {
                     ));
                 }
                 AlterOperation::RevokeSigner { pubkey } => {
-                    if !crate::runtime::signed_writes_kind::is_signed(&store, &query.name) {
+                    if !crate::runtime::signed_writes_kind::try_is_signed(&store, &query.name)? {
                         return Err(RedDBError::Query(format!(
                             "ALTER COLLECTION REVOKE SIGNER: '{}' has no signer registry",
                             query.name
@@ -1177,12 +1151,12 @@ impl RedDBRuntime {
                     }
                     let actor = crate::runtime::impl_core::current_user_projected()
                         .unwrap_or_else(|| "@system/alter".to_string());
-                    let changed = crate::runtime::signed_writes_kind::revoke_signer(
+                    let changed = crate::runtime::signed_writes_kind::try_revoke_signer(
                         &store,
                         &query.name,
                         pubkey,
                         &actor,
-                    );
+                    )?;
                     messages.push(format!(
                         "signer {} on '{}'",
                         if changed {
@@ -1426,82 +1400,34 @@ impl RedDBRuntime {
 
     pub fn execute_fork_store(
         &self,
-        raw_query: &str,
-        query: &ForkStoreQuery,
+        _raw_query: &str,
+        _query: &ForkStoreQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        let path = self.inner.db.path().ok_or_else(|| {
-            RedDBError::Query("FORK STORE requires a persistent store".to_string())
-        })?;
-        let durable_lsn = self.cdc_current_lsn();
-        let fork_lsn = query.at_lsn.unwrap_or(durable_lsn);
-        let retention_floor = operational_wal_retention_floor(durable_lsn);
-        validate_store_fork_lsn(fork_lsn, retention_floor, durable_lsn)?;
-
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let mut collections = self.inner.db.store().list_collections();
-        collections.sort();
-        manifest.recover_or_bootstrap(&collections).map_err(|err| {
-            RedDBError::Query(format!("failed to prepare store fork manifest: {err}"))
-        })?;
-        manifest
-            .create_fork(&query.name, fork_lsn)
-            .map_err(|err| RedDBError::Query(format!("failed to create store fork: {err}")))?;
-        Ok(RuntimeQueryResult::ok_message(
-            raw_query.to_string(),
-            &format!("store fork '{}' created at LSN {fork_lsn}", query.name),
-            "fork_store",
+        Err(RedDBError::InvalidOperation(
+            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
         ))
     }
 
     pub fn execute_drop_fork(
         &self,
-        raw_query: &str,
-        query: &DropForkQuery,
+        _raw_query: &str,
+        _query: &DropForkQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        let path = self.inner.db.path().ok_or_else(|| {
-            RedDBError::Query("DROP FORK requires a persistent store".to_string())
-        })?;
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let dropped = manifest
-            .drop_fork(&query.name)
-            .map_err(|err| RedDBError::Query(format!("failed to drop store fork: {err}")))?;
-        if !dropped && !query.if_exists {
-            return Err(RedDBError::NotFound(format!("store fork '{}'", query.name)));
-        }
-        Ok(RuntimeQueryResult::ok_message(
-            raw_query.to_string(),
-            &format!("store fork '{}' dropped", query.name),
-            "drop_fork",
+        Err(RedDBError::InvalidOperation(
+            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
         ))
     }
 
     pub fn execute_promote_fork(
         &self,
-        raw_query: &str,
-        query: &PromoteForkQuery,
+        _raw_query: &str,
+        _query: &PromoteForkQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        let path = self.inner.db.path().ok_or_else(|| {
-            RedDBError::Query("PROMOTE FORK requires a persistent store".to_string())
-        })?;
-        self.flush()?;
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let outcome = manifest
-            .promote_fork(&query.name)
-            .map_err(|err| RedDBError::Query(format!("failed to promote store fork: {err}")))?;
-        let outcome =
-            outcome.ok_or_else(|| RedDBError::NotFound(format!("store fork '{}'", query.name)))?;
-        Ok(RuntimeQueryResult::ok_message(
-            raw_query.to_string(),
-            &format!(
-                "store fork '{}' promoted at LSN {}; retired parent archived at {}",
-                outcome.name,
-                outcome.fork_lsn,
-                outcome.archived_parent.store_identity()
-            ),
-            "promote_fork",
+        Err(RedDBError::InvalidOperation(
+            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
         ))
     }
 
@@ -1964,6 +1890,7 @@ impl RedDBRuntime {
     }
 
     fn truncate_collection_entities(&self, name: &str) -> RedDBResult<u64> {
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(name) else {
             return Ok(0);
@@ -2038,10 +1965,9 @@ impl RedDBRuntime {
         if let Some(store) = self.inner.auth_store.read().clone() {
             store.invalidate_visible_collections_cache();
         }
-        self.inner
-            .db
-            .persist_metadata()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        // The native registry and targeted contract metadata publication above
+        // are the DROP commit boundary; do not turn this into a full database
+        // fingerprint/checkpoint.
         self.schema_vocabulary_apply(
             crate::runtime::schema_vocabulary::DdlEvent::DropCollection {
                 collection: name.to_string(),
@@ -2787,6 +2713,7 @@ fn ensure_event_target_queue(runtime: &RedDBRuntime, queue: &str) -> RedDBResult
     store
         .create_collection(queue)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    crate::runtime::queue_storage_index::prepare_queue(runtime, queue)?;
     runtime
         .inner
         .db

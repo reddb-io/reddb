@@ -191,6 +191,35 @@ impl RowData {
         }
     }
 
+    /// Replace a decoded named row with values in the authoritative schema's
+    /// order. Different dynamic shapes retain their named representation.
+    pub(crate) fn compact_with_schema(&mut self, schema: &std::sync::Arc<Vec<String>>) -> bool {
+        let Some(named) = &self.named else {
+            return false;
+        };
+        if named.len() != schema.len() || schema.iter().any(|name| !named.contains_key(name)) {
+            return false;
+        }
+        // Existing positional values are independently observable. Only drop
+        // their duplicate copy when the declared order agrees with them.
+        if !self.columns.is_empty()
+            && (self.columns.len() != schema.len()
+                || schema
+                    .iter()
+                    .zip(&self.columns)
+                    .any(|(name, value)| named.get(name) != Some(value)))
+        {
+            return false;
+        }
+        let mut named = self.named.take().expect("validated named row");
+        self.columns = schema
+            .iter()
+            .map(|name| named.remove(name).expect("validated schema field"))
+            .collect();
+        self.schema = Some(std::sync::Arc::clone(schema));
+        true
+    }
+
     /// Get a named field value — checks named HashMap first, then schema+columns.
     pub fn get_field(&self, name: &str) -> Option<&Value> {
         // Fast path: named HashMap
@@ -543,6 +572,47 @@ pub struct EntityAux {
 }
 
 impl UnifiedEntity {
+    /// Normalize persisted runtime-owned collection identities while retaining
+    /// exact user collection names. This is idempotent and intentionally does
+    /// not rewrite graph labels, which are data rather than collection keys.
+    pub fn canonicalize_system_collection_names(&mut self) {
+        match &mut self.kind {
+            EntityKind::TableRow { table, .. } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(table) {
+                    *table = Arc::from(canonical);
+                }
+            }
+            EntityKind::Vector { collection } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(collection)
+                {
+                    *collection = canonical.to_owned();
+                }
+            }
+            EntityKind::TimeSeriesPoint(point) => {
+                if let Some(canonical) =
+                    super::system_collection_names::canonical_name(&point.series)
+                {
+                    point.series = canonical.to_owned();
+                }
+            }
+            EntityKind::QueueMessage { queue, .. } => {
+                if let Some(canonical) = super::system_collection_names::canonical_name(queue) {
+                    *queue = canonical.to_owned();
+                }
+            }
+            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => {}
+        }
+        if let Some(aux) = &mut self.aux {
+            for reference in &mut aux.cross_refs {
+                if let Some(canonical) =
+                    super::system_collection_names::canonical_name(&reference.target_collection)
+                {
+                    reference.target_collection = canonical.to_owned();
+                }
+            }
+        }
+    }
+
     /// Access embeddings (returns empty slice if no aux data).
     pub fn embeddings(&self) -> &[EmbeddingSlot] {
         self.aux

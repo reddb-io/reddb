@@ -216,7 +216,12 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
     runtime.checkpoint().expect("initial checkpoint");
 
     let sidecar = reddb_server::physical::PhysicalMetadataFile::metadata_binary_path_for(&path);
-    let metadata_before = std::fs::read(&sidecar).expect("binary metadata");
+    assert!(!sidecar.exists());
+    let metadata_before = runtime
+        .db()
+        .store()
+        .try_get_storage_metadata("physical")
+        .expect("internal metadata");
     let store = runtime.db().store();
     let pager = store.pager().expect("paged store");
     let mut physical = pager.header().expect("header").physical;
@@ -238,7 +243,12 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
         let _indexes = runtime.db().physical_indexes();
         let _exports = runtime.db().exports();
         assert!(
-            std::fs::read(&sidecar).expect("metadata") == metadata_before,
+            runtime
+                .db()
+                .store()
+                .try_get_storage_metadata("physical")
+                .expect("internal metadata")
+                == metadata_before,
             "inspection published metadata"
         );
         assert!(std::fs::read(&path).expect("inspected file") == before);
@@ -249,7 +259,12 @@ fn physical_metadata_inspection_does_not_publish_native_ahead_metadata() {
         .run_maintenance()
         .expect("explicit maintenance");
     assert!(
-        std::fs::read(&sidecar).expect("maintained metadata") != metadata_before,
+        runtime
+            .db()
+            .store()
+            .try_get_storage_metadata("physical")
+            .expect("maintained metadata")
+            != metadata_before,
         "explicit maintenance did not publish metadata"
     );
 }
@@ -273,8 +288,14 @@ fn metadata_inspection_reads_a_journal_without_healing_the_primary() {
     let primary = PhysicalMetadataFile::metadata_binary_path_for(&path);
     let journal =
         PhysicalMetadataFile::metadata_journal_path_for(&path, metadata.superblock.sequence);
-    let bytes = std::fs::read(&primary).expect("primary metadata");
-    std::fs::write(&journal, &bytes).expect("recovery journal");
+    runtime
+        .db()
+        .delete_kv("red.storage.metadata", "physical")
+        .expect("legacy representation");
+    metadata
+        .save_to_binary_path(&journal)
+        .expect("legacy recovery journal");
+    let bytes = std::fs::read(&journal).expect("recovery journal");
     std::fs::write(&primary, b"damaged primary").expect("damage test metadata");
     let before = std::fs::read(&path).expect("data file");
 
@@ -294,7 +315,20 @@ fn metadata_inspection_reads_a_journal_without_healing_the_primary() {
         assert!(std::fs::read(&path).expect("data file") == before);
     }
     runtime.db().run_maintenance().expect("explicit repair");
-    PhysicalMetadataFile::load_from_binary_path(&primary).expect("repaired primary metadata");
+    assert!(
+        !primary.exists(),
+        "maintenance must import, not heal a sidecar"
+    );
+    assert!(
+        !journal.exists(),
+        "checkpointed import retires legacy journals"
+    );
+    assert!(runtime
+        .db()
+        .store()
+        .try_get_storage_metadata("physical")
+        .expect("internal metadata")
+        .is_some());
 }
 
 #[test]
@@ -800,7 +834,8 @@ fn metadata_only_health_detects_artifact_descriptor_drift() {
     let rt = RedDBRuntime::with_options(
         RedDBOptions::persistent(directory.path().join("health.rdb"))
             .with_storage_profile(StorageDeployPreset::Serverless.selection())
-            .expect("paged profile"),
+            .expect("paged profile")
+            .with_capability(reddb_server::api::Capability::FullText),
     )
     .expect("runtime");
     rt.execute_query("CREATE TABLE artifact_rows (body TEXT)")

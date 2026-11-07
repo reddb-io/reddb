@@ -193,6 +193,7 @@ pub fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<UnifiedRe
             record.set(key, value.clone());
         }
         set_public_row_envelope(&mut record, entity, row);
+        fill_document_body_fields(&mut record, None, document_row_body_bytes(row).as_deref());
         Some(record)
     } else if let Some(schema) = &row.schema {
         // Columnar fast-path: build the record with the schema-shared
@@ -207,7 +208,9 @@ pub fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<UnifiedRe
         values.push(runtime_row_tenant_value(row));
         values.push(Value::UnsignedInteger(created_at));
         values.push(Value::UnsignedInteger(updated_at));
-        Some(UnifiedRecord::from_columnar(sys_schema, values))
+        let mut record = UnifiedRecord::from_columnar(sys_schema, values);
+        fill_document_body_fields(&mut record, None, document_row_body_bytes(row).as_deref());
+        Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(6 + row.columns.len());
         for (i, value) in row.columns.iter().enumerate() {
@@ -264,6 +267,7 @@ pub fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<UnifiedRecord>
         record.set_arc(sys_key_tenant(), tenant);
         record.set_arc_if_absent(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc_if_absent(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
+        fill_document_body_fields(&mut record, None, doc_body.as_deref());
         Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(6 + row.columns.len());
@@ -644,6 +648,13 @@ pub fn runtime_table_record_with_col_indices(
     // compact positional form may not carry row.schema; callers can still pass
     // an idx_map derived from the persisted collection contract.
     if row.named.is_some() || row.columns.is_empty() {
+        return None;
+    }
+    if row.schema.as_ref().is_some_and(|schema| {
+        idx_map
+            .iter()
+            .any(|&(ci, si)| schema.get(si) != columns.get(ci))
+    }) {
         return None;
     }
     let mut record = UnifiedRecord::with_capacity(6 + idx_map.len());

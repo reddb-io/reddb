@@ -32,6 +32,7 @@ fn qualify_shrink(reopen_with_default_profile: bool) {
     let path = directory.path().join("native-shrink.rdb");
     let options = || {
         RedDBOptions::persistent(&path)
+            .with_capability(reddb_server::api::Capability::FullText)
             .with_storage_profile(StorageDeployPreset::Serverless.selection())
             .expect("paged profile")
     };
@@ -60,8 +61,11 @@ fn qualify_shrink(reopen_with_default_profile: bool) {
 
     let runtime = if reopen_with_default_profile {
         drop(runtime);
-        RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("existing paged file under the default embedded options")
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_capability(reddb_server::api::Capability::FullText),
+        )
+        .expect("existing paged file under the default embedded options")
     } else {
         runtime
     };
@@ -78,7 +82,7 @@ fn qualify_shrink(reopen_with_default_profile: bool) {
     drop(runtime);
 
     let recovered = RedDBRuntime::with_options(if reopen_with_default_profile {
-        RedDBOptions::persistent(&path)
+        RedDBOptions::persistent(&path).with_capability(reddb_server::api::Capability::FullText)
     } else {
         options()
     })

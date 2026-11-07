@@ -115,7 +115,8 @@ impl Value {
             .expect("writing JSON to a String cannot fail");
     }
 
-    fn write_compact_to(&self, out: &mut impl fmt::Write) -> fmt::Result {
+    /// Write canonical compact JSON to a fallible sink without an intermediate string.
+    pub fn write_compact_to(&self, out: &mut impl fmt::Write) -> fmt::Result {
         match self {
             Value::Null => out.write_str("null")?,
             Value::Bool(value) => out.write_str(if *value { "true" } else { "false" })?,

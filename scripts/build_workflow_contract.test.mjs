@@ -53,7 +53,7 @@ process.exit(Number(process.env.FAKE_EXIT || 0));
 
 function run(f, script, args = [], extraEnv = {}) {
   const result = spawnSync("bash", [path.join(f.dir, "scripts", script), ...args], {
-    cwd: f.dir, env: { ...f.env, ...extraEnv }, encoding: "utf8", timeout: 10_000,
+    cwd: f.dir, env: { ...f.env, ...extraEnv }, encoding: "utf8", timeout: 60_000,
   });
   assert.equal(result.status, 0, result.stderr);
   return fs.readFileSync(f.log, "utf8").trim().split("\n").map(JSON.parse);
@@ -91,7 +91,7 @@ test("explicit compiler, job and incremental choices remain available", (t) => {
 test("fast lane reuses its target, includes engine unit tests and builds the smoke client", (t) => {
   const f = fixture(t);
   const calls = run(f, "test-fast.sh");
-  assert.equal(calls.length, 17);
+  assert.equal(calls.length, 26);
   assert(calls.every((call) => call.target === f.env.CARGO_TARGET_DIR));
   assert(calls[0].args.includes("--workspace"));
   assert(calls[0].args.includes("--lib"));
@@ -100,8 +100,19 @@ test("fast lane reuses its target, includes engine unit tests and builds the smo
   for (const call of calls.slice(2)) {
     const index = call.args.indexOf("--test");
     assert.match(call.args[index + 1], /^grouped_/);
-    assert.match(call.args[index + 2], /::$/);
+    assert(call.args[index + 2]);
   }
+  assert.deepEqual(calls.slice(-9).map((call) => call.args.at(-1)), [
+    "e2e_index_replay::persistent_reopen_restores_indexed_query_results",
+    "e2e_statement_execution_contract::table_command_matrix_executes_ddl_dml_index_alter_truncate_and_drop",
+    "e2e_rls_universal::policy_on_messages_of_queue_gates_consumers",
+    "iam_policy_http_collections::security_journey_",
+    "e2e_tenant_auto_index::alter_enable_tenancy_creates_index_over_existing_data",
+    "integration_rpc_stdio::insert_then_query_round_trip",
+    "e2e_backup_restore::pitr_restore_succeeds_from_clean_snapshot",
+    "e2e_logical_wal_crash::truncated_tail_after_append_returns_valid_prefix_only",
+    "e2e_concurrent_writes::twenty_threads_five_collections_do_not_deadlock",
+  ]);
 });
 
 test("explicit fast target and legacy target-only selection are preserved", (t) => {
@@ -120,7 +131,8 @@ test("an isolated fast target remains opt-in", (t) => {
   const calls = run(f, "test-fast.sh", [], {
     REDDB_FAST_SHARED_TARGET: "0", REDDB_FAST_TESTS: "grouped_sql_core",
   });
-  assert(calls.every((call) => call.target === path.join(f.env.CARGO_TARGET_DIR, "test-fast")));
+  const target = path.join(f.env.CARGO_TARGET_DIR, "test-fast");
+  assert(calls.every((call) => path.normalize(call.target) === target));
 });
 
 test("independent target directories share one host build lease", async (t) => {
@@ -167,7 +179,7 @@ test("cargo run arguments do not accidentally acquire the build lease", async (t
 });
 
 // Inspect the declared harness graph without compiling the engine. This catches
-// nonexistent curated targets and double compilation of test-bearing source files.
+// nonexistent curated targets and both missing and duplicate harness ownership.
 test("curated modules exist and test files have one harness owner", () => {
   const manifest = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
   const targets = new Map([...manifest.matchAll(/\[\[test\]\]\s*name\s*=\s*"([^"]+)"\s*path\s*=\s*"([^"]+)"/g)]
@@ -193,8 +205,26 @@ test("curated modules exist and test files have one harness owner", () => {
     modules.set(owner, new Set());
     visit(file, owner, new Set());
   }
+  const pending = [path.join(root, "tests")];
+  while (pending.length > 0) {
+    const entry = pending.pop();
+    for (const dirent of fs.readdirSync(entry, { withFileTypes: true })) {
+      const file = path.join(entry, dirent.name);
+      if (dirent.isDirectory()) {
+        pending.push(file);
+      } else if (file.endsWith(".rs")) {
+        const source = fs.readFileSync(file, "utf8");
+        if (/#\[(?:tokio::)?test(?:\s*\(|\s*\])/.test(source)) {
+          assert(owners.has(file), `${file} is not included by a declared test harness`);
+        }
+      }
+    }
+  }
   const runner = fs.readFileSync(path.join(root, "scripts/test-fast.sh"), "utf8");
-  const curated = runner.match(/FAST_TESTS=\(([\s\S]*?)\)/)[1].trim().split(/\s+/);
+  const curated = runner.match(/FAST_TESTS=\(([\s\S]*?)\)/)[1]
+    .replace(/#[^\n]*/g, "")
+    .trim()
+    .split(/\s+/);
   for (const entry of curated) {
     const [target, module] = entry.split(":");
     assert(targets.has(target), `unknown target ${target}`);

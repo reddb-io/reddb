@@ -79,25 +79,24 @@ impl std::fmt::Display for PagerError {
                 f,
                 "superblock zone of {} is unrecoverable: both ping-pong copies failed \
                  validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with red salvage \
-                 (ADR 0074 §4); it reads the damaged file without writing to it and \
-                 reports what it could not verify.",
+                 will not be opened. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::ManifestZoneCorrupt(path) => write!(
                 f,
                 "internal manifest zone of {} failed its checksum: the zone that names \
                  collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
-                 and `red salvage` to extract what survives (ADR 0074 §2/§4).",
+                 rows are returned. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::DwbZoneCorrupt(path) => write!(
                 f,
                 "double-write zone of {} failed validation: page recovery cannot prove \
                  whether the protected in-place write completed. The store will not be opened \
-                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
-                 rows (ADR 0074 §2/§4).",
+                 silently. Preserve the database and its recovery files; restore from \
+                 a verified backup.",
                 path.display()
             ),
             Self::LegacySidecarStore { sidecar } => write!(
@@ -157,6 +156,8 @@ impl From<pager_io::PagerIoError> for PagerError {
 /// Host-independent pager configuration. File creation and ownership are host policy.
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
+    /// Host guarantees immutable published trees and generation-bound resume counters.
+    pub disk_residency: bool,
     pub cache_size: usize,
     pub read_only: bool,
     pub verify_checksums: bool,
@@ -166,6 +167,7 @@ pub struct PagerConfig {
 impl Default for PagerConfig {
     fn default() -> Self {
         Self {
+            disk_residency: false,
             cache_size: 10_000,
             read_only: false,
             verify_checksums: true,
@@ -178,6 +180,39 @@ impl Default for PagerConfig {
 /// Implementations must make all records through `lsn` durable or return an error.
 pub trait WalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()>;
+
+    /// A checkpoint host can preserve the first image of an existing page
+    /// before the cache accepts an overwrite. Newly reserved pages need no undo.
+    fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Must make the image durable before returning. The pager may evict the
+    /// replacement immediately; recording only at flush time is too late.
+    fn capture_page_image(&self, _page: &Page) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Called before pages are removed from allocator ownership.
+    fn reserve_pages(&self, _start: u32, _count: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Called before a persisted free-list trunk is detached from its head.
+    fn detach_free_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// True only while detached free IDs have durable recovery ownership.
+    /// No-op callbacks must not authorize moving a whole trunk into RAM.
+    fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Called before retired pages enter the free list.
+    fn retire_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A pager without a WAL may only publish pages whose LSN is zero.
@@ -196,13 +231,21 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     file: Mutex<F>,
     /// Whether mutable pages are protected by the in-file DWB zone.
     dwb_enabled: bool,
+    /// A failed writeback may leave the only complete image in the DWB.
+    /// Refuse further writes until reopen has recovered that image.
+    writeback_failed: std::sync::atomic::AtomicBool,
     /// Page cache
     cache: PageCache,
+    /// Recovery images must survive cache eviction without writing the source.
+    read_only_recovery: RwLock<std::collections::HashMap<u32, Page>>,
     /// Free page list
     freelist: RwLock<FreeList>,
     /// Store-managed frees stay unavailable until their removal from the
     /// durable catalog has crossed a publication boundary.
     deferred_reclamation: Mutex<DeferredPageReclamation>,
+    /// Excludes page ownership changes while a host publishes an epoch.
+    /// Reentrant so the publishing thread can use ordinary pager methods.
+    ownership_mutations: parking_lot::ReentrantMutex<()>,
     /// Reused page ownership must reach both superblock copies before a
     /// manifest can refer to those pages, including single-slot recovery.
     allocation_reused: std::sync::atomic::AtomicBool,
@@ -210,6 +253,8 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     allocation_fence_pending: std::sync::atomic::AtomicBool,
     /// Database header
     header: RwLock<DatabaseHeader>,
+    /// Serialize read-select-write sequences for the superblock pair.
+    superblock_publication: Mutex<()>,
     /// Configuration
     config: PagerConfig,
     /// Dirty flag for header
@@ -227,7 +272,9 @@ struct DeferredPageReclamation {
 /// The superblock zone occupies the head of page 0 (ADR 0038 §2 phase 1).
 const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = reddb_file::PAGE_FILE_VERSION;
+// The phase-3 layout was introduced in 1.0.1. Later file format versions
+// must not make existing phase-3 stores look like legacy sidecar stores.
+const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 
 /// The newest valid superblock copy together with its slot image.
 pub type NewestSuperblock = (
@@ -263,12 +310,16 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             path,
             file: Mutex::new(file),
             dwb_enabled: config.double_write && !config.read_only,
+            writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
+            read_only_recovery: RwLock::new(std::collections::HashMap::new()),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
+            ownership_mutations: parking_lot::ReentrantMutex::new(()),
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
             allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
             header: RwLock::new(DatabaseHeader::default()),
+            superblock_publication: Mutex::new(()),
             config,
             header_dirty: Mutex::new(false),
             wal,
@@ -285,6 +336,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     pub fn wal_barrier(&self) -> &W {
         &self.wal
+    }
+
+    /// Hold across an entire ownership publication, not just individual
+    /// allocation calls. Readers may continue accessing already-published pages.
+    pub fn lock_ownership_mutations(&self) -> parking_lot::ReentrantMutexGuard<'_, ()> {
+        self.ownership_mutations.lock()
+    }
+
+    /// An interrupted publication must be recovered before any more writes.
+    pub fn fence_interrupted_ownership(&self) {
+        self.writeback_failed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Run a host operation while holding the same lock as protected page I/O.
@@ -371,8 +434,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// The newest valid superblock copy, with its slot image.
     ///
     /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
-    /// §2): the store does not open, and the error names the zone and points
-    /// at salvage rather than panicking or silently re-initialising.
+    /// §2): the store does not open, and the error names the zone rather
+    /// than panicking or silently re-initialising.
     #[doc(hidden)]
     pub fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
         let zone = self.read_superblock_zone()?;
@@ -389,6 +452,21 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
+            && !self.config.read_only
+        {
+            return Err(PagerError::InvalidDatabase(
+                "recovered database is read-only; export verified data into a new store".into(),
+            ));
+        }
+        if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && !self.config.disk_residency
+            && !self.config.read_only
+        {
+            return Err(PagerError::InvalidDatabase(
+                "prepared disk-resident database requires a disk-resident writer".into(),
+            ));
+        }
         if header.version < PHASE3_DWB_ZONE_FILE_VERSION {
             return Err(PagerError::LegacyPagedStore {
                 path: self.path.clone(),
@@ -405,10 +483,12 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         copy_index: usize,
         generation: u64,
     ) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
         let mut file = self.file_lock()?;
+        self.ensure_writeback_available()?;
         Ok(pager_io::write_superblock_slot(
             &mut *file, slot, copy_index, generation,
         )?)
@@ -424,6 +504,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         &self,
         mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        self.commit_superblock_locked(mutate)
+    }
+
+    fn commit_superblock_locked(
+        &self,
+        mutate: impl FnOnce(&mut [u8; SUPERBLOCK_SLOT_SIZE]) -> Result<(), PagerError>,
+    ) -> Result<(), PagerError> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -431,6 +523,60 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         mutate(&mut image)?;
         let next_copy = reddb_file::paged_superblock_next_copy(Some(newest));
         self.write_superblock_slot(&mut image, next_copy, newest.generation.saturating_add(1))
+    }
+
+    /// Fence a file-format upgrade in both recoverable superblock copies.
+    ///
+    /// The caller must exclude other mutators while the fence is in progress
+    /// and may publish a new mandatory format only after this succeeds. A
+    /// failed write fences subsequent mutation until reopen and recovery.
+    pub fn fence_file_format_version(&self, version: u32) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION {
+            return Err(PagerError::InvalidDatabase(
+                "recovery read-only format is reserved".into(),
+            ));
+        }
+        if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && !self.config.disk_residency
+        {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency format requires a disk-resident writer".into(),
+            ));
+        }
+        if !(PHASE3_DWB_ZONE_FILE_VERSION..=reddb_file::PAGE_FILE_VERSION).contains(&version) {
+            return Err(PagerError::InvalidDatabase(
+                "unsupported file format fence".into(),
+            ));
+        }
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        if version < self.header_read()?.version {
+            return Err(PagerError::InvalidDatabase(
+                "file format downgrade is not supported".into(),
+            ));
+        }
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::set_database_header_version(image, version)
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                })?;
+            }
+            self.header_write()?.version = version;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Load the database header from the newest valid superblock copy.
@@ -445,9 +591,24 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // entire physical extent before allocating; never overwrite that tail.
         // A partial last page is reserved too, without treating it as verified.
         let physical_pages = self.file_lock()?.file_len()?.div_ceil(PAGE_SIZE as u64);
-        let physical_pages = u32::try_from(physical_pages).map_err(|_| {
+        let mut physical_pages = u32::try_from(physical_pages).map_err(|_| {
             PagerError::InvalidDatabase("data file exceeds the page address space".into())
         })?;
+        if self.config.read_only {
+            if let Some(id) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .keys()
+                .max()
+            {
+                physical_pages = physical_pages.max(id.checked_add(1).ok_or_else(|| {
+                    PagerError::InvalidDatabase(
+                        "recovery page exceeds the page address space".into(),
+                    )
+                })?);
+            }
+        }
         if decoded_header.page_count < physical_pages {
             decoded_header.page_count = physical_pages;
             if !self.config.read_only {
@@ -496,18 +657,87 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         )?)
     }
 
+    fn ensure_writeback_available(&self) -> Result<(), PagerError> {
+        if self
+            .writeback_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(PagerError::Io(std::io::Error::other(
+                "page writeback failed; reopen the database to recover before writing",
+            )));
+        }
+        Ok(())
+    }
+
+    fn record_ownership(
+        &self,
+        operation: impl FnOnce(&W) -> std::io::Result<()>,
+    ) -> Result<(), PagerError> {
+        if let Err(error) = operation(&self.wal) {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(PagerError::Io(error));
+        }
+        Ok(())
+    }
+
+    /// Amortize protected eviction over one bounded DWB frame. Keeping the
+    /// remaining cache dirty would otherwise pay three fsyncs per victim.
+    fn write_evicted_dirty_page(
+        &self,
+        page: Page,
+        pending_page: Option<u32>,
+    ) -> Result<(), PagerError> {
+        let mut ids = self.cache.dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME);
+        // The admitting write must not join its predecessor's eviction batch.
+        // Its image is dirty for readers, but publication still belongs to the
+        // caller after the earlier writeback has succeeded.
+        ids.retain(|id| Some(*id) != pending_page);
+        // Leave room for the already evicted image without reducing a full
+        // frame merely because the pending image occupied one candidate slot.
+        ids.truncate(pager_io::DWB_MAX_PAGES_PER_FRAME.saturating_sub(1));
+        ids.sort_unstable();
+        let mut pages = self.cache.flush_dirty_pages(&ids);
+        pages.push((page.page_id(), page));
+        pages.sort_unstable_by_key(|(id, _)| *id);
+        self.write_dirty_page_batch(&pages)
+    }
+
     /// Write a page to disk (bypassing cache)
     fn write_page_raw(&self, page_id: u32, page: &Page) -> Result<(), PagerError> {
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
         let mut file = self.file_lock()?;
+        self.ensure_writeback_available()?;
         Ok(pager_io::write_page(&mut *file, page_id, page)?)
     }
 
     /// Read a page (cache-aware)
     pub fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                if self.config.verify_checksums {
+                    page.verify_checksum()?;
+                }
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
+        if let Some(page) = self.cache.get(page_id) {
+            return Ok(page);
+        }
+
+        // A miss can evict and write dirty pages. Keep disk loading and cache
+        // publication inside the same ownership epoch as writers/checkpoints.
+        // Hits retain their existing path without taking this guard.
+        let _ownership = self.lock_ownership_mutations();
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
         }
@@ -516,10 +746,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let page = self.read_page_raw(page_id)?;
 
         // Add to cache
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+        if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, None)?;
         }
 
         Ok(page)
@@ -530,7 +759,22 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn read_page_no_checksum(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
+        if let Some(page) = self.cache.get(page_id) {
+            return Ok(page);
+        }
+
+        let _ownership = self.lock_ownership_mutations();
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
         }
@@ -541,10 +785,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         drop(file);
 
         // Add to cache (no checksum verification)
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+        if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
             // Evicted page was dirty, need to write it back
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+            self.write_evicted_dirty_page(dirty_page, None)?;
         }
 
         Ok(page)
@@ -552,9 +795,13 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Write a page (cache-aware)
     pub fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
+
+        self.capture_page_before_write(page_id)?;
 
         // Update checksum
         page.update_checksum();
@@ -563,11 +810,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // dirty entry, write it through immediately — the evicted
         // page will never be flushed otherwise (same bug fixed in
         // `allocate_page`).
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
-        self.cache.mark_dirty(page_id);
 
         Ok(())
     }
@@ -577,23 +822,40 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn write_page_no_checksum(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
 
+        self.capture_page_before_write(page_id)?;
+
         // Add to cache and mark dirty (no checksum update). Same
         // eviction-write-through guard as `write_page`.
-        if let Some(dirty_page) = self.cache.insert(page_id, page) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
-        self.cache.mark_dirty(page_id);
 
+        Ok(())
+    }
+
+    fn capture_page_before_write(&self, page_id: u32) -> Result<(), PagerError> {
+        let mut required = false;
+        self.record_ownership(|wal| {
+            required = wal.needs_page_image(page_id)?;
+            Ok(())
+        })?;
+        if required {
+            let previous = self.read_page(page_id)?;
+            self.record_ownership(|wal| wal.capture_page_image(&previous))?;
+        }
         Ok(())
     }
 
     /// Allocate a new page
     pub fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -604,7 +866,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             // A previous fence can fail after loading the trunk into memory.
             // Retry it before the fast path can consume any of those pages.
             self.complete_allocation_fence()?;
-            if let Some(id) = freelist.allocate() {
+            if let Some(id) = freelist.next_in_memory_page() {
+                self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+                let id = freelist
+                    .allocate()
+                    .expect("free page checked while allocator is locked");
                 self.allocation_reused
                     .store(true, std::sync::atomic::Ordering::Release);
                 id
@@ -617,32 +883,73 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     }
                     other => other,
                 })?;
+                if trunk.page_id() != trunk_id {
+                    return Err(PagerError::InvalidDatabase(
+                        "misdirected freelist trunk".into(),
+                    ));
+                }
 
-                freelist
+                // Persist ownership of every page detached from the trunk
+                // before either superblock stops naming that trunk.
+                let mut detached = FreeList::new();
+                detached
                     .load_from_trunk(&trunk)
-                    .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
-                let mut header = self.header_write()?;
-                header.freelist_head = freelist.trunk_head();
-                *self.header_dirty_lock()? = true;
-                drop(header);
-                // The consumed trunk itself becomes reusable. Forget its old
-                // allocator role durably before cache eviction can overwrite it.
-                // Keep the allocator locked so another allocator cannot race
-                // ahead of this fence. A failed fence leaves allocation stopped.
-                self.allocation_fence_pending
-                    .store(true, std::sync::atomic::Ordering::Release);
-                self.complete_allocation_fence()?;
-                let id = freelist.allocate().ok_or_else(|| {
-                    PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                    .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {e}")))?;
+                let mut pages = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let page_count = self.page_count()?;
+                while let Some(id) = detached.allocate() {
+                    if id < FIRST_ALLOCATABLE_PAGE || id >= page_count || !seen.insert(id) {
+                        return Err(PagerError::InvalidDatabase(
+                            "invalid freelist trunk page".into(),
+                        ));
+                    }
+                    pages.push(id);
+                }
+                let mut journaled = false;
+                self.record_ownership(|wal| {
+                    journaled = wal.has_page_ownership_journal()?;
+                    Ok(())
                 })?;
-                self.allocation_reused
-                    .store(true, std::sync::atomic::Ordering::Release);
-                id
+                if !journaled {
+                    self.allocate_unjournaled_trunk(&mut freelist, trunk, &pages)?
+                } else {
+                    self.record_ownership(|wal| wal.detach_free_pages(&pages))?;
+
+                    freelist
+                        .load_from_trunk(&trunk)
+                        .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
+                    let mut header = self.header_write()?;
+                    header.freelist_head = freelist.trunk_head();
+                    *self.header_dirty_lock()? = true;
+                    drop(header);
+                    // The consumed trunk itself becomes reusable. Forget its old
+                    // allocator role durably before cache eviction can overwrite it.
+                    // Keep the allocator locked so another allocator cannot race
+                    // ahead of this fence. A failed fence leaves allocation stopped.
+                    self.allocation_fence_pending
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    self.complete_allocation_fence()?;
+                    let next = freelist.next_in_memory_page().ok_or_else(|| {
+                        PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                    })?;
+                    self.record_ownership(|wal| wal.reserve_pages(next, 1))?;
+                    let id = freelist.allocate().ok_or_else(|| {
+                        PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
+                    })?;
+                    self.allocation_reused
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    id
+                }
             } else {
                 // No free pages, extend file
                 let mut header = self.header_write()?;
                 let id = header.page_count;
-                header.page_count += 1;
+                let next = id
+                    .checked_add(1)
+                    .ok_or_else(|| PagerError::InvalidDatabase("page count overflow".into()))?;
+                self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+                header.page_count = next;
                 *self.header_dirty_lock()? = true;
                 id
             }
@@ -651,7 +958,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let page = Page::new(page_type, page_id);
 
         // Write to cache. The evicted page (if any) is dirty by
-        // definition — `cache.insert` only returns `Some` when it
+        // definition — `cache.insert_dirty` only returns `Some` when it
         // had to evict a dirty entry to make room. The previous
         // version dropped that return value, which silently lost
         // writes whenever a freshly-allocated page caused an LRU
@@ -661,17 +968,56 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // back the never-flushed page. Mirror `read_page`'s
         // handling: write the evicted page through immediately so
         // the on-disk image stays consistent.
-        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
-            let evicted_id = dirty_page.page_id();
-            self.write_page_raw(evicted_id, &dirty_page)?;
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page.clone()) {
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
         }
-        self.cache.mark_dirty(page_id);
 
         Ok(page)
     }
 
+    /// Keep untouched free IDs reachable on disk when no ownership epoch can
+    /// recover a detached trunk. Removing one ID costs one protected page write;
+    /// checkpoint/replay epochs retain their batched, journaled allocation path.
+    fn allocate_unjournaled_trunk(
+        &self,
+        freelist: &mut FreeList,
+        mut trunk: Page,
+        pages: &[u32],
+    ) -> Result<u32, PagerError> {
+        let id = *pages
+            .first()
+            .expect("validated trunk includes its own page");
+        self.record_ownership(|wal| wal.reserve_pages(id, 1))?;
+        if pages.len() > 1 {
+            let remaining =
+                u32::try_from(pages.len() - 2).expect("a validated trunk fits in one page");
+            trunk.content_mut()[4..8].copy_from_slice(&remaining.to_le_bytes());
+            trunk.update_checksum();
+            self.cache.remove(trunk.page_id());
+            self.write_pages_through_dwb(&[(trunk.page_id(), trunk)])?;
+            freelist.note_durable_trunk_allocation(remaining);
+        } else {
+            // The empty trunk itself is the last available page. Fence both
+            // superblocks before it can be overwritten as user data.
+            freelist
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+            self.header_write()?.freelist_head = freelist.trunk_head();
+            *self.header_dirty_lock()? = true;
+            self.allocation_fence_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.complete_allocation_fence()?;
+            assert_eq!(freelist.allocate(), Some(id));
+        }
+        self.allocation_reused
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(id)
+    }
+
     /// Reserve a contiguous extent of vector pages.
     pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<ExtentId, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -684,9 +1030,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let start_page = {
             let mut header = self.header_write()?;
             let start = header.page_count;
-            header.page_count = header.page_count.checked_add(n_pages).ok_or_else(|| {
+            let end = header.page_count.checked_add(n_pages).ok_or_else(|| {
                 PagerError::InvalidDatabase("contiguous extent page count overflow".to_string())
             })?;
+            self.record_ownership(|wal| wal.reserve_pages(start, n_pages))?;
+            header.page_count = end;
             *self.header_dirty_lock()? = true;
             start
         };
@@ -694,11 +1042,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         for page_id in start_page..start_page + n_pages {
             let mut page = Page::new(PageType::Vector, page_id);
             page.update_checksum();
-            if let Some(dirty_page) = self.cache.insert(page_id, page) {
-                let evicted_id = dirty_page.page_id();
-                self.write_page_raw(evicted_id, &dirty_page)?;
+            if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
+                self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
             }
-            self.cache.mark_dirty(page_id);
         }
 
         Ok(ExtentId {
@@ -709,6 +1055,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -723,12 +1071,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     "invalid deferred free page".into(),
                 ));
             }
+            self.record_ownership(|wal| wal.retire_pages(&[page_id]))?;
             // Keep dirty forwarding/empty nodes until publication. An
             // incidental flush must leave the previous root traversable.
             deferred.pending.insert(page_id);
             return Ok(());
         }
         drop(deferred);
+
+        self.record_ownership(|wal| wal.retire_pages(&[page_id]))?;
 
         // Remove from cache
         self.cache.remove(page_id);
@@ -743,6 +1094,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.deferred_reclamation
             .lock()
             .map_err(|_| PagerError::LockPoisoned)?
@@ -762,6 +1114,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn restore_deferred_reclamation(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let count = self.page_count()?;
         if pages
             .iter()
@@ -787,6 +1140,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         retained: &[u32],
         released: &[u32],
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut deferred = self
             .deferred_reclamation
             .lock()
@@ -801,9 +1155,31 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    /// Record the pages whose catalog ownership is about to be retired.
+    pub fn record_retirement_intent(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let page_count = self.page_count()?;
+        let mut seen = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= page_count || !seen.insert(*id))
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid retirement intent".into(),
+            ));
+        }
+        self.record_ownership(|wal| wal.retire_pages(pages))
+    }
+
     /// Return a fully validated, unpublished tree generation in one allocator
     /// mutation. Call only after its removal from the manifest is durable.
     pub fn free_retired_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -816,13 +1192,182 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "invalid retired page range".into(),
             ));
         }
+        let mut seen = std::collections::HashSet::with_capacity(pages.len());
+        if pages.iter().any(|id| !seen.insert(*id)) {
+            return Err(PagerError::InvalidDatabase("duplicate retired page".into()));
+        }
         let mut freelist = self.freelist_write()?;
+        if freelist.contains_any(&seen) {
+            return Err(PagerError::InvalidDatabase(
+                "retired page is already free".into(),
+            ));
+        }
+        // Some free pages remain in on-disk trunks until allocation reaches
+        // them. Check those too before changing the cache or the allocator.
+        // The allocator lock prevents concurrent consumption or publication.
+        let mut trunk_id = freelist.trunk_head();
+        let mut visited = std::collections::HashSet::new();
+        while trunk_id != 0 && !seen.is_empty() {
+            if trunk_id < FIRST_ALLOCATABLE_PAGE
+                || trunk_id >= page_count
+                || !visited.insert(trunk_id)
+            {
+                return Err(PagerError::InvalidDatabase(
+                    "invalid freelist trunk chain".into(),
+                ));
+            }
+            let trunk = self.read_page(trunk_id)?;
+            if trunk.page_id() != trunk_id {
+                return Err(PagerError::InvalidDatabase(
+                    "misdirected freelist trunk".into(),
+                ));
+            }
+            let mut loaded = FreeList::new();
+            let next = loaded
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+            while let Some(id) = loaded.allocate() {
+                if id < FIRST_ALLOCATABLE_PAGE || id >= page_count {
+                    return Err(PagerError::InvalidDatabase(
+                        "invalid free page range".into(),
+                    ));
+                }
+                if seen.contains(&id) {
+                    return Err(PagerError::InvalidDatabase(
+                        "retired page is already free".into(),
+                    ));
+                }
+            }
+            trunk_id = next.unwrap_or(0);
+        }
+        self.record_ownership(|wal| wal.retire_pages(pages))?;
         for id in pages {
             self.cache.remove(*id);
         }
         freelist.free_batch(pages);
         *self.header_dirty_lock()? = true;
         Ok(())
+    }
+
+    fn pages_not_in_freelist(
+        &self,
+        pages: &[u32],
+        freelist: &FreeList,
+        page_count: u32,
+    ) -> Result<std::collections::HashSet<u32>, PagerError> {
+        let mut remaining = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|id| *id < FIRST_ALLOCATABLE_PAGE || *id >= page_count || !remaining.insert(*id))
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid recovery page set".into(),
+            ));
+        }
+        let requested = remaining.clone();
+        freelist
+            .remove_existing_from(&requested, &mut remaining)
+            .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+        let mut trunk_id = freelist.trunk_head();
+        let mut visited = std::collections::HashSet::new();
+        while trunk_id != 0 {
+            if trunk_id < FIRST_ALLOCATABLE_PAGE
+                || trunk_id >= page_count
+                || !visited.insert(trunk_id)
+            {
+                return Err(PagerError::InvalidDatabase(
+                    "invalid freelist trunk chain".into(),
+                ));
+            }
+            let trunk = self.read_page(trunk_id)?;
+            if trunk.page_id() != trunk_id {
+                return Err(PagerError::InvalidDatabase(
+                    "misdirected freelist trunk".into(),
+                ));
+            }
+            let mut loaded = FreeList::new();
+            let next = loaded
+                .load_from_trunk(&trunk)
+                .map_err(|error| PagerError::InvalidDatabase(format!("Freelist: {error}")))?;
+            while let Some(id) = loaded.allocate() {
+                if id < FIRST_ALLOCATABLE_PAGE || id >= page_count {
+                    return Err(PagerError::InvalidDatabase(
+                        "invalid free page range".into(),
+                    ));
+                }
+                if requested.contains(&id) && !remaining.remove(&id) {
+                    return Err(PagerError::InvalidDatabase(
+                        "duplicate recovery page".into(),
+                    ));
+                }
+            }
+            trunk_id = next.unwrap_or(0);
+        }
+        Ok(remaining)
+    }
+
+    /// Add proven-unowned pages to the allocator exactly once during recovery.
+    /// The caller must exclude all allocation and publication until this state
+    /// has been synced to both superblocks and the journal is completed.
+    pub fn recover_unowned_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let page_count = self.page_count()?;
+        let mut freelist = self.freelist_write()?;
+        let remaining = self.pages_not_in_freelist(pages, &freelist, page_count)?;
+        if !remaining.is_empty() {
+            let mut missing: Vec<_> = remaining.into_iter().collect();
+            missing.sort_unstable();
+            for id in &missing {
+                self.cache.remove(*id);
+            }
+            freelist.free_batch(&missing);
+            *self.header_dirty_lock()? = true;
+        }
+        Ok(())
+    }
+
+    /// Reject a recovery plan if any page it must preserve is already free.
+    /// The caller must exclude allocation and freelist mutation during recovery.
+    pub fn validate_owned_pages(&self, pages: &[u32]) -> Result<(), PagerError> {
+        let page_count = self.page_count()?;
+        let freelist = self.freelist_write()?;
+        let absent = self.pages_not_in_freelist(pages, &freelist, page_count)?;
+        if absent.len() != pages.len() {
+            return Err(PagerError::InvalidDatabase(
+                "owned recovery page is free".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Persist the current allocator in both fallback copies during recovery.
+    /// The caller must exclude allocation until journal completion is durable.
+    pub fn sync_recovered_allocator(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        let result = (|| {
+            self.sync()?;
+            let _publication = self
+                .superblock_publication
+                .lock()
+                .map_err(|_| PagerError::LockPoisoned)?;
+            let header = self.header_read()?.clone();
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::encode_database_header(image, &header)
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                })?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Get database header
@@ -840,6 +1385,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     }
 
     pub fn update_physical_header(&self, physical: PhysicalFileHeader) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
@@ -857,6 +1404,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Flush all dirty pages to disk
     pub fn flush(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only {
             return Ok(());
         }
@@ -883,30 +1432,29 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let mut dirty_pages = Vec::new();
         for trunk in trunks {
             let page_id = trunk.page_id();
-            if let Some(evicted) = self.cache.insert(page_id, trunk) {
+            if let Some(evicted) = self.cache.insert_dirty(page_id, trunk) {
                 // Trunk publication can evict dirty data. Keep it in the same
                 // WAL-first, double-write-protected batch as resident pages.
                 dirty_pages.push((evicted.page_id(), evicted));
             }
-            self.cache.mark_dirty(page_id);
         }
 
-        // Flush dirty pages from cache (through DWB if enabled)
-        dirty_pages.extend(self.cache.flush_dirty());
-        if !dirty_pages.is_empty() {
-            // WAL-FIRST: ensure every WAL record describing a dirty
-            // page is durable BEFORE the page itself reaches disk.
-            // Pages with `lsn == 0` are exempt (freelist trunks, header
-            // shadow pages, anything not produced by a WAL append).
-            let max_lsn = dirty_pages
-                .iter()
-                .filter_map(|(_, page)| page.header().ok().map(|h| h.lsn))
-                .max()
-                .unwrap_or(0);
-            if max_lsn > 0 {
-                self.wal.flush_until(max_lsn)?;
-            }
-            self.write_pages_through_dwb(&dirty_pages)?;
+        // IDs are compact; page images are not. At 16 KiB per page, staging
+        // 256 images plus one DWB frame uses about 5 MiB, independently of
+        // the dirty cache size. Publish the header only after every batch.
+        const FLUSH_BATCH_PAGES: usize = 256;
+        for batch in dirty_pages.chunks(FLUSH_BATCH_PAGES) {
+            self.write_dirty_page_batch(batch)?;
+        }
+        drop(dirty_pages);
+        // Batch dirty IDs, not every resident ID: otherwise a few edits in
+        // a mostly clean cache pay a protected write per cache-sized slice.
+        // Physical order also avoids arbitrary seeks among each batch's homes.
+        let mut page_ids = self.cache.dirty_page_ids(usize::MAX);
+        page_ids.sort_unstable();
+        for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
+            let pages = self.cache.flush_dirty_pages(ids);
+            self.write_dirty_page_batch(&pages)?;
         }
 
         // Write header if dirty
@@ -917,8 +1465,37 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    fn write_dirty_page_batch(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        // Every image's WAL must be durable before its home write, including
+        // dirty data evicted while publishing freelist trunks. LSN zero is
+        // reserved for pages not produced by a WAL append.
+        let result = (|| {
+            let max_lsn = pages
+                .iter()
+                .filter_map(|(_, page)| page.header().ok().map(|header| header.lsn))
+                .max()
+                .unwrap_or(0);
+            if max_lsn > 0 {
+                self.wal.flush_until(max_lsn)?;
+            }
+            self.write_pages_through_dwb(pages)
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            for (page_id, _) in pages {
+                self.cache.mark_dirty(*page_id);
+            }
+        }
+        result
+    }
+
     /// Sync file to disk (fsync)
     pub fn sync(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.flush()?;
 
         if self
@@ -950,6 +1527,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// this times the page size is the cache's memory footprint (ADR 0073 §2).
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+            + if self.config.read_only {
+                self.read_only_recovery
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len()
+            } else {
+                0
+            }
     }
 
     /// Preallocated page-cache slots — the sizing this process derived from
@@ -975,6 +1560,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// number actually written. Background-writer entry point —
     /// reuses the same persistence path as `flush()` but bounded.
     pub fn flush_some_dirty(&self, max: usize) -> Result<usize, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
         if self.config.read_only || max == 0 {
             return Ok(0);
         }
@@ -1039,7 +1626,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Keep the file locked through staging, home writes and clearing so
         // another page writer cannot interleave with a protected batch.
         let mut file = self.file_lock()?;
-        Ok(pager_io::write_pages(&mut *file, pages, self.dwb_enabled)?)
+        self.ensure_writeback_available()?;
+        let result = pager_io::write_pages(&mut *file, pages, self.dwb_enabled);
+        if result.is_err() {
+            // Set this while holding the file lock: a waiting writer must not
+            // replace the recovery frame after an interrupted home write.
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(result?)
     }
 
     /// Recover from double-write buffer after a crash.
@@ -1048,7 +1643,47 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
+        if self.config.read_only {
+            for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
+                // The DWB checksum seals raw bytes, which may be ciphertext.
+                // Normal reads check the page checksum; encryption hosts use
+                // read_page_no_checksum and authenticate after decrypting.
+                self.install_read_only_page(id, page)?;
+            }
+            return Ok(());
+        }
         Ok(pager_io::recover_from_dwb(&mut *file)?)
+    }
+
+    /// Install a validated recovery image only in this reader's private view.
+    /// The source and ordinary mutation APIs remain read-only. Bound pinned
+    /// images by the cache budget (with room for one complete DWB frame).
+    pub fn restore_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        if !self.config.read_only || page_id == 0 || page.page_id() != page_id {
+            return Err(PagerError::InvalidDatabase(
+                "invalid read-only recovery image".into(),
+            ));
+        }
+        page.verify_checksum()?;
+        self.install_read_only_page(page_id, page)
+    }
+
+    fn install_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        let mut images = self
+            .read_only_recovery
+            .write()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let limit = self
+            .config
+            .cache_size
+            .max(pager_io::DWB_MAX_PAGES_PER_FRAME);
+        if images.len() >= limit && !images.contains_key(&page_id) {
+            return Err(PagerError::InvalidDatabase(
+                "read-only recovery exceeds the page cache budget".into(),
+            ));
+        }
+        images.insert(page_id, page);
+        Ok(())
     }
 
     /// Finish a consumed trunk's durable ownership change, retaining errors
@@ -1069,6 +1704,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Write header and sync to disk (public for checkpointer).
     pub fn write_header_and_sync(&self) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         self.write_header()?;
         let file = self.file_lock()?;
         file.sync_all()?;
@@ -1081,6 +1717,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         in_progress: bool,
         target_lsn: u64,
     ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut header = self.header_write()?;
         header.checkpoint_in_progress = in_progress;
         header.checkpoint_target_lsn = target_lsn;
@@ -1091,6 +1728,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Update the checkpoint LSN and clear the in-progress flag.
     pub fn complete_checkpoint(&self, lsn: u64) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let mut header = self.header_write()?;
         header.checkpoint_lsn = lsn;
         header.checkpoint_in_progress = false;
@@ -1098,5 +1736,26 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         *self.header_dirty_lock()? = true;
         drop(header);
         self.write_header_and_sync()
+    }
+}
+
+#[cfg(test)]
+mod integrity_guidance_tests {
+    use super::PagerError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn damaged_paged_zones_recommend_preserving_files_and_a_verified_backup() {
+        for error in [
+            PagerError::SuperblockZoneUnrecoverable(PathBuf::from("data.rdb")),
+            PagerError::ManifestZoneCorrupt(PathBuf::from("data.rdb")),
+            PagerError::DwbZoneCorrupt(PathBuf::from("data.rdb")),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("Preserve the database"), "{message}");
+            assert!(message.contains("verified backup"), "{message}");
+            assert!(!message.contains("salvage"), "{message}");
+            assert!(!message.contains("SCRUB"), "{message}");
+        }
     }
 }

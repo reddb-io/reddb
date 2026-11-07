@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       channel:
@@ -23,6 +22,10 @@ on:
         default: true
         type: boolean
 
+      preview_platforms:
+        type: boolean
+        description: Show selected platforms without running builds, tests or publication
+        default: false
 permissions:
   contents: write
   packages: write
@@ -31,11 +34,172 @@ env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: red
 
+  ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
+  ENABLE_LINUX_ARM64: ${{ vars.ENABLE_LINUX_ARM64 || 'true' }}
+  ENABLE_WINDOWS_X64: ${{ vars.ENABLE_WINDOWS_X64 || 'true' }}
+  ENABLE_WINDOWS_ARM64: ${{ vars.ENABLE_WINDOWS_ARM64 || 'false' }}
+  ENABLE_MACOS_X64: ${{ vars.ENABLE_MACOS_X64 || 'false' }}
+  ENABLE_MACOS_ARM64: ${{ vars.ENABLE_MACOS_ARM64 || 'false' }}
+  ENABLE_LINUX_ARMV7: ${{ vars.ENABLE_LINUX_ARMV7 || 'false' }}
+  ENABLE_LINUX_X86: ${{ vars.ENABLE_LINUX_X86 || 'false' }}
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  platforms:
+    name: Select platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      linux_x64: ${{ steps.select.outputs.linux_x64 }}
+      linux_arm64: ${{ steps.select.outputs.linux_arm64 }}
+      windows_x64: ${{ steps.select.outputs.windows_x64 }}
+      windows_arm64: ${{ steps.select.outputs.windows_arm64 }}
+      macos_x64: ${{ steps.select.outputs.macos_x64 }}
+      macos_arm64: ${{ steps.select.outputs.macos_arm64 }}
+      linux_armv7: ${{ steps.select.outputs.linux_armv7 }}
+      linux_x86: ${{ steps.select.outputs.linux_x86 }}
+      any: ${{ steps.select.outputs.any }}
+      docker_platforms: ${{ steps.select.outputs.docker_platforms }}
+      matrix_build: ${{ steps.select.outputs.matrix_build }}
+      enabled_build: ${{ steps.select.outputs.enabled_build }}
+      matrix_publish-python-wheels: ${{ steps.select.outputs.matrix_publish-python-wheels }}
+      enabled_publish-python-wheels: ${{ steps.select.outputs.enabled_publish-python-wheels }}
+    steps:
+      - id: select
+        name: Filter platforms before allocating runners
+        shell: python
+        env:
+          PLATFORM_DEFAULTS: '{"linux_x64":true,"linux_arm64":true,"windows_x64":true,"windows_arm64":false,"macos_x64":false,"macos_arm64":false,"linux_armv7":false,"linux_x86":false}'
+          PLATFORM_AVAILABLE: '["linux_arm64", "linux_x64", "macos_arm64", "windows_x64"]'
+          PLATFORM_MATRICES: |
+            {
+              "build": [
+                {
+                  "flag": "linux_x64",
+                  "row": {
+                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "asset_name": "linux-x86_64",
+                    "cross": false
+                  }
+                },
+                {
+                  "flag": "linux_arm64",
+                  "row": {
+                    "os": "blacksmith-8vcpu-ubuntu-2404-arm",
+                    "target": "aarch64-unknown-linux-gnu",
+                    "asset_name": "linux-aarch64",
+                    "cross": false
+                  }
+                },
+                {
+                  "flag": "linux_arm64",
+                  "row": {
+                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "target": "aarch64-unknown-linux-musl",
+                    "asset_name": "linux-aarch64-static",
+                    "cross": true
+                  }
+                },
+                {
+                  "flag": "linux_x64",
+                  "row": {
+                    "os": "blacksmith-8vcpu-ubuntu-2404",
+                    "target": "x86_64-unknown-linux-musl",
+                    "asset_name": "linux-x86_64-static",
+                    "cross": true
+                  }
+                },
+                {
+                  "flag": "macos_arm64",
+                  "row": {
+                    "os": "blacksmith-6vcpu-macos-15",
+                    "target": "aarch64-apple-darwin",
+                    "asset_name": "macos-aarch64",
+                    "cross": false,
+                    "optional": true
+                  }
+                },
+                {
+                  "flag": "windows_x64",
+                  "row": {
+                    "os": "blacksmith-8vcpu-windows-2025",
+                    "target": "x86_64-pc-windows-msvc",
+                    "asset_name": "windows-x86_64",
+                    "cross": false,
+                    "optional": true
+                  }
+                }
+              ],
+              "publish-python-wheels": [
+                {
+                  "flag": "linux_x64",
+                  "row": {
+                    "os": "ubuntu-latest",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "manylinux": "2014"
+                  }
+                },
+                {
+                  "flag": "linux_arm64",
+                  "row": {
+                    "os": "ubuntu-latest",
+                    "target": "aarch64-unknown-linux-gnu",
+                    "manylinux": "2014"
+                  }
+                },
+                {
+                  "flag": "macos_arm64",
+                  "row": {
+                    "os": "macos-14",
+                    "target": "aarch64-apple-darwin",
+                    "manylinux": "auto"
+                  }
+                },
+                {
+                  "flag": "windows_x64",
+                  "row": {
+                    "os": "windows-latest",
+                    "target": "x86_64-pc-windows-msvc",
+                    "manylinux": "auto"
+                  }
+                }
+              ]
+            }
+        run: |
+          import json
+          import os
+
+          defaults = json.loads(os.environ["PLATFORM_DEFAULTS"])
+          enabled = {}
+          for key in defaults:
+              name = "ENABLE_" + key.upper()
+              value = os.environ[name].lower()
+              if value not in ("true", "false"):
+                  raise SystemExit(f"{name} must be true or false, got {value!r}")
+              enabled[key] = value == "true"
+
+          matrices = json.loads(os.environ["PLATFORM_MATRICES"])
+          available = json.loads(os.environ["PLATFORM_AVAILABLE"])
+          output = {key: str(value).lower() for key, value in enabled.items()}
+          output["any"] = str(any(enabled[key] for key in available)).lower()
+          for job, entries in matrices.items():
+              selected = [entry["row"] for entry in entries if enabled[entry["flag"]]]
+              output["enabled_" + job] = str(bool(selected)).lower()
+              # A placeholder keeps GitHub's matrix schema valid when the job is skipped.
+              output["matrix_" + job] = json.dumps({"include": selected or [entries[0]["row"]]}, separators=(",", ":"))
+          docker = [target for key, target in (("linux_x64", "linux/amd64"), ("linux_arm64", "linux/arm64")) if enabled[key]]
+          output["docker_platforms"] = ",".join(docker)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              for key, value in output.items():
+                  handle.write(f"{key}={value}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write("### Selected platforms\n\n")
+              for key in available:
+                  handle.write(f"- {key}: {str(enabled[key]).lower()}\n")
   plan:
     name: Plan release
     runs-on: ubuntu-latest
@@ -148,46 +312,23 @@ jobs:
         if: steps.plan.outputs.should_skip != 'true'
         run: node scripts/gen-docs-from-matrix.mjs --check
 
+    needs:
+      - platforms
+    if: ${{ !inputs.preview_platforms && (needs.platforms.outputs.any == 'true') }}
   build:
     name: Build ${{ matrix.asset_name }}
-    needs: [plan]
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    needs:
+      - plan
+      - platforms
+    if: |-
+      ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') && (needs.platforms.outputs.enabled_build == 'true')) }}
     runs-on: ${{ matrix.os }}
     # The Node addon is a second engine compile on the legs that build it.
     timeout-minutes: 60
     continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Linux x86_64 / armv7: native compile on a Blacksmith 8-vCPU
-          # x86_64 runner. The armv7 target still needs the cross-gcc
-          # toolchain, but the underlying CPU is 2x faster than ubuntu-latest.
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
-          # Linux aarch64: build natively on a Blacksmith ARM runner instead
-          # of cross-compiling from x86_64. Removes the gcc-aarch64-linux-gnu
-          # cross toolchain install + linker env vars + the QEMU smoke test
-          # for this target.
-          - { os: blacksmith-8vcpu-ubuntu-2404-arm, target: aarch64-unknown-linux-gnu, asset_name: linux-aarch64, cross: false }
-          # aarch64-musl keeps the Docker cross-compile path (musl
-          # toolchain inside messense/rust-musl-cross) — still on a
-          # Blacksmith x86_64 runner so the docker spawn is unchanged.
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: aarch64-unknown-linux-musl, asset_name: linux-aarch64-static, cross: true }
-          # x86_64-musl: THE portable Linux asset. Fully static (rustls/ring, no
-          # openssl) → ZERO runtime deps, runs on ANY Linux regardless of glibc
-          # version, unlike the glibc-linked `linux-x86_64`. Same Docker musl-
-          # cross path as aarch64.
-          - { os: blacksmith-8vcpu-ubuntu-2404, target: x86_64-unknown-linux-musl, asset_name: linux-x86_64-static, cross: true }
-          # Build Intel macOS on the ARM macOS pool. The macos-13 Intel pool
-          # frequently queues long enough to block publishing; cross-building
-          # from macos-14 still produces the x86_64-apple-darwin asset, but we
-          # cannot rely on Rosetta being available for a local smoke test.
-          - { os: macos-14,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: true,  smoke: false, optional: true }
-          - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false, optional: true }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset_name: windows-x86_64, cross: false, optional: true }
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix_build) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -207,13 +348,13 @@ jobs:
           version: '28.3'
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         if: "!matrix.cross"
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
         if: matrix.target == 'x86_64-unknown-linux-gnu'
 
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: "true"
@@ -221,33 +362,12 @@ jobs:
             . -> target
             drivers/node -> target
 
-      - name: Add cross-compile target
-        if: matrix.cross
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Cross-compile tools
-        # Only `armv7` and the musl-via-docker target need apt-installed
-        # cross toolchains now. aarch64 builds natively on blacksmith-arm64.
-        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-
       - name: Build
         if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
         env:
           SCCACHE_GHA_ENABLED: ${{ !matrix.cross && 'true' || '' }}
           RUSTC_WRAPPER: ${{ !matrix.cross && 'sccache' || '' }}
-          # Cross-compile linker/CC overrides only apply when matrix.cross
-          # is true. aarch64-unknown-linux-gnu now builds natively on
-          # blacksmith-arm64, so the host gcc is the right answer for
-          # that target — setting `aarch64-linux-gnu-gcc` here would point
-          # cargo at a binary that isn't installed on the arm64 runner.
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CC_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-gcc' || '' }}
-          CXX_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-g++' || '' }}
-          AR_armv7_unknown_linux_gnueabihf: ${{ matrix.target == 'armv7-unknown-linux-gnueabihf' && 'arm-linux-gnueabihf-ar' || '' }}
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
@@ -271,7 +391,7 @@ jobs:
             '
           sudo chown -R "$(id -u):$(id -g)" target/${{ matrix.target }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: "!matrix.cross"
         with:
           node-version: '22'
@@ -363,7 +483,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.asset_name }}
           path: |
@@ -377,11 +497,12 @@ jobs:
   artifact-sizes:
     # PLAN.md B2 — gate release on measured static binary and image size.
     name: Artifact Size Gate
-    needs: [plan]
+    needs:
+      - plan
+      - platforms
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') && needs.platforms.outputs.linux_x64 == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Sync release version
@@ -394,13 +515,13 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-artifact-size-rust-1.91.0
           cache-on-failure: "true"
       - name: Measure binary and image size
         run: make artifact-size
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: artifact-sizes
@@ -408,16 +529,15 @@ jobs:
 
   publish-github:
     name: GitHub Release
-    needs: [plan, build, artifact-sizes]
+    needs: [plan, build, artifact-sizes, platforms]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
       artifact-metadata: write
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ always() && !cancelled() && (!inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable')) && needs.plan.result == 'success' && needs.build.result == 'success' && (needs['artifact-sizes'].result == 'success' || (needs.platforms.outputs.linux_x64 == 'false' && needs['artifact-sizes'].result == 'skipped')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -425,7 +545,7 @@ jobs:
           fetch-depth: 0
       - name: Install Syft
         id: syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           syft-version: v1.46.0
 
@@ -451,7 +571,7 @@ jobs:
           test -s "release-sbom/red-${RELEASE_TAG}.spdx.json"
           test -s "release-sbom/red-${RELEASE_TAG}.cyclonedx.json"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release
           merge-multiple: true
@@ -505,7 +625,7 @@ jobs:
           fi
 
       - name: Generate changelog from commits
-        uses: orhun/git-cliff-action@3d96a18cc4ec17e9dc69ddcc424ccafaf1f78ce2 # v4
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4
         id: changelog
         with:
           config: cliff.toml
@@ -567,8 +687,6 @@ jobs:
           | Linux x86_64 (static musl) | \`red-linux-x86_64-static\` | \`red_client-linux-x86_64-static\` |
           | Linux aarch64 (glibc) | \`red-linux-aarch64\` | \`red_client-linux-aarch64\` |
           | Linux aarch64 (static musl) | \`red-linux-aarch64-static\` | \`red_client-linux-aarch64-static\` |
-          | Linux armv7 | \`red-linux-armv7\` | \`red_client-linux-armv7\` |
-          | macOS Intel | \`red-macos-x86_64\` | \`red_client-macos-x86_64\` |
           | macOS Apple Silicon | \`red-macos-aarch64\` | \`red_client-macos-aarch64\` |
           | Windows x86_64 | \`red-windows-x86_64.exe\` | \`red_client-windows-x86_64.exe\` |
 
@@ -666,9 +784,8 @@ jobs:
     name: Verify release assets
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Assert every npm-package-required asset is published
@@ -687,12 +804,11 @@ jobs:
     name: Publish @reddb-io/red-* platform packages (npm)
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -735,12 +851,11 @@ jobs:
     name: Publish CLI npm package
     needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -773,17 +888,15 @@ jobs:
     # serial wait on the build matrix.
     needs: [plan]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable' &&
-      needs.plan.outputs.publish_cargo == 'true'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.publish_cargo == 'true') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Sync release version
@@ -839,12 +952,11 @@ jobs:
     name: Publish @reddb-io/sdk (npm)
     needs: [plan, publish-github, verify-release-assets, publish-npm-platforms]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -877,12 +989,11 @@ jobs:
     name: Publish @reddb-io/client (npm)
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -913,12 +1024,11 @@ jobs:
     name: Publish @reddb-io/client-bun (npm)
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -949,12 +1059,11 @@ jobs:
     name: Publish @reddb-io/mcp (npm)
     needs: [plan, publish-github, verify-release-assets]
     runs-on: ubuntu-latest
-    if: |
-      needs.plan.outputs.should_skip != 'true' &&
-      needs.plan.outputs.release_channel == 'stable'
+    if: |-
+      ${{ !inputs.preview_platforms && (needs.plan.outputs.should_skip != 'true' && needs.plan.outputs.release_channel == 'stable') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -983,24 +1092,29 @@ jobs:
 
   publish-docker:
     name: Docker image (GHCR)
-    needs: [plan, build]
+    needs:
+      - plan
+      - build
+      - platforms
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       id-token: write
       packages: write
-    if: needs.plan.outputs.should_skip != 'true'
+    if: ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: linux-x86_64
           path: release/linux-x86_64
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: env.ENABLE_LINUX_X64 == 'true'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: linux-aarch64
           path: release/linux-aarch64
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: env.ENABLE_LINUX_ARM64 == 'true'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Sync release version
@@ -1014,21 +1128,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docker-bin/amd64 docker-bin/arm64
-          cp release/linux-x86_64/red-linux-x86_64 docker-bin/amd64/red
-          cp release/linux-aarch64/red-linux-aarch64 docker-bin/arm64/red
-          chmod 755 docker-bin/amd64/red docker-bin/arm64/red
+          if [[ "$ENABLE_LINUX_X64" == true ]]; then
+            cp release/linux-x86_64/red-linux-x86_64 docker-bin/amd64/red
+            chmod 755 docker-bin/amd64/red
+          fi
+          if [[ "$ENABLE_LINUX_ARM64" == true ]]; then
+            cp release/linux-aarch64/red-linux-aarch64 docker-bin/arm64/red
+            chmod 755 docker-bin/arm64/red
+          fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
+        if: env.ENABLE_LINUX_ARM64 == 'true'
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1054,12 +1174,12 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: docker/Dockerfile.release
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.platforms.outputs.docker_platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
@@ -1081,24 +1201,29 @@ jobs:
     # recompile Rust inside the container.
     # Pushed to GHCR under reddb-io; Docker Hub mirroring is intentionally off.
     name: Docker image — red_client (GHCR)
-    needs: [plan, build]
+    needs:
+      - plan
+      - build
+      - platforms
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       id-token: write
       packages: write
-    if: needs.plan.outputs.should_skip != 'true'
+    if: ${{ !inputs.preview_platforms && ((needs.plan.outputs.should_skip != 'true') && (needs.platforms.outputs.docker_platforms != '')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: linux-x86_64
           path: release/linux-x86_64
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: env.ENABLE_LINUX_X64 == 'true'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: linux-aarch64
           path: release/linux-aarch64
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: env.ENABLE_LINUX_ARM64 == 'true'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Sync release version
@@ -1112,21 +1237,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docker-bin/amd64 docker-bin/arm64
-          cp release/linux-x86_64/red_client-linux-x86_64 docker-bin/amd64/red_client
-          cp release/linux-aarch64/red_client-linux-aarch64 docker-bin/arm64/red_client
-          chmod 755 docker-bin/amd64/red_client docker-bin/arm64/red_client
+          if [[ "$ENABLE_LINUX_X64" == true ]]; then
+            cp release/linux-x86_64/red_client-linux-x86_64 docker-bin/amd64/red_client
+            chmod 755 docker-bin/amd64/red_client
+          fi
+          if [[ "$ENABLE_LINUX_ARM64" == true ]]; then
+            cp release/linux-aarch64/red_client-linux-aarch64 docker-bin/arm64/red_client
+            chmod 755 docker-bin/arm64/red_client
+          fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
+        if: env.ENABLE_LINUX_ARM64 == 'true'
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1152,12 +1283,12 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: docker/Dockerfile.client.release
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ needs.platforms.outputs.docker_platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
@@ -1186,21 +1317,18 @@ jobs:
   # ===========================================================================
   publish-python-wheels:
     name: Build PyPI wheel (${{ matrix.target }})
-    needs: [plan, build]
-    if: false  # TODO: enable after creating PYPI_API_TOKEN secret
+    needs:
+      - plan
+      - build
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((false) && (needs.platforms.outputs.enabled_publish-python-wheels == 'true')) }} # TODO: enable after creating PYPI_API_TOKEN secret
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  manylinux: '2014' }
-          - { os: ubuntu-latest, target: blacksmith-4vcpu-ubuntu-2404-arm, manylinux: '2014' }
-          - { os: macos-14,      target: aarch64-apple-darwin,      manylinux: 'auto' }
-          - { os: macos-13,      target: x86_64-apple-darwin,       manylinux: 'auto' }
-          - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix_publish-python-wheels) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.x'
       - name: Sync release version
@@ -1216,7 +1344,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reddb-wheel-${{ matrix.target }}
           path: drivers/python/dist/*
@@ -1224,10 +1352,10 @@ jobs:
   publish-python-upload:
     name: Upload wheels to PyPI
     needs: [plan, publish-python-wheels]
-    if: false  # TODO: enable after creating PYPI_API_TOKEN secret
+    if: ${{ !inputs.preview_platforms && (false) }} # TODO: enable after creating PYPI_API_TOKEN secret
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: reddb-wheel-*
           merge-multiple: true

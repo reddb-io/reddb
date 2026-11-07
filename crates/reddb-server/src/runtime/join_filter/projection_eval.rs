@@ -61,6 +61,88 @@ pub(in crate::runtime) fn eval_projection_value_with_db(
     }
 }
 
+/// Resolve aggregate/scalar inputs without converting a read failure into NULL
+/// or retrying an optional evaluator after admission has rejected the value.
+pub(in crate::runtime) fn try_eval_projection_value_with_db(
+    db: Option<&RedDB>,
+    projection: &Projection,
+    source: &UnifiedRecord,
+) -> crate::RedDBResult<Option<Value>> {
+    let value = match projection {
+        Projection::Column(column) | Projection::Alias(column, _) => {
+            if column.starts_with("LIT:") {
+                reddb_engine::query::runtime::projection_value::decode_projection_literal(column)
+            } else {
+                source.get(column.as_str()).cloned()
+            }
+        }
+        Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
+        Projection::Function(_, _) | Projection::Expression(_, _) => {
+            if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(projection) {
+                let row = RecordRow {
+                    db,
+                    record: source,
+                    table_name: None,
+                    table_alias: None,
+                };
+                match crate::runtime::expr_eval::evaluate_typed_expr_with_secret_literals(
+                    &expression,
+                    &row,
+                ) {
+                    Ok(value) => Some(value),
+                    Err(crate::storage::query::evaluator::EvalError::UnknownFunction {
+                        ..
+                    })
+                    | Err(crate::storage::query::evaluator::EvalError::UnknownColumn(_)) => {
+                        crate::runtime::expr_eval::try_evaluate_runtime_expr_with_db(
+                            db,
+                            &expression,
+                            source,
+                            None,
+                            None,
+                        )?
+                    }
+                    Err(error) => {
+                        let sensitive = projection_uses_secret(projection, source, None, None);
+                        return Err(crate::RedDBError::Query(
+                            if sensitive
+                                && !matches!(
+                                    &error,
+                                    crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }
+                                )
+                            {
+                                "secret expression evaluation failed".into()
+                            } else {
+                                error.to_string()
+                            },
+                        ));
+                    }
+                }
+            } else {
+                match projection {
+                    Projection::Function(name, arguments) => {
+                        crate::runtime::expr_eval::try_evaluate_projection_function(
+                            db, name, arguments, source,
+                        )?
+                    }
+                    Projection::Expression(filter, _) => Some(Value::Boolean(
+                        evaluate_runtime_filter_result_with_db(db, source, filter, None, None)?,
+                    )),
+                    _ => unreachable!("matched function or expression projection"),
+                }
+            }
+        }
+        Projection::All => None,
+        Projection::Window { name, alias, .. } => {
+            source.get(alias.as_ref().unwrap_or(name).as_str()).cloned()
+        }
+    };
+    value
+        .map(try_secret_runtime_input)
+        .transpose()
+        .map(Option::flatten)
+}
+
 /// Handle ML_CLASSIFY / ML_PREDICT_PROBA / SEMANTIC_CACHE_* scalars.
 ///
 /// Calling convention:

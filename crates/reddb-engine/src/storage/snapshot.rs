@@ -7,6 +7,11 @@ use super::{entity::UnifiedEntity, metadata::Metadata, metadata_codec::deseriali
 
 pub trait SnapshotVisitor {
     fn collection(&mut self, name: &str) -> Result<(), String>;
+    /// A collection header exposes the persisted record count before visiting
+    /// its contents. Existing visitors can continue to use `collection`.
+    fn collection_with_count(&mut self, name: &str, _entity_count: u32) -> Result<(), String> {
+        self.collection(name)
+    }
     fn entity(
         &mut self,
         collection: &str,
@@ -30,7 +35,7 @@ pub fn visit_snapshot(bytes: &[u8], visitor: &mut impl SnapshotVisitor) -> Resul
     for _ in 0..count {
         let collection = reddb_file::decode_native_dump_collection_header(bytes, &mut position)
             .map_err(|err| err.to_string())?;
-        visitor.collection(&collection.name)?;
+        visitor.collection_with_count(&collection.name, collection.entity_count)?;
         // V7+ records have a u32 length; legacy entities use at least one byte.
         check_count(
             collection.entity_count,

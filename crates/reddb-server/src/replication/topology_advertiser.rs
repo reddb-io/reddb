@@ -248,7 +248,7 @@ mod tests {
 
     fn tenant() -> AuthResult {
         AuthResult::Authenticated {
-            username: "tenant-alice".into(),
+            principal: crate::auth::UserId::scoped("tenant", "alice"),
             role: Role::Read,
             source: AuthSource::Password,
         }
@@ -256,7 +256,7 @@ mod tests {
 
     fn operator() -> AuthResult {
         AuthResult::Authenticated {
-            username: "operator-bob".into(),
+            principal: crate::auth::UserId::platform("operator-bob"),
             role: Role::Write,
             source: AuthSource::Password,
         }
@@ -264,7 +264,7 @@ mod tests {
 
     fn admin() -> AuthResult {
         AuthResult::Authenticated {
-            username: "admin-root".into(),
+            principal: crate::auth::UserId::platform("admin-root"),
             role: Role::Admin,
             source: AuthSource::Password,
         }

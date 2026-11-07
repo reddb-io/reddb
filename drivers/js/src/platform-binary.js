@@ -32,6 +32,11 @@ export function platformPackageNames({
   arch = process.arch,
   libc = detectLibc(platform),
 } = {}) {
+  const supported =
+    (platform === 'linux' && (arch === 'x64' || arch === 'arm64')) ||
+    (platform === 'darwin' && arch === 'arm64') ||
+    (platform === 'win32' && arch === 'x64')
+  if (!supported) return []
   const base = `@reddb-io/red-${platform}-${arch}`
   if (platform !== 'linux') return [base]
   return libc === 'musl' ? [`${base}-musl`, base] : [base, `${base}-musl`]

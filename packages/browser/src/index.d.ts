@@ -16,6 +16,8 @@ export interface RuntimeInfo {
     readonly transactions: boolean
     readonly queryParameters?: boolean
     readonly databaseBackups?: boolean
+    readonly databaseInspection?: boolean
+    readonly localVault?: boolean
     readonly sync: boolean
   }
 }
@@ -69,7 +71,28 @@ export function openArtifact(options: {
 /** Scalars bind as AST literals; integer numbers must be safe and bigints fit i64/u64. */
 export type QueryParameter = null | boolean | number | string | bigint
 
+export interface LocalVault {
+  /** Safe metadata; never returns credentials or key bytes. */
+  status(): Promise<{ initialized: boolean; locked: boolean }>
+  /** Existing Vaults are authenticated before any write. Creation is opt-in. */
+  unlock(password: string, options?: { create?: boolean }): Promise<void>
+  /** Clear the Worker-session opening key, preserving existing connections. */
+  lock(): Promise<void>
+  keys(): Promise<string[]>
+  /** Explicit plaintext reveal. Never cache the result in persistent storage. */
+  reveal(name: string): Promise<string | null>
+  /** Put/delete participate in BEGIN/COMMIT/ROLLBACK alongside table changes. */
+  put(name: string, value: string): Promise<void>
+  delete(name: string): Promise<void>
+}
+
 export interface Database extends Runtime {
+  /** Local file-owner Vault; no server principals, tenant policy or remote administration. */
+  readonly vault: LocalVault
+  /** Persisted catalog columns: table_name, column_name, data_type, nullable. */
+  catalog(): Promise<{ columns: string[]; rows: unknown[][] }>
+  /** SELECT only, over the host's allowed tables and equality-filtered source rows. */
+  readQuery(sql: string, params: readonly QueryParameter[], scopes: readonly {table: string; field: string; value: QueryParameter}[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** SELECT and table SQL mutations; mutations return an affectedRows column. */
   query(sql: string, params?: readonly QueryParameter[]): Promise<{ columns: string[]; rows: unknown[][] }>
   /** Complete native .rdb image of committed state, at most 256 MiB. Pending SQL changes are excluded. */

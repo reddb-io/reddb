@@ -1,4 +1,6 @@
 //! Canonical native metadata bytes and entity-record adapter, shared with WASM.
+#[path = "metadata_codec/budget.rs"]
+mod budget;
 use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataValue};
 
@@ -88,6 +90,13 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
     reddb_file::encode_native_len_prefixed_str(buf, value);
 }
 
+fn write_collection_name(buf: &mut Vec<u8>, value: &str) {
+    write_string(
+        buf,
+        super::system_collection_names::canonical_or_self(value),
+    );
+}
+
 fn write_bytes(buf: &mut Vec<u8>, value: &[u8]) {
     reddb_file::encode_native_len_prefixed_bytes(buf, value);
 }
@@ -98,7 +107,7 @@ fn write_ref_target(buf: &mut Vec<u8>, target: &super::metadata::RefTarget) {
     match target {
         RefTarget::TableRow { table, row_id } => {
             buf.push(0);
-            write_string(buf, table);
+            write_collection_name(buf, table);
             buf.extend_from_slice(&row_id.to_le_bytes());
         }
         RefTarget::Node {
@@ -106,7 +115,7 @@ fn write_ref_target(buf: &mut Vec<u8>, target: &super::metadata::RefTarget) {
             node_id,
         } => {
             buf.push(1);
-            write_string(buf, collection);
+            write_collection_name(buf, collection);
             buf.extend_from_slice(&node_id.raw().to_le_bytes());
         }
         RefTarget::Edge {
@@ -114,7 +123,7 @@ fn write_ref_target(buf: &mut Vec<u8>, target: &super::metadata::RefTarget) {
             edge_id,
         } => {
             buf.push(2);
-            write_string(buf, collection);
+            write_collection_name(buf, collection);
             buf.extend_from_slice(&edge_id.raw().to_le_bytes());
         }
         RefTarget::Vector {
@@ -122,7 +131,7 @@ fn write_ref_target(buf: &mut Vec<u8>, target: &super::metadata::RefTarget) {
             vector_id,
         } => {
             buf.push(3);
-            write_string(buf, collection);
+            write_collection_name(buf, collection);
             buf.extend_from_slice(&vector_id.raw().to_le_bytes());
         }
         RefTarget::Entity {
@@ -130,7 +139,7 @@ fn write_ref_target(buf: &mut Vec<u8>, target: &super::metadata::RefTarget) {
             entity_id,
         } => {
             buf.push(4);
-            write_string(buf, collection);
+            write_collection_name(buf, collection);
             buf.extend_from_slice(&entity_id.raw().to_le_bytes());
         }
     }
@@ -256,23 +265,23 @@ fn read_ref_target(data: &[u8], pos: &mut usize) -> Result<super::metadata::RefT
 
     match read_u8(data, pos)? {
         0 => Ok(RefTarget::TableRow {
-            table: read_string(data, pos)?,
+            table: super::system_collection_names::canonical_owned(read_string(data, pos)?),
             row_id: read_u64(data, pos)?,
         }),
         1 => Ok(RefTarget::Node {
-            collection: read_string(data, pos)?,
+            collection: super::system_collection_names::canonical_owned(read_string(data, pos)?),
             node_id: EntityId::new(read_u64(data, pos)?),
         }),
         2 => Ok(RefTarget::Edge {
-            collection: read_string(data, pos)?,
+            collection: super::system_collection_names::canonical_owned(read_string(data, pos)?),
             edge_id: EntityId::new(read_u64(data, pos)?),
         }),
         3 => Ok(RefTarget::Vector {
-            collection: read_string(data, pos)?,
+            collection: super::system_collection_names::canonical_owned(read_string(data, pos)?),
             vector_id: EntityId::new(read_u64(data, pos)?),
         }),
         4 => Ok(RefTarget::Entity {
-            collection: read_string(data, pos)?,
+            collection: super::system_collection_names::canonical_owned(read_string(data, pos)?),
             entity_id: EntityId::new(read_u64(data, pos)?),
         }),
         tag => Err(invalid(format!("unknown metadata ref target tag {tag}"))),
@@ -323,5 +332,40 @@ fn read_metadata_value(data: &[u8], pos: &mut usize, depth: u32) -> Result<Metad
             Ok(MetadataValue::References(targets))
         }
         tag => Err(invalid(format!("unknown metadata value tag {tag}"))),
+    }
+}
+
+/// Admit native value expansion and metadata containers before allocation.
+pub fn deserialize_entity_record_with_budget(
+    data: &[u8],
+    version: u32,
+    budget: &mut reddb_file::native_value::DecodeBudget,
+) -> Result<(UnifiedEntity, Option<Metadata>), super::error::StoreError> {
+    use super::error::StoreError;
+    let frame = reddb_file::decode_native_entity_record_frame(data).map_err(decode_error)?;
+    let (entity_bytes, metadata_bytes) =
+        frame.map_or((data, &[][..]), |frame| (frame.entity, frame.metadata));
+    let entity =
+        super::entity_codec::read_entity_binary_with_budget(entity_bytes, &mut 0, version, budget)
+            .map_err(decode_error)?;
+    let metadata = if metadata_bytes.is_empty() {
+        None
+    } else {
+        self::budget::admit(metadata_bytes, budget).map_err(decode_error)?;
+        Some(deserialize_metadata(metadata_bytes).map_err(StoreError::Serialization)?)
+    };
+    Ok((entity, metadata))
+}
+
+pub(super) fn decode_error(error: reddb_file::RdbFileError) -> super::error::StoreError {
+    match error {
+        reddb_file::RdbFileError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        } => super::error::StoreError::ReadLimitExceeded {
+            required_bytes,
+            limit_bytes,
+        },
+        other => super::error::StoreError::Serialization(other.to_string()),
     }
 }

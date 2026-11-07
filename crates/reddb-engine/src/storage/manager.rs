@@ -14,6 +14,8 @@
 
 #![allow(clippy::too_many_arguments)] // Relocated native host entrypoints.
 
+mod backing;
+pub use backing::PagedEntityCursor;
 mod graph_index_merge;
 
 use parking_lot::RwLock;
@@ -216,6 +218,7 @@ pub struct SegmentManager {
     next_segment_id: AtomicU64,
     /// Next entity ID counter
     next_entity_id: AtomicU64,
+    next_sequence_id: AtomicU64,
     /// Per-table auto-increment row ID (1, 2, 3... per collection)
     next_row_id: AtomicU64,
     /// Hot-path entity counter — lock-free, updated by every insert/delete.
@@ -237,6 +240,9 @@ pub struct SegmentManager {
     /// Shared column schema: column_name → index in Vec<Value>.
     /// Populated on first bulk_insert. Enables columnar storage (Vec instead of HashMap per row).
     column_schema: RwLock<Option<Arc<Vec<String>>>>,
+    // A bounded set of exact named-row shapes. Dynamic collections have no
+    // declared schema; sharing their names must not invent a table contract.
+    recovery_row_schemas: RwLock<Vec<Arc<Vec<String>>>>,
     /// Statistics (slow path — not updated on every insert).
     stats: RwLock<ManagerStats>,
     /// Consolidation in flight, if any. Only `run_maintenance` touches it, so
@@ -249,6 +255,7 @@ pub struct SegmentManager {
     /// Used by index-only scan decisions.
     visibility_map: VisibilityMap,
     physical_root_cache: parking_lot::Mutex<Option<PhysicalRootCacheEntry>>,
+    backing: RwLock<Option<backing::BackingRead>>,
 }
 
 impl SegmentManager {
@@ -262,10 +269,12 @@ impl SegmentManager {
         Self {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             physical_root_cache: parking_lot::Mutex::new(None),
+            backing: RwLock::new(None),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
             next_entity_id: AtomicU64::new(1),
+            next_sequence_id: AtomicU64::new(0),
             next_row_id: AtomicU64::new(1),
             total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
@@ -274,6 +283,7 @@ impl SegmentManager {
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
             column_schema: RwLock::new(None),
+            recovery_row_schemas: RwLock::new(Vec::new()),
             stats: RwLock::new(ManagerStats::default()),
             consolidation: RwLock::new(None),
             events: RwLock::new(Vec::new()),
@@ -311,7 +321,11 @@ impl SegmentManager {
     // Positional file records omit the shared column names. Restore them on
     // owned reads before callers update fields or rebuild secondary indexes.
     // Existing per-row names remain authoritative; segment contents stay raw.
-    fn restore_owned_row_schemas<'a>(&self, entities: impl Iterator<Item = &'a mut UnifiedEntity>) {
+    #[doc(hidden)]
+    pub fn restore_owned_row_schemas<'a>(
+        &self,
+        entities: impl Iterator<Item = &'a mut UnifiedEntity>,
+    ) {
         let schema = self.column_schema();
         for entity in entities {
             if let super::entity::EntityData::Row(row) = &mut entity.data {
@@ -324,13 +338,49 @@ impl SegmentManager {
 
     #[doc(hidden)]
     pub fn set_column_schema_if_empty(&self, columns: Vec<String>) {
-        if columns.is_empty() {
+        if columns.is_empty()
+            || columns
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != columns.len()
+        {
             return;
         }
         let mut schema = self.column_schema.write();
         if schema.is_none() {
             *schema = Some(Arc::new(columns));
         }
+    }
+
+    /// Compact named records after recovery has restored the authoritative
+    /// column schema, before serving requests. Captured segments are skipped:
+    /// a cursor's immutable view must never change under it.
+    #[doc(hidden)]
+    pub fn compact_recovered_rows(&self) -> usize {
+        if self.recovery_preserves_named_rows() {
+            return 0;
+        }
+        let Some(schema) = self.column_schema() else {
+            return 0;
+        };
+        if schema
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != schema.len()
+        {
+            return 0;
+        }
+        let mut growing = self.growing.write();
+        let mut sealed = self.sealed.write();
+        let mut compacted = 0;
+        for segment in growing.iter_mut().chain(sealed.iter_mut()) {
+            if let Some(segment) = Arc::get_mut(segment) {
+                compacted += segment.get_mut().compact_recovered_rows(&schema);
+            }
+        }
+        compacted
     }
 
     /// Get collection name
@@ -418,9 +468,11 @@ impl SegmentManager {
 
     /// Bytes a pressure-triggered consolidation could plausibly return.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.sealed
-            .read()
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        growing
             .iter()
+            .chain(sealed.iter())
             .map(|segment| segment.read().reclaimable_bytes())
             .fold(0, u64::saturating_add)
     }
@@ -428,6 +480,39 @@ impl SegmentManager {
     /// Generate a new entity ID
     pub fn next_entity_id(&self) -> EntityId {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Durable allocator state may be ahead of every surviving record.
+    pub fn identity_counters(&self) -> (u64, u64) {
+        (
+            self.next_entity_id.load(Ordering::SeqCst),
+            self.next_row_id.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn restore_identity_counters(&self, entity_id_next: u64, row_id_next: u64) {
+        assert!(
+            entity_id_next > 0 && row_id_next > 0,
+            "invariant: next identities are positive"
+        );
+        self.next_entity_id
+            .fetch_max(entity_id_next, Ordering::SeqCst);
+        self.next_row_id.fetch_max(row_id_next, Ordering::SeqCst);
+    }
+
+    pub fn sequence_id_next(&self) -> u64 {
+        let mut next = self.next_sequence_id.load(Ordering::SeqCst);
+        let growing = self.growing.read();
+        let sealed = self.sealed.read();
+        for segment in growing.iter().chain(sealed.iter()) {
+            next = next.max(segment.read().sequence_id_next());
+        }
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
+        next
+    }
+
+    pub fn restore_sequence_id_next(&self, next: u64) {
+        self.next_sequence_id.fetch_max(next, Ordering::SeqCst);
     }
 
     /// Generate a per-table sequential row ID (1, 2, 3... per collection)
@@ -485,6 +570,7 @@ impl SegmentManager {
 
         let id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
         let segment = GrowingSegment::new(id, &self.collection);
+        segment.restore_sequence_id_next(self.next_sequence_id.load(Ordering::SeqCst));
         let segment_arc = Arc::new(RwLock::new(segment));
         *growing = Some(Arc::clone(&segment_arc));
 
@@ -499,16 +585,20 @@ impl SegmentManager {
 
     /// Insert a new entity
     pub fn insert(&self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+        if entity.id.raw() == 0 {
+            entity.id = self.next_entity_id();
+        }
+        self.reject_backing_duplicate(entity.id)?;
+        if self.has_backing() && self.get_with(entity.id, |_| ()).is_some() {
+            return Err(SegmentError::AlreadyExists(entity.id));
+        }
+        self.next_entity_id
+            .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
         // Check if we need to seal the current segment first
         self.maybe_seal_growing()?;
 
         let segment_arc = self.get_or_create_growing();
         let mut segment = segment_arc.write();
-
-        // Assign entity ID if not already set
-        if entity.id.raw() == 0 {
-            entity.id = self.next_entity_id();
-        }
 
         let entity_id = entity.id;
         let segment_id = segment.id();
@@ -553,14 +643,83 @@ impl SegmentManager {
         }
     }
 
+    fn recovery_preserves_named_rows(&self) -> bool {
+        // Internal catalog/configuration readers still consume named maps
+        // directly, including bootstrap before runtime initialization. Keep
+        // their established representation on both recovery compaction paths.
+        self.collection.starts_with("red_") || self.collection.starts_with("red.")
+    }
+
+    fn recovery_schema(
+        &self,
+        row: &super::entity::RowData,
+        column_schema: Option<Arc<Vec<String>>>,
+    ) -> Option<Arc<Vec<String>>> {
+        if self.recovery_preserves_named_rows() {
+            return None;
+        }
+        let named = row.named.as_ref()?;
+        let matches = |schema: &Vec<String>| {
+            schema.len() == named.len() && schema.iter().all(|name| named.contains_key(name))
+        };
+        if let Some(schema) = column_schema.filter(|schema| matches(schema)) {
+            return Some(schema);
+        }
+        {
+            let schemas = self.recovery_row_schemas.read();
+            if let Some(schema) = schemas.iter().find(|schema| matches(schema)) {
+                return Some(Arc::clone(schema));
+            }
+        }
+        let mut schemas = self.recovery_row_schemas.write();
+        if let Some(schema) = schemas.iter().find(|schema| matches(schema)) {
+            return Some(Arc::clone(schema));
+        }
+        const MAX_RECOVERY_ROW_SCHEMAS: usize = 16;
+        if schemas.len() >= MAX_RECOVERY_ROW_SCHEMAS {
+            return None;
+        }
+        let mut names: Vec<_> = named.keys().cloned().collect();
+        names.sort_unstable();
+        let schema = Arc::new(names);
+        schemas.push(Arc::clone(&schema));
+        Some(schema)
+    }
+
+    /// Apply the ordinary recovery row layout without retaining the entity.
+    /// Hosts comparing disk-backed views with resident recovery must use the
+    /// same bounded schema cache and positional-value preservation rules.
+    #[doc(hidden)]
+    pub fn restore_snapshot_row_layout(&self, entity: &mut UnifiedEntity) {
+        self.restore_recovery_row_layout(entity, self.column_schema());
+    }
+
+    fn restore_recovery_row_layout(
+        &self,
+        entity: &mut UnifiedEntity,
+        column_schema: Option<Arc<Vec<String>>>,
+    ) {
+        if let super::entity::EntityData::Row(row) = &mut entity.data {
+            if let Some(schema) = self.recovery_schema(row, column_schema) {
+                row.compact_with_schema(&schema);
+            }
+        }
+    }
+
     /// Restore a snapshot image without allocating a new sequence identity.
     #[doc(hidden)]
-    pub fn restore_snapshot_entity(&self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
+    pub fn restore_snapshot_entity(
+        &self,
+        mut entity: UnifiedEntity,
+    ) -> Result<EntityId, SegmentError> {
+        self.restore_snapshot_row_layout(&mut entity);
         self.maybe_seal_growing()?;
         if self.get(entity.id).is_some() {
             return Err(SegmentError::AlreadyExists(entity.id));
         }
         let entity_id = entity.id;
+        self.next_entity_id
+            .fetch_max(entity_id.raw().saturating_add(1), Ordering::SeqCst);
         self.with_restoration_segment(entity_id, |segment| {
             let segment_id = segment.id();
             // Adoption retains sequence identity and advances its allocator.
@@ -589,11 +748,25 @@ impl SegmentManager {
         &self,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, SegmentError> {
+        // Reject the complete cold batch before publishing any of it.
+        if self.has_backing() {
+            let mut identities = std::collections::HashSet::with_capacity(entities.len());
+            for entity in &entities {
+                if entity.id.raw() != 0 {
+                    self.reject_backing_duplicate(entity.id)?;
+                    if self.get_with(entity.id, |_| ()).is_some() || !identities.insert(entity.id) {
+                        return Err(SegmentError::AlreadyExists(entity.id));
+                    }
+                }
+            }
+        }
         // Assign IDs and per-table row_ids.
         for entity in &mut entities {
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
             }
+            self.next_entity_id
+                .fetch_max(entity.id.raw().saturating_add(1), Ordering::SeqCst);
             if let super::entity::EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
                 if *row_id == 0 {
                     *row_id = self.next_row_id();
@@ -985,6 +1158,7 @@ impl SegmentManager {
 
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1021,6 +1195,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1066,6 +1241,7 @@ impl SegmentManager {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1107,6 +1283,7 @@ impl SegmentManager {
         modified_columns: &[String],
         metadata: Option<&Metadata>,
     ) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
         let mut entity = Some(entity);
 
@@ -1179,6 +1356,15 @@ impl SegmentManager {
 
     /// Delete an entity
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
+        self.materialize_backing_entity(id)?;
+        let deleted = self.delete_resident(id)?;
+        if deleted {
+            self.remember_backing_delete(id);
+        }
+        Ok(deleted)
+    }
+
+    fn delete_resident(&self, id: EntityId) -> Result<bool, SegmentError> {
         // Fast path: probe the growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment, and bulk-inserted entities.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1238,6 +1424,15 @@ impl SegmentManager {
     }
 
     pub fn delete_batch(&self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if self.has_backing() {
+            let mut deleted = Vec::new();
+            for id in ids {
+                if self.delete(*id)? {
+                    deleted.push(*id);
+                }
+            }
+            return Ok(deleted);
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1322,6 +1517,7 @@ impl SegmentManager {
 
     /// Set metadata for an entity
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        self.materialize_backing_entity(id)?;
         // Fast path: probe growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1372,11 +1568,27 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
+        self.seal_current_if(|_| true)?
+            .ok_or(SegmentError::InvalidState(SegmentState::Sealed))
+    }
+
+    fn seal_current_if(
+        &self,
+        should_seal: impl FnOnce(&GrowingSegment) -> bool,
+    ) -> Result<Option<SegmentId>, SegmentError> {
+        let disk_residency = self.has_backing();
         // Keep topology publication atomic for cursors that capture growing
         // and sealed under the same lock order: growing, then sealed.
         let mut growing_slot = self.growing.write();
-        if let Some(growing_arc) = growing_slot.take() {
+        if let Some(growing_arc) = growing_slot.as_ref() {
             let mut growing = growing_arc.write();
+            if !should_seal(&growing) {
+                return Ok(None);
+            }
+            if disk_residency {
+                self.next_sequence_id
+                    .fetch_max(growing.sequence_id_next(), Ordering::SeqCst);
+            }
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
 
@@ -1388,6 +1600,9 @@ impl SegmentManager {
 
             // In a real implementation, we'd convert to SealedSegment here
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
+            let growing_arc = growing_slot
+                .take()
+                .expect("sealed source remains published");
             self.sealed.write().push(growing_arc);
             drop(growing_slot);
 
@@ -1404,10 +1619,10 @@ impl SegmentManager {
 
             self.emit(LifecycleEvent::SegmentSealed(seg_id));
 
-            return Ok(seg_id);
+            return Ok(Some(seg_id));
         }
 
-        Err(SegmentError::InvalidState(SegmentState::Sealed))
+        Ok(None)
     }
 
     /// Force seal (for testing/manual control)
@@ -1656,16 +1871,25 @@ impl SegmentManager {
         &self,
         mut callback: impl FnMut(&UnifiedEntity, Option<Metadata>) -> bool,
     ) {
+        self.for_each_entity_source(|segment, entity| {
+            callback(entity, segment.get_metadata(entity.id))
+        });
+    }
+
+    fn for_each_entity_source(
+        &self,
+        mut callback: impl FnMut(&GrowingSegment, &UnifiedEntity) -> bool,
+    ) {
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
-            if !growing.for_each_fast(|entity| callback(entity, growing.get_metadata(entity.id))) {
+            if !growing.for_each_fast(|entity| callback(&growing, entity)) {
                 return;
             }
         }
         let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read();
-            if !segment.for_each_fast(|entity| callback(entity, segment.get_metadata(entity.id))) {
+            if !segment.for_each_fast(|entity| callback(&segment, entity)) {
                 return;
             }
         }
@@ -1881,6 +2105,20 @@ impl SegmentManager {
     where
         F: Fn(&UnifiedEntity) -> bool + Sync,
     {
+        self.project_all_zoned_with_stats(zone_preds, |entity| {
+            filter(entity).then(|| entity.clone())
+        })
+    }
+
+    fn project_all_zoned_with_stats<T, F>(
+        &self,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        project: F,
+    ) -> (Vec<T>, SegmentScanStats)
+    where
+        T: Send,
+        F: Fn(&UnifiedEntity) -> Option<T> + Sync,
+    {
         let mut results = Vec::new();
         let mut scan_stats = SegmentScanStats::default();
 
@@ -1894,7 +2132,7 @@ impl SegmentManager {
             } else {
                 growing_arc.read()
             };
-            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            results.extend(growing.iter().filter_map(&project));
         }
 
         // Sealed segments: zone-prune on main thread, then scan in parallel.
@@ -1922,8 +2160,8 @@ impl SegmentManager {
         let use_parallel = surviving.len() > 1 && crate::execution::should_parallelize();
 
         if use_parallel {
-            let filter_ref = &filter;
-            let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
+            let project_ref = &project;
+            let segment_results: Vec<Vec<T>> = std::thread::scope(|s| {
                 surviving
                     .iter()
                     .map(|segment| {
@@ -1931,14 +2169,16 @@ impl SegmentManager {
                             segment
                                 .read()
                                 .iter()
-                                .filter(|e| filter_ref(e))
-                                .cloned()
+                                .filter_map(project_ref)
                                 .collect::<Vec<_>>()
                         })
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .map(|handle| handle.join().unwrap_or_default())
+                    .map(|handle| match handle.join() {
+                        Ok(batch) => batch,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    })
                     .collect()
             });
             for batch in segment_results {
@@ -1947,7 +2187,7 @@ impl SegmentManager {
         } else {
             for segment_arc in surviving {
                 let seg = segment_arc.read();
-                results.extend(seg.iter().filter(|e| filter(e)).cloned());
+                results.extend(seg.iter().filter_map(&project));
             }
         }
 
@@ -1959,7 +2199,7 @@ impl SegmentManager {
     /// callers that intentionally scan without a statement snapshot and keeps
     /// the documented resolver fallback — moderation gate plus hiding
     /// superseded physical versions — instead of showing every version.
-    fn scan_entity_visible(snapshot: Option<&SnapshotContext>, entity: &UnifiedEntity) -> bool {
+    pub fn scan_entity_visible(snapshot: Option<&SnapshotContext>, entity: &UnifiedEntity) -> bool {
         match snapshot {
             Some(ctx) => entity_visible_with_context(Some(ctx), entity),
             None => {
@@ -2026,6 +2266,64 @@ impl SegmentManager {
             |segment| segment.may_contain_graph_kind(kind),
             |entity| Self::scan_entity_visible(snapshot, entity) && kind.matches(&entity.kind),
         )
+    }
+
+    /// Hydrate one bounded graph batch at a time. Payloads and policy callbacks
+    /// leave storage locks; pinned cursors survive sealing and consolidation.
+    /// Work is charged for pruned sources and every inspected physical slot.
+    #[doc(hidden)]
+    pub fn scan_graph_batches(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(Vec<UnifiedEntity>) -> bool,
+    ) -> bool {
+        let segments = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return false;
+                }
+                let view = segment.read();
+                if view.may_contain_graph_kind(kind) {
+                    segments.push((Arc::clone(segment), view.scan_cursor()));
+                }
+            }
+            segments
+        };
+        let mut ids = [EntityId::new(0); super::segment::SCAN_BATCH_SIZE];
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                let mut count = 0;
+                {
+                    let view = segment.read();
+                    if !view.scan_batch(&mut cursor, &mut before_work, &mut |id| {
+                        ids[count] = id;
+                        count += 1;
+                    }) {
+                        return false;
+                    }
+                }
+                if !before_work() {
+                    return false;
+                }
+                // Hydration groups lookups by their current segment. Restore the
+                // cursor's order when an update moved a candidate between sources.
+                let mut batch = vec![None; count];
+                self.for_each_id(&ids[..count], |position, entity| {
+                    if kind.matches(&entity.kind) && Self::scan_entity_visible(snapshot, entity) {
+                        batch[position] = Some(entity.clone());
+                    }
+                });
+                if !before_work() || !consume(batch.into_iter().flatten().collect()) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Visit visible candidates in segments that may contain the requested kind.
@@ -2233,6 +2531,28 @@ impl SegmentManager {
     {
         self.query_all_zoned_with_stats(zone_preds, |entity| {
             Self::scan_entity_visible(snapshot, entity) && filter(entity)
+        })
+    }
+
+    /// Project visible zone-map candidates while borrowing each source entity.
+    /// Only the owned projection leaves the segment read guard. The callback
+    /// must not mutate or re-enter the source collection.
+    pub fn scan_project_zoned_with_stats<T, F>(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        project: F,
+    ) -> (Vec<T>, SegmentScanStats)
+    where
+        T: Send,
+        F: Fn(&UnifiedEntity) -> Option<T> + Sync,
+    {
+        self.project_all_zoned_with_stats(zone_preds, |entity| {
+            if Self::scan_entity_visible(snapshot, entity) {
+                project(entity)
+            } else {
+                None
+            }
         })
     }
 
@@ -2521,6 +2841,15 @@ impl SegmentManager {
 
         let running = self.consolidation.read().is_some();
         if !running {
+            // Foreground churn can exhaust the budget before a growing segment
+            // reaches its ordinary size threshold. Publish only a dirty source;
+            // the existing paced consolidation then reclaims its dead slots.
+            if self
+                .seal_current_if(|segment| segment.reclaimable_bytes() > 0)
+                .is_err()
+            {
+                return false;
+            }
             let sources = self.dirty_sealed_segments();
             if !self.start_consolidation_from_sources(sources) {
                 return false;
@@ -2805,6 +3134,41 @@ mod tests {
     use crate::storage::entity::{EntityData, EntityKind, RowData};
     use crate::transaction::snapshot::{Snapshot, SnapshotManager};
     use reddb_types::Value;
+
+    #[test]
+    fn recovery_view_projection_keeps_schema_bounds_without_retaining_rows_or_identities() {
+        for collection in ["rows", "red_internal"] {
+            let manager = SegmentManager::new(collection);
+            let identities = manager.identity_counters();
+            for id in 1..=18 {
+                let field = format!("field_{id}");
+                let mut entity =
+                    UnifiedEntity::table_row(EntityId::new(id), collection, id, vec![]);
+                entity.data = EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(HashMap::from([
+                        (field.clone(), Value::Integer(id as i64)),
+                        ("id".into(), Value::Integer(id as i64)),
+                    ])),
+                    schema: None,
+                });
+                manager.restore_snapshot_row_layout(&mut entity);
+                let row = entity.data.as_row().expect("row");
+                assert_eq!(row.get_field(&field), Some(&Value::Integer(id as i64)));
+                assert_eq!(row.get_field("id"), Some(&Value::Integer(id as i64)));
+                assert_eq!(
+                    row.named.is_some(),
+                    collection.starts_with("red_") || id > 16
+                );
+            }
+            assert_eq!(manager.count(), 0, "a projection never adopts payloads");
+            assert_eq!(manager.identity_counters(), identities);
+            assert_eq!(
+                manager.recovery_row_schemas.read().len(),
+                if collection == "rows" { 16 } else { 0 }
+            );
+        }
+    }
 
     #[test]
     fn physical_pages_keep_global_order_across_segments_and_deleted_slots() {
@@ -3435,6 +3799,17 @@ mod tests {
                         .map(|item| item.id)
                         .collect();
                     assert_eq!(actual, expected);
+                    let mut batched = HashSet::new();
+                    assert!(manager.scan_graph_batches(
+                        view,
+                        kind,
+                        || true,
+                        |batch| {
+                            batched.extend(batch.into_iter().map(|item| item.id));
+                            true
+                        }
+                    ));
+                    assert_eq!(batched, expected);
                     let mut visited = 0;
                     let mut candidates = HashSet::new();
                     manager.scan_graph_candidates_for_each(
@@ -3660,6 +4035,145 @@ mod tests {
     }
 
     #[test]
+    fn projected_zoned_scan_preserves_segment_order_and_pruning() {
+        let manager = SegmentManager::with_config(
+            "events",
+            ManagerConfig {
+                segment_config: SegmentConfig {
+                    max_entities: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        for (index, value) in [10, 20, 100, 110, 200].into_iter().enumerate() {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(index as u64 + 1),
+                "events",
+                index as u64 + 1,
+                vec![],
+            );
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::Integer(value)],
+                vec!["ts".into()],
+            ));
+            manager.insert(entity).expect("test row");
+        }
+        assert_eq!(manager.stats().sealed_count, 2);
+        let project = |entity: &UnifiedEntity| match entity.data.as_row()?.get_field("ts")? {
+            Value::Integer(value) => Some(*value),
+            _ => None,
+        };
+        let (all, stats) = manager.scan_project_zoned_with_stats(None, &[], project);
+        let (legacy, _) = manager.scan_zoned_with_stats(None, &[], |_| true);
+        assert_eq!(all, legacy.iter().filter_map(project).collect::<Vec<_>>());
+        assert_eq!(all[0], 200, "growing segment first");
+        assert!(all[1..3].iter().all(|value| [10, 20].contains(value)));
+        assert!(all[3..5].iter().all(|value| [100, 110].contains(value)));
+        assert_eq!(stats.segments_total, 3);
+        assert_eq!(stats.segments_scanned, 3);
+        assert_eq!(stats.segments_pruned, 0);
+        let probe = Value::Integer(100);
+        let (pruned, stats) = manager.scan_project_zoned_with_stats(
+            None,
+            &[("ts", ZoneColPred::Gte(&probe))],
+            |entity| project(entity).filter(|value| *value >= 100),
+        );
+        assert_eq!(
+            pruned,
+            all.into_iter()
+                .filter(|value| *value >= 100)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(stats.segments_total, 3);
+        assert_eq!(stats.segments_scanned, 2);
+        assert_eq!(stats.segments_pruned, 1);
+        let (empty, _) = manager.scan_project_zoned_with_stats(None, &[], |_| None::<u64>);
+        assert!(empty.is_empty(), "projection may reject every candidate");
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manager.scan_project_zoned_with_stats(None, &[], |entity| {
+                let value = project(entity)?;
+                assert_ne!(value, 10, "injected projection worker failure");
+                Some(value)
+            })
+        }));
+        assert!(
+            failure.is_err(),
+            "a failed worker must not return a successful partial scan"
+        );
+    }
+
+    #[test]
+    fn projected_zoned_scan_checks_visibility_before_projection_on_workers() {
+        let manager = SegmentManager::with_config(
+            "accounts",
+            ManagerConfig {
+                segment_config: SegmentConfig {
+                    max_entities: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        for (id, xmin, xmax) in [(1, 3, 12), (2, 12, 0), (3, 3, 0), (4, 3, 4), (5, 3, 0)] {
+            let mut entity = UnifiedEntity::table_row(EntityId::new(id), "accounts", id, vec![]);
+            entity.set_xmin(xmin);
+            entity.set_xmax(xmax);
+            manager.insert(entity).expect("versioned test row");
+        }
+        let mut hidden = UnifiedEntity::table_row(EntityId::new(6), "accounts", 6, vec![]);
+        hidden.data = EntityData::Row(RowData::with_names(
+            vec![Value::text("pending")],
+            vec!["__moderation_status".into()],
+        ));
+        manager.insert(hidden).expect("moderated row");
+        assert_eq!(manager.stats().sealed_count, 2);
+        let snapshot = SnapshotContext {
+            snapshot: Snapshot {
+                xid: 10,
+                in_progress: HashSet::from([4]),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: false,
+            serializable_reader: None,
+        };
+        std::thread::spawn(move || {
+            for (view, expected) in [(Some(&snapshot), vec![5, 1, 3, 4]), (None, vec![5, 2, 3])] {
+                let called = std::sync::Mutex::new(Vec::new());
+                let (rows, stats) = manager.scan_project_zoned_with_stats(view, &[], |entity| {
+                    let id = entity.id.raw();
+                    assert!(
+                        expected.contains(&id),
+                        "invisible entity reached projection: {id}"
+                    );
+                    called.lock().expect("callback log").push(id);
+                    Some(id)
+                });
+                let (legacy, _) = manager.scan_zoned_with_stats(view, &[], |_| true);
+                assert_eq!(
+                    rows,
+                    legacy
+                        .iter()
+                        .map(|entity| entity.id.raw())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(rows[0], 5, "visible growing row first");
+                let mut called = called.into_inner().expect("callback log");
+                called.sort_unstable();
+                let mut expected = expected;
+                expected.sort_unstable();
+                assert_eq!(called, expected, "each visible row projected exactly once");
+                assert_eq!(stats.segments_total, 3);
+                assert_eq!(stats.segments_scanned, 3);
+            }
+        })
+        .join()
+        .expect("projected scan worker");
+    }
+
+    #[test]
     fn test_manager_auto_seal() {
         let config = ManagerConfig {
             segment_config: SegmentConfig {
@@ -3835,6 +4349,60 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn graph_batches_bound_payloads_and_hydrate_current_entities_after_sealing() {
+        let manager = SegmentManager::new("graph");
+        let node =
+            |id| UnifiedEntity::graph_node(EntityId::new(id), "graph", "node", HashMap::new());
+        manager
+            .bulk_insert((1..=1024).map(node).collect())
+            .expect("nodes");
+        let mut hidden = node(1025);
+        hidden.set_xmax(5);
+        manager.insert(hidden).expect("hidden version");
+        manager
+            .insert(UnifiedEntity::vector(EntityId::new(1026), "graph", vec![]))
+            .expect("mixed kind");
+        let mut work = 0;
+        let mut delivered = 0;
+        assert!(!manager.scan_graph_batches(
+            None,
+            GraphEntityKind::Node,
+            || {
+                work += 1;
+                work < 100
+            },
+            |batch| {
+                delivered += batch.len();
+                true
+            }
+        ));
+        assert_eq!(delivered, 0, "cancelled partial batch must not escape");
+        let mut seen = Vec::new();
+        assert!(manager.scan_graph_batches(None, GraphEntityKind::Node, || true, |batch| {
+            assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+            assert!(manager.growing.try_write().is_some(), "no topology guard");
+            assert!(manager.sealed.try_write().is_some(), "no sealed guard");
+            if seen.is_empty() {
+                manager.force_seal().expect("seal during delivery");
+                manager.insert(node(2000)).expect("append beyond captured boundary");
+                let mut updated = node(900);
+                if let EntityKind::GraphNode(node) = &mut updated.kind {
+                    node.label = "updated".into();
+                }
+                manager.update(updated).expect("update unread candidate");
+            }
+            for entity in batch {
+                if entity.id.raw() == 900 {
+                    assert!(matches!(&entity.kind, EntityKind::GraphNode(node) if node.label == "updated"));
+                }
+                seen.push(entity.id.raw());
+            }
+            true
+        }));
+        assert_eq!(seen, (1..=1024).collect::<Vec<_>>());
     }
 
     #[test]
@@ -4031,6 +4599,133 @@ mod tests {
                 manager.resident_bytes()
             );
         });
+    }
+
+    #[test]
+    fn physical_cursor_tracks_individual_and_mixed_insertions() {
+        for mode in 0..3 {
+            let manager = SegmentManager::new("physical_rows");
+            let row = |id| {
+                UnifiedEntity::table_row(
+                    EntityId::new(id),
+                    "physical_rows",
+                    id,
+                    vec![Value::Integer(id as i64)],
+                )
+            };
+            match mode {
+                0 => {
+                    for id in [10, 30, 20] {
+                        manager.insert(row(id)).expect("individual row");
+                    }
+                }
+                1 => {
+                    manager.insert(row(10)).expect("individual prefix");
+                    manager
+                        .bulk_insert(vec![row(30), row(31)])
+                        .expect("batch suffix");
+                }
+                _ => {
+                    manager
+                        .bulk_insert(vec![row(30), row(31)])
+                        .expect("batch prefix");
+                    manager.insert(row(10)).expect("individual suffix");
+                }
+            }
+            let mut cursor = manager.physical_scan_cursor();
+            let mut ids = Vec::new();
+            for _ in 0..32 {
+                if cursor.finished() {
+                    break;
+                }
+                let mut work = 1;
+                let batch = manager.physical_scan_batch(&mut cursor, &mut work);
+                assert!(batch.len() <= 1);
+                ids.extend(batch.into_iter().map(|id| id.raw()));
+            }
+            assert!(cursor.finished());
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                if mode == 0 {
+                    vec![10, 20, 30]
+                } else {
+                    vec![10, 30, 31]
+                },
+                "mode={mode}"
+            );
+        }
+    }
+
+    fn growing_tombstones_fixture() -> SegmentManager {
+        let manager = consolidating_manager(1);
+        let ids = manager
+            .bulk_insert(
+                (0..64)
+                    .map(|id| {
+                        UnifiedEntity::table_row(
+                            manager.next_entity_id(),
+                            "users",
+                            id,
+                            vec![Value::Blob(vec![7; 2048])],
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("growing rows");
+        for id in ids.iter().take(48) {
+            manager.delete(*id).expect("physical tombstone");
+        }
+        assert_eq!(manager.stats().sealed_count, 0);
+        manager
+    }
+
+    #[test]
+    fn pressure_consolidation_reclaims_unsealed_tombstones() {
+        let manager = growing_tombstones_fixture();
+        let before = manager.resident_bytes();
+        assert!(manager.reclaimable_bytes() > 0);
+        assert!(manager.pressure_consolidation_tick());
+        drain_maintenance(&manager);
+        assert_eq!(live_ids(&manager), (49..=64).collect::<Vec<_>>());
+        assert!(manager.resident_bytes() < before);
+        assert_eq!(manager.stats().consolidation.tombstones_reclaimed, 48);
+    }
+
+    #[test]
+    fn pressure_consolidation_preserves_pinned_growing_source_accounting() {
+        let manager = growing_tombstones_fixture();
+        let source = Arc::clone(manager.growing.read().as_ref().expect("growing source"));
+        let weak = Arc::downgrade(&source);
+        assert!(manager.pressure_consolidation_tick());
+        drain_maintenance(&manager);
+        assert_eq!(live_ids(&manager), (49..=64).collect::<Vec<_>>());
+        let source_bytes = source.read().resident_bytes();
+        let held = manager.resident_bytes();
+        assert!(held >= source_bytes);
+        drop(source);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(held - manager.resident_bytes(), source_bytes);
+    }
+
+    #[test]
+    fn pressure_consolidation_keeps_clean_and_disabled_growing_sources_open() {
+        let clean = consolidating_manager(1);
+        clean
+            .insert(UnifiedEntity::table_row(
+                clean.next_entity_id(),
+                "users",
+                1,
+                vec![Value::Integer(1)],
+            ))
+            .expect("clean row");
+        assert!(!clean.pressure_consolidation_tick());
+        assert_eq!(clean.stats().sealed_count, 0);
+        let mut disabled = growing_tombstones_fixture();
+        disabled.config.enable_consolidation = false;
+        assert!(!disabled.pressure_consolidation_tick());
+        assert_eq!(disabled.stats().sealed_count, 0);
+        assert_eq!(live_ids(&disabled), (49..=64).collect::<Vec<_>>());
     }
 
     #[test]

@@ -160,9 +160,23 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
+        if manager.has_backing() {
+            return self.sparse_cold_append_tree(collection, manager, tree, previous, current);
+        }
         if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
+        self.apply_sparse_checkpoint_tree(collection, manager, tree, previous, current)
+    }
+
+    pub(super) fn apply_sparse_checkpoint_tree(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+        tree: &Arc<BTree>,
+        previous: &CheckpointVersion,
+        current: &mut CheckpointVersion,
+    ) -> Result<Option<Arc<BTree>>, StoreError> {
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
             return Ok(None);
         }
@@ -196,16 +210,20 @@ impl UnifiedStore {
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
-                    || (matches!(entity.data, EntityData::Row(_) | EntityData::Vector(_))
-                        && current.excluded_xids.contains(&entity.xmin))
+                    || (matches!(
+                        entity.data,
+                        EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                    ) && current.excluded_xids.contains(&entity.xmin))
                 {
                     defer = true;
                     return None;
                 }
                 let raw =
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
-                let projected = if matches!(entity.data, EntityData::Row(_))
-                    && current.excluded_xids.contains(&entity.xmax)
+                let projected = if matches!(
+                    entity.data,
+                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                ) && current.excluded_xids.contains(&entity.xmax)
                 {
                     defer = true;
                     let mut normalized = entity.clone();
@@ -267,12 +285,50 @@ impl UnifiedStore {
         if manager.checkpoint_revisions() != current.segments {
             return Ok(None);
         }
+        current.has_unprojected_rows = !deferred.is_empty();
         current.deferred_rows = Some(Arc::new(deferred));
         // Validate every source before changing the published tree. Afterwards
         // materialize only bounded batches from those exact durable images;
         // do not reread potentially changed manager payloads in a second pass.
         #[cfg(debug_assertions)]
         let root_before = tree.root_page_id();
+        let protected = self.ownership_active_epoch.load(Ordering::Acquire) != 0;
+        let tree = Arc::clone(tree);
+        let apply = |items: &[(Vec<u8>, Vec<u8>)]| -> Result<(), StoreError> {
+            if protected
+                && tree
+                    .try_upsert_inline_without_splits(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+            {
+                #[cfg(test)]
+                if std::env::var_os("REDDB_TEST_EXIT_AFTER_INLINE_SPARSE_WRITE").is_some() {
+                    self.pager
+                        .as_ref()
+                        .expect("paged checkpoint")
+                        .sync()
+                        .map_err(|error| {
+                            StoreError::Io(std::io::Error::other(error.to_string()))
+                        })?;
+                    std::process::exit(190);
+                }
+            } else {
+                // The ownership epoch records each old page before its first
+                // overwrite. Recovery restores those images before reading
+                // roots, then releases new pages and replays committed rows.
+                tree.upsert_batch_sorted(items)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            }
+            #[cfg(debug_assertions)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_SPARSE_BATCH").is_some() {
+                self.pager
+                    .as_ref()
+                    .expect("paged checkpoint")
+                    .sync()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                std::process::exit(193);
+            }
+            Ok(())
+        };
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;
         for (id, source) in upserts {
@@ -292,9 +348,10 @@ impl UnifiedStore {
             };
             let key = id.raw().to_be_bytes().to_vec();
             let bytes = key.len() + value.len();
-            if !batch.is_empty() && batch_bytes.saturating_add(bytes) > 1024 * 1024 {
-                tree.upsert_batch_sorted(&batch)
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            if !batch.is_empty()
+                && (batch_bytes.saturating_add(bytes) > 1024 * 1024 || batch.len() >= 512)
+            {
+                apply(&batch)?;
                 batch.clear();
                 batch_bytes = 0;
             }
@@ -302,8 +359,7 @@ impl UnifiedStore {
             batch.push((key, value));
         }
         if !batch.is_empty() {
-            tree.upsert_batch_sorted(&batch)
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            apply(&batch)?;
         }
         drop(retained);
         #[cfg(debug_assertions)]
@@ -317,7 +373,7 @@ impl UnifiedStore {
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             std::process::exit(176);
         }
-        Ok(Some(Arc::clone(tree)))
+        Ok(Some(tree))
     }
 }
 

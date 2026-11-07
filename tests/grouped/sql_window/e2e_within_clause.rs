@@ -433,13 +433,11 @@ fn execute_query_with_scope_typed_api() {
         &rt,
         "CREATE TABLE jobs (id INT, body TEXT, tenant_id TEXT) TENANT BY (tenant_id)",
     );
-    exec(&rt, "SET TENANT 'admin-bootstrap'");
     exec(
         &rt,
         "INSERT INTO jobs (id, body, tenant_id) VALUES \
          (1, 'a', 'acme'), (2, 'g', 'globex')",
     );
-    exec(&rt, "SET TENANT NULL");
 
     let acme = ScopeOverride {
         tenant: FieldOverride::Set("acme".into()),

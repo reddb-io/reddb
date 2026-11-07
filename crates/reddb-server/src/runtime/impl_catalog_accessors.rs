@@ -68,33 +68,7 @@ impl RedDBRuntime {
         // prevent us from durably persisting what's already in memory.
         // The remote upload is the side-effect that risks clobbering a
         // peer's state, so it's behind the lease gate.
-        let started = std::time::Instant::now();
-        self.seal_hypertable_chunks_for_checkpoint(
-            self.inner.checkpoint_columnar_emission_budget_chunks,
-        )?;
-        self.persist_probabilistic_snapshots()?;
-        self.inner.db.flush_local_only().map_err(|err| {
-            // Issue #205 — local flush failure is a CheckpointFailed
-            // operator-grade event. The local-flush path also covers
-            // the WAL fsync we depend on, so a failure here doubles as
-            // the WalFsyncFailed signal for the runtime entry point.
-            let msg = err.to_string();
-            crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
-                lsn: 0,
-                error: msg.clone(),
-            }
-            .emit_global();
-            crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
-                path: "<flush_local_only>".to_string(),
-                error: msg.clone(),
-            }
-            .emit_global();
-            RedDBError::Engine(msg)
-        })?;
-        let checkpoint_lsn = self.cdc_current_lsn();
-        self.inner
-            .checkpoint_projection_stats
-            .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
+        self.checkpoint_local()?;
         if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
             tracing::warn!(
                 target: "reddb::serverless::lease",
@@ -107,6 +81,47 @@ impl RedDBRuntime {
             .db
             .upload_to_remote_backend()
             .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
+        let started = std::time::Instant::now();
+        self.seal_hypertable_chunks_for_checkpoint(
+            self.inner.checkpoint_columnar_emission_budget_chunks,
+        )?;
+        let store = self.inner.db.store();
+        let publication = store.vault_publication_lock.lock();
+        // Collections created since startup need the compact visibility
+        // inventory before their first resident-to-disk publication too.
+        self.prepare_paged_counts()?;
+        self.persist_probabilistic_snapshots()?;
+        self.inner
+            .db
+            .flush_local_after_runtime_snapshots()
+            .map_err(|err| {
+                // Issue #205 — local flush failure is a CheckpointFailed
+                // operator-grade event. The local-flush path also covers
+                // the WAL fsync we depend on, so a failure here doubles as
+                // the WalFsyncFailed signal for the runtime entry point.
+                let msg = err.to_string();
+                crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
+                    lsn: 0,
+                    error: msg.clone(),
+                }
+                .emit_global();
+                crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
+                    path: "<flush_local_only>".to_string(),
+                    error: msg.clone(),
+                }
+                .emit_global();
+                RedDBError::Engine(msg)
+            })?;
+        self.inner.probabilistic.replayed_names.lock().clear();
+        drop(publication);
+        let checkpoint_lsn = self.cdc_current_lsn();
+        self.inner
+            .checkpoint_projection_stats
+            .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
+        Ok(())
     }
 
     /// Guard remote-mutating operations on the writer lease.
@@ -149,6 +164,9 @@ impl RedDBRuntime {
         cursor: Option<ScanCursor>,
         limit: usize,
     ) -> RedDBResult<ScanPage> {
+        use reddb_rql::ast::PolicyAction;
+
+        self.check_collection_privilege(PolicyAction::Select, collection)?;
         let store = self.inner.db.store();
         let manager = store
             .get_collection(collection)
@@ -156,7 +174,23 @@ impl RedDBRuntime {
 
         let offset = cursor.map(|cursor| cursor.offset).unwrap_or(0);
         let limit = limit.max(1);
-        let (total, items) = manager.page_in_id_order(offset, limit);
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let (total, items) = if crate::runtime::execution_context::current_auth_identity().is_some()
+            && crate::runtime::rls_injection::rls_is_enabled(self, collection)
+        {
+            manager.try_page_in_id_order_where(offset, limit, read_bytes, |entity| {
+                crate::runtime::rls_injection::entity_passes_rls_action(
+                    self,
+                    collection,
+                    PolicyAction::Select,
+                    entity,
+                )
+            })?
+        } else {
+            manager.try_page_in_id_order(offset, limit, read_bytes)?
+        };
         let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 
@@ -168,8 +202,104 @@ impl RedDBRuntime {
         })
     }
 
+    pub fn get_collection_entity(
+        &self,
+        collection: &str,
+        id: crate::storage::EntityId,
+    ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        use reddb_rql::ast::PolicyAction;
+
+        self.check_collection_privilege(PolicyAction::Select, collection)?;
+        let entity = self.inner.db.store().get(collection, id);
+        Ok(entity.filter(|entity| {
+            crate::runtime::rls_injection::entity_passes_rls_action(
+                self,
+                collection,
+                PolicyAction::Select,
+                entity,
+            )
+        }))
+    }
+
     pub fn catalog(&self) -> CatalogModelSnapshot {
         self.inner.db.catalog_model_snapshot()
+    }
+
+    /// Fallible catalog for disk-resident databases. The decode workspace shares
+    /// query admission with concurrent reads and is released on every error.
+    pub fn try_catalog(&self) -> RedDBResult<CatalogModelSnapshot> {
+        if self
+            .inner
+            .db
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_none()
+        {
+            return Ok(self.catalog());
+        }
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let _scratch = self
+            .try_reserve_query_buffer(read_bytes * 2)
+            .ok_or_else(|| {
+                self.memory_accounting().record_admission_denied();
+                RedDBError::MaterializationLimitExceeded {
+                    executor: "catalog",
+                    limit: usize::try_from(self.memory_budget().resolved_bytes)
+                        .unwrap_or(usize::MAX),
+                    current: usize::try_from(self.memory_accounting().total_used_bytes())
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                }
+            })?;
+        Ok(self.inner.db.try_catalog_model_snapshot(read_bytes)?)
+    }
+
+    /// Fallible catalog inventory scoped to known collection names. This keeps
+    /// filtered `red.collections` queries from decoding every unrelated
+    /// collection before their predicate is applied.
+    pub(crate) fn try_catalog_for_collections(
+        &self,
+        collection_names: &std::collections::HashSet<String>,
+        observe_legacy_payloads: bool,
+    ) -> RedDBResult<CatalogModelSnapshot> {
+        if self
+            .inner
+            .db
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_none()
+        {
+            return Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+                collection_names,
+                observe_legacy_payloads,
+                usize::MAX,
+            )?);
+        }
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let _scratch = self
+            .try_reserve_query_buffer(read_bytes * 2)
+            .ok_or_else(|| {
+                self.memory_accounting().record_admission_denied();
+                RedDBError::MaterializationLimitExceeded {
+                    executor: "catalog",
+                    limit: usize::try_from(self.memory_budget().resolved_bytes)
+                        .unwrap_or(usize::MAX),
+                    current: usize::try_from(self.memory_accounting().total_used_bytes())
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                }
+            })?;
+        Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+            collection_names,
+            observe_legacy_payloads,
+            read_bytes,
+        )?)
     }
 
     pub fn catalog_consistency_report(&self) -> crate::catalog::CatalogConsistencyReport {
@@ -210,5 +340,150 @@ impl RedDBRuntime {
             kv: self.inner.kv_stats.snapshot(),
             metrics_ingest: self.inner.metrics_ingest_stats.snapshot(),
         }
+    }
+}
+
+#[cfg(test)]
+mod security_boundary_tests {
+    use super::*;
+    use crate::application::entity::{DeleteEntityInput, PatchEntityInput};
+    use crate::application::ports::RuntimeEntityPort;
+    use crate::auth::Role;
+    use crate::runtime::execution_context::{with_snapshot_bundle, SnapshotBundle};
+    use crate::storage::{EntityData, UnifiedEntity};
+    use reddb_types::Value;
+
+    fn text_field<'a>(entity: &'a UnifiedEntity, name: &str) -> Option<&'a str> {
+        let EntityData::Row(row) = &entity.data else {
+            return None;
+        };
+        let value = row
+            .named
+            .as_ref()
+            .and_then(|named| named.get(name))
+            .or_else(|| {
+                row.schema.as_ref().and_then(|schema| {
+                    schema
+                        .iter()
+                        .position(|column| column == name)
+                        .and_then(|index| row.columns.get(index))
+                })
+            })?;
+        match value {
+            Value::Text(value) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn typed_entity_boundary_filters_before_pagination_and_hides_foreign_ids() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE docs (id INT, tenant_id TEXT, body TEXT) TENANT BY (tenant_id)",
+            )
+            .expect("tenant table");
+        runtime
+            .execute_query(
+                "INSERT INTO docs (id, tenant_id, body) VALUES \
+                 (1, 'acme', 'first'), (2, 'globex', 'hidden'), (3, 'acme', 'second')",
+            )
+            .expect("seed platform rows");
+
+        let unfiltered = runtime
+            .scan_collection("docs", None, 10)
+            .expect("platform scan");
+        let foreign_id = unfiltered
+            .items
+            .iter()
+            .find(|entity| text_field(entity, "tenant_id") == Some("globex"))
+            .map(|entity| entity.id)
+            .expect("foreign row");
+
+        let bundle = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("alice".to_string(), Role::Write)),
+            auth_principal: Some(crate::auth::UserId::scoped("acme", "alice")),
+            tenant: Some("acme".to_string()),
+        };
+        with_snapshot_bundle(&bundle, || {
+            let first = runtime
+                .scan_collection("docs", None, 1)
+                .expect("first visible page");
+            assert_eq!(first.total, 2);
+            assert_eq!(first.items.len(), 1);
+            assert_eq!(text_field(&first.items[0], "tenant_id"), Some("acme"));
+            assert_eq!(first.next, Some(ScanCursor { offset: 1 }));
+
+            let second = runtime
+                .scan_collection("docs", first.next, 1)
+                .expect("second visible page");
+            assert_eq!(second.total, 2);
+            assert_eq!(second.items.len(), 1);
+            assert_eq!(text_field(&second.items[0], "tenant_id"), Some("acme"));
+            assert_eq!(second.next, None);
+
+            assert!(runtime
+                .get_collection_entity("docs", foreign_id)
+                .expect("typed get")
+                .is_none());
+            assert!(matches!(
+                runtime.patch_entity(PatchEntityInput {
+                    collection: "docs".to_string(),
+                    id: foreign_id,
+                    payload: crate::json::Value::Object(Default::default()),
+                    operations: Vec::new(),
+                }),
+                Err(crate::RedDBError::NotFound(_))
+            ));
+            let deleted = runtime
+                .delete_entity(DeleteEntityInput {
+                    collection: "docs".to_string(),
+                    id: foreign_id,
+                })
+                .expect("typed delete");
+            assert!(!deleted.deleted);
+        });
+
+        assert!(runtime.db().store().get("docs", foreign_id).is_some());
+    }
+
+    #[test]
+    fn typed_entity_boundary_uses_model_specific_rls_policies() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        for query in [
+            "CREATE GRAPH links",
+            "INSERT INTO links NODE (label,node_type,visible) VALUES ('shown','Item',true)",
+            "INSERT INTO links NODE (label,node_type,visible) VALUES ('hidden','Item',false)",
+            "CREATE POLICY visible_nodes ON NODES OF links FOR SELECT USING (properties.visible=true)",
+            "ALTER TABLE links ENABLE ROW LEVEL SECURITY",
+            "CREATE DOCUMENT papers",
+            "INSERT INTO papers DOCUMENT VALUES ({name:'shown',visible:true})",
+            "INSERT INTO papers DOCUMENT VALUES ({name:'hidden',visible:false})",
+            "CREATE POLICY visible_documents ON DOCUMENTS OF papers FOR SELECT USING (visible=true)",
+            "ALTER TABLE papers ENABLE ROW LEVEL SECURITY",
+        ] {
+            runtime.execute_query(query).expect(query);
+        }
+
+        let bundle = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("alice".to_string(), Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("alice")),
+            tenant: None,
+        };
+        with_snapshot_bundle(&bundle, || {
+            let nodes = runtime
+                .scan_collection("links", None, 10)
+                .expect("typed graph scan");
+            assert_eq!(nodes.total, 1);
+            assert_eq!(nodes.items.len(), 1);
+
+            let documents = runtime
+                .scan_collection("papers", None, 10)
+                .expect("typed document scan");
+            assert_eq!(documents.total, 1);
+            assert_eq!(documents.items.len(), 1);
+        });
     }
 }

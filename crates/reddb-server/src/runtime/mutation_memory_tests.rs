@@ -39,6 +39,290 @@ fn seeded_runtime(budget: u64, document: bool) -> RedDBRuntime {
 }
 
 #[test]
+fn compressed_secret_expression_input_respects_the_decode_budget() {
+    use reddb_types::Value;
+    use std::sync::Arc;
+
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(128 * 1024))
+            .expect("runtime");
+    let auth = Arc::new(crate::auth::AuthStore::new(
+        crate::auth::AuthConfig::default(),
+    ));
+    auth.ensure_vault_secret_key();
+    let key = auth.vault_secret_key().expect("fixture key");
+    runtime.set_auth_store(auth.clone());
+
+    // This is the existing typed SECRET expression representation. Its
+    // authenticated ciphertext is small, while decoding its TOAST value
+    // would allocate substantially more than the complete engine allowance.
+    let encoded = Value::text("x".repeat(512 * 1024)).to_bytes();
+    assert!(encoded.len() < 1024, "fixture must actually be compressed");
+    let nonce = [7u8; 12];
+    let ciphertext =
+        crate::crypto::aes_gcm::aes256_gcm_encrypt(&key, &nonce, b"reddb.secret.value", &encoded);
+    let mut payload = nonce.to_vec();
+    payload.extend_from_slice(&ciphertext);
+    let secret = Value::Secret(payload);
+    for query in [
+        "SELECT CASE WHEN true THEN 7 ELSE LENGTH($1) END AS selected",
+        "SELECT COALESCE(7, LENGTH($1)) AS selected",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        assert!(
+            result.is_ok(),
+            "unused secret branch must stay lazy: {result:?}"
+        );
+        let result = result.unwrap();
+        let selected = result.result.records[0].get("selected").expect("selected");
+        assert_eq!(
+            runtime.try_secret_query_input(selected.clone()).unwrap(),
+            Some(Value::Integer(7))
+        );
+    }
+    let result = runtime.execute_query_with_params(
+        "SELECT LENGTH($1) AS expanded_length",
+        std::slice::from_ref(&secret),
+    );
+    let error = result.expect_err("compressed secret input must not bypass memory admission");
+    assert!(error.to_string().contains("read memory limit"), "{error}");
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
+    runtime
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("table");
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("small authenticated ciphertext fits the resident allowance");
+    for query in [
+        "SELECT LENGTH(payload) AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs WHERE LENGTH(payload) > 0",
+        "SELECT MIN(LENGTH(payload)) OVER () AS size FROM secret_inputs",
+        "SELECT id FROM secret_inputs ORDER BY LENGTH(payload)",
+        "SELECT id FROM secret_inputs ORDER BY payload",
+        "SELECT id FROM secret_inputs ORDER BY payload LIMIT 1",
+        "SELECT id FROM secret_inputs ORDER BY payload DESC LIMIT 1",
+        "SELECT id FROM secret_inputs WHERE payload IN ('x','y')",
+        "SELECT MIN(payload) FROM secret_inputs",
+        "SELECT COUNT(payload) FROM secret_inputs",
+        "SELECT ARRAY_AGG(payload) FROM secret_inputs",
+        "SELECT COUNT(DISTINCT payload) FROM secret_inputs",
+        "SELECT payload, COUNT(*) FROM secret_inputs GROUP BY payload",
+        "SELECT LENGTH(payload), COUNT(*) FROM secret_inputs GROUP BY LENGTH(payload)",
+    ] {
+        let result = runtime.execute_query(query);
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+    }
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT COUNT(*) FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) FROM secret_inputs WHERE payload = $1 GROUP BY id",
+        "SELECT id, COUNT(*) FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
+        "UPDATE secret_inputs SET id = 77 WHERE payload = $1",
+        "DELETE FROM secret_inputs WHERE payload = $1",
+    ] {
+        let result = runtime.execute_query_with_params(query, std::slice::from_ref(&secret));
+        let error = result.expect_err(query);
+        assert!(
+            error.to_string().contains("read memory limit"),
+            "{query}: {error}"
+        );
+        assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+        if query.starts_with("UPDATE") || query.starts_with("DELETE") {
+            let rows = runtime
+                .execute_query("SELECT id FROM secret_inputs ORDER BY id")
+                .expect("denial preserves rows");
+            assert_eq!(rows.result.records.len(), 3);
+            for (row, expected) in rows.result.records.iter().zip(1..=3) {
+                assert_eq!(row.get("id"), Some(&Value::Integer(expected)));
+            }
+        }
+    }
+
+    for query in [
+        "SELECT COUNT(*) AS total FROM secret_inputs",
+        "SELECT SUM(CASE WHEN id > 0 THEN 1 ELSE LENGTH(payload) END) AS total FROM secret_inputs",
+        "SELECT SUM(COALESCE(1, LENGTH(payload))) AS total FROM secret_inputs",
+    ] {
+        let result = runtime
+            .execute_query(query)
+            .expect("unused secret input stays lazy");
+        let total = result.result.records[0]
+            .get("total")
+            .expect("aggregate total");
+        assert_eq!(
+            runtime
+                .try_secret_query_input(total.clone())
+                .expect("small aggregate output"),
+            Some(Value::Integer(3)),
+            "{query}"
+        );
+    }
+
+    runtime
+        .execute_query("CREATE INDEX secret_inputs_id ON secret_inputs (id) USING BTREE")
+        .expect("index for direct wire candidates");
+    // Keep enough headroom for the admitted response so this case reaches the
+    // secret decoder. The 512 KiB decoded value still exceeds the whole budget.
+    runtime.refresh_memory_accounting();
+    assert!(
+        runtime
+            .memory_accounting()
+            .total_used_bytes()
+            .saturating_add(4096)
+            < runtime.memory_budget().resolved_bytes,
+        "fixture must reach predicate decoding before output admission refuses"
+    );
+    {
+        let _scope = super::execution_context::SecretStoreGuard::install(&runtime);
+        let response = crate::wire::query_direct::try_handle_query_binary_direct(
+            &runtime,
+            "SELECT id FROM secret_inputs WHERE id BETWEEN 1 AND 3 AND payload IS NOT NULL",
+        )
+        .expect("direct indexed scan is eligible");
+        assert_eq!(
+            response.get(4),
+            Some(&reddb_wire::legacy::MSG_ERROR),
+            "direct wire scan must reject rather than publish partial rows"
+        );
+        assert!(
+            String::from_utf8_lossy(&response[5..]).contains("read memory limit"),
+            "direct scan error: {}; sampled usage: {}; budget: {}",
+            String::from_utf8_lossy(&response[5..]),
+            runtime.memory_accounting().total_used_bytes(),
+            runtime.memory_budget().resolved_bytes,
+        );
+    }
+    assert!(runtime.execute_query("SELECT 1 AS healthy").is_ok());
+
+    let larger =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("larger runtime");
+    larger.set_auth_store(auth);
+    larger
+        .execute_query("CREATE TABLE secret_inputs (id INTEGER, payload SECRET)")
+        .expect("larger table");
+    larger
+        .execute_query_with_params(
+            "INSERT INTO secret_inputs (id,payload) VALUES (1,$1),(2,$1),(3,$1)",
+            std::slice::from_ref(&secret),
+        )
+        .expect("larger seed");
+    for query in [
+        "SELECT id FROM secret_inputs WHERE payload = $1",
+        "SELECT id, LENGTH('x') AS marker FROM secret_inputs WHERE payload = $1",
+        "SELECT id, COUNT(*) AS total FROM secret_inputs GROUP BY id HAVING LENGTH($1) > 0",
+    ] {
+        let result = larger
+            .execute_query_with_params(query, std::slice::from_ref(&secret))
+            .expect("value fits the larger allowance");
+        assert_eq!(result.result.records.len(), 3, "{query}");
+    }
+    let result = larger
+        .execute_query("SELECT MIN(payload) AS minimum FROM secret_inputs")
+        .expect("aggregate input fits larger budget");
+    let minimum = result.result.records[0].get("minimum").expect("minimum");
+    assert_eq!(
+        larger
+            .try_secret_query_input(minimum.clone())
+            .expect("decode result"),
+        Some(Value::text("x".repeat(512 * 1024))),
+        "budget enforcement must retain the actual aggregate value"
+    );
+}
+
+#[test]
+fn recovered_row_patch_preserves_fields_outside_the_patch() {
+    use crate::storage::{EntityData, EntityId, UnifiedEntity};
+    use reddb_types::Value;
+
+    for document in [false, true] {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(if document {
+                "CREATE DOCUMENT patch_recovery"
+            } else {
+                "CREATE TABLE patch_recovery (name TEXT, score INT)"
+            })
+            .expect("collection");
+        let fields = if document {
+            let mut body = Vec::new();
+            reddb_types::document_body_codec::encode(
+                &[
+                    ("name", &Value::text("alice")),
+                    ("score", &Value::Integer(1)),
+                ],
+                &mut body,
+            )
+            .expect("body");
+            vec![("body".to_string(), Value::Json(body))]
+        } else {
+            vec![
+                ("name".to_string(), Value::text("alice")),
+                ("score".to_string(), Value::Integer(1)),
+            ]
+        };
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(90001), "patch_recovery", 1, vec![]);
+        entity.data = EntityData::Row(crate::storage::unified::entity::RowData {
+            columns: vec![],
+            named: Some(fields.into_iter().collect()),
+            schema: None,
+        });
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("patch_recovery")
+            .expect("manager");
+        manager
+            .restore_snapshot_entity(entity)
+            .expect("recover row");
+        assert!(manager
+            .get(EntityId::new(90001))
+            .expect("row")
+            .data
+            .as_row()
+            .expect("row data")
+            .named
+            .is_none());
+        runtime
+            .patch_entity(PatchEntityInput {
+                collection: "patch_recovery".to_string(),
+                id: EntityId::new(90001),
+                payload: crate::json::Value::Null,
+                operations: vec![PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["fields".to_string(), "score".to_string()],
+                    value: Some(crate::json::Value::Integer(2)),
+                }],
+            })
+            .expect("patch recovered row");
+        let result = runtime
+            .execute_query("SELECT name, score FROM patch_recovery")
+            .expect("read patched row");
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("alice")),
+            "document={document}"
+        );
+        assert_eq!(
+            result.result.records[0].get("score"),
+            Some(&Value::Integer(2))
+        );
+    }
+}
+
+#[test]
 fn mutation_memory_oversized_update_preserves_table_and_document() {
     for document in [false, true] {
         let runtime = seeded_runtime(128 * 1024, document);
@@ -679,5 +963,623 @@ fn bulk_update_wal_batches_and_recovers_every_key_after_process_exit() {
             Some(&reddb_types::Value::text("committed")),
             "recovered payload for id={id}"
         );
+    }
+}
+
+#[test]
+fn recovered_named_rows_share_declared_schema_before_serving_queries() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path).with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        runtime.execute_query("CREATE TABLE recovery_memory (id INTEGER PRIMARY KEY, payload TEXT, dimension INTEGER)").expect("table");
+        for id in 0..128 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO recovery_memory (id,payload,dimension) VALUES ({id},'kept',{id})"
+                ))
+                .expect("insert");
+        }
+    }
+    for _ in 0..3 {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("reopen");
+        let manager = runtime
+            .inner
+            .db
+            .store()
+            .get_collection("recovery_memory")
+            .expect("collection");
+        let mut count = 0;
+        manager.for_each_entity(|entity| {
+            let row = entity.data.as_row().expect("row");
+            assert!(
+                row.named.is_none(),
+                "recovery must compact the named hash map"
+            );
+            assert_eq!(
+                row.get_field("payload"),
+                Some(&reddb_types::Value::text("kept"))
+            );
+            count += 1;
+            true
+        });
+        assert_eq!(count, 128);
+        let result = runtime
+            .execute_query(
+                "SELECT id,dimension FROM recovery_memory WHERE dimension >= 120 ORDER BY id",
+            )
+            .expect("filtered rows");
+        assert_eq!(result.result.records.len(), 8);
+        for (index, row) in result.result.records.iter().enumerate() {
+            assert_eq!(
+                row.get("id"),
+                Some(&reddb_types::Value::Integer(120 + index as i64))
+            );
+            assert_eq!(row.get("dimension"), row.get("id"));
+        }
+    }
+}
+
+#[test]
+fn paged_recovery_compacts_named_rows_before_runtime_initialization() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("early-recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        runtime
+            .execute_query(
+                "CREATE TABLE early_recovery_memory (id INTEGER PRIMARY KEY, payload TEXT)",
+            )
+            .expect("table");
+        for id in 0..128 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO early_recovery_memory (id,payload) VALUES ({id},'kept')"
+                ))
+                .expect("insert");
+        }
+    }
+    // Open storage alone. No runtime bootstrap or late schema hydration has
+    // run yet, so this pins the memory-saving path to snapshot reconstruction.
+    let db = crate::storage::RedDB::open_with_options(&options).expect("cold storage open");
+    let manager = db
+        .store()
+        .get_collection("early_recovery_memory")
+        .expect("collection");
+    let mut count = 0;
+    manager.for_each_entity(|entity| {
+        let row = entity.data.as_row().expect("row");
+        assert!(
+            row.named.is_none(),
+            "paged hydration must compact before full materialization"
+        );
+        assert_eq!(
+            row.get_field("payload"),
+            Some(&reddb_types::Value::text("kept"))
+        );
+        count += 1;
+        true
+    });
+    assert_eq!(count, 128);
+}
+
+#[test]
+fn paged_recovery_keeps_bootstrap_and_declared_schema_metadata_readable() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("bootstrap-recovery-memory.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("create");
+        assert_eq!(
+            runtime.inner.db.store().set_config_tree(
+                "system.bootstrap",
+                &crate::serde_json::json!({"completed": true, "preset": "production"}),
+            ),
+            2
+        );
+        runtime
+            .execute_query("CREATE TABLE bootstrap_recovery (id INTEGER, payload TEXT)")
+            .expect("declared schema");
+    }
+    for _ in 0..3 {
+        // Bootstrap reads this before a runtime or any late hydration exists.
+        {
+            let db = crate::storage::RedDB::open_with_options(&options).expect("cold storage open");
+            assert_eq!(
+                db.store()
+                    .get_config(crate::service_cli::BOOTSTRAP_COMPLETED_KEY),
+                Some(reddb_types::Value::Boolean(true)),
+                "an existing vault must not be bootstrapped again after recovery"
+            );
+        }
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime reopen");
+        assert_eq!(
+            runtime
+                .inner
+                .db
+                .store()
+                .get_config(crate::service_cli::BOOTSTRAP_PRESET_KEY),
+            Some(reddb_types::Value::text("production"))
+        );
+        let manager = runtime
+            .inner
+            .db
+            .store()
+            .get_collection("bootstrap_recovery")
+            .expect("table");
+        assert_eq!(
+            manager
+                .column_schema()
+                .expect("rehydrated declared columns")
+                .len(),
+            2
+        );
+    }
+}
+
+#[test]
+fn metadata_publication_memory_does_not_copy_large_unrelated_payloads() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let observe = |payload_bytes| {
+        let directory = tempfile::tempdir().expect("directory");
+        let options = RedDBOptions::persistent(directory.path().join("ddl-memory.rdb"))
+            .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+            .with_memory_budget(32 * 1024 * 1024);
+        let runtime = RedDBRuntime::with_options(options).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE source (id INTEGER, payload BLOB)")
+            .expect("source");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("source")
+            .expect("source manager");
+        for id in 1..=32 {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(1000 + id), "source", id, vec![]);
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![
+                    Value::Integer(id as i64),
+                    Value::Blob(vec![255; payload_bytes]),
+                ],
+                vec!["id".into(), "payload".into()],
+            ));
+            manager.insert(entity).expect("source row");
+        }
+        runtime
+            .checkpoint()
+            .expect("publish source before unrelated DDL");
+        let (result, allocations) =
+            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+                runtime.execute_query("CREATE TABLE unrelated_empty (id INTEGER)")
+            });
+        result.expect("DDL succeeds independently of unrelated payload size");
+        assert_eq!(manager.count(), 32);
+        assert_eq!(
+            manager
+                .get(EntityId::new(1001))
+                .expect("source survives")
+                .data
+                .as_row()
+                .expect("row")
+                .get_field("payload"),
+            Some(&Value::Blob(vec![255; payload_bytes]))
+        );
+        allocations
+    };
+    let baseline = observe(0);
+    let measured = observe(64 * 1024);
+    eprintln!(
+        "DDL allocation bytes: {} -> {}",
+        baseline.allocated_bytes, measured.allocated_bytes
+    );
+    assert!(measured.allocated_bytes <= baseline.allocated_bytes + 1024 * 1024,
+        "metadata publication must not copy unrelated payloads for derived search artifacts: {baseline:?} -> {measured:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reopened_catalog_ddl_does_not_rewrite_unrelated_collection_pages() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    use std::os::unix::fs::MetadataExt;
+
+    fn space(path: &std::path::Path) -> (u64, u64) {
+        let metadata = std::fs::metadata(path).expect("database metadata");
+        (metadata.len(), metadata.blocks() * 512)
+    }
+
+    const COLLECTIONS: u64 = 24;
+    const ROWS_PER_COLLECTION: u64 = 512;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("ddl-reopen.rdb");
+    let options = RedDBOptions::persistent(&path)
+        .with_bounded_disk_residency(true)
+        .with_memory_budget(64 * 1024 * 1024);
+
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+        for collection_index in 0..COLLECTIONS {
+            let collection = format!("existing_{collection_index}");
+            runtime
+                .execute_query(&format!(
+                    "CREATE TABLE {collection} (id INTEGER, bucket INTEGER, payload BLOB)"
+                ))
+                .expect("source collection");
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection(&collection)
+                .expect("source manager");
+            let rows = (0..ROWS_PER_COLLECTION)
+                .map(|row| {
+                    let id = collection_index * 1_000 + row + 1;
+                    let mut entity = UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        collection.as_str(),
+                        row + 1,
+                        vec![],
+                    );
+                    let mut payload = varied_payload(1024).into_bytes();
+                    payload[..8].copy_from_slice(&id.to_le_bytes());
+                    entity.data = EntityData::Row(RowData::with_names(
+                        vec![
+                            Value::Integer(id as i64),
+                            Value::Integer((row % 32) as i64),
+                            Value::Blob(payload),
+                        ],
+                        vec!["id".into(), "bucket".into(), "payload".into()],
+                    ));
+                    entity
+                })
+                .collect();
+            manager.bulk_insert(rows).expect("source rows");
+            runtime
+                .execute_query(&format!(
+                    "CREATE INDEX idx_{collection_index}_id ON {collection} (id) USING BTREE"
+                ))
+                .expect("id index");
+            runtime
+                .execute_query(&format!(
+                    "CREATE INDEX idx_{collection_index}_bucket ON {collection} (bucket) USING BTREE"
+                ))
+                .expect("bucket index");
+        }
+        runtime.checkpoint().expect("publish source generations");
+    }
+
+    let compact_directory = directory.path().join("compact");
+    let report = crate::storage::compact::compact_paged(&path, &compact_directory)
+        .expect("offline physical rewrite");
+    let compacted_path = compact_directory.join("ddl-reopen.rdb");
+    eprintln!(
+        "compacted DDL fixture: {} -> {} bytes, records={}, trees={}",
+        report.source_bytes, report.destination_bytes, report.records, report.trees
+    );
+    let compacted_options = RedDBOptions::persistent(&compacted_path)
+        .with_bounded_disk_residency(true)
+        .with_memory_budget(64 * 1024 * 1024);
+    let before_open = space(&compacted_path);
+    let runtime = RedDBRuntime::with_options(compacted_options).expect("reopen compacted runtime");
+    let after_open = space(&compacted_path);
+    eprintln!("cold open space: {before_open:?} -> {after_open:?}");
+    let open_growth = after_open.1.saturating_sub(before_open.1);
+    assert!(
+        open_growth <= 1024 * 1024,
+        "cold open must reuse compacted secondary trees instead of rebuilding them: \
+         before={before_open:?} after={after_open:?} growth={open_growth}"
+    );
+    let before = space(&compacted_path);
+    runtime
+        .execute_query(
+            "CREATE TABLE IF NOT EXISTS database_engine_rollout_claims (\
+                id TEXT, database_id TEXT, environment TEXT, operation_id TEXT, acquired_at TEXT\
+            )",
+        )
+        .expect("small unrelated DDL");
+    runtime.checkpoint().expect("publish small unrelated DDL");
+    let after = space(&compacted_path);
+    eprintln!("reopened DDL space: {before:?} -> {after:?}");
+
+    let growth = after.1.saturating_sub(before.1);
+    assert!(
+        growth <= 1024 * 1024,
+        "a metadata-only DDL must not physically rewrite unrelated collection pages: \
+         before={before:?} after={after:?} growth={growth}"
+    );
+    for collection_index in 0..COLLECTIONS {
+        let collection = format!("existing_{collection_index}");
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection(&collection)
+                .expect("unrelated collection survives")
+                .count(),
+            ROWS_PER_COLLECTION as usize
+        );
+    }
+}
+
+#[test]
+fn native_artifact_budget_deferral_is_visible_recoverable_and_reversible() {
+    let directory = tempfile::tempdir().expect("directory");
+    let options = RedDBOptions::persistent(directory.path().join("artifact-budget.rdb"))
+        .with_capability(crate::api::Capability::FullText)
+        .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+        .expect("paged profile")
+        .with_memory_budget(32 * 1024 * 1024);
+    let payload = "alpha beta ".repeat(1024);
+    let state = |runtime: &RedDBRuntime| {
+        let metadata = runtime
+            .db()
+            .physical_metadata()
+            .expect("published metadata");
+        let index = metadata
+            .indexes
+            .iter()
+            .find(|index| {
+                index.collection.as_deref() == Some("artifact_budget")
+                    && index.artifact_kind.as_deref() == Some("text.fulltext")
+            })
+            .expect("fulltext index state");
+        index.build_state.clone()
+    };
+    {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        runtime
+            .execute_query("CREATE DOCUMENT artifact_budget")
+            .expect("document collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("artifact_budget")
+            .expect("manager");
+        for id in 0..32 {
+            // A legacy document can retain promoted named fields alongside
+            // its canonical JSON body. This exercises both native artifacts.
+            let mut entity = crate::storage::UnifiedEntity::table_row(
+                crate::storage::EntityId::new(1000 + id),
+                "artifact_budget",
+                id,
+                vec![],
+            );
+            entity.data = crate::storage::EntityData::Row(
+                crate::storage::unified::entity::RowData::with_names(
+                    vec![
+                        reddb_types::Value::Integer(id as i64),
+                        reddb_types::Value::text(payload.as_str()),
+                        reddb_types::Value::Json(br#"{"legacy":true}"#.to_vec()),
+                    ],
+                    vec!["id".into(), "payload".into(), "body".into()],
+                ),
+            );
+            manager.insert(entity).expect("legacy source row");
+        }
+        runtime.checkpoint().expect("bounded publication");
+        assert_eq!(state(&runtime), "deferred-memory-budget");
+    }
+    let runtime = RedDBRuntime::with_options(options).expect("cold reopen");
+    assert_eq!(state(&runtime), "deferred-memory-budget");
+    let records = runtime
+        .execute_query("SELECT id,payload FROM artifact_budget ORDER BY id")
+        .expect("canonical query after deferral")
+        .result
+        .records;
+    assert_eq!(records.len(), 32);
+    assert!(records
+        .iter()
+        .all(|row| row.get("payload") == Some(&reddb_types::Value::text(payload.as_str()))));
+    runtime
+        .execute_query("DELETE FROM artifact_budget WHERE id >= 1")
+        .expect("delete");
+    runtime
+        .execute_query("VACUUM artifact_budget")
+        .expect("reclaim");
+    runtime.checkpoint().expect("publish smaller artifact");
+    assert_ne!(state(&runtime), "deferred-memory-budget");
+    let store = runtime.db().store();
+    let header = store.physical_file_header().expect("header");
+    assert!(store
+        .read_native_vector_artifact_blob(
+            header.vector_artifact_page,
+            "artifact_budget",
+            Some("text.fulltext")
+        )
+        .expect("artifact read")
+        .is_some());
+}
+
+#[test]
+fn native_kv_reads_recovered_shapes_without_copying_unrelated_payloads() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    runtime
+        .execute_query("CREATE KV recovered_keys")
+        .expect("KV collection");
+    let manager = runtime
+        .db()
+        .store()
+        .get_collection("recovered_keys")
+        .expect("manager");
+    for id in 0..33 {
+        let mut row =
+            UnifiedEntity::table_row(EntityId::new(1000 + id), "recovered_keys", id, vec![]);
+        row.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(if id == 0 {
+                    "wanted".to_string()
+                } else {
+                    format!("other-{id}")
+                }),
+                if id == 0 {
+                    Value::text("kept")
+                } else {
+                    Value::Blob(vec![255; 64 * 1024])
+                },
+            ],
+            vec!["key".into(), "value".into()],
+        ));
+        manager
+            .restore_snapshot_entity(row)
+            .expect("recover named record");
+    }
+    let (value, allocations) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+        runtime.db().get_kv("recovered_keys", "wanted")
+    });
+    assert_eq!(value, Some((Value::text("kept"), EntityId::new(1000))));
+    assert!(
+        allocations.allocated_bytes < 65536,
+        "native KV get copied unrelated values: {allocations:?}"
+    );
+}
+
+#[test]
+fn dynamic_recovery_shape_preserves_compiled_filters_and_projections() {
+    use crate::storage::unified::entity::{EntityData, EntityId, RowData, UnifiedEntity};
+    use reddb_types::Value;
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE dynamic_recovery (id INTEGER)")
+        .expect("table");
+    let manager = runtime
+        .inner
+        .db
+        .store()
+        .get_collection("dynamic_recovery")
+        .expect("manager");
+    let mut entity = UnifiedEntity::table_row(EntityId::new(1000), "dynamic_recovery", 1, vec![]);
+    entity.data = EntityData::Row(RowData {
+        columns: vec![],
+        named: Some(
+            [
+                ("a_dimension".into(), Value::Integer(999)),
+                ("id".into(), Value::Integer(7)),
+                ("z_payload".into(), Value::Integer(42)),
+            ]
+            .into(),
+        ),
+        schema: None,
+    });
+    manager
+        .restore_snapshot_entity(entity)
+        .expect("recover dynamic row");
+    let records = runtime
+        .execute_query("SELECT id,z_payload FROM dynamic_recovery WHERE id = 7")
+        .expect("compiled read")
+        .result
+        .records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].get("id"), Some(&Value::Integer(7)));
+    assert_eq!(records[0].get("z_payload"), Some(&Value::Integer(42)));
+}
+
+#[test]
+fn mutation_memory_event_outbox_rejects_growth_before_publishing_a_message() {
+    use reddb_types::Value;
+    let runtime =
+        RedDBRuntime::with_options(RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024))
+            .expect("bounded event runtime");
+    runtime
+        .execute_query("CREATE QUEUE admitted_events")
+        .expect("outbox");
+    let payload = varied_payload(256 * 1024);
+    let queue = runtime
+        .db()
+        .store()
+        .get_collection("admitted_events")
+        .expect("event collection");
+    let mut admitted = 0;
+    let mut denied = None;
+    for _ in 0..64 {
+        let before = queue.count();
+        match runtime.enqueue_event_payload("admitted_events", Value::text(payload.clone())) {
+            Ok(_) => admitted += 1,
+            Err(error) => {
+                assert_eq!(queue.count(), before, "denied enqueue published a message");
+                denied = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(
+        admitted > 0,
+        "fixture must exercise incremental queue growth"
+    );
+    let error = denied.expect("event outbox must stop resident growth at the shared engine budget");
+    assert!(error.to_string().contains("over budget"), "{error}");
+    assert_eq!(queue.count(), admitted);
+    let reservations = runtime.inner.memory_reservations.lock();
+    assert_eq!(
+        reservations.reserved_bytes, reservations.completed_bytes,
+        "admission failure leaked a credit"
+    );
+}
+
+#[test]
+fn mutation_memory_queue_push_rejects_growth_before_message_or_metadata_publication() {
+    // KEY and DELAY are mutually exclusive in the public grammar.
+    for metadata_suffix in ["", " KEY 'ordering'", " DELAY 5s"] {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(4 * 1024 * 1024),
+        )
+        .expect("bounded queue runtime");
+        runtime
+            .execute_query("CREATE QUEUE admitted_push")
+            .expect("queue");
+        let queue = runtime
+            .db()
+            .store()
+            .get_collection("admitted_push")
+            .expect("queue collection");
+        let payload = varied_payload(256 * 1024);
+        let mut admitted = 0;
+        let mut denied = None;
+        for attempt in 0..64 {
+            let metadata = runtime
+                .db()
+                .store()
+                .get_collection(super::impl_queue::QUEUE_META_COLLECTION)
+                .expect("queue metadata");
+            let metadata_before = metadata.count();
+            let suffix = if !metadata_suffix.is_empty() {
+                format!("{metadata_suffix} DEDUP 'attempt_{attempt}'")
+            } else {
+                String::new()
+            };
+            match runtime.execute_query(&format!("QUEUE PUSH admitted_push '{payload}'{suffix}")) {
+                Ok(_) => admitted += 1,
+                Err(error) => {
+                    assert_eq!(queue.count(), admitted, "denied push inserted a message");
+                    assert_eq!(
+                        metadata.count(),
+                        metadata_before,
+                        "denied push inserted metadata"
+                    );
+                    denied = Some(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            admitted > 0,
+            "exercise incremental growth for {metadata_suffix}: {denied:?}"
+        );
+        let error = denied.expect("QUEUE PUSH must enforce the shared memory budget");
+        assert!(error.to_string().contains("over budget"), "{error}");
+        let reservations = runtime.inner.memory_reservations.lock();
+        assert_eq!(reservations.reserved_bytes, reservations.completed_bytes);
     }
 }

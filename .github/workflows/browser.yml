@@ -1,70 +1,12 @@
 name: RedDB Browser Foundation
 
 on:
-  pull_request:
-    paths:
-      - 'crates/reddb-file/**'
-      - 'crates/reddb-engine/**'
-      - 'crates/reddb-server/src/catalog.rs'
-      - 'crates/reddb-server/src/physical.rs'
-      - 'crates/reddb-server/src/physical/**'
-      - 'crates/reddb-server/src/application/collection_contract*'
-      - 'crates/reddb-server/src/application/entity.rs'
-      - 'crates/reddb-server/src/application/ttl_payload.rs'
-      - 'crates/reddb-server/src/storage/unified/devx/reddb/contract_cache.rs'
-      - 'crates/reddb-server/src/storage/query/**'
-      - 'crates/reddb-server/src/storage/engine/**'
-      - 'crates/reddb-server/src/storage/transaction/**'
-      - 'crates/reddb-server/src/storage/unified/entity.rs'
-      - 'crates/reddb-server/src/storage/unified/manager.rs'
-      - 'crates/reddb-server/src/storage/unified/manager/**'
-      - 'crates/reddb-server/src/storage/unified/visibility_map.rs'
-      - 'crates/reddb-server/src/storage/unified/context_index.rs'
-      - 'crates/reddb-server/src/storage/unified/entity_cache.rs'
-      - 'crates/reddb-server/src/storage/unified/tokenization.rs'
-      - 'crates/reddb-server/src/runtime/ai/moderation.rs'
-      - 'crates/reddb-server/src/storage/unified/store.rs'
-      - 'crates/reddb-server/src/storage/unified/store/**'
-      - 'crates/reddb-server/src/runtime/transaction_state.rs'
-      - 'crates/reddb-server/src/runtime/execution_context.rs'
-      - 'crates/reddb-server/src/runtime/table_row_mvcc_resolver.rs'
-      - 'crates/reddb-server/src/runtime/record_search.rs'
-      - 'crates/reddb-server/src/runtime/query_exec/json_writers.rs'
-      - 'crates/reddb-server/src/runtime/query_exec.rs'
-      - 'crates/reddb-server/src/runtime/query_exec/aggregate.rs'
-      - 'crates/reddb-server/src/runtime/query_exec/table.rs'
-      - 'crates/reddb-server/src/runtime/window_phase.rs'
-      - 'tests/grouped_mvcc_transactions.rs'
-      - 'tests/grouped/mvcc_transactions/**'
-      - 'crates/reddb-server/src/runtime/join_filter/**'
-      - 'crates/reddb-server/src/runtime/expr_eval.rs'
-      - 'crates/reddb-server/src/geo/**'
-      - 'crates/reddb-server/src/runtime/evaluator_differential.rs'
-      - 'crates/reddb-server/tests/portable_query_engine.rs'
-      - 'crates/reddb-server/tests/pager_*.rs'
-      - 'crates/reddb-server/tests/vault_transactions.rs'
-      - 'crates/reddb-server/tests/vault_contract.rs'
-      - 'crates/reddb-server/tests/vault_import_corruption.rs'
-      - 'crates/reddb-server/tests/vacuum_snapshot_horizon.rs'
-      - 'crates/reddb-server/tests/checkpoint_open_transaction.rs'
-      - 'crates/reddb-server/tests/checkpoint_concurrent_transaction.rs'
-      - 'crates/reddb-server/tests/btree_*.rs'
-      - 'crates/reddb-server/tests/paged_checkpoint_rebuild.rs'
-      - 'crates/reddb-server/tests/dead_storage_modules.rs'
-      - 'crates/reddb-wasm/**'
-      - 'crates/reddb-rql/**'
-      - 'crates/reddb-types/**'
-      - 'packages/browser/**'
-      - 'drivers/node/Cargo.lock'
-      - 'drivers/python/Cargo.lock'
-      - 'drivers/dart/**'
-      - 'drivers/dotnet/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/browser.yml'
-      - '.github/workflows/browser-release.yml'
   workflow_dispatch:
+    inputs:
+      preview_platforms:
+        type: boolean
+        description: Show selected platforms without running builds, tests or publication
+        default: false
 
 permissions:
   contents: read
@@ -77,15 +19,95 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_BUILD_JOBS: 2
 
+  ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
+  ENABLE_LINUX_ARM64: ${{ vars.ENABLE_LINUX_ARM64 || 'true' }}
+  ENABLE_WINDOWS_X64: ${{ vars.ENABLE_WINDOWS_X64 || 'true' }}
+  ENABLE_WINDOWS_ARM64: ${{ vars.ENABLE_WINDOWS_ARM64 || 'false' }}
+  ENABLE_MACOS_X64: ${{ vars.ENABLE_MACOS_X64 || 'false' }}
+  ENABLE_MACOS_ARM64: ${{ vars.ENABLE_MACOS_ARM64 || 'false' }}
+  ENABLE_LINUX_ARMV7: ${{ vars.ENABLE_LINUX_ARMV7 || 'false' }}
+  ENABLE_LINUX_X86: ${{ vars.ENABLE_LINUX_X86 || 'false' }}
 jobs:
+  platforms:
+    name: Select platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      linux_x64: ${{ steps.select.outputs.linux_x64 }}
+      linux_arm64: ${{ steps.select.outputs.linux_arm64 }}
+      windows_x64: ${{ steps.select.outputs.windows_x64 }}
+      windows_arm64: ${{ steps.select.outputs.windows_arm64 }}
+      macos_x64: ${{ steps.select.outputs.macos_x64 }}
+      macos_arm64: ${{ steps.select.outputs.macos_arm64 }}
+      linux_armv7: ${{ steps.select.outputs.linux_armv7 }}
+      linux_x86: ${{ steps.select.outputs.linux_x86 }}
+      any: ${{ steps.select.outputs.any }}
+      docker_platforms: ${{ steps.select.outputs.docker_platforms }}
+      matrix_native-artifact: ${{ steps.select.outputs.matrix_native-artifact }}
+      enabled_native-artifact: ${{ steps.select.outputs.enabled_native-artifact }}
+    steps:
+      - id: select
+        name: Filter platforms before allocating runners
+        shell: python
+        env:
+          PLATFORM_DEFAULTS: '{"linux_x64":true,"linux_arm64":true,"windows_x64":true,"windows_arm64":false,"macos_x64":false,"macos_arm64":false,"linux_armv7":false,"linux_x86":false}'
+          PLATFORM_AVAILABLE: '["linux_x64", "windows_x64"]'
+          PLATFORM_MATRICES: |
+            {
+              "native-artifact": [
+                {
+                  "flag": "linux_x64",
+                  "row": {
+                    "os": "ubuntu-latest"
+                  }
+                },
+                {
+                  "flag": "windows_x64",
+                  "row": {
+                    "os": "windows-latest"
+                  }
+                }
+              ]
+            }
+        run: |
+          import json
+          import os
+
+          defaults = json.loads(os.environ["PLATFORM_DEFAULTS"])
+          enabled = {}
+          for key in defaults:
+              name = "ENABLE_" + key.upper()
+              value = os.environ[name].lower()
+              if value not in ("true", "false"):
+                  raise SystemExit(f"{name} must be true or false, got {value!r}")
+              enabled[key] = value == "true"
+
+          matrices = json.loads(os.environ["PLATFORM_MATRICES"])
+          available = json.loads(os.environ["PLATFORM_AVAILABLE"])
+          output = {key: str(value).lower() for key, value in enabled.items()}
+          output["any"] = str(any(enabled[key] for key in available)).lower()
+          for job, entries in matrices.items():
+              selected = [entry["row"] for entry in entries if enabled[entry["flag"]]]
+              output["enabled_" + job] = str(bool(selected)).lower()
+              # A placeholder keeps GitHub's matrix schema valid when the job is skipped.
+              output["matrix_" + job] = json.dumps({"include": selected or [entries[0]["row"]]}, separators=(",", ":"))
+          docker = [target for key, target in (("linux_x64", "linux/amd64"), ("linux_arm64", "linux/arm64")) if enabled[key]]
+          output["docker_platforms"] = ",".join(docker)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              for key, value in output.items():
+                  handle.write(f"{key}={value}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write("### Selected platforms\n\n")
+              for key in available:
+                  handle.write(f"- {key}: {str(enabled[key]).lower()}\n")
   native-artifact:
     name: Native formats and query core (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.platforms.outputs.matrix_native-artifact) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
@@ -148,11 +170,15 @@ jobs:
           cargo test --locked -p reddb-io-server --lib runtime::evaluator_differential
           cargo test --locked -p reddb-io-server --lib runtime::query_exec::aggregate
           cargo test --locked -p reddb-io-server --lib runtime::window_phase
+          cargo test --locked -p reddb-io-server --lib auth::vault::tests::portable_vault_preserves_native_auth_payload_and_passphrase_contract
           cargo test --locked -p reddb-io-server --test vault_contract
       - name: Check every workspace target, including evaluator inventory tests
         if: runner.os == 'Linux'
         run: cargo check --locked --workspace --all-targets
 
+    needs:
+      - platforms
+    if: ${{ !inputs.preview_platforms && (needs.platforms.outputs.enabled_native-artifact == 'true') }}
   browser-artifact:
     name: WASM and OPFS (Chromium, Firefox, WebKit)
     runs-on: ubuntu-latest
@@ -163,7 +189,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Install pinned browser dependencies
@@ -196,7 +222,7 @@ jobs:
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: '3.13.7'
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
         with:
           dotnet-version: '8.0.426'
       - name: Analyze the Dart browser entrypoint
@@ -209,3 +235,4 @@ jobs:
         run: pnpm --filter @reddb-io/browser build:interop
       - name: Verify Dart and Blazor online and after an offline browser restart
         run: pnpm --filter @reddb-io/browser test:interop
+    if: ${{ !inputs.preview_platforms }}

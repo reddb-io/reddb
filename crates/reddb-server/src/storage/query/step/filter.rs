@@ -15,7 +15,6 @@
 use super::{Step, StepResult, Traverser, TraverserRequirement, TraverserValue};
 use crate::serde_json::Value;
 use std::any::Any;
-use std::collections::HashSet;
 
 /// Trait for filter steps
 pub trait FilterStep: Step {
@@ -422,8 +421,6 @@ pub struct DedupStep {
     labels: Vec<String>,
     /// Dedup scope (labels to dedup on)
     by_labels: Vec<String>,
-    /// Seen values (state)
-    seen: HashSet<u64>,
 }
 
 impl DedupStep {
@@ -433,7 +430,6 @@ impl DedupStep {
             id: "dedup_0".to_string(),
             labels: Vec::new(),
             by_labels: Vec::new(),
-            seen: HashSet::new(),
         }
     }
 
@@ -443,32 +439,7 @@ impl DedupStep {
             id: format!("dedup_{}", by_labels.join("_")),
             labels: Vec::new(),
             by_labels,
-            seen: HashSet::new(),
         }
-    }
-
-    /// Hash a traverser value for dedup
-    fn hash_value(&self, traverser: &Traverser) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-
-        if self.by_labels.is_empty() {
-            // Dedup on current value
-            traverser.value().hash(&mut hasher);
-        } else {
-            // Dedup on labeled values
-            if let Some(path) = traverser.path() {
-                for label in &self.by_labels {
-                    if let Some(value) = path.get(label) {
-                        value.hash(&mut hasher);
-                    }
-                }
-            }
-        }
-
-        hasher.finish()
     }
 }
 
@@ -508,16 +479,11 @@ impl Step for DedupStep {
     }
 
     fn process_traverser(&self, traverser: Traverser) -> StepResult {
-        // Note: This needs mutable access to seen set
-        // In real impl, this would use interior mutability
-        let hash = self.hash_value(&traverser);
         // For now, just emit (actual dedup would be in barrier)
         StepResult::emit_one(traverser)
     }
 
-    fn reset(&mut self) {
-        self.seen.clear();
-    }
+    fn reset(&mut self) {}
 
     fn clone_step(&self) -> Box<dyn Step> {
         Box::new(self.clone())

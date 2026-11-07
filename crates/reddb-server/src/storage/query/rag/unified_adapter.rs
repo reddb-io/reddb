@@ -208,7 +208,7 @@ impl UnifiedStoreAdapter {
             visited.insert(current_id);
 
             // Find the entity
-            if let Some((col_name, entity)) = self.store.get_any(current_id) {
+            if let Some((_, entity)) = self.store.get_any(current_id) {
                 // Add to results if not the source
                 if current_id != source_id {
                     let matched = MatchedEntity::new(
@@ -668,7 +668,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Convert an entity to a context chunk
-fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> ContextChunk {
+fn entity_to_chunk(entity: &UnifiedEntity, _collection: &str, score: f32) -> ContextChunk {
     let content = match &entity.data {
         EntityData::Row(row) => {
             let fields: Vec<String> = row

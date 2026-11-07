@@ -29,6 +29,8 @@ mod segment_unique_key;
 
 pub mod metadata_codec;
 pub mod snapshot;
+#[doc(hidden)]
+pub mod system_collection_names;
 
 pub mod manager;
 pub mod visibility;
@@ -38,8 +40,13 @@ pub mod context_index;
 pub mod entity_cache;
 pub mod tokenization;
 
+mod collection_key_read;
+#[doc(hidden)]
+pub mod collection_read;
+pub mod ordered_secondary_key;
 #[doc(hidden)]
 pub mod resident_store;
+pub mod secondary_index_read;
 
 pub mod error;
 #[doc(hidden)]

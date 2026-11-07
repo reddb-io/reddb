@@ -17,25 +17,36 @@ impl RuntimeBackgroundTasks {
         builder: Builder,
         work: impl FnOnce(Arc<AtomicBool>) + Send + 'static,
     ) {
+        let mut workers = self.workers.lock();
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         let stopped = Arc::clone(&self.stopped);
         if let Ok(worker) = builder.spawn(move || work(stopped)) {
-            self.workers.lock().push(worker);
+            workers.push(worker);
+        }
+    }
+
+    pub(super) fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let workers = {
+            let mut workers = self.workers.lock();
+            for worker in workers.iter() {
+                worker.thread().unpark();
+            }
+            workers.drain(..).collect::<Vec<_>>()
+        };
+        for worker in workers {
+            if worker.join().is_err() {
+                tracing::warn!("runtime background worker panicked before shutdown completed");
+            }
         }
     }
 }
 
 impl Drop for RuntimeBackgroundTasks {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        let workers = self.workers.get_mut();
-        for worker in workers.iter() {
-            worker.thread().unpark();
-        }
-        for worker in workers.drain(..) {
-            if worker.join().is_err() {
-                tracing::warn!("runtime background worker panicked before shutdown completed");
-            }
-        }
+        self.shutdown();
     }
 }
 
@@ -98,5 +109,50 @@ mod tests {
             .execute_query("SELECT * FROM close_rows")
             .expect("persisted row");
         assert_eq!(result.result.len(), 1);
+    }
+
+    #[test]
+    fn graceful_shutdown_drains_workers_before_the_final_checkpoint() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("graceful-close.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
+            .expect("paged profile");
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE close_rows (id INT)")
+            .expect("table");
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = Arc::clone(&exited);
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("foreground owner")
+            .spawn(
+                Builder::new().name("reddb-graceful-close-regression".into()),
+                move |stopped| {
+                    while !stopped.load(Ordering::Acquire) {
+                        std::thread::park_timeout(Duration::from_secs(30));
+                    }
+                    worker_exited.store(true, Ordering::Release);
+                },
+            );
+
+        runtime.graceful_shutdown(false).expect("graceful shutdown");
+        assert!(
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground owner")
+                .stopped
+                .load(Ordering::Acquire),
+            "graceful shutdown must stop periodic workers before returning",
+        );
+        assert!(
+            exited.load(Ordering::Acquire),
+            "graceful shutdown must join periodic workers before returning",
+        );
+        drop(runtime);
+        RedDBRuntime::with_options(options).expect("reopen after final checkpoint");
     }
 }

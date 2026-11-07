@@ -10,6 +10,7 @@ import {
   PLATFORMS,
   addonAssetName,
   buildPackages,
+  enabledPlatforms,
   injectOptionalDependencies,
   packageName,
   parseSha256Sums,
@@ -148,4 +149,35 @@ test('every platform asset maps to the release asset naming scheme', () => {
   for (const p of PLATFORMS.filter((x) => !x.asset.endsWith('-static'))) {
     assert.ok(assetName.includes(p.asset.replace(/^red/, '${binName}')), `${p.asset} not in asset-name.js`)
   }
+})
+
+
+test('platform flags omit disabled targets without weakening selected asset checks', () => {
+  const selected = enabledPlatforms({
+    ENABLE_LINUX_X64: 'true',
+    ENABLE_LINUX_ARM64: 'false',
+    ENABLE_WINDOWS_X64: 'false',
+    ENABLE_MACOS_ARM64: 'false',
+  })
+  const assets = stageAssets(selected.map((p) => p.asset))
+  const out = mkdtempSync(path.join(tmpdir(), 'reddb-selected-'))
+  const dirs = buildPackages({ version: '9.9.9', assetsDir: assets, outDir: out, platforms: selected })
+  assert.deepEqual(dirs.map((dir) => path.basename(dir)).sort(), selected.map((p) => `red-${p.key}`).sort())
+  assert.equal(existsSync(path.join(out, 'red-linux-arm64')), false)
+  const missing = stageAssets([])
+  assert.throws(() => buildPackages({ version: '9.9.9', assetsDir: missing, outDir: out, platforms: selected }), /required asset missing/)
+  const tampered = stageAssets(selected.map((p) => p.asset), { tamper: selected[0].asset })
+  assert.throws(() => buildPackages({ version: '9.9.9', assetsDir: tampered, outDir: out, platforms: selected }), /sha256 mismatch/)
+})
+
+test('dependency injection removes disabled stale platforms and preserves other dependencies', () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'reddb-selected-inject-')), 'package.json')
+  const disabled = PLATFORMS.find((p) => p.os === 'darwin')
+  writeFileSync(file, JSON.stringify({ name: 'x', optionalDependencies: { keep: '^1.0.0', [packageName(disabled)]: 'old' } }))
+  const selected = enabledPlatforms({ ENABLE_MACOS_ARM64: 'false' })
+  injectOptionalDependencies(file, '2.3.4', selected)
+  const deps = JSON.parse(readFileSync(file, 'utf8')).optionalDependencies
+  assert.equal(deps.keep, '^1.0.0')
+  assert.equal(deps[packageName(disabled)], undefined)
+  for (const p of selected) assert.equal(deps[packageName(p)], '2.3.4')
 })

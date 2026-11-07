@@ -1,5 +1,10 @@
 use super::*;
 
+pub(crate) struct NativeArtifactBuild {
+    pub records: Vec<(NativeVectorArtifactSummary, Vec<u8>)>,
+    pub deferred_collections: std::collections::HashSet<String>,
+}
+
 impl RedDB {
     /// Access the quorum coordinator (Phase 2.6 PG parity).
     ///
@@ -142,17 +147,76 @@ impl RedDB {
 
     pub(crate) fn native_vector_artifact_records(
         &self,
-    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+    ) -> Result<NativeArtifactBuild, Box<dyn std::error::Error>> {
+        let budget = crate::storage::memory_budget::resolve_for_boot(
+            self.options.storage_profile.deploy_profile,
+            self.options.memory_budget_bytes,
+        )?
+        .resolved_bytes;
+        // These optional derived snapshots share a small, conservative slice
+        // of the process budget. Their builders amplify source memory through
+        // tokens, postings and encoded frames, so bound input before copying.
+        let source_limit = usize::try_from((budget / 256).clamp(1024, 2 * 1024 * 1024))
+            .expect("bounded source allowance");
+        let output_limit = usize::try_from((budget / 128).min(8 * 1024 * 1024))
+            .expect("bounded artifact allowance");
         let mut artifacts = Vec::new();
-        for collection in self.store.list_collections() {
+        let mut retained_bytes = 0usize;
+        let mut deferred_collections = std::collections::HashSet::new();
+        let mut collections = self.store.list_collections();
+        collections.sort_unstable();
+        'collections: for collection in collections {
             let Some(manager) = self.store.get_collection(&collection) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            if manager.count() == 0 {
+                continue;
+            }
+            let mut entities = Vec::new();
+            let mut source_bytes = 0usize;
+            let mut exceeded = false;
+            let column_schema = manager.column_schema();
+            manager.for_each_entity(|entity| {
+                let eligible = match &entity.data {
+                    EntityData::Vector(vector) => {
+                        self.options.has_capability(Capability::Vector) && !vector.dense.is_empty()
+                    }
+                    EntityData::Edge(_) => self.options.has_capability(Capability::Graph),
+                    _ => self.options.has_capability(Capability::FullText),
+                };
+                if !eligible {
+                    return true;
+                }
+                let bytes = reddb_engine::storage::memory_size::entity_bytes(entity);
+                if bytes > source_limit.saturating_sub(source_bytes)
+                    || retained_bytes >= output_limit
+                {
+                    exceeded = true;
+                    return false;
+                }
+                source_bytes += bytes;
+                let mut owned = entity.clone();
+                if let EntityData::Row(row) = &mut owned.data {
+                    if row.named.is_none() && row.schema.is_none() {
+                        row.schema = column_schema.clone();
+                    }
+                }
+                entities.push(owned);
+                true
+            });
+            if exceeded {
+                deferred_collections.insert(collection);
+                continue;
+            }
+            if entities.is_empty() {
+                continue;
+            }
+            let first_artifact = artifacts.len();
             let mut vectors = Vec::new();
             let mut graph_edges = Vec::new();
             let mut fulltext_documents = Vec::new();
             let mut document_records = Vec::new();
+            let mut document_bytes = 0usize;
             for entity in entities {
                 match entity.data {
                     EntityData::Vector(vector) => {
@@ -176,9 +240,28 @@ impl RedDB {
                         if !text.trim().is_empty() {
                             fulltext_documents.push((entity.id, text));
                         }
-                        if let Some(document) =
-                            Self::native_document_pathvalue_for_entity(entity.id, &data)
-                        {
+                        let document = match Self::native_document_pathvalue_for_entity(
+                            entity.id,
+                            &data,
+                            source_limit.saturating_sub(document_bytes),
+                        ) {
+                            Ok(document) => document,
+                            Err(()) => {
+                                artifacts.truncate(first_artifact);
+                                deferred_collections.insert(collection);
+                                continue 'collections;
+                            }
+                        };
+                        if let Some(document) = document {
+                            document_bytes += document
+                                .1
+                                .iter()
+                                .map(|(path, value)| {
+                                    path.len()
+                                        + value.len()
+                                        + std::mem::size_of::<(String, String)>()
+                                })
+                                .sum::<usize>();
                             document_records.push(document);
                         }
                     }
@@ -297,8 +380,25 @@ impl RedDB {
                 };
                 artifacts.push((summary, bytes));
             }
+            let bytes = artifacts[first_artifact..]
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>();
+            if bytes > output_limit.saturating_sub(retained_bytes) {
+                artifacts.truncate(first_artifact);
+                deferred_collections.insert(collection);
+            } else {
+                retained_bytes += bytes;
+            }
         }
-        artifacts
+        for collection in &deferred_collections {
+            tracing::warn!(collection, source_bytes_limit=source_limit, retained_bytes_limit=output_limit,
+                "native search artifact deferred by memory budget; canonical records remain available");
+        }
+        Ok(NativeArtifactBuild {
+            records: artifacts,
+            deferred_collections,
+        })
     }
 
     fn serialize_native_graph_adjacency_artifact(
@@ -443,28 +543,55 @@ impl RedDB {
     fn native_document_pathvalue_for_entity(
         entity_id: EntityId,
         data: &EntityData,
-    ) -> Option<(EntityId, Vec<(String, String)>)> {
+        limit: usize,
+    ) -> Result<Option<(EntityId, Vec<(String, String)>)>, ()> {
         let mut entries = Vec::new();
+        let mut bytes = 0;
         match data {
             EntityData::Row(row) => {
-                if let Some(named) = &row.named {
-                    for (key, value) in named {
-                        Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                if row.named.is_some() || row.schema.is_some() {
+                    for (key, value) in row.iter_fields() {
+                        Self::collect_native_document_entries_from_value(
+                            key,
+                            value,
+                            &mut entries,
+                            &mut bytes,
+                            limit,
+                        )?;
                     }
-                }
-                for (idx, value) in row.columns.iter().enumerate() {
-                    let path = format!("columns[{idx}]");
-                    Self::collect_native_document_entries_from_value(&path, value, &mut entries);
+                } else {
+                    for (idx, value) in row.columns.iter().enumerate() {
+                        let path = format!("columns[{idx}]");
+                        Self::collect_native_document_entries_from_value(
+                            &path,
+                            value,
+                            &mut entries,
+                            &mut bytes,
+                            limit,
+                        )?;
+                    }
                 }
             }
             EntityData::Node(node) => {
                 for (key, value) in &node.properties {
-                    Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                    Self::collect_native_document_entries_from_value(
+                        key,
+                        value,
+                        &mut entries,
+                        &mut bytes,
+                        limit,
+                    )?;
                 }
             }
             EntityData::Edge(edge) => {
                 for (key, value) in &edge.properties {
-                    Self::collect_native_document_entries_from_value(key, value, &mut entries);
+                    Self::collect_native_document_entries_from_value(
+                        key,
+                        value,
+                        &mut entries,
+                        &mut bytes,
+                        limit,
+                    )?;
                 }
             }
             EntityData::Vector(_) => {}
@@ -472,9 +599,9 @@ impl RedDB {
             EntityData::QueueMessage(_) => {}
         }
         if entries.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some((entity_id, entries))
+            Ok(Some((entity_id, entries)))
         }
     }
 
@@ -482,45 +609,74 @@ impl RedDB {
         path: &str,
         value: &Value,
         out: &mut Vec<(String, String)>,
-    ) {
+        bytes: &mut usize,
+        limit: usize,
+    ) -> Result<(), ()> {
         match value {
-            Value::Json(bytes) | Value::Blob(bytes) => {
-                if let Ok(json) = crate::json::from_slice::<JsonValue>(bytes) {
-                    Self::collect_native_document_entries_from_json(path, &json, out);
+            Value::Json(payload) | Value::Blob(payload) => {
+                if let Ok(json) = crate::json::from_slice::<JsonValue>(payload) {
+                    Self::collect_native_document_entries_from_json(
+                        path, &json, out, bytes, limit,
+                    )?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn collect_native_document_entries_from_json(
         path: &str,
         value: &JsonValue,
         out: &mut Vec<(String, String)>,
-    ) {
-        match value {
-            JsonValue::Object(entries) => {
-                for (key, value) in entries {
-                    let next = if path.is_empty() {
-                        key.clone()
-                    } else {
-                        format!("{path}.{key}")
-                    };
-                    Self::collect_native_document_entries_from_json(&next, value, out);
+        bytes: &mut usize,
+        limit: usize,
+    ) -> Result<(), ()> {
+        let mut pending = vec![(path.to_string(), value)];
+        let mut pending_bytes = path.len() + std::mem::size_of::<(String, &JsonValue)>();
+        while let Some((path, value)) = pending.pop() {
+            pending_bytes -= path.len() + std::mem::size_of::<(String, &JsonValue)>();
+            match value {
+                JsonValue::Object(entries) => {
+                    for (key, value) in entries.iter().rev() {
+                        let next = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        let cost = next.len() + std::mem::size_of::<(String, &JsonValue)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        pending_bytes += cost;
+                        pending.push((next, value));
+                    }
                 }
-            }
-            JsonValue::Array(items) => {
-                for (idx, value) in items.iter().enumerate() {
-                    let next = format!("{path}[{idx}]");
-                    Self::collect_native_document_entries_from_json(&next, value, out);
+                JsonValue::Array(items) => {
+                    for (idx, value) in items.iter().enumerate().rev() {
+                        let next = format!("{path}[{idx}]");
+                        let cost = next.len() + std::mem::size_of::<(String, &JsonValue)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        pending_bytes += cost;
+                        pending.push((next, value));
+                    }
                 }
-            }
-            _ => {
-                if let Some(text) = Self::native_json_scalar_text(value) {
-                    out.push((path.to_string(), text));
+                _ => {
+                    if let Some(text) = Self::native_json_scalar_text(value) {
+                        let cost =
+                            path.len() + text.len() + std::mem::size_of::<(String, String)>();
+                        if cost > limit.saturating_sub(bytes.saturating_add(pending_bytes)) {
+                            return Err(());
+                        }
+                        *bytes += cost;
+                        out.push((path, text));
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     fn native_json_scalar_text(value: &JsonValue) -> Option<String> {
@@ -951,6 +1107,19 @@ impl RedDB {
 
         let mut states = Vec::new();
         for collection in snapshot.collections {
+            // This infallible snapshot only observes resident entities. A cold
+            // base, including one with a resident overlay, cannot supply an
+            // inferred model here. The caller reconciles its durable index
+            // descriptors from the native registry and physical metadata.
+            // Treating an unobserved base as Mixed invents graph/search indexes
+            // on ordinary tables each time metadata is republished.
+            if self
+                .store
+                .get_collection(&collection.name)
+                .is_some_and(|manager| manager.has_backing())
+            {
+                continue;
+            }
             for index_name in &collection.indices {
                 let metric = metrics_by_name.get(index_name);
                 let kind = metric
@@ -998,6 +1167,7 @@ impl RedDB {
 
             let root = manager.cached_physical_root(root, || {
                 manager.for_each_entity_in_id_order(|entity| {
+                    record_physical_root_row_scan(&name);
                     fnv1a_hash_value(&mut root, &entity.id.raw());
                     fnv1a_hash_value(&mut root, &entity.kind);
                     fnv1a_hash_value(&mut root, &entity.created_at);
@@ -1373,13 +1543,8 @@ impl RedDB {
                 self.store.pager(),
             ),
         );
-        // Issue #674 — derive the `.tv` snapshot path from the
-        // resolved tier layout if the active layout enables snapshot
-        // files. `Minimal` (embedded) returns `None` and the state
-        // never writes a `.tv` for this collection.
-        if let Some((_, paths)) = self.options.resolve_tiered_layout() {
-            state.set_snapshot_path(paths.turbo_snapshot_path(collection));
-        }
+        // Native artifacts belong to the .rdb checkpoint. Leave the optional
+        // standalone snapshot sink unset instead of creating a .tv sidecar.
         let mut guard = map.lock();
         let inserted_now = !guard.contains_key(collection);
         let entry = guard
@@ -1455,5 +1620,217 @@ impl RedDB {
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && reddb_file::native_store_magic_matches(&magic))
+    }
+}
+
+#[cfg(not(test))]
+fn record_physical_root_row_scan(_collection: &str) {}
+
+#[cfg(test)]
+std::thread_local! {
+    static PHYSICAL_ROOT_ROW_SCANS: std::cell::RefCell<std::collections::BTreeMap<String, u64>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+fn record_physical_root_row_scan(collection: &str) {
+    PHYSICAL_ROOT_ROW_SCANS.with(|scans| {
+        *scans
+            .borrow_mut()
+            .entry(collection.to_string())
+            .or_default() += 1;
+    });
+}
+
+#[cfg(test)]
+impl RedDB {
+    pub(crate) fn reset_physical_root_row_scans_for_test(&self) {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow_mut().clear());
+    }
+
+    pub(crate) fn physical_root_row_scans_for_test(
+        &self,
+    ) -> std::collections::BTreeMap<String, u64> {
+        PHYSICAL_ROOT_ROW_SCANS.with(|scans| scans.borrow().clone())
+    }
+}
+
+#[cfg(test)]
+mod artifact_memory_tests {
+    use super::*;
+
+    #[test]
+    fn physical_roots_hash_borrowed_payloads_without_rendered_copies() {
+        fn legacy_root(db: &RedDB) -> u64 {
+            fn hash<T: Debug>(root: &mut u64, value: &T) {
+                fnv1a_hash_bytes(root, format!("{value:?}").as_bytes());
+            }
+            let manager = db.store().get_collection("root_source").expect("source");
+            let stats = manager.stats();
+            let mut root = fnv1a_seed();
+            hash(&mut root, &"root_source".to_string());
+            hash(&mut root, &stats.total_entities);
+            hash(&mut root, &stats.growing_count);
+            hash(&mut root, &stats.sealed_count);
+            hash(&mut root, &stats.archived_count);
+            hash(&mut root, &stats.total_memory_bytes);
+            hash(&mut root, &stats.seal_ops);
+            hash(&mut root, &stats.consolidation.runs_completed);
+            manager.for_each_entity_in_id_order(|entity| {
+                hash(&mut root, &entity.id.raw());
+                hash(&mut root, &entity.kind);
+                hash(&mut root, &entity.created_at);
+                hash(&mut root, &entity.updated_at);
+                hash(&mut root, &entity.data);
+                hash(&mut root, &entity.sequence_id);
+                hash(&mut root, &entity.embeddings().len());
+                hash(&mut root, &entity.cross_refs().len());
+                true
+            });
+            root
+        }
+
+        let runtime =
+            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE root_source (payload BLOB, label TEXT, body JSON)")
+            .expect("table");
+        let db = runtime.db();
+        let manager = db.store().get_collection("root_source").expect("source");
+        let mut entity = UnifiedEntity::table_row(
+            EntityId::new(1001),
+            "root_source",
+            1,
+            vec![
+                Value::Blob(vec![255; 2 * 1024 * 1024]),
+                Value::text("escaped\n\t\0\"\\ and Unicode ç🦀"),
+                Value::Json(br#"{"nested":[null,true,17,"kept"]}"#.to_vec()),
+            ],
+        );
+        manager.insert(entity.clone()).expect("source row");
+        let expected = legacy_root(&db);
+        let (roots, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.physical_collection_roots()
+        });
+        assert_eq!(roots["root_source"], expected, "retain legacy hash bytes");
+        eprintln!(
+            "physical root allocation bytes: {}",
+            measured.allocated_bytes
+        );
+        assert!(
+            measured.allocated_bytes < 64 * 1024,
+            "fingerprinting must not render the borrowed payload: {measured:?}"
+        );
+        assert_eq!(db.physical_collection_roots(), roots, "unchanged cache");
+        let EntityData::Row(row) = &mut entity.data else {
+            unreachable!("fixture is a table row");
+        };
+        row.columns[0] = Value::Blob(vec![254; 2 * 1024 * 1024]);
+        manager
+            .update(entity)
+            .expect("replace payload of equal size");
+        let updated = db.physical_collection_roots();
+        assert_ne!(updated["root_source"], roots["root_source"]);
+        assert_eq!(updated["root_source"], legacy_root(&db));
+    }
+
+    #[test]
+    fn document_artifact_paths_survive_shared_recovery_shapes() {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(1), "documents", 1, vec![]);
+        entity.data = EntityData::Row(crate::storage::unified::entity::RowData::with_names(
+            vec![Value::Json(br#"{"thing":"kept"}"#.to_vec())],
+            vec!["body".into()],
+        ));
+        let before = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
+            .expect("named document");
+        let EntityData::Row(row) = &mut entity.data else {
+            unreachable!("fixture is a row");
+        };
+        *row = crate::storage::unified::entity::RowData {
+            columns: vec![row.get_field("body").expect("body field").clone()],
+            named: None,
+            schema: Some(Arc::new(vec!["body".into()])),
+        };
+        let after = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
+            .expect("shared document");
+        assert_eq!(
+            before, after,
+            "compaction must preserve named document paths"
+        );
+    }
+
+    #[test]
+    fn disabled_fulltext_does_not_copy_rows_or_publish_search_artifacts() {
+        let runtime =
+            crate::RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE source (payload BLOB)")
+            .expect("table");
+        let db = runtime.db();
+        let manager = db.store().get_collection("source").expect("manager");
+        let (_, baseline) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("empty build")
+        });
+        for id in 1..=32 {
+            manager
+                .insert(UnifiedEntity::table_row(
+                    EntityId::new(1000 + id),
+                    "source",
+                    id,
+                    vec![Value::Blob(vec![255; 64 * 1024])],
+                ))
+                .expect("source row");
+        }
+        let (build, measured) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            db.native_vector_artifact_records().expect("disabled build")
+        });
+        assert!(build.records.is_empty());
+        assert!(
+            build.deferred_collections.is_empty(),
+            "disabled capabilities do not consume artifact allowance"
+        );
+        assert!(
+            measured.allocated_bytes <= baseline.allocated_bytes + 4096,
+            "disabled fulltext copied source payloads: {baseline:?} -> {measured:?}"
+        );
+    }
+
+    #[test]
+    fn document_artifact_traversal_is_ordered_and_bounded() {
+        let json = crate::json::from_slice::<JsonValue>(br#"{"a":{"b":1},"z":[2,3]}"#)
+            .expect("JSON fixture");
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        RedDB::collect_native_document_entries_from_json(
+            "body",
+            &json,
+            &mut entries,
+            &mut bytes,
+            4096,
+        )
+        .expect("small document fits");
+        assert_eq!(
+            entries,
+            vec![
+                ("body.a.b".into(), "1".into()),
+                ("body.z[0]".into(), "2".into()),
+                ("body.z[1]".into(), "3".into())
+            ]
+        );
+        let mut deep = JsonValue::Integer(1);
+        for _ in 0..64 {
+            deep = JsonValue::Object([("child".to_string(), deep)].into());
+        }
+        let mut entries = Vec::new();
+        let mut bytes = 0;
+        assert!(RedDB::collect_native_document_entries_from_json(
+            "body",
+            &deep,
+            &mut entries,
+            &mut bytes,
+            128
+        )
+        .is_err());
+        assert!(bytes <= 128);
     }
 }

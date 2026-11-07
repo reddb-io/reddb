@@ -38,9 +38,12 @@ pub mod layout;
 pub mod local_backend;
 pub mod logical_wal;
 pub mod native_index_artifact;
+pub mod native_key_index;
+pub mod native_resume;
 pub mod native_store;
 pub mod native_value;
 pub mod operational_manifest;
+pub mod page_ownership_journal;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
 pub mod primary_replica;
@@ -117,16 +120,17 @@ pub use bloom_segment::{
 pub use btree_value_layout::{
     btree_projected_cell_len, btree_value_pointer_head, decode_btree_inline_payload,
     decode_btree_value_cell, encode_btree_inline_compressed, encode_btree_inline_raw,
-    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_MAX_SIZE,
-    BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
+    encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_COMPRESSION_THRESHOLD,
+    BTREE_VALUE_MAX_SIZE, BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
-    decode_column_block_granule_index_blob, encode_column_block_frame,
-    encode_column_block_granule_bloom_blob, encode_column_block_granule_index_blob,
-    peek_column_block_version, ColumnBlockColumn, ColumnBlockFrame, ColumnBlockFrameError,
-    ColumnBlockGranuleBloom, ColumnBlockGranuleIndex, ColumnBlockGranuleStats, ColumnBlockPart,
+    decode_column_block_granule_index_blob, decode_column_block_granule_index_view,
+    encode_column_block_frame, encode_column_block_granule_bloom_blob,
+    encode_column_block_granule_index_blob, peek_column_block_version, ColumnBlockColumn,
+    ColumnBlockFrame, ColumnBlockFrameError, ColumnBlockGranuleBloom, ColumnBlockGranuleIndex,
+    ColumnBlockGranuleIndexView, ColumnBlockGranuleStats, ColumnBlockPart,
     COLUMN_BLOCK_DIR_ENTRY_LEN, COLUMN_BLOCK_FOOTER_LEN, COLUMN_BLOCK_HEADER_LEN,
 };
 pub use control_store::{

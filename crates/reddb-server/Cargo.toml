@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-server"
-version = "1.26.8"
+version = "1.28.25"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
@@ -66,7 +66,6 @@ ed25519-dalek = "3"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tonic = { workspace = true, features = ["transport", "codegen", "router", "gzip", "zstd", "tls-ring"] }
-tonic-prost = { workspace = true }
 prost = "0.14"
 snap = "1"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
@@ -77,7 +76,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 flate2 = "1"
 tar = "0.4"
 roaring = "0.11"
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 # crossbeam-queue::SegQueue powers the lock-free WAL append path
 # (Roadmap #2 / issue #157). Writers atomically reserve an LSN via
 # next_lsn.fetch_add and push their encoded bytes onto the queue —
@@ -131,7 +130,6 @@ http = "1"
 # tokio-tungstenite, which terminates the WS protocol; the binary data
 # channel is bridged into the transport-agnostic RedWire session (#932).
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = "1"
 strsim = "0.11"
@@ -143,6 +141,7 @@ serde = { version = "1", features = ["derive"] }
 # randomized iteration order into the merge or sort step.
 indexmap = "2"
 argon2 = "0.6.0"
+zeroize = "1"
 
 [features]
 default = []
@@ -231,6 +230,12 @@ http = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

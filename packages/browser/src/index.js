@@ -303,7 +303,21 @@ export async function restoreDatabase(options) {
 
 function databaseMethods(client) {
   return {
+    vault: {
+      status: () => client.call('vaultStatus'),
+      unlock: (password, { create = false } = {}) => client.call('vaultUnlock', { password, create }),
+      lock: () => client.call('vaultLock'),
+      keys: () => client.call('vaultKeys'),
+      reveal: (name) => client.call('vaultReveal', { name }),
+      put: (name, value) => client.call('vaultPut', { name, value }),
+      delete: (name) => client.call('vaultDelete', { name }),
+    },
     ...runtimeMethods(client),
+    catalog: () => client.call('catalog'),
+    readQuery(sql, params, scopes) {
+      if (typeof sql !== 'string' || !Array.isArray(params) || params.length > MAX_QUERY_PARAMETERS || !Array.isArray(scopes) || scopes.length > 64) return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected SQL, parameters and at most 64 inspection scopes'))
+      return client.call('readQuery', { sql, params, scopes })
+    },
     query(sql, params) {
       if (typeof sql !== 'string') return Promise.reject(new BrowserError('INVALID_ARGUMENT', 'Expected an RQL string'))
       if (params === undefined) return client.call('query', { sql })

@@ -96,6 +96,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -1975,9 +1976,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags",
  "memchr",
@@ -2170,11 +2171,11 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "reddb-io-client",
+ "reddb-io-engine",
  "reddb-io-file",
- "reddb-io-grpc-proto",
  "reddb-io-rql",
  "reddb-io-server",
  "reddb-io-types",
@@ -2184,45 +2185,55 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
  "reddb-io-grpc-proto",
  "reddb-io-server",
+ "reddb-io-tonic",
  "reddb-io-types",
  "reddb-io-wire",
  "reqwest",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "aes-gcm",
+ "argon2",
+ "getrandom 0.4.3",
+ "zeroize",
 ]
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "crc32fast",
  "hex",
  "parking_lot",
  "rayon",
+ "reddb-io-crypto",
  "reddb-io-file",
  "reddb-io-rql",
  "reddb-io-types",
  "regex",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
 name = "reddb-io-file"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2234,12 +2245,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2251,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-node"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "napi",
  "napi-build",
@@ -2261,14 +2273,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2286,7 +2298,6 @@ dependencies = [
  "hex",
  "hmac",
  "http",
- "hyper",
  "hyper-util",
  "indexmap",
  "itoa",
@@ -2304,7 +2315,6 @@ dependencies = [
  "reddb-io-grpc-proto",
  "reddb-io-rql",
  "reddb-io-tonic",
- "reddb-io-tonic-prost",
  "reddb-io-types",
  "reddb-io-wire",
  "regex",
@@ -2324,13 +2334,15 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "x509-parser",
+ "zeroize",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "async-trait",
  "axum",
@@ -2355,12 +2367,13 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "bytes",
  "prost",
@@ -2369,14 +2382,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.26.8"
+version = "1.28.25"
 dependencies = [
  "hmac",
  "reddb-io-types",
@@ -2435,6 +2448,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",

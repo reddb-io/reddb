@@ -8,15 +8,100 @@
 //! Unique constraint is enforced at insert time when `unique = true`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 
 use super::entity::EntityId;
 
+/// An owned candidate allocation. A governed provider keeps its memory reservation
+/// attached until the IDs (or their consuming iterator) have been destroyed.
+pub struct HashCandidates {
+    ids: Vec<EntityId>,
+    owner: Option<Box<dyn Send + Sync>>,
+}
+
+impl HashCandidates {
+    pub(crate) fn owned(ids: Vec<EntityId>, owner: Box<dyn Send + Sync>) -> Self {
+        Self {
+            ids,
+            owner: Some(owner),
+        }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [EntityId] {
+        &mut self.ids
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.ids.truncate(len);
+    }
+}
+
+impl From<Vec<EntityId>> for HashCandidates {
+    fn from(ids: Vec<EntityId>) -> Self {
+        Self { ids, owner: None }
+    }
+}
+impl std::ops::Deref for HashCandidates {
+    type Target = [EntityId];
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+impl std::fmt::Debug for HashCandidates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.ids.fmt(f)
+    }
+}
+impl PartialEq<Vec<EntityId>> for HashCandidates {
+    fn eq(&self, rhs: &Vec<EntityId>) -> bool {
+        self.ids == *rhs
+    }
+}
+impl PartialEq for HashCandidates {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.ids == rhs.ids
+    }
+}
+pub struct HashCandidateIterator {
+    ids: std::vec::IntoIter<EntityId>,
+    _owner: Option<Box<dyn Send + Sync>>,
+}
+impl Iterator for HashCandidateIterator {
+    type Item = EntityId;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ids.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.ids.size_hint()
+    }
+}
+impl ExactSizeIterator for HashCandidateIterator {}
+impl std::iter::FusedIterator for HashCandidateIterator {}
+impl IntoIterator for HashCandidates {
+    type Item = EntityId;
+    type IntoIter = HashCandidateIterator;
+    fn into_iter(self) -> Self::IntoIter {
+        HashCandidateIterator {
+            ids: self.ids.into_iter(),
+            _owner: self.owner,
+        }
+    }
+}
+
+/// The source store owns all mutations. This provider resolves physical
+/// candidates; snapshot visibility and logical uniqueness remain runtime work.
+pub(crate) trait PagedHashIndex: Send + Sync {
+    fn lookup(&self, key: &[u8]) -> Result<HashCandidates, HashIndexError>;
+    fn memory_bytes(&self) -> usize;
+}
+
 /// A single hash index on one or more columns
 pub struct HashIndex {
     /// Maps key bytes → set of entity IDs
     entries: HashMap<Vec<u8>, Vec<EntityId>>,
+    paged: Option<Arc<dyn PagedHashIndex>>,
     /// Whether this index enforces uniqueness
     pub unique: bool,
     /// Number of keys
@@ -30,6 +115,7 @@ impl HashIndex {
     pub fn new(unique: bool) -> Self {
         Self {
             entries: HashMap::new(),
+            paged: None,
             unique,
             key_count: 0,
             entry_memory_bytes: 0,
@@ -39,6 +125,9 @@ impl HashIndex {
     /// Insert a key → entity mapping.
     /// Returns `Err` if the index is unique and the key already exists.
     pub fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) -> Result<(), HashIndexError> {
+        if self.paged.is_some() {
+            return Ok(());
+        }
         let key_bytes = key.len();
         let entry = self.entries.entry(key).or_default();
         if self.unique && !entry.is_empty() {
@@ -124,7 +213,12 @@ impl HashIndex {
 
     /// Approximate memory usage in bytes
     pub fn memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.entry_memory_bytes
+        std::mem::size_of::<Self>()
+            + self.entry_memory_bytes
+            + self
+                .paged
+                .as_ref()
+                .map_or(0, |provider| provider.memory_bytes())
     }
 }
 
@@ -133,6 +227,13 @@ impl HashIndex {
 pub enum HashIndexError {
     /// Attempted to insert a duplicate key in a unique index
     DuplicateKey,
+    /// An authoritative disk read or memory admission failed.
+    Read(String),
+    /// A retry may reserve a larger bounded decode/candidate workspace.
+    ReadLimit {
+        required_bytes: usize,
+        limit_bytes: usize,
+    },
     /// The requested index was not found in the manager registry.
     MissingIndex { collection: String, name: String },
 }
@@ -140,6 +241,14 @@ pub enum HashIndexError {
 impl std::fmt::Display for HashIndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReadLimit {
+                required_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "hash index read needs {required_bytes} bytes; reserved workspace is {limit_bytes}"
+            ),
+            Self::Read(message) => write!(f, "hash index read failed: {message}"),
             Self::DuplicateKey => write!(f, "duplicate key in unique hash index"),
             Self::MissingIndex { collection, name } => {
                 write!(
@@ -166,34 +275,58 @@ pub struct HashIndexConfig {
     pub unique: bool,
 }
 
+/// Runtime admission for owned resident candidates. Sampling may acquire storage
+/// locks; reservation must only touch the short admission ledger.
+pub(crate) trait HashCandidateAdmission: Send + Sync {
+    fn sample(&self) -> Result<(), HashIndexError>;
+    fn reserve(&self, bytes: usize) -> Result<Box<dyn Send + Sync>, HashIndexError>;
+}
+
 /// Manager for all hash indices across collections
 pub struct HashIndexManager {
-    /// (collection, index_name) → HashIndex
-    indices: RwLock<HashMap<(String, String), HashIndex>>,
+    /// Collection → index name → backing; borrowed probes allocate no names.
+    indices: RwLock<HashMap<String, HashMap<String, HashIndex>>>,
+    candidate_admission: OnceLock<Arc<dyn HashCandidateAdmission>>,
 }
 
 impl HashIndexManager {
+    /// Publish a fully built collection under the runtime topology fence.
+    /// Moving the backing preserves the old indexes if preparation fails.
+    pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let mut indices = self.indices.write();
+        indices.remove(collection);
+        indices.extend(prepared.indices.into_inner());
+    }
+
     /// Create a new manager
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            candidate_admission: OnceLock::new(),
         }
     }
 
     /// Create a new hash index
     pub fn create_index(&self, config: &HashIndexConfig) -> Result<(), HashIndexError> {
         let mut indices = self.indices.write();
-        let key = (config.collection.clone(), config.name.clone());
-        indices.insert(key, HashIndex::new(config.unique));
+        indices
+            .entry(config.collection.clone())
+            .or_default()
+            .insert(config.name.clone(), HashIndex::new(config.unique));
         Ok(())
     }
 
     /// Drop a hash index
     pub fn drop_index(&self, collection: &str, name: &str) -> bool {
         let mut indices = self.indices.write();
-        indices
-            .remove(&(collection.to_string(), name.to_string()))
-            .is_some()
+        let removed = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.remove(name))
+            .is_some();
+        if indices.get(collection).is_some_and(HashMap::is_empty) {
+            indices.remove(collection);
+        }
+        removed
     }
 
     /// Insert into a named index
@@ -205,7 +338,10 @@ impl HashIndexManager {
         entity_id: EntityId,
     ) -> Result<(), HashIndexError> {
         let mut indices = self.indices.write();
-        if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
+        if let Some(index) = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.get_mut(index_name))
+        {
             index.insert(key, entity_id)
         } else {
             Err(HashIndexError::MissingIndex {
@@ -215,21 +351,178 @@ impl HashIndexManager {
         }
     }
 
-    /// Lookup in a named index
+    pub(crate) fn install_paged(
+        &self,
+        collection: &str,
+        name: &str,
+        provider: Arc<dyn PagedHashIndex>,
+    ) {
+        let mut index = HashIndex::new(false);
+        index.paged = Some(provider);
+        self.indices
+            .write()
+            .entry(collection.into())
+            .or_default()
+            .insert(name.into(), index);
+    }
+
+    pub(crate) fn is_paged(&self, collection: &str, name: &str) -> bool {
+        self.indices
+            .read()
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
+            .is_some_and(|index| index.paged.is_some())
+    }
+
+    /// Atomically select the resident-only path. A separate `is_paged` probe
+    /// can race DDL replacement and accidentally enter disk I/O in an Option API.
+    pub(crate) fn lookup_resident(
+        &self,
+        collection: &str,
+        name: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<EntityId>>, HashIndexError> {
+        let indices = self.indices.read();
+        let index = indices
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
+            .ok_or_else(|| HashIndexError::MissingIndex {
+                collection: collection.into(),
+                name: name.into(),
+            })?;
+        Ok(index.paged.is_none().then(|| index.get(key).to_vec()))
+    }
+
+    /// Compatibility API for independently managed resident HASH indexes.
     pub fn lookup(
+        &self,
+        collection: &str,
+        name: &str,
+        key: &[u8],
+    ) -> Result<Vec<EntityId>, HashIndexError> {
+        self.lookup_resident(collection, name, key)?.ok_or_else(|| {
+            HashIndexError::Read("paged HASH requires an owned candidate result".into())
+        })
+    }
+
+    pub(crate) fn sample_candidate_memory(&self) -> Result<(), HashIndexError> {
+        if let Some(admission) = self.candidate_admission.get() {
+            admission.sample()?;
+        }
+        Ok(())
+    }
+
+    /// Ledger only: safe while resident index postings are frozen by a read lock.
+    pub(crate) fn reserve_candidate_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<Box<dyn Send + Sync>>, HashIndexError> {
+        if bytes == 0 {
+            return Ok(None);
+        }
+        self.candidate_admission
+            .get()
+            .map(|admission| admission.reserve(bytes))
+            .transpose()
+    }
+
+    pub(crate) fn install_candidate_admission(&self, admission: Arc<dyn HashCandidateAdmission>) {
+        assert!(
+            self.candidate_admission.set(admission).is_ok(),
+            "invariant: runtime candidate admission is installed once"
+        );
+    }
+
+    pub(crate) fn lookup_owned(
         &self,
         collection: &str,
         index_name: &str,
         key: &[u8],
-    ) -> Result<Vec<EntityId>, HashIndexError> {
-        let indices = self.indices.read();
-        if let Some(index) = indices.get(&(collection.to_string(), index_name.to_string())) {
-            Ok(index.get(key).to_vec())
-        } else {
-            Err(HashIndexError::MissingIndex {
-                collection: collection.to_string(),
-                name: index_name.to_string(),
-            })
+    ) -> Result<HashCandidates, HashIndexError> {
+        self.lookup_candidates(collection, index_name, std::iter::once(key), Some(key))
+            .map(|result| result.expect("invariant: a point lookup admits every backing"))
+    }
+
+    /// Admit the complete resident IN union before copying any posting list.
+    /// Paged unions retain their bounded scan fallback; point providers own
+    /// their separate admission. Duplicate keys preserve concatenation order.
+    pub(crate) fn lookup_union_owned<I, K>(
+        &self,
+        collection: &str,
+        index_name: &str,
+        keys: I,
+    ) -> Result<Option<HashCandidates>, HashIndexError>
+    where
+        I: Iterator<Item = K> + Clone,
+        K: AsRef<[u8]>,
+    {
+        self.lookup_candidates(collection, index_name, keys, None)
+    }
+
+    fn lookup_candidates<I, K>(
+        &self,
+        collection: &str,
+        index_name: &str,
+        keys: I,
+        paged_key: Option<&[u8]>,
+    ) -> Result<Option<HashCandidates>, HashIndexError>
+    where
+        I: Iterator<Item = K> + Clone,
+        K: AsRef<[u8]>,
+    {
+        let admission = self.candidate_admission.get();
+        let mut sampled = false;
+        loop {
+            let indices = self.indices.read();
+            let index = indices
+                .get(collection)
+                .and_then(|indexes| indexes.get(index_name))
+                .ok_or_else(|| HashIndexError::MissingIndex {
+                    collection: collection.into(),
+                    name: index_name.into(),
+                })?;
+            if let Some(provider) = &index.paged {
+                let provider = Arc::clone(provider);
+                drop(indices);
+                return paged_key.map(|key| provider.lookup(key)).transpose();
+            }
+            let count = keys.clone().try_fold(0usize, |count, key| {
+                count
+                    .checked_add(index.get(key.as_ref()).len())
+                    .ok_or_else(|| HashIndexError::Read("HASH candidate count overflow".into()))
+            })?;
+            if count == 0 {
+                // UNIQUE misses must not sample or allocate per inserted row.
+                return Ok(Some(Vec::new().into()));
+            }
+            if let Some(admission) = admission {
+                if !sampled {
+                    // The sampler reads index/storage locks. Re-probe after it:
+                    // concurrent DDL may replace the backing while unlocked.
+                    drop(indices);
+                    admission.sample()?;
+                    sampled = true;
+                    continue;
+                }
+            }
+            let bytes = count
+                .checked_mul(std::mem::size_of::<EntityId>())
+                .ok_or_else(|| {
+                    HashIndexError::Read("HASH candidate allocation size overflow".into())
+                })?;
+            // Only the short, storage-independent ledger is touched under the
+            // read lock, freezing the posting lengths until copying completes.
+            let owner = admission
+                .map(|admission| admission.reserve(bytes))
+                .transpose()?;
+            let mut ids = Vec::new();
+            ids.try_reserve_exact(count).map_err(|error| {
+                HashIndexError::Read(format!("HASH candidate allocation: {error}"))
+            })?;
+            for key in keys {
+                ids.extend_from_slice(index.get(key.as_ref()));
+            }
+            return Ok(Some(HashCandidates { ids, owner }));
         }
     }
 
@@ -242,7 +535,10 @@ impl HashIndexManager {
         entity_id: EntityId,
     ) -> Result<bool, HashIndexError> {
         let mut indices = self.indices.write();
-        if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
+        if let Some(index) = indices
+            .get_mut(collection)
+            .and_then(|indexes| indexes.get_mut(index_name))
+        {
             Ok(index.remove(key, entity_id))
         } else {
             Err(HashIndexError::MissingIndex {
@@ -256,9 +552,9 @@ impl HashIndexManager {
     pub fn list_indices(&self, collection: &str) -> Vec<String> {
         let indices = self.indices.read();
         indices
-            .keys()
-            .filter(|(coll, _)| coll == collection)
-            .map(|(_, name)| name.clone())
+            .get(collection)
+            .into_iter()
+            .flat_map(|indexes| indexes.keys().cloned())
             .collect()
     }
 
@@ -266,7 +562,9 @@ impl HashIndexManager {
     pub fn index_stats(&self, collection: &str, name: &str) -> Option<HashIndexStats> {
         let indices = self.indices.read();
         indices
-            .get(&(collection.to_string(), name.to_string()))
+            .get(collection)
+            .and_then(|indexes| indexes.get(name))
+            .filter(|idx| idx.paged.is_none())
             .map(|idx| HashIndexStats {
                 name: name.to_string(),
                 collection: collection.to_string(),
@@ -283,6 +581,7 @@ impl HashIndexManager {
         self.indices
             .read()
             .values()
+            .flat_map(|indexes| indexes.values())
             .map(|idx| idx.memory_bytes() as u64)
             .sum()
     }
@@ -306,8 +605,54 @@ pub struct HashIndexStats {
 }
 
 #[cfg(test)]
+mod admission_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backing_probes_allocate_nothing_and_collection_replacement_is_isolated() {
+        struct NoReadProvider;
+        impl PagedHashIndex for NoReadProvider {
+            fn lookup(&self, _: &[u8]) -> Result<HashCandidates, HashIndexError> {
+                panic!("a backing probe must not read the provider");
+            }
+            fn memory_bytes(&self) -> usize {
+                0
+            }
+        }
+
+        let manager = HashIndexManager::new();
+        let config = HashIndexConfig {
+            collection: "resident".into(),
+            name: "shared_name".into(),
+            columns: vec!["id".into()],
+            unique: false,
+        };
+        manager
+            .create_index(&config)
+            .expect("create resident index");
+        manager.install_paged("paged", "shared_name", Arc::new(NoReadProvider));
+        let (_, allocations) = crate::storage::no_malloc_hot_paths::measure_allocations(|| {
+            assert!(!manager.is_paged("resident", "shared_name"));
+            assert!(manager.is_paged("paged", "shared_name"));
+            assert!(!manager.is_paged("paged", "missing"));
+            assert!(!manager.is_paged("missing", "shared_name"));
+        });
+        assert_eq!(allocations.allocs, 0);
+
+        let replacement = HashIndexManager::new();
+        replacement.install_paged("resident", "replacement", Arc::new(NoReadProvider));
+        manager.replace_collection_from("resident", replacement);
+        assert_eq!(manager.list_indices("resident"), vec!["replacement"]);
+        assert!(manager.is_paged("paged", "shared_name"));
+        assert!(manager.is_paged("resident", "replacement"));
+        assert!(!manager.drop_index("resident", "shared_name"));
+        assert!(manager.drop_index("resident", "replacement"));
+        assert!(!manager.indices.read().contains_key("resident"));
+        assert!(manager.is_paged("paged", "shared_name"));
+    }
 
     fn assert_memory_accounting(index: &HashIndex) {
         let recomputed = std::mem::size_of::<HashIndex>()

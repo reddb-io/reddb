@@ -113,18 +113,18 @@ batch, walks each leaf once, applies all updates for that leaf in
 one page write. Proptest covers 1..200 entries. Targets the
 ~30× `bulk_update` gap in `when-not-reddb.md` Gap 2.
 
+### 5. Secondary-index write maintenance — ✅ SHIPPED (#160)
+
+Outcome: the live `IndexStore::index_entity_insert/update/delete` paths maintain
+secondary indexes across single-row and batch mutations. The standalone
+`IncrementalIndexMaintainer` prototype never became a caller and was retired;
+the runtime paths are the authority. Benchmark revalidation remains separate
+from the functional write-maintenance contract.
+
 ## In-flight slices (PRD #152)
 
-These close the remaining `when-not-reddb.md` gaps that the four
-shipped slices above did not eliminate.
-
-### IncrementalIndexMaintainer — in flight (#160)
-
-Closes `BASELINE` Finding #4 and the secondary half of
-`when-not-reddb.md` Gap 4 (`select_filtered`). Maintains secondary
-indices on every write so the planner can use them, instead of
-falling back to a full-table scan. Restarted on a fresh `main`
-base after the #156–#159 cluster landed.
+The remaining slices close `when-not-reddb.md` gaps that the shipped work above
+did not eliminate.
 
 ### AggregateQueryPlanner — in flight (#161)
 
@@ -221,12 +221,9 @@ recorded in [ADR 0008](../../.red/adr/0008-topology-advertisement-security.md).
 The original ROI ordering (#1 → #2 → #4 → #3) shipped end-to-end.
 Remaining order is determined by gap rather than dependency:
 
-1. **#160 IncrementalIndexMaintainer** — unblocks the planner half
-   of `select_filtered` once #156's UnifiedRecord work is bench-
-   confirmed.
-2. **#161 AggregateQueryPlanner** — independent of #160. Pick up
+1. **#161 AggregateQueryPlanner** — independent of #160. Pick up
    in parallel.
-3. **PRD #164 client-side cluster** (#167 / #168 / #171 → #172) —
+2. **PRD #164 client-side cluster** (#167 / #168 / #171 → #172) —
    independent of #160 / #161; closes the replica-aware routing
    throughput story.
 

@@ -11,7 +11,8 @@ use super::compression::{
 use crate::catalog::AnalyticalStorageConfig;
 use crate::storage::index::{BloomSegment, HasBloom, ZoneDecision, ZoneMap, ZonePredicate};
 use crate::storage::unified::column_block::{
-    read_column_block, write_column_block, ColumnBlockError, ColumnInput,
+    read_column_block, read_column_block_frame_filtered, write_column_block, ColumnBlockError,
+    ColumnInput,
 };
 use crate::storage::unified::segment_codec::ColumnSemantics;
 use reddb_types::types::DataType;
@@ -450,9 +451,9 @@ pub fn points_from_column_block(bytes: &[u8]) -> Result<Vec<TimeSeriesPoint>, Co
 }
 
 /// Result of a granule-pruned range scan over a sealed columnar chunk.
-/// `granules_total` vs `granules_scanned` makes pruning observable: a
-/// selective predicate decodes fewer granules than the chunk holds
-/// (PRD #850 Phase 1, #854 — criterion 2).
+/// `granules_total` vs `granules_scanned` reports how many granules have
+/// their rows examined. A range with no surviving granules also skips column
+/// decoding; otherwise v1 decodes the complete column streams.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrunedColumnScan {
     /// Matching points, in timestamp order, drawn only from surviving
@@ -482,7 +483,15 @@ pub fn query_column_block_range(
     start_ns: u64,
     end_ns: u64,
 ) -> Result<PrunedColumnScan, ColumnBlockError> {
-    let block = read_column_block(bytes)?;
+    let frame = reddb_file::decode_column_block_frame(bytes)?;
+    if let Some(granules_total) = range_without_matching_granules(&frame, start_ns, end_ns) {
+        return Ok(PrunedColumnScan {
+            points: Vec::new(),
+            granules_total,
+            granules_scanned: 0,
+        });
+    }
+    let block = read_column_block_frame_filtered(&frame, None)?;
     let ts_col = block
         .columns
         .iter()
@@ -551,6 +560,45 @@ pub fn query_column_block_range(
         granules_total,
         granules_scanned,
     })
+}
+
+// Only prune without decoding when a complete timestamp index proves every
+// granule misses. Unrecognized or incomplete metadata keeps the normal path.
+fn range_without_matching_granules(
+    frame: &reddb_file::ColumnBlockFrame<'_>,
+    start_ns: u64,
+    end_ns: u64,
+) -> Option<usize> {
+    if frame.columns.len() != 2 {
+        return None;
+    }
+    let timestamps = frame.columns.iter().find(|column| {
+        column.column_id == COLUMNAR_TS_COLUMN_ID
+            && column.logical_type == DataType::UnsignedInteger.to_byte()
+    })?;
+    frame.columns.iter().find(|column| {
+        column.column_id == COLUMNAR_VALUE_COLUMN_ID
+            && column.logical_type == DataType::Float.to_byte()
+    })?;
+    let index =
+        reddb_file::decode_column_block_granule_index_view(timestamps.granule_index?).ok()?;
+    let rows = usize::try_from(frame.row_count).ok()?;
+    let granule_size = index.granule_size() as usize;
+    if rows == 0
+        || granule_size == 0
+        || index.value_width() != 8
+        || index.granule_count() != rows.div_ceil(granule_size)
+    {
+        return None;
+    }
+    for (min, max) in index.granules() {
+        let min = u64::from_le_bytes(min.try_into().ok()?);
+        let max = u64::from_le_bytes(max.try_into().ok()?);
+        if min > max || (min <= end_ns && max >= start_ns) {
+            return None;
+        }
+    }
+    Some(index.granule_count())
 }
 
 /// Point query: all points whose **value** equals `target` in a sealed
@@ -908,6 +956,69 @@ mod tests {
         let empty = query_column_block_range(&block, 100_000, 200_000).expect("scan");
         assert_eq!(empty.granules_scanned, 0);
         assert!(empty.points.is_empty());
+    }
+
+    #[test]
+    fn range_query_skips_decoding_when_all_granules_are_outside_window() {
+        let mut chunk = TimeSeriesChunk::with_max_points("m", HashMap::new(), 200);
+        for i in 0..100u64 {
+            chunk.append(i, i as f64);
+            chunk.append(10_000 + i, i as f64);
+        }
+        let original = chunk
+            .seal_columnar_with_granule_size(1, 0, 100)
+            .expect("seal columnar");
+        let frame = reddb_file::decode_column_block_frame(&original).expect("valid frame");
+        // Rebuild a checksummed frame with a non-decodable value stream. This
+        // shows whether the negative range scan decodes a column it cannot need.
+        let parts: Vec<_> = frame
+            .columns
+            .iter()
+            .map(|col| reddb_file::ColumnBlockPart {
+                column_id: col.column_id,
+                logical_type: col.logical_type,
+                codec_tag: col.codec_tag,
+                stream: if col.column_id == COLUMNAR_VALUE_COLUMN_ID {
+                    &[0u8][..]
+                } else {
+                    col.stream
+                },
+                granule_index: col.granule_index.unwrap_or_default(),
+                granule_bloom: col.granule_bloom.unwrap_or_default(),
+            })
+            .collect();
+        let block = reddb_file::encode_column_block_frame(
+            frame.chunk_id,
+            frame.schema_ref,
+            frame.row_count,
+            frame.min_ts_ns,
+            frame.max_ts_ns,
+            &parts,
+        );
+        assert!(read_column_block(&block).is_err());
+        let scan = query_column_block_range(&block, 1_000, 9_000).expect("skip empty range");
+        assert!(scan.points.is_empty());
+        assert_eq!((scan.granules_scanned, scan.granules_total), (0, 2));
+        assert!(query_column_block_range(&block, 0, 10).is_err());
+
+        // An index that cannot cover the declared row count cannot justify
+        // skipping the streams: the regular decode must report the error.
+        let incomplete = reddb_file::encode_column_block_frame(
+            frame.chunk_id,
+            frame.schema_ref,
+            frame.row_count + 1,
+            frame.min_ts_ns,
+            frame.max_ts_ns,
+            &parts,
+        );
+        assert!(query_column_block_range(&incomplete, 1_000, 9_000).is_err());
+
+        let mut corrupted = block;
+        corrupted[50] ^= 1;
+        assert!(matches!(
+            query_column_block_range(&corrupted, 1_000, 9_000),
+            Err(ColumnBlockError::ChecksumMismatch { .. })
+        ));
     }
 
     /// Criterion 3: pruning NEVER drops a row that matches the predicate,

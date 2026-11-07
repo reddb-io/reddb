@@ -32,7 +32,13 @@ fn replica_persists_relay_manifest_for_applied_batches() {
     let manifest_path = runtime
         .replica_relay_manifest_path("replica-a")
         .expect("relay manifest path");
-    let manifest = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+    assert!(
+        !manifest_path.exists(),
+        "relay metadata stays inside database"
+    );
+    let manifest = runtime
+        .replica_relay_manifest("replica-a")
+        .expect("read internal relay manifest")
         .expect("read relay manifest");
     assert_eq!(manifest.replica_id, "replica-a");
     assert_eq!(manifest.timeline, reddb_file::TimelineId::initial());
@@ -73,10 +79,13 @@ fn replica_relay_manifest_corruption_fails_closed() {
     runtime
         .record_replica_relay_batch("replica-a", &[(1, b"first".to_vec())], 1)
         .expect("record first relay batch");
-    let manifest_path = runtime
-        .replica_relay_manifest_path("replica-a")
-        .expect("relay manifest path");
-    fs::write(&manifest_path, b"corrupt relay manifest").expect("corrupt relay manifest");
+    let key = format!("replication.relay.{}", hex::encode("replica-a"));
+    let corrupt = hex::encode(b"corrupt relay manifest");
+    runtime
+        .db()
+        .store()
+        .try_set_storage_metadata(&key, &reddb_server::json!(corrupt))
+        .expect("corrupt internal relay manifest");
 
     let err = runtime
         .record_replica_relay_batch("replica-a", &[(2, b"second".to_vec())], 2)
@@ -87,8 +96,12 @@ fn replica_relay_manifest_corruption_fails_closed() {
         "error should identify relay manifest corruption, got {message}"
     );
     assert_eq!(
-        fs::read(&manifest_path).expect("read corrupt relay manifest"),
-        b"corrupt relay manifest",
+        runtime
+            .db()
+            .store()
+            .try_get_storage_metadata(&key)
+            .expect("read corrupt relay manifest"),
+        Some(reddb_types::Value::text(corrupt)),
         "failed closed path must not replace corrupt manifest with a reset state"
     );
 
@@ -108,7 +121,9 @@ fn replica_relay_missing_segment_fails_closed() {
     let manifest_path = runtime
         .replica_relay_manifest_path("replica-a")
         .expect("relay manifest path");
-    let manifest = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+    let manifest = runtime
+        .replica_relay_manifest("replica-a")
+        .expect("read internal relay manifest")
         .expect("read relay manifest");
     let relay_dir = manifest_path.parent().expect("relay manifest parent");
     let segment_path = relay_dir.join(&manifest.segments[0].relative_path);
@@ -119,10 +134,14 @@ fn replica_relay_missing_segment_fails_closed() {
         .expect_err("missing relay segment must fail closed");
     let message = err.to_string();
     assert!(
-        message.contains("No such file") || message.contains("not found"),
+        message.contains("No such file")
+            || message.contains("not found")
+            || (cfg!(windows) && message.contains("cannot find the file")),
         "error should identify missing relay segment, got {message}"
     );
-    let unchanged = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+    let unchanged = runtime
+        .replica_relay_manifest("replica-a")
+        .expect("read internal relay manifest")
         .expect("read unchanged relay manifest");
     assert_eq!(
         unchanged, manifest,
@@ -151,7 +170,9 @@ fn replica_relay_corrupt_segment_fails_closed() {
     let manifest_path = runtime
         .replica_relay_manifest_path("replica-a")
         .expect("relay manifest path");
-    let manifest = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+    let manifest = runtime
+        .replica_relay_manifest("replica-a")
+        .expect("read internal relay manifest")
         .expect("read relay manifest");
     let segment_path = manifest_path
         .parent()
@@ -167,7 +188,9 @@ fn replica_relay_corrupt_segment_fails_closed() {
         message.contains("relay") || message.contains("checksum") || message.contains("invalid"),
         "error should identify corrupt relay segment, got {message}"
     );
-    let unchanged = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+    let unchanged = runtime
+        .replica_relay_manifest("replica-a")
+        .expect("read internal relay manifest")
         .expect("read unchanged relay manifest");
     assert_eq!(
         unchanged, manifest,
@@ -201,7 +224,9 @@ fn replica_relay_runtime_write_survives_atomic_crash_points() {
         let manifest_path = runtime
             .replica_relay_manifest_path("replica-a")
             .expect("relay manifest path");
-        let initial = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+        let initial = runtime
+            .replica_relay_manifest("replica-a")
+            .expect("read internal relay manifest")
             .expect("read initial relay manifest");
         // The child is the next writer; an embedded store admits one at a time.
         drop(runtime);
@@ -221,7 +246,11 @@ fn replica_relay_runtime_write_survives_atomic_crash_points() {
             "child should crash at {point}, status={child:?}"
         );
 
-        let manifest = reddb_file::ReplicaRelayLogManifest::read_from_path(&manifest_path)
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("recover WAL");
+        let manifest = runtime
+            .replica_relay_manifest("replica-a")
+            .expect("read internal relay manifest")
             .expect("relay manifest remains decodable");
         assert!(
             manifest.flushed_lsn == initial.flushed_lsn || manifest.flushed_lsn == 2,

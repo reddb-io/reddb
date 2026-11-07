@@ -25,6 +25,11 @@ fn unreachable_storage_modules_stay_retired() {
         "engine/pq.rs",
         "engine/store_strategy.rs",
         "engine/tiered_search.rs",
+        "transaction/coordinator.rs",
+        "transaction/lock.rs",
+        "transaction/log.rs",
+        "transaction/savepoint.rs",
+        "unified/index/incremental.rs",
     ] {
         assert!(
             !root.join(retired).exists(),
@@ -57,5 +62,17 @@ fn unreachable_storage_modules_stay_retired() {
             .join("benches/cache_ring_contention_bench.rs")
             .exists(),
         "benchmark for the retired cache ring remains"
+    );
+
+    assert!(
+        !manifest.join("src/runtime/replica_queue_store.rs").exists(),
+        "retired replica queue adapter remains"
+    );
+
+    let hot_update = std::fs::read_to_string(root.join("engine/hot_update.rs"))
+        .expect("read HOT decision helper");
+    assert!(
+        !hot_update.contains("cfg(any())"),
+        "disabled HOT test module returned"
     );
 }

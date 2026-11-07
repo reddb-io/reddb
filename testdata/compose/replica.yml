@@ -28,6 +28,7 @@ services:
       - REDDB_STORAGE_PACKAGING=operational-directory
       - REDDB_REPLICA_COUNT=1
       - REDDB_VAULT=false
+      - REDDB_NO_AUTH=true
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:5000"]
       interval: 5s
@@ -60,6 +61,7 @@ services:
       - REDDB_REPLICA_COUNT=1
       - REDDB_PRIMARY_ADDR=http://primary:55055
       - REDDB_VAULT=false
+      - REDDB_NO_AUTH=true
     depends_on:
       primary:
         condition: service_healthy

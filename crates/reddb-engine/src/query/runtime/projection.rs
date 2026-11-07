@@ -26,6 +26,21 @@ pub trait ProjectionHost {
         arguments: &[Projection],
         source: &UnifiedRecord,
     ) -> Option<Value>;
+    fn try_evaluate_filter(
+        &self,
+        filter: &Filter,
+        source: &UnifiedRecord,
+    ) -> Result<bool, Self::Error> {
+        Ok(self.evaluate_filter(filter, source))
+    }
+    fn try_evaluate_function(
+        &self,
+        name: &str,
+        arguments: &[Projection],
+        source: &UnifiedRecord,
+    ) -> Result<Option<Value>, Self::Error> {
+        Ok(self.evaluate_function(name, arguments, source))
+    }
     fn evaluate_literal(&self, column: &str, source: &UnifiedRecord) -> Option<Value>;
     fn evaluation_error(&self, error: EvalError, sensitive: bool) -> Self::Error;
     fn secret_query_output(&self, value: Value) -> Result<Value, Self::Error>;
@@ -113,12 +128,12 @@ pub fn project_runtime_record_with_host<H: ProjectionHost>(
                         // parse failure, overflow, …) still propagate.
                         Err(EvalError::UnknownFunction { .. })
                         | Err(EvalError::UnknownColumn(_)) => {
-                            Some(Value::Boolean(host.evaluate_filter(filter, source)))
+                            Some(Value::Boolean(host.try_evaluate_filter(filter, source)?))
                         }
                         Err(err) => return Err(host.evaluation_error(err, sensitive)),
                     }
                 } else {
-                    Some(Value::Boolean(host.evaluate_filter(filter, source)))
+                    Some(Value::Boolean(host.try_evaluate_filter(filter, source)?))
                 }
             }
             Projection::Function(ref name, ref args) => {
@@ -135,12 +150,12 @@ pub fn project_runtime_record_with_host<H: ProjectionHost>(
                         // (JSON parse failure, overflow, …) still propagate.
                         Err(EvalError::UnknownFunction { .. })
                         | Err(EvalError::UnknownColumn(_)) => {
-                            host.evaluate_function(name, args, source)
+                            host.try_evaluate_function(name, args, source)?
                         }
                         Err(err) => return Err(host.evaluation_error(err, sensitive)),
                     }
                 } else {
-                    host.evaluate_function(name, args, source)
+                    host.try_evaluate_function(name, args, source)?
                 }
             }
             Projection::All => None,

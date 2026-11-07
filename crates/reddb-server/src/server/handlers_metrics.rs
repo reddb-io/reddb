@@ -169,39 +169,64 @@ impl RedDBServer {
         &self,
         headers: &BTreeMap<String, String>,
         default_namespace: &str,
-    ) -> MetricsRequestScope {
-        let tenant = headers
+    ) -> RedDBResult<MetricsRequestScope> {
+        let requested_tenant = headers
             .get("x-reddb-tenant")
             .filter(|value| !value.trim().is_empty())
-            .map(|value| value.trim().to_string())
-            .or_else(|| self.metrics_tenant_from_bearer(headers))
-            .or_else(crate::runtime::impl_core::current_tenant)
-            .unwrap_or_else(|| "default".to_string());
+            .map(|value| value.trim().to_string());
+        let caller = super::handlers_auth::resolve_auth_caller(self, headers);
+        let tenant = match caller {
+            Some(caller) if caller.id.tenant.is_some() => {
+                let credential_tenant = caller.id.tenant.expect("checked tenant");
+                if requested_tenant
+                    .as_deref()
+                    .is_some_and(|tenant| tenant != credential_tenant)
+                {
+                    return Err(RedDBError::ReadOnly(format!(
+                        "credential tenant `{credential_tenant}` cannot select another metrics tenant"
+                    )));
+                }
+                credential_tenant
+            }
+            Some(caller) => {
+                let tenant = requested_tenant
+                    .or_else(crate::runtime::impl_core::current_tenant)
+                    .unwrap_or_else(|| "default".to_string());
+                if headers.contains_key("x-reddb-tenant") {
+                    let auth_store = self.auth_store.as_ref().ok_or_else(|| {
+                        RedDBError::ReadOnly("metrics tenant selection requires auth".to_string())
+                    })?;
+                    let resource = crate::auth::policies::ResourceRef::new("metrics", &tenant)
+                        .with_tenant(tenant.clone());
+                    let ctx = auth_store.eval_context_for_principal(
+                        &caller.id,
+                        caller.role,
+                        Some(tenant.clone()),
+                    );
+                    if !auth_store.check_policy_authz_with_role(
+                        &caller.id,
+                        "metrics:cross-tenant",
+                        &resource,
+                        &ctx,
+                        caller.role,
+                    ) {
+                        return Err(RedDBError::ReadOnly(format!(
+                            "policy denied metrics:cross-tenant on metrics:{tenant}"
+                        )));
+                    }
+                }
+                tenant
+            }
+            None => requested_tenant
+                .or_else(crate::runtime::impl_core::current_tenant)
+                .unwrap_or_else(|| "default".to_string()),
+        };
         let namespace = headers
             .get("x-reddb-namespace")
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.trim().to_string())
             .unwrap_or_else(|| default_namespace.to_string());
-        MetricsRequestScope { tenant, namespace }
-    }
-
-    fn metrics_tenant_from_bearer(&self, headers: &BTreeMap<String, String>) -> Option<String> {
-        let token = headers
-            .get("authorization")
-            .and_then(|value| value.strip_prefix("Bearer "))?;
-        if super::routing::looks_like_jwt(token) {
-            if let Some(validator) = self.runtime.oauth_validator() {
-                if let Ok((tenant, _username, _role)) =
-                    crate::wire::redwire::auth::validate_oauth_jwt_full(&validator, token)
-                {
-                    return tenant;
-                }
-            }
-        }
-        let auth_store = self.auth_store.as_ref()?;
-        auth_store
-            .validate_token_full(token)
-            .and_then(|(id, _role)| id.tenant)
+        Ok(MetricsRequestScope { tenant, namespace })
     }
 
     pub(crate) fn handle_prometheus_query(
@@ -210,7 +235,10 @@ impl RedDBServer {
         query: &BTreeMap<String, String>,
         body: Option<Vec<u8>>,
     ) -> HttpResponse {
-        let scope = self.metrics_request_scope(headers, "default");
+        let scope = match self.metrics_request_scope(headers, "default") {
+            Ok(scope) => scope,
+            Err(err) => return prometheus_error_response(403, "forbidden", err.to_string()),
+        };
         self.runtime
             .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "query");
         let raw_query = match prometheus_query_param(query, body.as_deref()) {
@@ -243,7 +271,10 @@ impl RedDBServer {
         query: &BTreeMap<String, String>,
         body: Option<Vec<u8>>,
     ) -> HttpResponse {
-        let scope = self.metrics_request_scope(headers, "default");
+        let scope = match self.metrics_request_scope(headers, "default") {
+            Ok(scope) => scope,
+            Err(err) => return prometheus_error_response(403, "forbidden", err.to_string()),
+        };
         self.runtime
             .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "query_range");
         let raw_query = match prometheus_required_param(query, body.as_deref(), "query") {
@@ -275,7 +306,7 @@ impl RedDBServer {
         match self.ingest_prometheus_remote_write(query, headers, &body) {
             Ok(()) => HttpResponse {
                 status: 204,
-                body: Vec::new(),
+                body: Vec::new().into(),
                 content_type: "text/plain",
                 extra_headers: Vec::new(),
             },
@@ -305,7 +336,7 @@ impl RedDBServer {
             )));
         }
         let default_namespace = contract.metrics_namespace.as_deref().unwrap_or("default");
-        let scope = self.metrics_request_scope(headers, default_namespace);
+        let scope = self.metrics_request_scope(headers, default_namespace)?;
 
         let decoded = snap::raw::Decoder::new()
             .decompress_vec(body)
@@ -2433,4 +2464,67 @@ fn valid_label_name(name: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tenant_scope_tests {
+    use super::*;
+    use crate::auth::{AuthConfig, AuthStore, Role};
+    use std::sync::Arc;
+
+    fn server_with_key(tenant: Option<&str>, username: &str, role: Role) -> (RedDBServer, String) {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let store = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        store
+            .create_user_in_tenant(tenant, username, "pw", role)
+            .expect("user");
+        let key = store
+            .create_api_key_in_tenant(tenant, username, "metrics", role)
+            .expect("key")
+            .key;
+        (RedDBServer::new(runtime).with_auth(store), key)
+    }
+
+    #[test]
+    fn tenant_bearer_is_authoritative_over_metrics_header() {
+        let (server, key) = server_with_key(Some("acme"), "collector", Role::Admin);
+        let mut headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {key}"))]);
+
+        let scope = server
+            .metrics_request_scope(&headers, "default")
+            .expect("credential tenant");
+        assert_eq!(scope.tenant, "acme");
+
+        headers.insert("x-reddb-tenant".to_string(), "globex".to_string());
+        assert!(server.metrics_request_scope(&headers, "default").is_err());
+
+        headers.insert("x-reddb-tenant".to_string(), "acme".to_string());
+        assert_eq!(
+            server
+                .metrics_request_scope(&headers, "default")
+                .expect("matching header")
+                .tenant,
+            "acme"
+        );
+    }
+
+    #[test]
+    fn legacy_platform_admin_can_select_metrics_tenant() {
+        let (server, key) = server_with_key(None, "root", Role::Admin);
+        let headers = BTreeMap::from([
+            ("authorization".to_string(), format!("Bearer {key}")),
+            ("x-reddb-tenant".to_string(), "acme".to_string()),
+        ]);
+        assert_eq!(
+            server
+                .metrics_request_scope(&headers, "default")
+                .expect("legacy admin selector")
+                .tenant,
+            "acme"
+        );
+    }
 }

@@ -26,6 +26,14 @@ pub(crate) mod host;
 /// Bound materialization before cloning records, independently of SQL LIMIT.
 pub const LOCAL_READ_ROWS_MAX: usize = 100_000;
 
+/// Host-owned equality restriction, applied before the caller's SQL predicates.
+/// This is a local inspection boundary, not a server authentication policy.
+pub struct ReadScope {
+    pub table: String,
+    pub field: String,
+    pub value: reddb_types::Value,
+}
+
 #[derive(Debug)]
 pub enum LocalReadError {
     Storage(StoreError),
@@ -36,11 +44,13 @@ pub enum LocalReadError {
     Query(String),
     Parameters(super::parameters::UserParamError),
     ResourceLimit,
+    Vault(&'static str),
 }
 
 impl LocalReadError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Vault(code) => code,
             Self::Storage(_) => "DATABASE_ERROR",
             Self::Catalog(_) => "CATALOG_ERROR",
             Self::Parse(_) => "QUERY_PARSE_ERROR",
@@ -55,6 +65,7 @@ impl LocalReadError {
 impl std::fmt::Display for LocalReadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Vault(code) => formatter.write_str(code),
             Self::Storage(error) => error.fmt(formatter),
             Self::Catalog(message) | Self::Query(message) => formatter.write_str(message),
             Self::Parse(error) => error.fmt(formatter),
@@ -117,7 +128,7 @@ pub(crate) fn query_resident(
     sql: &str,
 ) -> Result<ScalarResult, LocalReadError> {
     let query = admission::query(sql)?;
-    execute_resident_query(resident, contracts, query)
+    execute_resident_query(resident, contracts, query, None)
 }
 
 pub(crate) fn query_resident_bound(
@@ -125,13 +136,23 @@ pub(crate) fn query_resident_bound(
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
 ) -> Result<ScalarResult, LocalReadError> {
-    execute_resident_query(resident, contracts, admission::table(query)?)
+    execute_resident_query(resident, contracts, admission::table(query)?, None)
+}
+
+pub(crate) fn query_resident_scoped(
+    resident: &crate::storage::resident_store::ResidentStore,
+    contracts: &HashMap<String, CollectionContract>,
+    query: reddb_rql::ast::TableQuery,
+    scope: &ReadScope,
+) -> Result<ScalarResult, LocalReadError> {
+    execute_resident_query(resident, contracts, admission::table(query)?, Some(scope))
 }
 
 fn execute_resident_query(
     resident: &crate::storage::resident_store::ResidentStore,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
+    scope: Option<&ReadScope>,
 ) -> Result<ScalarResult, LocalReadError> {
     let contract = contracts.get(&query.table).ok_or_else(|| {
         LocalReadError::Catalog(format!(
@@ -150,12 +171,29 @@ fn execute_resident_query(
     let columns = crate::catalog::schema::resolved_contract_columns(contract)
         .map_err(|error| LocalReadError::Catalog(error.to_string()))?;
     admission::expressions(&query, &columns)?;
+    if scope.is_some_and(|scope| !columns.iter().any(|column| column.name == scope.field)) {
+        return Err(LocalReadError::Catalog(
+            "inspection scope column is missing".into(),
+        ));
+    }
     let manager = resident
         .get_collection(&query.table)
         .ok_or_else(|| LocalReadError::Catalog(format!("collection {} is missing", query.table)))?;
+    let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
     let mut entities = Vec::new();
     let mut exceeded = false;
     manager.scan_for_each(None, |entity| {
+        if let Some(scope) = scope {
+            let Some(record) = super::records::runtime_table_record_from_entity_ref_with_schema(
+                entity,
+                Some(&schema),
+            ) else {
+                return true;
+            };
+            if record.get(&scope.field) != Some(&scope.value) {
+                return true;
+            }
+        }
         if entities.len() == LOCAL_READ_ROWS_MAX {
             exceeded = true;
             return false;
@@ -166,7 +204,6 @@ fn execute_resident_query(
     if exceeded {
         return Err(LocalReadError::ResourceLimit);
     }
-    let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
     let mut records = Vec::with_capacity(entities.len());
     for entity in entities {
         if !matches!(entity.data, EntityData::Row(_)) {

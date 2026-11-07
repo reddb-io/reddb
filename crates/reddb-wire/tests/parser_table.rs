@@ -82,7 +82,16 @@ fn ok_cases() -> Vec<OkCase> {
             name: "grpcs:// default port 55555",
             input: "grpcs://primary",
             expect: ConnectionTarget::Grpc {
-                endpoint: "http://primary:55555".into(),
+                endpoint: "https://primary:55555".into(),
+            },
+        },
+        OkCase {
+            name: "grpcs cluster preserves TLS",
+            input: "grpcs://primary,replica",
+            expect: ConnectionTarget::GrpcCluster {
+                primary: "https://primary:55555".into(),
+                replicas: vec!["https://replica:55555".into()],
+                force_primary: false,
             },
         },
         OkCase {
@@ -361,6 +370,42 @@ fn connection_auth_parse_errors_redact_userinfo() {
     let rendered = err.to_string();
     assert!(!rendered.contains("alice"), "{rendered}");
     assert!(!rendered.contains("secret-token"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[test]
+fn connection_uri_redacts_sensitive_query_values() {
+    let parsed = parse_with_auth(
+        "https://db.example:443?token=top-secret&Api%4Bey=second-secret&mode=read&key=third-secret&access_token=fourth-secret&client_secret=fifth-secret&sslcert=sixth-secret&sslkey=seventh-secret&token=eighth-secret#frag",
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.redacted_uri,
+        "https://db.example:443?token=<redacted>&Api%4Bey=<redacted>&mode=read&key=<redacted>&access_token=<redacted>&client_secret=<redacted>&sslcert=<redacted>&sslkey=<redacted>&token=<redacted>#frag"
+    );
+    for secret in [
+        "top-secret",
+        "second-secret",
+        "third-secret",
+        "fourth-secret",
+        "fifth-secret",
+        "sixth-secret",
+        "seventh-secret",
+        "eighth-secret",
+    ] {
+        assert!(
+            !parsed.redacted_uri.contains(secret),
+            "{}",
+            parsed.redacted_uri
+        );
+    }
+}
+
+#[test]
+fn connection_uri_parse_errors_redact_query_secrets() {
+    let err = parse_with_auth("https://[bad?token=top-secret").unwrap_err();
+    let rendered = err.to_string();
+    assert!(!rendered.contains("top-secret"), "{rendered}");
     assert!(rendered.contains("<redacted>"), "{rendered}");
 }
 

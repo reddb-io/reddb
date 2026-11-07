@@ -81,9 +81,6 @@ pub use index::{
     EdgeDirection,
     // Graph adjacency index
     GraphAdjacencyIndex,
-    // Incremental write-path maintenance (issue #160)
-    IncrementalIndexMaintainer,
-    IndexDeltaOp,
     IndexEvent,
     IndexEventKind,
     IndexStats,
@@ -94,7 +91,6 @@ pub use index::{
     IntegratedIndexManager,
     InvertedIndex,
     MetadataQueryFilter,
-    SecondaryIndexHandle,
     TextSearchResult,
     VectorSearchResult,
 };

@@ -41,6 +41,17 @@ FAST_TESTS=(
   grouped_documents_kv_queues:e2e_issue_555_documents_sql_aggregates::
   grouped_general_multimodel:e2e_issue_751_json_patch_path_helpers::
   grouped_chaos_drill_persistence:e2e_fold_dwb_into_wal_policy::
+  # Critical user journeys. These reuse harnesses already linked above so the
+  # fast lane gains behavioural coverage without adding integration binaries.
+  grouped_sql_core:e2e_index_replay::persistent_reopen_restores_indexed_query_results
+  grouped_sql_core:e2e_statement_execution_contract::table_command_matrix_executes_ddl_dml_index_alter_truncate_and_drop
+  grouped_auth_iam_security:e2e_rls_universal::policy_on_messages_of_queue_gates_consumers
+  grouped_auth_iam_security:iam_policy_http_collections::security_journey_
+  grouped_auth_iam_security:e2e_tenant_auto_index::alter_enable_tenancy_creates_index_over_existing_data
+  grouped_surface_contracts:integration_rpc_stdio::insert_then_query_round_trip
+  grouped_chaos_drill_persistence:e2e_backup_restore::pitr_restore_succeeds_from_clean_snapshot
+  grouped_chaos_drill_persistence:e2e_logical_wal_crash::truncated_tail_after_append_returns_valid_prefix_only
+  grouped_general_multimodel:e2e_concurrent_writes::twenty_threads_five_collections_do_not_deadlock
 )
 
 if [ -n "${REDDB_FAST_TESTS:-}" ]; then

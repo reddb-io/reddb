@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -40,6 +40,16 @@ use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
 use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
+
+pub(crate) fn trace_startup_phase(path: &Path, phase: &'static str, started: std::time::Instant) {
+    tracing::debug!(
+        target: "reddb::storage::startup",
+        path = %path.display(),
+        phase,
+        elapsed = ?started.elapsed(),
+        "database startup phase completed"
+    );
+}
 
 pub use reddb_file::{
     is_supported_store_version, NativeCatalogCollectionSummary, NativeCatalogSummary,
@@ -128,6 +138,9 @@ pub struct UnifiedStoreConfig {
     /// supplies a count derived from the page-cache budget share, so the
     /// default is reached only by direct library callers.
     pub page_cache_slots: Option<usize>,
+    /// Shared resident arena allowance for disk-backed collections. The host
+    /// supplies the segment share of its process memory budget.
+    pub resident_memory_bytes_max: Option<u64>,
 }
 
 impl Default for UnifiedStoreConfig {
@@ -145,6 +158,7 @@ impl Default for UnifiedStoreConfig {
             data_dir: None,
             embedded_wal_path: None,
             page_cache_slots: None,
+            resident_memory_bytes_max: None,
         }
     }
 }
@@ -247,12 +261,13 @@ struct CheckpointVersion {
     /// full validation path when more than 1,024 such rows are outstanding.
     /// Also carries bounded unprojected IDs across completed inline GC batches.
     deferred_rows: Option<Arc<Vec<EntityId>>>,
-    /// Inline GC advanced the segment proof past rows still awaiting projection.
+    /// The resident image includes rows omitted or normalized in the checkpoint.
     has_unprojected_rows: bool,
 }
 
 impl CheckpointVersion {
     fn remember_deferred_row(&mut self, id: EntityId) {
+        self.has_unprojected_rows = true;
         let Some(rows) = self.deferred_rows.as_mut() else {
             return;
         };
@@ -307,6 +322,7 @@ pub struct UnifiedStore {
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
     db_path: Option<PathBuf>,
+    operational_manifest: parking_lot::Mutex<Option<(PathBuf, reddb_file::OperationalManifest)>>,
     /// B-tree indices for O(log n) entity lookups by ID (per collection).
     /// Stored as `Arc<BTree>` so hot-path callers can clone the handle out
     /// under a read lock and release the map-level lock before doing the
@@ -314,12 +330,18 @@ pub struct UnifiedStore {
     /// btree mutation, serialising every concurrent insert across every
     /// collection into one global write lock.
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
+    key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
+    secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
+    /// Epoch in the durable catalog and the epoch being published, if any.
+    ownership_catalog_epoch: AtomicU64,
+    ownership_active_epoch: AtomicU64,
     /// Detached artifact pages stay unavailable until native metadata is durable.
     detached_native_blob_pages: parking_lot::Mutex<std::collections::BTreeSet<u32>>,
     /// Logical store WAL / grouped durability coordinator for paged mode.
@@ -348,6 +370,18 @@ pub struct UnifiedStore {
     pub(crate) snapshot_manager:
         std::sync::OnceLock<Arc<crate::storage::transaction::snapshot::SnapshotManager>>,
     embedded_commit_session: std::sync::OnceLock<crate::storage::embedded::EmbeddedCommitSession>,
+    #[cfg(test)]
+    pub(crate) test_fail_deferred_wal_append: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) test_require_deferred_publication_fence: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone)]
+struct PublishedKeyIndex {
+    indexed: bool,
+    source: std::sync::Weak<BTree>,
+    tree: Arc<BTree>,
+    secondary: BTreeMap<String, secondary_index::PublishedSecondaryIndex>,
 }
 
 struct RetiredBTree {
@@ -356,6 +390,7 @@ struct RetiredBTree {
 }
 
 mod builder;
+mod checkpoint_cold_append;
 mod checkpoint_delta;
 mod checkpoint_wal;
 mod commit;
@@ -366,13 +401,16 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 mod impl_vault_import;
+mod key_index;
 mod keyed_write;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
+pub(crate) mod count_index;
 mod native_helpers;
+mod recovery_xid;
+pub mod secondary_index;
 
-pub use self::builder::EntityBuilder;
-pub(crate) use self::commit::DeferredStoreWalActions;
+pub(crate) use self::commit::{DeferredStoreWalActions, StoreWalCaptureGuard};
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
 

@@ -9,8 +9,6 @@
 //! visibility through the snapshot API; point/index candidates use the
 //! table-row resolver before reaching UPDATE or DELETE.
 
-use std::collections::HashMap;
-
 use super::{query_exec, RedDBRuntime};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::table_row_mvcc_resolver::TableRowMvccReadResolver;
@@ -28,6 +26,28 @@ pub(super) struct DmlTargetScan<'a> {
     table_row_resolver: TableRowMvccReadResolver,
     live_table_rows: bool,
     declared_table: bool,
+}
+
+fn dml_snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
+    let current = snapshot.manager.fresh_read_snapshot();
+    snapshot.manager.oldest_active_xid().is_some()
+        || snapshot.snapshot.xid != current.xid
+        || snapshot.snapshot.in_progress != current.in_progress
+}
+
+fn dml_filter_can_retry(filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare { .. }
+        | Filter::In { .. }
+        | Filter::Between { .. }
+        | Filter::IsNull(_)
+        | Filter::IsNotNull(_) => true,
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            dml_filter_can_retry(left) && dml_filter_can_retry(right)
+        }
+        Filter::Not(inner) => dml_filter_can_retry(inner),
+        _ => false,
+    }
 }
 
 impl<'a> DmlTargetScan<'a> {
@@ -92,6 +112,10 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
+        if let Some(ids) = super::retention_sweeper::take_delete_candidates() {
+            return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+        }
+
         // Fast path: WHERE _entity_id = N. The resolver maps stable
         // table-row identity to the version visible to this statement.
         // Skip for graph node/edge targets — the table-row resolver only
@@ -109,13 +133,13 @@ impl<'a> DmlTargetScan<'a> {
             if let Some(entity_id) = entity_id {
                 let logical_id = EntityId::new(entity_id);
                 let entity = if self.live_table_rows {
-                    store.get_table_row_by_logical_id(self.table, logical_id)
+                    store.try_get_table_row_by_logical_id(self.table, logical_id)?
                 } else {
                     self.table_row_resolver
-                        .resolve_logical_id(&store, self.table, logical_id)
+                        .try_resolve_logical_id(&store, self.table, logical_id)?
                 };
                 if let Some(entity) = entity {
-                    return Ok(self.target_ids_from_entities([entity]));
+                    return self.target_ids_from_entities([entity], compiled_filter.as_ref());
                 }
                 // Non-table-row entities (e.g. vectors) carry their
                 // physical id as their identity and are invisible to the
@@ -123,43 +147,69 @@ impl<'a> DmlTargetScan<'a> {
                 // direct physical-id lookup so `DELETE FROM <vector>
                 // WHERE rid = N` actually targets the vector instead of
                 // silently matching nothing.
-                if let Some(entity) = store.get(self.table, logical_id) {
+                if let Some(entity) = store.try_get(self.table, logical_id, usize::MAX)? {
                     if !matches!(entity.kind, EntityKind::TableRow { .. }) {
-                        return Ok(self.target_ids_from_entities([entity]));
+                        return self.target_ids_from_entities([entity], compiled_filter.as_ref());
                     }
                 }
                 return Ok(Vec::new());
             }
         }
 
-        if !matches!(self.target, Some(UpdateTarget::Documents))
-            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
-        {
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let index_store = self.runtime.index_store_ref();
+        let generation = index_store.indexed_mutation_generation();
+        // DML target discovery may run against a retained snapshot even for an
+        // autocommit statement. Current index entries cannot recover old values.
+        // Only retry a pure filter outside stored-function work limits if
+        // publication raced the lookup. Query deadlines still cover both scans.
+        let can_retry = self.filter.is_some_and(dml_filter_can_retry)
+            && compiled_filter.is_some()
+            && !super::function_budget::stored_function_active();
+        let scan_required = self.target.is_none() && self.limit.is_some()
+            || matches!(self.target, Some(UpdateTarget::Documents))
+            || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+            || !can_retry
+            || index_store.indexed_mutation_active()
+            || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
+        if !scan_required {
             if let Some(filter) = self.filter {
-                if let Some(ids) = query_exec::try_hash_eq_lookup(
-                    filter,
+                #[cfg(test)]
+                index_store.mutation_test_hook(
                     self.table,
-                    self.runtime.index_store_ref(),
-                ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
-                }
-
-                if let Some(ids) = query_exec::try_sorted_index_lookup(
-                    filter,
-                    self.table,
-                    self.runtime.index_store_ref(),
-                    None,
-                ) {
-                    return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
+                    super::index_store::MutationTestPhase::DmlIndexLookupStarted,
+                );
+                let candidates =
+                    match query_exec::try_hash_eq_lookup(filter, self.table, index_store)? {
+                        Some(ids) => Some(ids),
+                        None => query_exec::try_sorted_index_lookup(
+                            filter,
+                            self.table,
+                            index_store,
+                            None,
+                        )?,
+                    };
+                if let Some(ids) = candidates {
+                    let result = self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+                    if !index_store.indexed_mutation_active()
+                        && generation == index_store.indexed_mutation_generation()
+                        && snapshot
+                            .as_ref()
+                            .is_none_or(|ctx| !dml_snapshot_index_is_stale(ctx))
+                    {
+                        return result;
+                    }
                 }
             }
         }
 
-        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let mut ids = Vec::new();
+        let mut predicate_failure = None;
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
-            if !matches!(self.target, Some(UpdateTarget::Documents)) {
+            if !(matches!(self.target, Some(UpdateTarget::Documents))
+                || self.target.is_none() && self.limit.is_some())
+            {
                 query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
             }
             let zone_preds: Vec<_> = owned_zone_preds
@@ -188,20 +238,51 @@ impl<'a> DmlTargetScan<'a> {
                 })
                 .collect();
 
-            manager.for_each_entity_zoned_with_stats(&zone_preds, |entity| {
+            let mut visit = |entity: &crate::storage::UnifiedEntity| {
+                #[cfg(test)]
+                self.runtime.index_store_ref().mutation_test_hook(
+                    self.table,
+                    super::index_store::MutationTestPhase::DmlTargetScanCandidate,
+                );
+                if let Err(error) = super::query_budget::charge(1) {
+                    predicate_failure = Some(error);
+                    return false;
+                }
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
-                    && self.matches_filter(entity, compiled_filter.as_ref())
                 {
-                    ids.push(entity.id);
-                    if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
-                        return false;
+                    match self.matches_filter(entity, compiled_filter.as_ref()) {
+                        Ok(true) => {
+                            ids.push(entity.id);
+                            if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            predicate_failure = Some(error);
+                            return false;
+                        }
                     }
                 }
                 true
-            });
+            };
+            if manager.has_backing() {
+                manager.try_for_each_entity(usize::MAX, &mut visit)?;
+            } else {
+                manager.for_each_entity_zoned_with_stats(&zone_preds, visit);
+            }
         } else {
-            manager.for_each_entity(|entity| {
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                #[cfg(test)]
+                self.runtime.index_store_ref().mutation_test_hook(
+                    self.table,
+                    super::index_store::MutationTestPhase::DmlTargetScanCandidate,
+                );
+                if let Err(error) = super::query_budget::charge(1) {
+                    predicate_failure = Some(error);
+                    return false;
+                }
                 if self.candidate_visible(snapshot.as_ref(), entity)
                     && self.matches_update_target(entity)
                 {
@@ -211,46 +292,33 @@ impl<'a> DmlTargetScan<'a> {
                     }
                 }
                 true
-            });
+            })?;
         }
 
-        Ok(ids)
+        match predicate_failure {
+            Some(error) => Err(error),
+            None => Ok(ids),
+        }
     }
 
-    pub(super) fn row_snapshots(&self, entity_ids: &[EntityId]) -> Vec<Vec<(String, Value)>> {
+    pub(super) fn row_snapshots(
+        &self,
+        entity_ids: &[EntityId],
+    ) -> RedDBResult<Vec<Vec<(String, Value)>>> {
         if entity_ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let db = self.runtime.db();
         let store = db.store();
         let Some(manager) = store.get_collection(self.table) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        manager
-            .get_many(entity_ids)
+        Ok(manager
+            .try_get_many(entity_ids, usize::MAX)?
             .into_iter()
             .flatten()
             .filter_map(|entity| entity_row_snapshot(&entity))
-            .collect()
-    }
-
-    pub(super) fn row_json_pre_images(
-        &self,
-        entity_ids: &[EntityId],
-    ) -> HashMap<u64, crate::json::Value> {
-        if entity_ids.is_empty() {
-            return HashMap::new();
-        }
-        let db = self.runtime.db();
-        let store = db.store();
-        entity_ids
-            .iter()
-            .filter_map(|&id| {
-                store
-                    .get(self.table, id)
-                    .map(|entity| (id.raw(), crate::runtime::mutation::entity_row_json(&entity)))
-            })
-            .collect()
+            .collect())
     }
 
     fn compiled_filter(&self) -> Option<query_exec::CompiledEntityFilter> {
@@ -269,40 +337,68 @@ impl<'a> DmlTargetScan<'a> {
 
     fn recheck_index_candidates(
         &self,
-        entity_ids: Vec<EntityId>,
+        entity_ids: &[EntityId],
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
-    ) -> Vec<EntityId> {
+    ) -> RedDBResult<Vec<EntityId>> {
         let db = self.runtime.db();
         let store = db.store();
         let Some(manager) = store.get_collection(self.table) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-
         let mut ids = Vec::with_capacity(entity_ids.len());
-        for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+        let mut visit = |entity: crate::storage::UnifiedEntity| -> RedDBResult<bool> {
+            super::query_budget::charge(1)?;
             if self.visible_candidate(&entity)
                 && self.matches_update_target(&entity)
-                && self.matches_filter(&entity, compiled_filter)
+                && self.matches_filter(&entity, compiled_filter)?
             {
                 ids.push(entity.id);
-                if self.limit.map(|limit| ids.len() >= limit).unwrap_or(false) {
+                if self.limit.is_some_and(|limit| ids.len() >= limit) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        if manager.has_backing() {
+            // Decode only the current candidate, including when LIMIT stops
+            // before a later unreadable row. The callback owns no manager lock.
+            for id in entity_ids {
+                if let Some(entity) = manager.try_get(*id, usize::MAX)? {
+                    if !visit(entity)? {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Retain the resident batched-fetch fast path.
+            for entity in manager.get_many(entity_ids).into_iter().flatten() {
+                if !visit(entity)? {
                     break;
                 }
             }
         }
-        ids
+        Ok(ids)
     }
 
-    fn target_ids_from_entities<I>(&self, entities: I) -> Vec<EntityId>
+    fn target_ids_from_entities<I>(
+        &self,
+        entities: I,
+        compiled_filter: Option<&query_exec::CompiledEntityFilter>,
+    ) -> RedDBResult<Vec<EntityId>>
     where
         I: IntoIterator<Item = crate::storage::UnifiedEntity>,
     {
-        entities
-            .into_iter()
-            .filter(|entity| self.visible_candidate(entity))
-            .filter(|entity| self.matches_update_target(entity))
-            .map(|entity| entity.id)
-            .collect()
+        let mut ids = Vec::new();
+        for entity in entities {
+            super::query_budget::charge(1)?;
+            if self.visible_candidate(&entity)
+                && self.matches_update_target(&entity)
+                && self.matches_filter(&entity, compiled_filter)?
+            {
+                ids.push(entity.id);
+            }
+        }
+        Ok(ids)
     }
 
     fn visible_candidate(&self, entity: &crate::storage::UnifiedEntity) -> bool {
@@ -387,19 +483,27 @@ impl<'a> DmlTargetScan<'a> {
         &self,
         entity: &crate::storage::UnifiedEntity,
         compiled_filter: Option<&query_exec::CompiledEntityFilter>,
-    ) -> bool {
+    ) -> RedDBResult<bool> {
         match (self.filter, compiled_filter) {
-            (_, Some(compiled)) => {
-                compiled.evaluate(entity) == query_exec::CompiledEntityFilterDecision::Match
-            }
-            (Some(filter), None) => query_exec::evaluate_entity_filter_with_db(
+            (_, Some(compiled)) => compiled
+                .try_evaluate(entity)?
+                .try_resolve_with_fallback(|| {
+                    query_exec::evaluate_entity_filter_result_with_db(
+                        Some(self.runtime.db().as_ref()),
+                        entity,
+                        self.filter.expect("compiled target has a source filter"),
+                        self.table,
+                        self.table,
+                    )
+                }),
+            (Some(filter), None) => query_exec::evaluate_entity_filter_result_with_db(
                 Some(self.runtime.db().as_ref()),
                 entity,
                 filter,
                 self.table,
                 self.table,
             ),
-            (None, None) => true,
+            (None, None) => Ok(true),
         }
     }
 }

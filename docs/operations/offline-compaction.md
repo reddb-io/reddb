@@ -1,0 +1,232 @@
+# Offline native compaction
+
+For a physical scrub of the supported closed, checkpointed standalone layout:
+
+```sh
+red scrub-paged --source /preserved/data.rdb --json
+```
+
+This checks both superblocks, the checkpointed WAL boundary, allocator and
+catalog, collection and index trees, supported native metadata and blob
+checksums, and a marker-only operational manifest. A tree finding leaves the
+auxiliary checks explicitly incomplete. Allocated pages not identified as free
+or owned are counted as unclassified: they may be garbage, but prevent a clean
+result. When a Vault is present, it authenticates and decodes the Vault using
+the configured certificate or passphrase; missing or invalid credentials fail
+the scrub. It refuses pending recovery, nonempty logical WAL, slot or audit files, operational
+segments, columnar ownership, replicas and other unsupported layouts. It does
+not check the logical correspondence between index entries and rows. An error
+means the scrub could not verify the full supported layout; it is not a clean
+result. Page checksums alone do not prove that a checksum-valid page is the
+latest published generation. The source is never written.
+
+For a read-only diagnostic of collection, key-index and secondary-index trees,
+close and checkpoint the store, then run:
+
+```sh
+red scrub-paged-trees --source /preserved/data.rdb --json
+```
+
+This checks the catalog, allocator, tree ownership and forward leaf chains,
+key ordering and readable records. The command exits unsuccessfully when it
+finds a damaged tree or cannot safely inspect the source. It reports the
+affected collection and root, but cannot determine how many records were lost.
+Its scope is **trees only**: it does not validate the Vault, native physical
+assets, logical correspondence between indexes and rows, or replicated and
+serverless state. It is not a complete store scrub or a salvage operation.
+It applies the same source restrictions and per-value allowance listed below.
+
+If a closed, checkpointed store has damage limited to secondary index trees,
+the following operation copies verified data and surviving trees to a new
+directory and discards damaged secondary roots for rebuilding on reopen:
+
+```sh
+red salvage-paged-indexes --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+`salvage.json` lists the discarded roots and their reasons. Verify the recovered
+database and its indexes before serving it; retain the source. Data-tree,
+primary-key tree, catalog and pending-WAL corruption are not recovered by
+this command. A Vault must authenticate before recovery and again after it is
+copied. Nonempty logical WAL, replication slot or audit files, operational segments and nonempty operational collection
+files are refused because this operation cannot verify them. The compaction qualification boundaries below
+also apply. Recovery also refuses unclassified pages. A failed attempt may leave a diagnostic directory but will not
+publish the output file.
+
+For a legacy paged store with no cross references or physical metadata, the
+following command copies intact collections and intact leaves of damaged
+multi-page collections to a new directory:
+
+```sh
+red salvage-paged-collections --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+The loss report identifies skipped pages; the number of lost entities remains
+unknown. A checksum-damaged single-leaf root leaves that collection empty. For
+a multi-page tree, intact parent links, leaf depth, key ordering and surviving
+overflow ownership must verify; records in damaged leaves cannot be recovered.
+Interior damage, system collection damage, unclassified pages (including
+overflow pages whose owner was in a damaged leaf), unauthenticated Vaults,
+pending recovery, and more recent catalog formats are refused. Validate the
+recovered records and application-level relationships before using them.
+The legacy format does not provide a trusted identity high-water mark after
+this loss. Both superblocks are fenced to a read-only recovery version before
+publication; older engines reject that version. Export verified data into a
+new store after reconciling identities against an authoritative source. The
+low-level pager can inspect this version read-only; the server and SQL dump
+paths have not yet been qualified for it.
+
+For a supported closed store with pending WAL, checkpoint or double-write
+recovery, replay on an isolated copy and verify the result with:
+
+```sh
+red recover-paged-wal --source /preserved/data.rdb --destination-dir /new/recovered --json
+```
+
+For a store with divergent, populated `red_config` and `red.config` identities,
+an operator who has chosen the latter may explicitly add
+`--retain-canonical-system-config`. This retires the old identity only on the
+recovery copy. The operation refuses WAL actions addressed to `red_config`,
+except for committed upserts and deletes proved to affect only the process
+information recreated at boot (`red.system.pid`, CPU/memory observations,
+OS, architecture, hostname and start time). Delete identities must resolve
+in the old checkpoint or an earlier committed upsert. User-defined keys,
+unknown identities, references and unsupported action kinds are rejected.
+
+This exception requires a stable checkpoint image. Pending double-write pages
+are recovered on the isolated copy before inspecting configuration identities;
+engine WAL, interrupted checkpoints and full-page undo images are refused for
+this exception.
+The original WAL is copied unchanged; replay retires only the proved actions
+at their original positions. Other actions in the same transaction and page
+ownership records retain their order and behavior. Consumed identity counters
+are preserved. The JSON report exposes `retired_boot_system_wal_actions`;
+canonical process values remain unchanged until runtime boot reseeds them.
+Explicit canonical-config recovery also reconciles duplicate runtime catalogs
+for planner statistics, index descriptors, queue groups and materialized-view
+definitions on the isolated copy. It retains canonical planner observations,
+requires equal definitions for existing index/view keys, and imports definitions
+missing from the canonical catalog. Queue groups match by queue and group; their
+creation observations may differ. Legacy pending deliveries, acknowledgments,
+queue configurations, conflicting definitions, unknown row shapes, references,
+nontrivial MVCC/typed metadata and WAL targeting either side of these catalog
+pairs are refused. Consumed identities are retained. These checks cover the
+whole supported catalog before opening its recovered writer.
+
+The normal recovery command continues to reject the ambiguous catalog.
+
+The source read lock excludes normal writers; the original file and sidecars
+remain unchanged. The operation strictly reads the WAL and validates any
+complete double-write frame before making a copy. It recovers the copy,
+then rewrites and scrubs it before publishing the final filename. A private
+`.wal-replay` subdirectory retains the copied source and validation artifacts;
+do not use its intermediate files as a database.
+Schema and auxiliary-metadata actions in the unified WAL are replayed; legacy
+physical engine WALs are applied only when their page images and transaction
+records verify. There is no total WAL-size limit, although individual records
+remain subject to the format's limits. Legacy pager WALs are refused.
+Probabilistic WAL deltas are materialized on the recovery copy. Turbo vector
+records are accepted only if the recovered entity contains the exact vector;
+validated turbo snapshots up to 64 MiB are discarded as rebuildable caches.
+Recovery refuses missing or mismatched vector entities, unsupported support
+files, malformed deltas and unclassified non-vector pages. Records already
+lost before recovery cannot be reconstructed from the WAL. Supported physical metadata
+is verified and copied with its sidecars, and saved Vaults must authenticate
+before publication. A populated adjacent audit log and its rotated archives
+are accepted only when their JSONL hash chain verifies across file boundaries;
+they are copied byte-for-byte outside the writable replay stage, restored after
+scrub, and read back for exact parity before publication. The first retained
+event may carry a valid external hash anchor when older archives were pruned.
+Individual audit events are capped at 1 MiB during verification.
+`red scrub-paged` verifies the same audit chain without modifying it, including
+rotated archives, before reporting success for a recovered store.
+Logical WAL and slot sidecars must still be empty. Incomplete or corrupt WAL,
+audit chains and double-write frames are refused. The replayed copy must have
+readable data trees; this command does not combine replay with salvage of
+damaged trees.
+
+Internal storage checkpoints retain vector and probabilistic WAL records until
+a runtime checkpoint publishes the corresponding state. They rewrite the WAL
+through a synced temporary file and atomic replacement; the original frames and
+their authority are preserved. Runtime checkpoints serialize probabilistic
+snapshots before discarding these records. A turbo index rebuild also scans the
+durable vector entities because an existing snapshot may be older than the WAL.
+
+`VACUUM FULL` currently vacuums MVCC history and checkpoints. It does not rewrite
+or shrink a native paged file. Use the explicit offline operation to reclaim
+historical physical allocation:
+
+```sh
+red compact --source /preserved/data.rdb --destination-dir /new/compacted --json
+```
+
+If a historical store contains both populated physical system-config identities
+and normal open fails closed on that ambiguity, an operator may explicitly retain
+the canonical `red.config` identity while performing the rewrite:
+
+```sh
+red compact --source /preserved/data.rdb --destination-dir /new/compacted \
+  --retain-canonical-system-config --json
+```
+
+This repair requires exactly one `red_config` and one `red.config` catalog entry
+with complete resume state. It copies only `red.config`; it neither merges nor
+guesses between divergent values. References to `red_config`, missing identities,
+and other catalog shapes are refused. The original store remains unchanged, and
+ordinary compaction never enables this behavior implicitly. Scrub and validate
+the new store before any serving cutover.
+
+The source must be closed and fully checkpointed. The command takes a shared
+read lock that excludes the writer's exclusive lock, opens the source without
+write/recovery privileges, and refuses pending WAL, checkpoint or double-write
+recovery. Recover and checkpoint a separate preserved copy with its compatible
+engine first when necessary.
+
+The destination directory must not exist. The command rebuilds current collection,
+key-index and secondary-index trees, preserving every persisted key/value byte,
+including MVCC versions, deletes and record metadata. It preserves cross references,
+resume/identity/transaction counters, native summaries, opaque native index blobs,
+and encrypted Vault contents. Metadata page addresses and artifact descriptors are
+relocated. Retired generations, free pages and allocations unreachable from the
+supported durable roots are not copied. This is not a retention-policy change.
+
+Interior ownership and the complete forward leaf chain must agree. Historical
+stale backward links from non-rightmost splits are reconstructed in the new file
+and counted as `repaired_leaf_backlinks`; forward skips, cycles, overlapping owners,
+invalid checksums and unordered records still fail. The source is never repaired
+in place. Both directions are verified in the destination.
+
+The new file is reopened and all tree records compared in order. Native auxiliary
+payloads and copied logical/operational files are verified on readback. Output
+remains named `.compacting.rdb` until checks and durability barriers succeed. A
+failure leaves diagnostic output and the untouched source; use another fresh
+output directory for retry. Never start a server on the incomplete filename.
+`compaction.json` reports main-file apparent bytes, allocated bytes on Unix, and
+verified tree-record counts and reconstructed historical leaf backlinks;
+record counts include derived indexes and are not SQL row counts. Measure allocated
+bytes separately (for example, `du -B1`) and account for retained recovery copies.
+
+This command does not switch the running database, delete backups, reduce PVC
+capacity or compact in the request path. Before a serving replacement, independently
+validate SQL/index results, authentication, reopen, subsequent writes/checkpoint and
+crash recovery using the target engine. Keep the source family as rollback evidence.
+
+Current qualification boundaries:
+
+- Native paged record formats 11/12 and canonical resume trailers 4/5. Embedded
+  snapshots, encrypted pagers, unknown catalog extensions and pending recovery fail.
+  Encrypted Vault pages are preserved without needing to disclose their key.
+- Columnar page owners, non-empty tiered layouts, replicated/serverless directories,
+  store forks and
+  historical metadata journals require their own relocation qualification and fail
+  closed. Empty standalone support-directory scaffolding is preserved. Standalone
+  operational collection files are copied with their manifest.
+- Tree values have a 32 MiB per-value read allowance. Tree batches are bounded by
+  512 records/1 MiB plus one value; the target page cache is 16 MiB. Catalog and
+  metadata documents are capped at 64 MiB each, and the source ownership bitmap at
+  64 MiB (one byte per addressable page). This is not a global process RSS guarantee.
+
+The regression suite is `cargo test -p reddb-io-server --test offline_compaction`.
+It covers abandoned allocations before live roots, overflow values and catalogs,
+Vault authentication, index/resume reopen and subsequent mutations, pending WAL,
+corruption, writer locks, existing destinations and forced process loss.

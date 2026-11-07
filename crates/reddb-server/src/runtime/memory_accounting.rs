@@ -8,16 +8,20 @@
 //! one shared pool, so `red.stats` can show per-pool `share_bytes` /
 //! `used_bytes` against a single total.
 //!
-//! **Pull, not push.** The alternative — every subsystem holding an
+//! Storage pools use **pull, not push**. The alternative — every subsystem holding an
 //! `Arc<MemoryAccounting>` and updating it inline — would thread the pool into
 //! the page-cache hit path and the segment insert path, which is exactly the
 //! per-operation cost ADR 0073 §3 forbids. Instead the pools keep the atomics
 //! they already maintain and a reader samples them. A refresh is a handful of
-//! resident-counter reads under the segment publication locks; ordinary read
-//! hot paths gain no accounting hook.
+//! resident-counter reads under the segment publication locks. Direct output
+//! scans sample once before entering storage callbacks, never once per row.
 //!
 //! This sampler reports usage. `memory_admission` applies the growth checks
 //! against the shared budget (ADR 0073 §4).
+//!
+//! Query buffers are the exception: their owned reservations charge capacity
+//! before allocation and return it after the last owner drops. Never overwrite
+//! that pool with a sampled estimate.
 
 use crate::runtime::RedDBRuntime;
 use crate::storage::memory_pools::MemoryPool;
@@ -27,7 +31,8 @@ impl RedDBRuntime {
     /// accounting. Called before the `red.stats` budget section is rendered.
     ///
     /// Samples store/segment inventories without scanning entity payloads.
-    /// Maintenance publication can delay a sample; ordinary reads do not call it.
+    /// Maintenance publication can delay a sample. Output admission must call
+    /// this outside storage callbacks and use the short ledger during a scan.
     pub fn refresh_memory_accounting(&self) {
         let mut reservations = self.inner.memory_reservations.lock();
         self.refresh_memory_accounting_with_reservations(&mut reservations);
@@ -68,5 +73,11 @@ impl RedDBRuntime {
         );
         reservations.reserved_bytes -= reservations.completed_bytes;
         reservations.completed_bytes = 0;
+        let non_query = crate::storage::memory_pools::MEMORY_POOLS
+            .iter()
+            .filter(|pool| **pool != MemoryPool::QueryBuffers)
+            .map(|pool| accounting.used_bytes(*pool))
+            .fold(reservations.reserved_bytes, u64::saturating_add);
+        accounting.reconcile_non_query_admission(non_query);
     }
 }

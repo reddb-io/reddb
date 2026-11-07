@@ -1,0 +1,178 @@
+name: Storage recovery and growth
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_platforms:
+        type: boolean
+        description: Show selected platforms without running builds, tests or publication
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-recovery-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+
+  ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
+  ENABLE_LINUX_ARM64: ${{ vars.ENABLE_LINUX_ARM64 || 'true' }}
+  ENABLE_WINDOWS_X64: ${{ vars.ENABLE_WINDOWS_X64 || 'true' }}
+  ENABLE_WINDOWS_ARM64: ${{ vars.ENABLE_WINDOWS_ARM64 || 'false' }}
+  ENABLE_MACOS_X64: ${{ vars.ENABLE_MACOS_X64 || 'false' }}
+  ENABLE_MACOS_ARM64: ${{ vars.ENABLE_MACOS_ARM64 || 'false' }}
+  ENABLE_LINUX_ARMV7: ${{ vars.ENABLE_LINUX_ARMV7 || 'false' }}
+  ENABLE_LINUX_X86: ${{ vars.ENABLE_LINUX_X86 || 'false' }}
+jobs:
+  platforms:
+    name: Select platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      linux_x64: ${{ steps.select.outputs.linux_x64 }}
+      linux_arm64: ${{ steps.select.outputs.linux_arm64 }}
+      windows_x64: ${{ steps.select.outputs.windows_x64 }}
+      windows_arm64: ${{ steps.select.outputs.windows_arm64 }}
+      macos_x64: ${{ steps.select.outputs.macos_x64 }}
+      macos_arm64: ${{ steps.select.outputs.macos_arm64 }}
+      linux_armv7: ${{ steps.select.outputs.linux_armv7 }}
+      linux_x86: ${{ steps.select.outputs.linux_x86 }}
+      any: ${{ steps.select.outputs.any }}
+      docker_platforms: ${{ steps.select.outputs.docker_platforms }}
+    steps:
+      - id: select
+        name: Filter platforms before allocating runners
+        shell: python
+        env:
+          PLATFORM_DEFAULTS: '{"linux_x64":true,"linux_arm64":true,"windows_x64":true,"windows_arm64":false,"macos_x64":false,"macos_arm64":false,"linux_armv7":false,"linux_x86":false}'
+          PLATFORM_AVAILABLE: '["linux_x64", "windows_x64"]'
+          PLATFORM_MATRICES: |
+            {}
+        run: |
+          import json
+          import os
+
+          defaults = json.loads(os.environ["PLATFORM_DEFAULTS"])
+          enabled = {}
+          for key in defaults:
+              name = "ENABLE_" + key.upper()
+              value = os.environ[name].lower()
+              if value not in ("true", "false"):
+                  raise SystemExit(f"{name} must be true or false, got {value!r}")
+              enabled[key] = value == "true"
+
+          matrices = json.loads(os.environ["PLATFORM_MATRICES"])
+          available = json.loads(os.environ["PLATFORM_AVAILABLE"])
+          output = {key: str(value).lower() for key, value in enabled.items()}
+          output["any"] = str(any(enabled[key] for key in available)).lower()
+          for job, entries in matrices.items():
+              selected = [entry["row"] for entry in entries if enabled[entry["flag"]]]
+              output["enabled_" + job] = str(bool(selected)).lower()
+              # A placeholder keeps GitHub's matrix schema valid when the job is skipped.
+              output["matrix_" + job] = json.dumps({"include": selected or [entries[0]["row"]]}, separators=(",", ":"))
+          docker = [target for key, target in (("linux_x64", "linux/amd64"), ("linux_arm64", "linux/arm64")) if enabled[key]]
+          output["docker_platforms"] = ",".join(docker)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              for key, value in output.items():
+                  handle.write(f"{key}={value}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write("### Selected platforms\n\n")
+              for key in available:
+                  handle.write(f"- {key}: {str(enabled[key]).lower()}\n")
+  recovery-and-growth:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.13'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: storage-recovery-rust-1.91.0
+          cache-on-failure: 'true'
+      - name: Repeated crashes, reuse, growth and transaction regressions
+        run: |
+          mkdir -p target/storage-recovery
+          set -o pipefail
+          make test-storage-apocalypse 2>&1 | tee target/storage-recovery/native.log
+      - name: Power cuts, torn writes and failed synchronization
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target/storage-recovery
+          set -o pipefail
+          make test-dst-storage 2>&1 | tee target/storage-recovery/power-loss.log
+      - name: Recovery and catalog memory regressions
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p target/storage-recovery
+          set -o pipefail
+          make test-memory-regressions 2>&1 | tee target/storage-recovery/memory.log
+      - name: Build current CLI for RedWire process recovery
+        if: ${{ !cancelled() }}
+        run: cargo build --locked --bin red
+      - name: Recover acknowledged RedWire KV writes after forced termination
+        if: ${{ !cancelled() }}
+        # The Rust target cache may contain retained fixtures from an older run.
+        # Keep strict fresh-directory admission and put new fixtures outside it.
+        run: REDDB_TEST_BINARY=target/debug/red python scripts/test-native-kv-crash-recovery.py --output "$RUNNER_TEMP/reddb-redwire-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Preserve reproduction and space measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: storage-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/storage-recovery/*.log
+            ${{ runner.temp }}/reddb-redwire-recovery-${{ github.run_id }}-${{ github.run_attempt }}/
+
+    needs:
+      - platforms
+    if: ${{ !inputs.preview_platforms && (needs.platforms.outputs.linux_x64 == 'true') }}
+  windows-kv-recovery:
+    name: Windows KV acknowledged-write recovery
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@839ed2261f110eedd370cb037b6038e074512c4e # 1.91.0
+      - uses: ./.github/actions/install-protoc
+        with:
+          version: '28.3'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.13'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: storage-recovery-windows-rust-1.91.0
+          cache-on-failure: 'true'
+      - name: Kill writer after acknowledged native KV initialization
+        shell: bash
+        run: |
+          mkdir -p target/storage-recovery
+          set -o pipefail
+          cargo test --locked -p reddb-io-server --test single_file_collection_model_recovery -- --test-threads=1 --nocapture 2>&1 | tee target/storage-recovery/windows-kv.log
+      - name: Build current CLI for Windows RedWire process recovery
+        run: cargo build --locked --bin red
+      - name: Recover acknowledged RedWire KV writes after TerminateProcess
+        shell: bash
+        run: REDDB_TEST_BINARY=target/debug/red.exe python scripts/test-native-kv-crash-recovery.py --output "$RUNNER_TEMP/reddb-redwire-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: storage-recovery-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/storage-recovery/*.log
+            ${{ runner.temp }}/reddb-redwire-recovery-${{ github.run_id }}-${{ github.run_attempt }}/
+    needs:
+      - platforms
+    if: ${{ !inputs.preview_platforms && (needs.platforms.outputs.windows_x64 == 'true') }}

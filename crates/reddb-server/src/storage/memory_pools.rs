@@ -18,10 +18,10 @@
 //! and the policy's basis points sum to at most `10_000`. Boot asserts both
 //! halves of that statement rather than trusting the arithmetic.
 //!
-//! What this module is *not*: it does not enforce admission. A pool over its
-//! share is visible in `red.stats` and nothing more — enforcement is the next
-//! slice (ADR 0073 §4). Reporting is therefore free of policy: a plain relaxed
-//! atomic per pool, no allocation, no lock.
+//! Reporting uses one atomic per pool. Runtime admission also shares a short
+//! ledger lock for sampled storage, outstanding mutations and owned query
+//! buffers. The ledger never holds storage locks or samples storage itself;
+//! callbacks can reserve output while the sampler waits for their read locks.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
@@ -57,6 +57,8 @@ pub enum MemoryPool {
     IndexMemory,
     /// WAL group-commit queue and writer buffers.
     WalBuffers,
+    /// Owned result and serialized query buffers, retained until their last owner drops.
+    QueryBuffers,
 }
 
 /// Every pool, in the order `red.stats` reports them.
@@ -66,10 +68,11 @@ pub const MEMORY_POOLS: [MemoryPool; MEMORY_POOL_COUNT] = [
     MemoryPool::SegmentArena,
     MemoryPool::IndexMemory,
     MemoryPool::WalBuffers,
+    MemoryPool::QueryBuffers,
 ];
 
 /// Number of pools. Arrays are indexed by [`MemoryPool::index`].
-pub const MEMORY_POOL_COUNT: usize = 5;
+pub const MEMORY_POOL_COUNT: usize = 6;
 
 impl MemoryPool {
     /// Stable label echoed by the boot log and the `red.stats` budget section.
@@ -80,6 +83,7 @@ impl MemoryPool {
             Self::SegmentArena => "segment_arena",
             Self::IndexMemory => "index_memory",
             Self::WalBuffers => "wal_buffers",
+            Self::QueryBuffers => "query_buffers",
         }
     }
 
@@ -91,6 +95,7 @@ impl MemoryPool {
             Self::SegmentArena => 2,
             Self::IndexMemory => 3,
             Self::WalBuffers => 4,
+            Self::QueryBuffers => 5,
         }
     }
 }
@@ -107,8 +112,8 @@ pub struct BudgetSharePolicy {
 
 /// Server-side profiles: the segment arena *is* the database (RAM-resident
 /// store), the page cache backs the paged tier and the B+ trees over it.
-/// The unnamed remainder (10%) absorbs plan caches, connection state, result
-/// buffers and allocator slack — everything that is not a governed pool.
+/// The unnamed remainder (5%) absorbs plan caches, connection state and
+/// allocator slack — everything that is not a governed pool.
 const DEFAULT_POLICY: BudgetSharePolicy = BudgetSharePolicy {
     basis_points: [
         2_000, // page_cache
@@ -116,12 +121,13 @@ const DEFAULT_POLICY: BudgetSharePolicy = BudgetSharePolicy {
         4_000, // segment_arena
         1_000, // index_memory
         500,   // wal_buffers
+        500,   // query_buffers
     ],
 };
 
 /// Serverless: boundedness is a survival contract, not a tuning preference
 /// (ADR 0038 §1). A cold function instance has a small budget and a short
-/// life, so the caches shrink and the unnamed reserve doubles to 20%.
+/// life, so the caches shrink and the unnamed reserve doubles to 10%.
 const SERVERLESS_POLICY: BudgetSharePolicy = BudgetSharePolicy {
     basis_points: [
         1_500, // page_cache
@@ -129,6 +135,7 @@ const SERVERLESS_POLICY: BudgetSharePolicy = BudgetSharePolicy {
         4_000, // segment_arena
         1_000, // index_memory
         500,   // wal_buffers
+        1_000, // query_buffers
     ],
 };
 
@@ -322,6 +329,10 @@ pub struct MemoryAccounting {
     pressure_reclamations_triggered: AtomicU64,
     pressure_bytes_reclaimed: AtomicU64,
     high_water_bytes: AtomicU64,
+    // Sampled storage plus outstanding mutation growth. This short ledger lock
+    // never covers sampling or storage access: read callbacks can admit output
+    // while a sampler waits for their segment lock without an ABBA deadlock.
+    admission_non_query_bytes: parking_lot::Mutex<u64>,
 }
 
 impl MemoryAccounting {
@@ -344,6 +355,7 @@ impl MemoryAccounting {
             pressure_reclamations_triggered: AtomicU64::new(0),
             pressure_bytes_reclaimed: AtomicU64::new(0),
             high_water_bytes: AtomicU64::new(0),
+            admission_non_query_bytes: parking_lot::Mutex::new(0),
         }
     }
 
@@ -378,6 +390,58 @@ impl MemoryAccounting {
         let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
             Some(used.saturating_sub(bytes))
         });
+    }
+
+    /// Publish a completed storage sample and its still-outstanding mutation
+    /// reservations. The runtime serializes samplers; owned query charges are
+    /// read under this ledger lock and can never be overwritten by a sample.
+    pub(crate) fn reconcile_non_query_admission(&self, bytes: u64) {
+        let mut non_query = self.admission_non_query_bytes.lock();
+        *non_query = bytes;
+        self.observe_total_used(bytes.saturating_add(self.used_bytes(MemoryPool::QueryBuffers)));
+    }
+
+    pub(crate) fn try_charge_query_buffer(&self, bytes: u64) -> bool {
+        let non_query = self.admission_non_query_bytes.lock();
+        let Some(projected) = non_query
+            .checked_add(self.used_bytes(MemoryPool::QueryBuffers))
+            .and_then(|used| used.checked_add(bytes))
+        else {
+            return false;
+        };
+        if projected > self.budget.resolved_bytes {
+            return false;
+        }
+        self.charge(MemoryPool::QueryBuffers, bytes);
+        self.observe_total_used(projected);
+        true
+    }
+
+    /// Hold growth until a later sample observes its completed publication.
+    pub(crate) fn try_reserve_mutation_growth(&self, bytes: u64) -> bool {
+        let mut non_query = self.admission_non_query_bytes.lock();
+        let Some(projected) = non_query
+            .checked_add(self.used_bytes(MemoryPool::QueryBuffers))
+            .and_then(|used| used.checked_add(bytes))
+        else {
+            return false;
+        };
+        if projected > self.budget.resolved_bytes {
+            return false;
+        }
+        *non_query += bytes;
+        self.observe_total_used(projected);
+        true
+    }
+
+    /// Owned buffers must be charged once and released once. A mismatch is an
+    /// ownership bug, not a sampled counter that can safely saturate.
+    pub(crate) fn release_query_buffer(&self, bytes: u64) {
+        self.used_bytes[MemoryPool::QueryBuffers.index()]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.checked_sub(bytes).expect("query buffer released once"))
+            })
+            .expect("query buffer counter update cannot be rejected");
     }
 
     /// This pool's live usage.
@@ -632,7 +696,8 @@ mod tests {
                 "blob_cache_l1",
                 "segment_arena",
                 "index_memory",
-                "wal_buffers"
+                "wal_buffers",
+                "query_buffers"
             ]
         );
         let unique: std::collections::HashSet<_> = labels.iter().collect();

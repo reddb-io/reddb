@@ -40,25 +40,37 @@ impl WindowHost for NativeWindowHost<'_> {
         Ok(())
     }
     fn evaluate_expression(&self, expression: &Expr, record: &UnifiedRecord) -> Option<Value> {
-        let row = |field: &reddb_rql::ast::FieldRef| {
-            super::join_filter::resolve_runtime_field(
-                record,
-                field,
-                self.table_name,
-                self.table_alias,
-            )
-            .and_then(super::execution_context::secret_query_input)
-        };
-        super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row)
+        self.try_evaluate_expression(expression, record)
             .ok()
-            .or_else(|| {
-                super::expr_eval::evaluate_runtime_expr(
-                    expression,
-                    record,
-                    self.table_name,
-                    self.table_alias,
-                )
-            })
+            .flatten()
+    }
+    fn try_evaluate_expression(
+        &self,
+        expression: &Expr,
+        record: &UnifiedRecord,
+    ) -> Result<Option<Value>, RedDBError> {
+        let row = super::join_filter::RecordRow {
+            db: self.db,
+            record,
+            table_name: self.table_name,
+            table_alias: self.table_alias,
+        };
+        // The pure typed evaluator rejects visited context functions. Keep its
+        // existing fast path and propagate operating failures from the fallback.
+        match super::expr_eval::evaluate_typed_expr_with_secret_literals(expression, &row) {
+            Ok(value) => return Ok(Some(value)),
+            Err(error @ crate::storage::query::evaluator::EvalError::ReadLimitExceeded { .. }) => {
+                return Err(RedDBError::Query(error.to_string()));
+            }
+            Err(_) => {}
+        }
+        super::expr_eval::try_evaluate_runtime_expr_with_db(
+            self.db,
+            expression,
+            record,
+            self.table_name,
+            self.table_alias,
+        )
     }
     fn secret_query_output(&self, value: Value) -> Result<Value, RedDBError> {
         super::execution_context::secret_query_output(value)

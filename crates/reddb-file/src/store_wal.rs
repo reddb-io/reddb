@@ -32,6 +32,9 @@ pub enum StoreWalActionFrame {
         collection: String,
         records: Vec<Vec<u8>>,
     },
+    SetAuxMetadata {
+        bytes: Vec<u8>,
+    },
 }
 
 pub fn encode_store_wal_action_frame(frame: &StoreWalActionFrame) -> io::Result<Vec<u8>> {
@@ -74,6 +77,10 @@ pub fn encode_store_wal_action_frame(frame: &StoreWalActionFrame) -> io::Result<
             out.push(6);
             write_string(&mut out, collection)?;
             write_record_list(&mut out, records)?;
+        }
+        StoreWalActionFrame::SetAuxMetadata { bytes } => {
+            out.push(7);
+            write_bytes(&mut out, bytes)?;
         }
     }
     Ok(out)
@@ -186,6 +193,16 @@ pub fn decode_store_wal_action_frame(bytes: &[u8]) -> io::Result<StoreWalActionF
                 collection,
                 records,
             })
+        }
+        7 => {
+            let value = read_bytes(bytes, &mut pos)?;
+            if pos != bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trailing auxiliary metadata WAL bytes",
+                ));
+            }
+            Ok(StoreWalActionFrame::SetAuxMetadata { bytes: value })
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,

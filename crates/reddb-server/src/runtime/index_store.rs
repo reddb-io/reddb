@@ -10,11 +10,14 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
 use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use reddb_types::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
+
+pub(crate) mod candidates;
 
 enum CanonicalizedValue {
     Exact(CanonicalKey),
@@ -847,178 +850,6 @@ impl SortedIndexManager {
         }
     }
 
-    /// Range lookup with early stop at `limit` — avoids collecting all IDs
-    /// when only the first N results are needed (LIMIT-bounded queries).
-    pub(crate) fn range_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.range_limited(low, high, limit)
-    }
-
-    pub(crate) fn range_lookup_limited_same_family(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .range_limited_same_family(low, high, limit)
-    }
-
-    pub(crate) fn gt_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.greater_than_limited(threshold, limit)
-    }
-
-    pub(crate) fn ge_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.greater_equal_limited(threshold, limit)
-    }
-
-    pub(crate) fn lt_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.less_than_limited(threshold, limit)
-    }
-
-    pub(crate) fn le_lookup_limited(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.less_equal_limited(threshold, limit)
-    }
-
-    /// Bitmap AND: range [low, high] filtered to IDs in `filter_set`.
-    pub(crate) fn range_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        low: CanonicalKey,
-        high: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        if low > high {
-            return Some(Vec::new());
-        }
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&low) || low.family() != high.family() {
-            return None;
-        }
-        idx.collect_range_filtered_by_set(low..=high, filter_set, limit)
-    }
-
-    /// Bitmap AND: gt filtered to IDs in `filter_set`.
-    pub(crate) fn gt_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Excluded(threshold), Unbounded), filter_set, limit)
-    }
-
-    /// Bitmap AND: ge filtered to IDs in `filter_set`.
-    pub(crate) fn ge_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Included(threshold), Unbounded), filter_set, limit)
-    }
-
-    /// Bitmap AND: lt filtered to IDs in `filter_set`.
-    pub(crate) fn lt_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Unbounded, Excluded(threshold)), filter_set, limit)
-    }
-
-    /// Bitmap AND: le filtered to IDs in `filter_set`.
-    pub(crate) fn le_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        threshold: CanonicalKey,
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        let idx = indices.get(&key)?;
-        if !idx.supports_range_key(&threshold) {
-            return None;
-        }
-        idx.collect_range_filtered_by_set((Unbounded, Included(threshold)), filter_set, limit)
-    }
-
     /// IN-list multi-point lookup on a sorted index.
     /// Performs one BTree point-lookup per value — O(k log n) for k values
     /// instead of O(n) for a range scan covering all values.
@@ -1033,23 +864,6 @@ impl SortedIndexManager {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         indices.get(&key)?.in_lookup_limited(values, limit)
-    }
-
-    /// IN-list multi-point lookup filtered by a hash-index candidate set.
-    /// Bitmap AND: sorted-index point lookups ∩ hash-index set.
-    pub(crate) fn in_lookup_limited_filtered_by_set(
-        &self,
-        collection: &str,
-        column: &str,
-        values: &[CanonicalKey],
-        filter_set: &std::collections::HashSet<u64>,
-        limit: usize,
-    ) -> Option<Vec<EntityId>> {
-        let indices = read_unpoisoned(&self.indices);
-        let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .in_lookup_limited_filtered_by_set(values, filter_set, limit)
     }
 
     /// Covered-query range projection: return BTree keys (= column values) for a range.
@@ -1277,24 +1091,54 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MutationTestPhase {
+    DmlTargetScanCandidate,
+    DmlIndexLookupStarted,
+    DirectWireQueryStarted,
+    DmlPostImageCandidate,
     StoragePublished,
     BeforeEvents,
+    BeforeUndoTopology,
+    UndoIndexRemoved,
+    DeleteVisibilityCommitted,
+    IndexTopologyPublishing,
+    IndexTopologyDropping,
 }
+
+type PagedBtreeProviders =
+    HashMap<(String, String), std::sync::Arc<super::paged_btree_index::RuntimeBtreeIndex>>;
 
 /// Unified index store aggregating all secondary index managers.
 pub struct IndexStore {
     pub hash: HashIndexManager,
     pub bitmap: BitmapIndexManager,
     pub sorted: SortedIndexManager,
+    pub(super) paged_btrees: RwLock<PagedBtreeProviders>,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
     // Keep identities stable across DROP/recreate, including queued writers.
     // The memory sampler never takes a topology lock.
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
+    indexed_mutations_active: AtomicUsize,
+    indexed_mutation_generation: AtomicU64,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(super) mutation_hook: parking_lot::Mutex<Option<MutationTestHook>>,
+}
+
+/// Covers the interval in which storage and secondary indexes are published.
+/// Scoped to one runtime so unrelated databases do not affect each other.
+pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore);
+
+impl Drop for IndexedMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        self.0
+            .indexed_mutations_active
+            .fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl IndexStore {
@@ -1303,13 +1147,62 @@ impl IndexStore {
             hash: HashIndexManager::new(),
             bitmap: BitmapIndexManager::new(),
             sorted: SortedIndexManager::new(),
+            paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
             topology: RwLock::new(HashMap::new()),
+            indexed_mutations_active: AtomicUsize::new(0),
+            indexed_mutation_generation: AtomicU64::new(0),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
             #[cfg(test)]
             mutation_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn begin_indexed_mutation(&self) -> IndexedMutationGuard<'_> {
+        self.indexed_mutations_active.fetch_add(1, Ordering::SeqCst);
+        self.indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        IndexedMutationGuard(self)
+    }
+
+    pub(crate) fn indexed_mutation_active(&self) -> bool {
+        self.indexed_mutations_active.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn indexed_mutation_generation(&self) -> u64 {
+        self.indexed_mutation_generation.load(Ordering::SeqCst)
+    }
+
+    /// The caller exclusively fences collection topology until publication.
+    /// No live backing is changed until the complete replacement is ready.
+    pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let _indexed_mutation = self.begin_indexed_mutation();
+        let mut registry = self.registry.write();
+        self.hash.replace_collection_from(collection, prepared.hash);
+        #[cfg(test)]
+        self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyPublishing);
+        self.bitmap
+            .replace_collection_from(collection, prepared.bitmap);
+        let mut sorted = self.sorted.indices.write();
+        sorted.retain(|(table, _), _| table != collection);
+        sorted.extend(prepared.sorted.indices.into_inner());
+        let mut composite = self.sorted.composite.write();
+        composite.retain(|(table, _), _| table != collection);
+        composite.extend(prepared.sorted.composite.into_inner());
+        let mut paged = self.paged_btrees.write();
+        paged.retain(|(table, _), _| table != collection);
+        paged.extend(prepared.paged_btrees.into_inner());
+        registry.retain(|(table, _), _| table != collection);
+        registry.extend(prepared.registry.into_inner());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mutation_test_hook(
+        &self,
+        hook: Option<std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + Sync>>,
+    ) {
+        *self.mutation_hook.lock() = hook;
     }
 
     #[cfg(test)]
@@ -1360,6 +1253,22 @@ impl IndexStore {
             .memory_bytes()
             .saturating_add(self.bitmap.memory_bytes())
             .saturating_add(self.sorted.memory_bytes())
+            .saturating_add(
+                self.paged_btrees
+                    .read()
+                    .values()
+                    .map(|provider| provider.memory_bytes())
+                    .sum::<u64>(),
+            )
+    }
+
+    fn index_is_paged(&self, index: &RegisteredIndex) -> bool {
+        self.hash.is_paged(&index.collection, &index.name)
+            || self
+                .paged_btrees
+                .read()
+                .keys()
+                .any(|(collection, name)| collection == &index.collection && name == &index.name)
     }
 
     /// Estimate resident index growth before row mutation, without cloning
@@ -1397,6 +1306,9 @@ impl IndexStore {
             }
         }
         for index in indexes {
+            if self.index_is_paged(index) {
+                continue;
+            }
             for fields in rows.clone() {
                 growth = growth.saturating_add(estimate_registered_index_growth(index, fields));
             }
@@ -1430,6 +1342,7 @@ impl IndexStore {
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         indexes
+            .filter(|index| !self.index_is_paged(index))
             .filter(|index| {
                 versioned
                     || index.columns.iter().any(|column| {
@@ -1579,9 +1492,13 @@ impl IndexStore {
 
     /// Drop an index
     pub fn drop_index(&self, name: &str, collection: &str) -> bool {
+        let _indexed_mutation = self.begin_indexed_mutation();
         let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
+            #[cfg(test)]
+            self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyDropping);
+            self.paged_btrees.write().remove(&key);
             match info.method {
                 IndexMethodKind::Hash => self.hash.drop_index(collection, name),
                 IndexMethodKind::Bitmap => {
@@ -1613,9 +1530,9 @@ impl IndexStore {
         collection: &str,
         index_name: &str,
         key: &[u8],
-    ) -> Result<Vec<EntityId>, String> {
+    ) -> Result<crate::storage::unified::hash_index::HashCandidates, String> {
         self.hash
-            .lookup(collection, index_name, key)
+            .lookup_owned(collection, index_name, key)
             .map_err(|err| err.to_string())
     }
 
@@ -1643,23 +1560,40 @@ impl IndexStore {
             .map_err(|err| err.to_string())
     }
 
-    /// Find which index (if any) covers a collection + column
+    /// Find a single-column index for method-aware planning, including H3.
     pub fn find_index_for_column(&self, collection: &str, column: &str) -> Option<RegisteredIndex> {
-        let registry = read_unpoisoned(&self.registry);
-        // Callers (`try_hash_eq_lookup`, IN-list lookup) feed `idx.name`
-        // straight to `hash_lookup`, which only works for indexes that
-        // actually own a hash backing — Hash itself, or a single-col
-        // BTree whose `create_index` also registers an `{name}_hash`
-        // aux. Composite BTree indexes only live in `sorted`, so
-        // returning one here causes a `MissingIndex` error at lookup
-        // time. Restrict the search to single-column indexes so the
-        // ID list the caller gets back is always servable.
-        registry
+        self.registry
+            .read()
             .values()
-            .find(|idx| {
-                idx.collection == collection
-                    && idx.columns.len() == 1
-                    && idx.columns.first().is_some_and(|c| c == column)
+            .find(|index| {
+                index.collection == collection
+                    && index.columns.len() == 1
+                    && index
+                        .columns
+                        .first()
+                        .is_some_and(|candidate| candidate == column)
+            })
+            .cloned()
+    }
+
+    /// Equality paths need a physical hash pocket. BITMAP and H3 remain
+    /// discoverable by their own planners but cannot serve these lookups.
+    pub(crate) fn find_hash_index_for_column(
+        &self,
+        collection: &str,
+        column: &str,
+    ) -> Option<RegisteredIndex> {
+        self.registry
+            .read()
+            .values()
+            .find(|index| {
+                index.collection == collection
+                    && index.columns.len() == 1
+                    && index
+                        .columns
+                        .first()
+                        .is_some_and(|candidate| candidate == column)
+                    && matches!(index.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
             })
             .cloned()
     }
@@ -1672,6 +1606,11 @@ impl IndexStore {
             .filter(|idx| idx.collection == collection)
             .cloned()
             .collect()
+    }
+
+    /// List every operational index without consulting collection payloads.
+    pub(crate) fn list_all_indices(&self) -> Vec<RegisteredIndex> {
+        read_unpoisoned(&self.registry).values().cloned().collect()
     }
 
     /// Standalone UNIQUE indexes enforced at admission. Both are backed by a
@@ -1706,8 +1645,11 @@ impl IndexStore {
         })
     }
 
-    pub fn entries_indexed(&self, index: &RegisteredIndex) -> u64 {
-        match index.method {
+    pub fn entries_indexed(&self, index: &RegisteredIndex) -> Option<u64> {
+        if self.index_is_paged(index) {
+            return None;
+        }
+        Some(match index.method {
             IndexMethodKind::Hash => self
                 .hash
                 .index_stats(&index.collection, &index.name)
@@ -1724,7 +1666,7 @@ impl IndexStore {
                 .and_then(|column| self.bitmap.index_stats(&index.collection, column).ok())
                 .map(|stats| stats.entity_count as u64)
                 .unwrap_or(0),
-        }
+        })
     }
 
     /// Collect the column-name set covered by any index on `collection`
@@ -1811,6 +1753,9 @@ impl IndexStore {
         // OLTP schema), because the inner `break` keeps string
         // compares short and amortised.
         for idx in &relevant {
+            if self.index_is_paged(idx) {
+                continue;
+            }
             let composite_btree =
                 matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1;
             if composite_btree {
@@ -1895,7 +1840,7 @@ impl IndexStore {
     ) -> Result<(), String> {
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection {
+            if idx.collection != collection || self.index_is_paged(idx) {
                 continue;
             }
 
@@ -1978,7 +1923,7 @@ impl IndexStore {
     ) -> Result<(), String> {
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection {
+            if idx.collection != collection || self.index_is_paged(idx) {
                 continue;
             }
 
@@ -2193,114 +2138,6 @@ impl Default for IndexStore {
     }
 }
 
-// --------------------------------------------------------------------
-// IncrementalIndexMaintainer adapter (issue #160)
-//
-// Routes the maintainer's `IndexDeltaOp` stream through the existing
-// hash/bitmap manager methods — no parallel write paths. Composite
-// BTree and the sorted half of single-column BTree still flow through
-// `index_entity_insert`/`composite_entity_*` because those need the
-// raw `Value`, which the op stream doesn't carry; the maintainer
-// documents this restriction.
-// --------------------------------------------------------------------
-
-use crate::storage::unified::index::incremental::{
-    IndexMethodKind as IncMethodKind, SecondaryIndexBackend, SecondaryIndexHandle,
-};
-
-impl From<IndexMethodKind> for IncMethodKind {
-    fn from(value: IndexMethodKind) -> Self {
-        match value {
-            IndexMethodKind::Hash => IncMethodKind::Hash,
-            IndexMethodKind::Bitmap => IncMethodKind::Bitmap,
-            IndexMethodKind::BTree => IncMethodKind::BTree,
-            // The maintainer mirror doesn't carry the H3 resolution; the
-            // sorted half is maintained via `index_entity_insert`.
-            IndexMethodKind::H3 { .. } => IncMethodKind::H3,
-        }
-    }
-}
-
-impl From<IncMethodKind> for IndexMethodKind {
-    fn from(value: IncMethodKind) -> Self {
-        match value {
-            IncMethodKind::Hash => IndexMethodKind::Hash,
-            IncMethodKind::Bitmap => IndexMethodKind::Bitmap,
-            IncMethodKind::BTree => IndexMethodKind::BTree,
-            // Resolution isn't carried by the mirror — placeholder only;
-            // the authoritative resolution lives in the index registry.
-            IncMethodKind::H3 => IndexMethodKind::H3 {
-                resolution: DEFAULT_H3_RESOLUTION,
-            },
-        }
-    }
-}
-
-impl SecondaryIndexBackend for IndexStore {
-    fn insert(
-        &self,
-        idx: &SecondaryIndexHandle,
-        key: &[u8],
-        row_id: EntityId,
-    ) -> Result<(), String> {
-        let collection = idx.collection.as_ref();
-        let Some(col) = idx.leading_column() else {
-            return Ok(());
-        };
-        match idx.method {
-            IncMethodKind::Hash => self
-                .hash
-                .insert(collection, idx.name.as_ref(), key.to_vec(), row_id)
-                .map_err(|e| e.to_string()),
-            IncMethodKind::Bitmap => self
-                .bitmap
-                .insert(collection, col, row_id, key)
-                .map_err(|e| e.to_string()),
-            IncMethodKind::BTree => {
-                // Single-col BTree: maintain the auxiliary hash side
-                // pocket. Sorted half is maintained by the caller via
-                // the pre-existing `index_entity_insert` route, which
-                // has access to the raw `Value`. Composite BTree:
-                // skipped (composite_entity_insert covers it).
-                if idx.columns.len() > 1 {
-                    return Ok(());
-                }
-                let aux = format!("{}_hash", idx.name);
-                self.hash
-                    .insert(collection, &aux, key.to_vec(), row_id)
-                    .map_err(|e| e.to_string())
-            }
-            // H3 has no auxiliary hash side-pocket; its sorted half is
-            // maintained by `index_entity_insert` (which has the raw
-            // GeoPoint Value + resolution).
-            IncMethodKind::H3 => Ok(()),
-        }
-    }
-
-    fn remove(&self, idx: &SecondaryIndexHandle, key: &[u8], row_id: EntityId) {
-        let collection = idx.collection.as_ref();
-        let Some(col) = idx.leading_column() else {
-            return;
-        };
-        match idx.method {
-            IncMethodKind::Hash => {
-                let _ = self.hash.remove(collection, idx.name.as_ref(), key, row_id);
-            }
-            IncMethodKind::Bitmap => {
-                let _ = self.bitmap.remove(collection, col, row_id);
-            }
-            IncMethodKind::BTree => {
-                if idx.columns.len() > 1 {
-                    return;
-                }
-                let aux = format!("{}_hash", idx.name);
-                let _ = self.hash.remove(collection, &aux, key, row_id);
-            }
-            IncMethodKind::H3 => {}
-        }
-    }
-}
-
 impl IndexStore {
     /// Resolve the value an index on `column` would store for a row, including a
     /// bare/dotted document field offset-read from the `body` container when the
@@ -2457,7 +2294,7 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
     if matches!(index.method, IndexMethodKind::BTree | IndexMethodKind::Hash)
         && index.columns.len() > 1
     {
-        return index
+        let growth = index
             .columns
             .iter()
             .try_fold(INDEX_GROWTH_ENTRY_BYTES, |growth, column| {
@@ -2469,6 +2306,12 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
                 )
             })
             .unwrap_or(0);
+        // A UNIQUE composite BTREE owns both sorted tuples and a hash pocket.
+        return if matches!(index.method, IndexMethodKind::BTree) && index.unique {
+            growth.saturating_mul(2)
+        } else {
+            growth
+        };
     }
     let Some(column) = index.columns.first() else {
         return 0;
@@ -2546,6 +2389,40 @@ pub(crate) fn hash_index_key(columns: &[String], fields: &[(String, Value)]) -> 
             Some(key)
         }
     }
+}
+
+/// Bound composite/debug key expansion before materializing the canonical key.
+/// A small source row may name the same large value in many indexed columns.
+pub(crate) fn bounded_hash_index_key(
+    columns: &[String],
+    fields: &[(String, Value)],
+    bytes_max: usize,
+) -> Result<Option<Vec<u8>>, crate::storage::StoreError> {
+    let mut bytes = 0u64;
+    for column in columns {
+        let Some(value) = index_field_value(fields, column) else {
+            return Ok(None);
+        };
+        if columns.len() > 1 && matches!(value.as_ref(), Value::Null) {
+            return Ok(None);
+        }
+        let component = value_to_bytes_len(value.as_ref());
+        if columns.len() > 1 && component > u32::MAX as u64 {
+            return Err(crate::storage::StoreError::Serialization(
+                "HASH component exceeds its canonical length prefix".into(),
+            ));
+        }
+        bytes = bytes
+            .saturating_add(component)
+            .saturating_add(if columns.len() > 1 { 4 } else { 0 });
+        if bytes > bytes_max as u64 {
+            return Err(crate::storage::StoreError::ReadLimitExceeded {
+                required_bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+                limit_bytes: bytes_max,
+            });
+        }
+    }
+    Ok(hash_index_key(columns, fields))
 }
 
 /// Key a standalone UNIQUE index reserves for `fields`, or `None` when the row
@@ -2863,7 +2740,7 @@ mod tests {
         for index in store.list_indices("rows") {
             assert_eq!(
                 store.entries_indexed(&index),
-                1,
+                Some(1),
                 "one posting per composite index"
             );
         }
@@ -2936,6 +2813,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hash_lookup_selection_preserves_method_aware_index_discovery() {
+        let store = IndexStore::new();
+        let columns = vec!["value".to_string()];
+        for (collection, method) in [
+            ("hash", IndexMethodKind::Hash),
+            ("btree", IndexMethodKind::BTree),
+            ("bitmap", IndexMethodKind::Bitmap),
+            ("h3", IndexMethodKind::H3 { resolution: 9 }),
+        ] {
+            store
+                .create_index("lookup", collection, &columns, method, false, &[])
+                .expect("physical index");
+            store.register(RegisteredIndex {
+                name: "lookup".into(),
+                collection: collection.into(),
+                columns: columns.clone(),
+                method,
+                unique: false,
+            });
+            assert_eq!(
+                store
+                    .find_index_for_column(collection, "value")
+                    .expect("general discovery")
+                    .method,
+                method
+            );
+            assert_eq!(
+                store
+                    .find_hash_index_for_column(collection, "value")
+                    .is_some(),
+                matches!(method, IndexMethodKind::Hash | IndexMethodKind::BTree)
+            );
+        }
+        store
+            .create_index(
+                "other_hash",
+                "bitmap",
+                &columns,
+                IndexMethodKind::Hash,
+                false,
+                &[],
+            )
+            .expect("same column hash backing");
+        store.register(RegisteredIndex {
+            name: "other_hash".into(),
+            collection: "bitmap".into(),
+            columns,
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        assert_eq!(
+            store
+                .find_hash_index_for_column("bitmap", "value")
+                .expect("select actual hash pocket")
+                .name,
+            "other_hash"
+        );
+    }
+
+    #[test]
+    fn composite_unique_backfill_estimate_covers_sorted_and_hash_backing() {
+        let store = IndexStore::new();
+        let columns = vec!["a".to_string(), "b".to_string()];
+        store
+            .create_index(
+                "unique_tuple",
+                "rows",
+                &columns,
+                IndexMethodKind::BTree,
+                true,
+                &[],
+            )
+            .expect("index");
+        store.register(RegisteredIndex {
+            name: "unique_tuple".into(),
+            collection: "rows".into(),
+            columns,
+            method: IndexMethodKind::BTree,
+            unique: true,
+        });
+        let fields = row(&[
+            ("a", Value::text("a".repeat(2048))),
+            ("b", Value::text("b".repeat(2048))),
+        ]);
+        let before = store.memory_bytes();
+        let estimate =
+            store.estimate_insert_growth("rows", std::iter::once(fields.as_slice()), false);
+        store
+            .index_entity_insert("rows", EntityId::new(1), &fields)
+            .expect("backfill");
+        let actual = store.memory_bytes() - before;
+        assert!(
+            estimate >= actual,
+            "estimated {estimate}, resident growth {actual}"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ RedDB server, account, CDN or external API. Applications bundle the JS, worker
 and WASM assets and make them available locally or through their own offline
 application cache. Sync is optional and must never gate local reads or writes.
 
-Version `0.6.0` adds local database sessions for Dart/Flutter Web and retains reusable Worker sessions. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
+Version `0.7.0` adds persisted catalog inspection and read-only, host-scoped SELECT, retaining local Dart/Flutter Web database sessions and reusable Workers. Native `.rdb` backup export and restore remain available. It exposes local table SELECT, CREATE TABLE, INSERT, UPDATE, DELETE
 and explicit BEGIN/COMMIT/ROLLBACK transactions through `openDatabase`.
 Other models, synchronization, conflict
 resolution and forwarding between tabs remain pending. The browser package
@@ -504,3 +504,55 @@ internal fixtures remain separate from application entrypoints.
    pending intent, identity separation, offline assets and the storage-status UI.
 5. Validate two-device sync and engine conformance, Safari/iOS on real devices,
    quota/failure cases, bundle size, startup, memory and query performance.
+
+## Embedded explorers and scoped reads
+
+`database.catalog()` returns the persisted columns `table_name`, `column_name`,
+`data_type` and `nullable`. It reads real contracts, including empty tables.
+
+```ts
+const scopes = [{ table: 'files', field: 'tenant_id', value: 'campaign-1' }]
+const result = await database.readQuery('SELECT name, body FROM files', [], scopes)
+```
+
+The host supplies the allowed table and equality predicate. The canonical engine
+filters source records before the caller's WHERE, ordering and limit. Only SELECT
+is admitted; SQL cannot remove this filter or address an unlisted table. Empty
+scopes deny all tables. This is a local inspection boundary, not a server user
+session or RLS. The browser's file owner can still use the ordinary full SQL API.
+Catalogs and scoped reads honor the same I/O health fence; an aborted explicit
+transaction must roll back first. Source filtering uses canonical record
+materialization and may temporarily allocate one record for each candidate.
+
+## Local file-owner Vault (0.8.0)
+
+```js
+const session = await createDatabaseSession()
+let db = await session.openDatabase({ name: 'my-private-workspace', create: true })
+await db.vault.unlock(masterPassword, { create: true }) // explicit first-use opt-in
+await db.query('BEGIN')
+await db.query('INSERT INTO profiles VALUES ($1, $2)', ['admin', 'connection:admin'])
+await db.vault.put('connection:admin', JSON.stringify(credentials))
+await db.query('COMMIT') // profile and encrypted credential publish together
+await db.close()
+db = await session.openDatabase({ name: 'my-private-workspace' })
+const credential = await db.vault.reveal('connection:admin') // explicit reveal
+await db.vault.lock() // metadata SQL remains usable
+await db.close()
+await session.close()
+```
+
+The Vault is a native internal Vault collection, sealed with the existing RDVX
+envelope and native v3 passphrase KDF. Passwords and opening keys never enter
+OPFS, WAL or JavaScript storage. The Worker-session key survives file release,
+but never a Worker/browser restart. Each initialization receives a random salt
+that fences stale keys if a file is replaced. Existing ciphertext is always
+authenticated before use; wrong passwords never recreate it. Credential payload
+size is bounded to 1 MiB. Certificate-based auth page chains and server auth
+records are preserved; this local API adds no server IAM or encrypted-column SQL.
+
+Use an outer application Web Lock to queue tabs before opening the SDK's
+exclusive owner. Explicit lock affects the local credential key, not an already
+authenticated remote connection. Hosts must choose opt-in saving and the lifetime
+of revealed credentials. Backups retain ordinary metadata in plaintext and may
+retain old encrypted records; deleting a secret does not promise secure erasure.

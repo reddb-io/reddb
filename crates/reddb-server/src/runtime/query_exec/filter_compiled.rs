@@ -231,9 +231,19 @@ pub(crate) fn resolve_kind<'a>(
             entity.logical_id().raw(),
         ))),
         EntityFieldKind::SystemCreatedAt => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "created_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)))
         }
         EntityFieldKind::SystemUpdatedAt => {
+            if let Some(value) =
+                crate::runtime::retention_sweeper::maintenance_timestamp(entity, "updated_at")
+            {
+                return Some(Cow::Owned(value));
+            }
             Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)))
         }
         EntityFieldKind::SystemSequenceId => {
@@ -344,7 +354,13 @@ pub(crate) fn resolve_kind<'a>(
                     return Some(Cow::Owned(v));
                 }
                 // Fast path (bulk-insert entities): columns[] in schema order, O(1).
-                if row.named.is_none() {
+                if row.named.is_none()
+                    && row.schema.as_ref().is_none_or(|schema| {
+                        schema
+                            .get(*idx as usize)
+                            .is_some_and(|column| column == name)
+                    })
+                {
                     return row.columns.get(*idx as usize).map(Cow::Borrowed);
                 }
                 // Fallback (single-insert entities): named HashMap, also O(1).
@@ -377,12 +393,10 @@ pub(crate) fn resolve_kind<'a>(
 }
 
 fn row_has_document_body(row: &crate::storage::unified::entity::RowData) -> bool {
-    row.named.as_ref().is_some_and(|named| {
-        matches!(
-            named.get("body"),
-            Some(Value::Json(_)) | Some(Value::Blob(_))
-        )
-    })
+    matches!(
+        row.get_field("body"),
+        Some(Value::Json(_)) | Some(Value::Blob(_))
+    )
 }
 
 /// Offset-read a single-source document's top-level field from its body.
@@ -495,13 +509,12 @@ pub struct CompiledEntityFilter {
     table_name: String,
     table_alias: String,
     has_fallback: bool,
-    /// OR of `field_name_bloom(name)` for every non-system user field
-    /// referenced by any predicate in this filter. 0 means no user fields
-    /// (pure system-field query — bloom gate skipped).
+    /// Bloom bits for user fields that must be present for this filter to
+    /// match. 0 means presence cannot be proved from the filter shape.
     ///
     /// At evaluate time: if `entity.field_bloom & required_bloom != required_bloom`
-    /// the entity cannot satisfy any user-field predicate and is skipped before
-    /// any HashMap probe.
+    /// the entity cannot satisfy the whole filter and is skipped before any
+    /// HashMap probe.
     required_bloom: u64,
 }
 
@@ -519,6 +532,17 @@ pub enum CompiledEntityFilterDecision {
 }
 
 impl CompiledEntityFilterDecision {
+    pub fn try_resolve_with_fallback(
+        self,
+        fallback: impl FnOnce() -> RedDBResult<bool>,
+    ) -> RedDBResult<bool> {
+        match self {
+            Self::Match => Ok(true),
+            Self::Reject => Ok(false),
+            Self::NeedsFallback => fallback(),
+        }
+    }
+
     /// Convert the three-way decision to a match only after supplying the
     /// runtime evaluation required by an undecided compiled predicate.
     pub fn resolve_with_fallback(self, fallback: impl FnOnce() -> bool) -> bool {
@@ -588,11 +612,21 @@ impl CompiledEntityFilter {
         self.has_fallback
     }
 
-    /// Evaluate against an entity. Hot path — must stay allocation-free
-    /// in the common case.
+    /// Test convenience for fixtures that do not exercise operating failures.
+    #[cfg(test)]
     pub fn evaluate(&self, entity: &UnifiedEntity) -> CompiledEntityFilterDecision {
-        // Field-name bloom gate: if the entity is missing a required field,
-        // it cannot satisfy any user-field predicate. Skip before any HashMap.
+        self.try_evaluate(entity)
+            .expect("fixture compiled filter has no operating failure")
+    }
+
+    /// Native execution must propagate decode/admission failures before a row
+    /// can be accepted, rejected, counted or published as a mutation target.
+    pub fn try_evaluate(
+        &self,
+        entity: &UnifiedEntity,
+    ) -> RedDBResult<CompiledEntityFilterDecision> {
+        // Field-name bloom gate: skip only when the filter shape proves that
+        // the whole predicate requires a field that this entity lacks.
         // Only fires when entity.field_bloom is non-zero (named/document entities).
         // Schema-based bulk rows have field_bloom == 0 (bloom tracked at segment
         // level for those) so the gate is a no-op for the table hot path.
@@ -611,7 +645,7 @@ impl CompiledEntityFilter {
             && entity.field_bloom != 0
             && (entity.field_bloom & self.required_bloom) != self.required_bloom
         {
-            return CompiledEntityFilterDecision::Reject;
+            return Ok(CompiledEntityFilterDecision::Reject);
         }
 
         // Fixed-size three-valued stack — no heap allocation per row.
@@ -669,36 +703,52 @@ impl CompiledEntityFilter {
         for op in &self.ops {
             match op {
                 CompiledEntityOp::Compare { kind, op, value } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
+                        .map(|candidate| try_compare_runtime_values(candidate.as_ref(), value, *op))
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::Between { kind, low, high } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| {
-                            compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
-                                && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
+                        .map(|candidate| -> RedDBResult<bool> {
+                            Ok(
+                                try_compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)?
+                                    && try_compare_runtime_values(
+                                        candidate.as_ref(),
+                                        high,
+                                        CompareOp::Le,
+                                    )?,
+                            )
                         })
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::InList { kind, values } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
-                        .map(|candidate| {
-                            values.iter().any(|v| {
-                                compare_runtime_values(candidate.as_ref(), v, CompareOp::Eq)
-                            })
+                        .map(|candidate| -> RedDBResult<bool> {
+                            for value in values {
+                                if try_compare_runtime_values(
+                                    candidate.as_ref(),
+                                    value,
+                                    CompareOp::Eq,
+                                )? {
+                                    return Ok(true);
+                                }
+                            }
+                            Ok(false)
                         })
+                        .transpose()?
                         .unwrap_or(false);
                     push!(result);
                 }
                 CompiledEntityOp::InSet { kind, set } => {
                     // O(1) HashSet::contains — built once at compile time
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .map(|candidate| set.contains(candidate.as_ref()))
                         .unwrap_or(false);
@@ -706,7 +756,7 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::InBloom { kind, set, bloom } => {
                     // Two-stage: bloom pre-filter eliminates ~99% of misses before HashSet probe.
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .map(|candidate| {
                             let h = crate::storage::primitives::split_block_bloom::hash_value_u32(
@@ -719,40 +769,40 @@ impl CompiledEntityFilter {
                 }
                 CompiledEntityOp::Like { kind, pattern } => {
                     // runtime_value_text_cow: borrow for Text/Email/Url, owned for others
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| like_matches(s.as_ref(), pattern));
                     push!(result);
                 }
                 CompiledEntityOp::StartsWith { kind, prefix } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.starts_with(prefix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::EndsWith { kind, suffix } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.ends_with(suffix.as_str()));
                     push!(result);
                 }
                 CompiledEntityOp::Contains { kind, substring } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .as_ref()
                         .is_some_and(|value| runtime_value_contains(value.as_ref(), substring));
                     push!(result);
                 }
                 CompiledEntityOp::IsNull { kind } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .map(|v| v.as_ref() == &Value::Null)
                         .unwrap_or(true);
                     push!(result);
                 }
                 CompiledEntityOp::IsNotNull { kind } => {
-                    let result = resolve_filter_kind(kind, entity)
+                    let result = resolve_filter_kind(kind, entity)?
                         .map(|v| v.as_ref() != &Value::Null)
                         .unwrap_or(false);
                     push!(result);
@@ -783,11 +833,11 @@ impl CompiledEntityFilter {
                 }
             }
         }
-        match pop!(Some(true)) {
+        Ok(match pop!(Some(true)) {
             Some(true) => CompiledEntityFilterDecision::Match,
             Some(false) => CompiledEntityFilterDecision::Reject,
             None => CompiledEntityFilterDecision::NeedsFallback,
-        }
+        })
     }
 
     /// Evaluate the filter against a batch of entities. Appends the
@@ -801,6 +851,7 @@ impl CompiledEntityFilter {
     /// vectorizable `Compare` and `InSet` opcodes and widen `out` to
     /// a roaring bitmap. The signature here is forward-compatible.
     #[inline]
+    #[cfg(test)]
     pub fn evaluate_batch(
         &self,
         entities: &[&UnifiedEntity],
@@ -848,10 +899,11 @@ fn json_value_contains(value: &crate::serde_json::Value, needle: &str) -> bool {
 /// semantics. This keeps document-path queries on the slow path
 /// without breaking them — a future iteration can teach the
 /// classifier to walk paths too.
-/// Walk the filter AST and OR together `field_name_bloom(name)` for every
-/// non-system user field referenced. System fields (entity_id, created_at…)
-/// are always present on every entity so they don't need the bloom gate.
-/// Returns 0 when no user fields are referenced (pure system-field query).
+/// Compute field-name bloom bits whose presence is necessary for the whole
+/// filter to match. A positive leaf needs its field, `AND` needs both sides,
+/// and `OR` can require only fields common to both alternatives. `IS NULL`
+/// and `NOT` intentionally contribute no bits because missing fields can make
+/// those predicates true under the runtime filter semantics.
 fn collect_required_bloom(filter: &Filter) -> u64 {
     const SYSTEM_FIELDS: &[&str] = &[
         "rid",
@@ -886,11 +938,11 @@ fn collect_required_bloom(filter: &Filter) -> u64 {
         Filter::StartsWith { field, .. } => bloom_for_field(field),
         Filter::EndsWith { field, .. } => bloom_for_field(field),
         Filter::Contains { field, .. } => bloom_for_field(field),
-        Filter::IsNull(field) => bloom_for_field(field),
+        Filter::IsNull(_) => 0,
         Filter::IsNotNull(field) => bloom_for_field(field),
         Filter::And(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
-        Filter::Or(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
-        Filter::Not(inner) => collect_required_bloom(inner),
+        Filter::Or(l, r) => collect_required_bloom(l) & collect_required_bloom(r),
+        Filter::Not(_) => 0,
         _ => 0,
     }
 }
@@ -960,7 +1012,9 @@ fn compile_into(
             //                         ~99% of non-matching rows skip HashSet entirely
             const IN_SMALL_THRESHOLD: usize = 8;
             const IN_BLOOM_THRESHOLD: usize = 1000;
-            if values.len() <= IN_SMALL_THRESHOLD {
+            if values.len() <= IN_SMALL_THRESHOLD
+                || values.iter().any(|value| matches!(value, Value::Secret(_)))
+            {
                 ops.push(CompiledEntityOp::InList {
                     kind,
                     values: values.clone(),
@@ -1352,6 +1406,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_field_bloom_does_not_override_null_or_boolean_semantics() {
+        let marker = FieldRef::TableColumn {
+            table: String::new(),
+            column: "marker".to_string(),
+        };
+        let id = FieldRef::TableColumn {
+            table: String::new(),
+            column: "id".to_string(),
+        };
+        let entity = make_row_entity(1, vec![("id".to_string(), Value::Integer(1))]);
+
+        let is_null =
+            CompiledEntityFilter::compile(&Filter::IsNull(marker.clone()), "users", "users");
+        assert_eq!(
+            is_null.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
+
+        let alternative = CompiledEntityFilter::compile(
+            &Filter::Or(
+                Box::new(Filter::Compare {
+                    field: marker.clone(),
+                    op: CompareOp::Eq,
+                    value: Value::text("present"),
+                }),
+                Box::new(Filter::Compare {
+                    field: id,
+                    op: CompareOp::Eq,
+                    value: Value::Integer(1),
+                }),
+            ),
+            "users",
+            "users",
+        );
+        assert_eq!(
+            alternative.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
+
+        let negated = CompiledEntityFilter::compile(
+            &Filter::Not(Box::new(Filter::Compare {
+                field: marker,
+                op: CompareOp::Eq,
+                value: Value::text("present"),
+            })),
+            "users",
+            "users",
+        );
+        assert_eq!(
+            negated.evaluate(&entity),
+            CompiledEntityFilterDecision::Match
+        );
+    }
+
+    #[test]
     fn evaluate_batch_on_empty_slice_is_noop() {
         let filter = Filter::Compare {
             field: FieldRef::TableColumn {
@@ -1372,11 +1481,13 @@ mod tests {
 fn resolve_filter_kind<'a>(
     kind: &'a EntityFieldKind,
     entity: &'a UnifiedEntity,
-) -> Option<Cow<'a, Value>> {
-    let value = resolve_kind(kind, entity)?;
+) -> RedDBResult<Option<Cow<'a, Value>>> {
+    let Some(value) = resolve_kind(kind, entity) else {
+        return Ok(None);
+    };
     if matches!(value.as_ref(), Value::Secret(_)) {
-        crate::runtime::execution_context::secret_query_input(value.into_owned()).map(Cow::Owned)
+        try_secret_runtime_input(value.into_owned()).map(|value| value.map(Cow::Owned))
     } else {
-        Some(value)
+        Ok(Some(value))
     }
 }

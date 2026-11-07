@@ -53,11 +53,11 @@ pub struct PgWireConfig {
 /// connection flows through the same IAM/policy gates as native
 /// transports. `None` connections (loopback trust) run under the ambient
 /// embedded identity, preserving the pre-auth behaviour.
-#[derive(Debug, Clone)]
 struct PgAuthContext {
     username: String,
     role: Role,
     tenant: Option<String>,
+    _lease: crate::auth::store::ConnectionLease,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ struct PgPortal {
     #[allow(dead_code)]
     result_format_codes: Vec<i16>,
     row_description_sent: bool,
-    result: Option<crate::runtime::RuntimeQueryResult>,
+    result: Option<crate::runtime::OwnedQueryResult>,
     row_offset: usize,
 }
 
@@ -116,6 +116,81 @@ fn run_runtime_blocking<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+fn pg_frame_requires_execution(frame: &FrontendMessage) -> bool {
+    matches!(
+        frame,
+        FrontendMessage::Query(_)
+            | FrontendMessage::Parse(_)
+            | FrontendMessage::Describe(_)
+            | FrontendMessage::Execute(_)
+    )
+}
+
+async fn acquire_pg_execution(
+    runtime: &RedDBRuntime,
+) -> Result<crate::transport::execution_admission::ExecutionPermit, &'static str> {
+    use crate::transport::execution_admission::ExecutionAdmissionError;
+
+    let admission = runtime.execution_admission();
+    match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+            Err("execution_queue_full: engine execution queue is full; retryable=true")
+        }
+        Ok(Err(ExecutionAdmissionError::Closed)) => {
+            Err("execution_admission_closed: engine execution admission is unavailable")
+        }
+        Err(_) => Err(
+            "execution_queue_timeout: deadline expired while waiting to execute; retryable=true",
+        ),
+    }
+}
+
+/// Holds the execution slot only until the response starts. PG handlers do
+/// all synchronous engine work before their first write; releasing at that
+/// boundary prevents a slow client from occupying engine capacity while rows
+/// drain through the socket.
+struct ExecutionResponseWriter<'a, S> {
+    inner: &'a mut S,
+    permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+}
+
+impl<'a, S> ExecutionResponseWriter<'a, S> {
+    fn new(
+        inner: &'a mut S,
+        permit: Option<crate::transport::execution_admission::ExecutionPermit>,
+    ) -> Self {
+        Self { inner, permit }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ExecutionResponseWriter<'_, S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        drop(self.permit.take());
+        std::pin::Pin::new(&mut *self.inner).poll_shutdown(cx)
+    }
+}
+
 /// Run `f` with the authenticated PG-Wire identity installed as the
 /// thread-local execution identity, restoring the prior state afterwards.
 ///
@@ -138,27 +213,43 @@ fn execute_with_pg_auth_context<T>(
 /// current thread and restores the previous state on drop, so pooled
 /// runtime threads never leak an identity across statements.
 struct PgAuthContextGuard {
+    previous_principal: Option<crate::auth::UserId>,
+    previous_identity: Option<(String, Role)>,
     previous_tenant: Option<String>,
 }
 
 impl PgAuthContextGuard {
     fn install(auth_context: &PgAuthContext) -> Self {
         let previous_tenant = crate::runtime::execution_context::current_tenant();
+        let previous_principal = crate::runtime::execution_context::current_auth_principal();
+        let previous_identity = crate::runtime::execution_context::current_auth_identity();
         match &auth_context.tenant {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant.clone()),
             None => crate::runtime::execution_context::clear_current_tenant(),
         }
-        crate::runtime::execution_context::set_current_auth_identity(
-            auth_context.username.clone(),
+        crate::runtime::execution_context::set_current_auth_principal(
+            crate::auth::UserId::from_parts(auth_context.tenant.as_deref(), &auth_context.username),
             auth_context.role,
         );
-        Self { previous_tenant }
+        Self {
+            previous_principal,
+            previous_identity,
+            previous_tenant,
+        }
     }
 }
 
 impl Drop for PgAuthContextGuard {
     fn drop(&mut self) {
-        crate::runtime::execution_context::clear_current_auth_identity();
+        match (
+            self.previous_principal.take(),
+            self.previous_identity.take(),
+        ) {
+            (Some(principal), Some((_, role))) => {
+                crate::runtime::execution_context::set_current_auth_principal(principal, role)
+            }
+            _ => crate::runtime::execution_context::clear_current_auth_identity(),
+        }
         match self.previous_tenant.take() {
             Some(tenant) => crate::runtime::execution_context::set_current_tenant(tenant),
             None => crate::runtime::execution_context::clear_current_tenant(),
@@ -240,6 +331,13 @@ pub async fn start_pg_wire_listener_on(
         let Some(permit) = admission.try_admit() else {
             continue;
         };
+        // Small result/control frames must not wait for a client's delayed ACK
+        // before the next frame (notably ReadyForQuery) can leave the server.
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(transport = "pg-wire", peer = %peer, err = %error,
+                "failed to configure connection");
+            continue;
+        }
         let rt = Arc::clone(&runtime);
         let cfg = Arc::clone(&cfg);
         let acceptor = tls_acceptor.clone();
@@ -391,13 +489,42 @@ where
             Err(e) => return Err(e),
         };
 
+        // PG sessions are serial, but every session competes for the same
+        // runtime-wide engine budget as HTTP, gRPC and RedWire. Admission is
+        // taken before any parser/planner/storage work. The response writer
+        // releases it before the first socket write, so a slow client cannot
+        // occupy engine capacity while rows drain.
+        let mut execution_permit = if pg_frame_requires_execution(&frame) {
+            match acquire_pg_execution(&runtime).await {
+                Ok(permit) => Some(permit),
+                Err(message) => {
+                    // SQLSTATE 53000 = insufficient_resources. Keep the stable
+                    // RedDB reason code in the message for clients that expose
+                    // only the PostgreSQL ErrorResponse text.
+                    send_error(&mut stream, "53000", message).await?;
+                    write_frame(
+                        &mut stream,
+                        &BackendMessage::ReadyForQuery(TransactionStatus::Idle),
+                    )
+                    .await?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         match frame {
             FrontendMessage::Query(sql) => {
-                handle_simple_query(&mut stream, &runtime, auth_context.as_ref(), &sql).await?;
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
+                handle_simple_query(&mut response, &runtime, auth_context.as_ref(), &sql).await?;
             }
             FrontendMessage::Parse(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_parse(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     &prepared_registry,
                     &mut prepared,
@@ -417,8 +544,10 @@ where
                 .await?;
             }
             FrontendMessage::Describe(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_describe(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     auth_context.as_ref(),
                     &prepared_registry,
@@ -429,8 +558,10 @@ where
                 .await?;
             }
             FrontendMessage::Execute(msg) => {
+                let mut response =
+                    ExecutionResponseWriter::new(&mut stream, execution_permit.take());
                 handle_execute(
-                    &mut stream,
+                    &mut response,
                     &runtime,
                     auth_context.as_ref(),
                     &prepared_registry,
@@ -824,7 +955,7 @@ fn execute_pg_query_result(
     prepared_id: PreparedId,
     sql: &str,
     params: &[ParamValue],
-) -> Result<crate::runtime::RuntimeQueryResult, String> {
+) -> Result<crate::runtime::OwnedQueryResult, String> {
     let executor = QueryRequestExecutor::new(runtime, prepared_registry);
     let bound = executor
         .bind(QueryRequest::prepared(prepared_id, params.to_vec()))
@@ -832,22 +963,26 @@ fn execute_pg_query_result(
     if pg_scalar_select_param_index(sql).is_some() {
         let values = params.iter().cloned().map(Value::from).collect::<Vec<_>>();
         if let Some(result) = try_execute_pg_scalar_select(sql, &values) {
-            return Ok(result);
+            return runtime
+                .own_query_result(result)
+                .map_err(|error| error.to_string());
         }
     }
     if params.is_empty() {
         return match translate_pg_catalog_query(runtime, sql) {
-            Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
-                query: sql.to_string(),
-                mode: reddb_rql::modes::QueryMode::Sql,
-                statement: "select",
-                engine: "pg-catalog",
-                result,
-                affected_rows: 0,
-                statement_type: "select",
-                bookmark: None,
-                notice: None,
-            }),
+            Ok(Some(result)) => runtime
+                .own_query_result(crate::runtime::RuntimeQueryResult {
+                    query: sql.to_string(),
+                    mode: reddb_rql::modes::QueryMode::Sql,
+                    statement: "select",
+                    engine: "pg-catalog",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                    bookmark: None,
+                    notice: None,
+                })
+                .map_err(|error| error.to_string()),
             Ok(None) => run_runtime_blocking(|| {
                 execute_with_pg_auth_context(auth_context, || {
                     // Utility statements use the full dispatcher after registry validation.
@@ -874,7 +1009,9 @@ fn execute_pg_query_result(
                     ) {
                         executor.execute_bound(bound)
                     } else {
-                        runtime.execute_query(sql)
+                        runtime
+                            .execute_query(sql)
+                            .and_then(|result| runtime.own_query_result(result))
                     }
                 })
             })
@@ -1126,8 +1263,8 @@ where
     };
     // A missing user and a wrong password both surface as the same error
     // class below — no user-existence oracle leaks over the wire.
-    let session = match auth_store.authenticate_in_tenant(tenant, username, &password) {
-        Ok(session) => session,
+    let (session, lease) = match auth_store.authenticate_connection(tenant, username, &password) {
+        Ok(authenticated) => authenticated,
         Err(_) => {
             send_error(stream, "28P01", "password authentication failed").await?;
             return Ok(None);
@@ -1139,6 +1276,7 @@ where
         username: session.username,
         role: session.role,
         tenant: session.tenant_id,
+        _lease: lease,
     })))
 }
 
@@ -1230,7 +1368,7 @@ where
     }
 
     let query_result = match translate_pg_catalog_query(runtime, sql) {
-        Ok(Some(result)) => Ok(crate::runtime::RuntimeQueryResult {
+        Ok(Some(result)) => runtime.own_query_result(crate::runtime::RuntimeQueryResult {
             query: sql.to_string(),
             mode: reddb_rql::modes::QueryMode::Sql,
             statement: "select",
@@ -1242,7 +1380,11 @@ where
             notice: None,
         }),
         Ok(None) => run_runtime_blocking(|| {
-            execute_with_pg_auth_context(auth_context, || runtime.execute_query(sql))
+            execute_with_pg_auth_context(auth_context, || {
+                runtime
+                    .execute_query(sql)
+                    .and_then(|result| runtime.own_query_result(result))
+            })
         }),
         Err(err) => Err(err),
     };
@@ -1666,11 +1808,54 @@ fn classify_sqlstate(msg: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::api::RedDBOptions;
-    use crate::auth::{AuthConfig, AuthStore};
+    use crate::auth::{AuthConfig, AuthStore, UserAttributes, UserId};
     use crate::runtime::RuntimeQueryResult;
     use crate::storage::query::unified::UnifiedResult;
     use reddb_rql::modes::QueryMode;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    async fn assert_pg_password_rejected(auth: Arc<AuthStore>, username: &str, password: &str) {
+        let runtime = Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap());
+        runtime.set_auth_store(auth);
+        let config = Arc::new(PgWireConfig::default());
+        let (server_io, mut client_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            handle_connection(server_io, runtime, config, None)
+                .await
+                .unwrap();
+        });
+
+        write_startup_params(&mut client_io, &[("user", username)]).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'R');
+        assert_eq!(i32::from_be_bytes(body[..4].try_into().unwrap()), 3);
+        write_frontend_frame(&mut client_io, b'p', cstring_body(password)).await;
+        let (tag, body) = read_backend_frame(&mut client_io).await;
+        assert_eq!(tag, b'E');
+        assert_eq!(error_response_field(&body, b'C'), Some("28P01"));
+
+        let mut eof = [0u8; 1];
+        assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_writer_releases_execution_slot_before_socket_write() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        runtime.configure_execution_admission(1, 0, 100);
+        let admission = runtime.execution_admission();
+        let permit = admission.acquire().await.expect("execution permit");
+        assert_eq!(admission.active(), 1);
+
+        let (mut server_io, mut client_io) = tokio::io::duplex(64);
+        let mut writer = ExecutionResponseWriter::new(&mut server_io, Some(permit));
+        writer.write_all(b"ok").await.unwrap();
+        assert_eq!(admission.active(), 0);
+
+        let mut received = [0_u8; 2];
+        client_io.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"ok");
+    }
 
     #[tokio::test]
     async fn enabled_auth_store_rejects_bad_pgwire_password_with_28p01() {
@@ -1706,6 +1891,50 @@ mod tests {
         let mut eof = [0u8; 1];
         assert_eq!(client_io.read(&mut eof).await.unwrap(), 0);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pgwire_rejects_expired_accounts() {
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        auth.set_user_attributes(
+            &UserId::platform("alice"),
+            UserAttributes {
+                valid_until: Some(1),
+                ..UserAttributes::default()
+            },
+        )
+        .unwrap();
+
+        assert_pg_password_rejected(auth, "alice", "secret").await;
+    }
+
+    #[tokio::test]
+    async fn pgwire_rejects_accounts_at_connection_limit() {
+        let auth = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        auth.create_user("alice", "secret", Role::Write).unwrap();
+        let id = UserId::platform("alice");
+        auth.set_user_attributes(
+            &id,
+            UserAttributes {
+                connection_limit: Some(1),
+                ..UserAttributes::default()
+            },
+        )
+        .unwrap();
+        let _held = auth
+            .acquire_connection_lease(&id)
+            .expect("occupy the only connection slot");
+
+        assert_pg_password_rejected(auth, "alice", "secret").await;
     }
 
     #[tokio::test]

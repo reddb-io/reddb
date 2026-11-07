@@ -13,7 +13,7 @@
 #
 # Required assets are the cross-product of:
 #   - bins:      red, red_client
-#   - suffixes:  linux-x86_64, linux-aarch64, linux-armv7,
+#   - suffixes:  linux-x86_64, linux-aarch64,
 #                linux-x86_64-static, linux-aarch64-static,
 #                windows-x86_64.exe
 # The suffix list mirrors the required entries of `PLATFORMS` in
@@ -39,14 +39,12 @@ fi
 REPO="${GITHUB_REPOSITORY:-reddb-io/reddb}"
 
 BINS=(red red_client)
-SUFFIXES=(
-  linux-x86_64
-  linux-aarch64
-  linux-armv7
-  linux-x86_64-static
-  linux-aarch64-static
-  windows-x86_64.exe
-)
+SUFFIXES=()
+[[ "${ENABLE_LINUX_X64:-true}" != false ]] && SUFFIXES+=(linux-x86_64 linux-x86_64-static)
+[[ "${ENABLE_LINUX_ARM64:-true}" != false ]] && SUFFIXES+=(linux-aarch64 linux-aarch64-static)
+[[ "${ENABLE_WINDOWS_X64:-true}" != false ]] && SUFFIXES+=(windows-x86_64.exe)
+[[ "${ENABLE_MACOS_ARM64:-false}" == true ]] && SUFFIXES+=(macos-aarch64)
+
 EXTRA_ASSETS=(
   checksums.txt
   SHA256SUMS

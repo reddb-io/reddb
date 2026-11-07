@@ -56,6 +56,7 @@ use reddb_types::Value;
 /// metadata support and cross-referencing.
 pub struct RedDB {
     store: Arc<UnifiedStore>,
+    pub(crate) runtime: std::sync::OnceLock<crate::runtime::WeakRuntime>,
     /// Preprocessing hooks
     preprocessors: SharedPreprocessors,
     /// Index configuration
@@ -458,6 +459,18 @@ fn fnv1a_hash_bytes(hash: &mut u64, bytes: &[u8]) {
 }
 
 fn fnv1a_hash_value<T: Debug>(hash: &mut u64, value: &T) {
-    let rendered = format!("{value:?}");
-    fnv1a_hash_bytes(hash, rendered.as_bytes());
+    use std::fmt::Write;
+
+    struct HashWriter<'a>(&'a mut u64);
+
+    impl std::fmt::Write for HashWriter<'_> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            fnv1a_hash_bytes(self.0, text.as_bytes());
+            Ok(())
+        }
+    }
+
+    // Preserve the legacy Debug byte stream without a payload-sized String.
+    write!(HashWriter(hash), "{value:?}")
+        .expect("Debug must format into an infallible hash writer");
 }

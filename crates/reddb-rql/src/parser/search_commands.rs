@@ -67,7 +67,7 @@ impl<'a> Parser<'a> {
 
         // Parse COLLECTION
         self.expect(Token::Collection)?;
-        let collection = self.expect_ident()?;
+        let collection = self.parse_collection_name()?;
 
         // Optional LIMIT — accepts an integer literal or `$N` placeholder (#361).
         let mut limit_param: Option<usize> = None;
@@ -302,13 +302,8 @@ impl<'a> Parser<'a> {
     /// identifier or a keyword, lowercasing the keyword form so the
     /// stored name matches the source spelling.
     fn expect_collection_name(&mut self) -> Result<String, ParseError> {
-        let was_ident = matches!(self.peek(), Token::Ident(_));
-        let raw = self.expect_ident_or_keyword()?;
-        Ok(if was_ident {
-            raw
-        } else {
-            raw.to_ascii_lowercase()
-        })
+        let head = self.collection_name_segment(true)?;
+        self.finish_collection_name(head, false)
     }
 
     fn expect_search_ident(&mut self, expected: &str) -> Result<(), ParseError> {
@@ -420,7 +415,7 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect(Token::Collection)?;
-                let collection = self.expect_ident()?;
+                let collection = self.parse_collection_name()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.parse_search_spatial_column()?;
@@ -487,7 +482,7 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect(Token::Collection)?;
-                let collection = self.expect_ident()?;
+                let collection = self.parse_collection_name()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.parse_search_spatial_column()?;
@@ -522,7 +517,7 @@ impl<'a> Parser<'a> {
                 validate_search_spatial_polygon(&vertices, self.position())?;
 
                 self.expect(Token::Collection)?;
-                let collection = self.expect_ident()?;
+                let collection = self.parse_collection_name()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.parse_search_spatial_column()?;
@@ -581,7 +576,7 @@ impl<'a> Parser<'a> {
                 };
 
                 self.expect(Token::Collection)?;
-                let collection = self.expect_ident()?;
+                let collection = self.parse_collection_name()?;
 
                 let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.parse_search_spatial_column()?;

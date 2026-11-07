@@ -70,6 +70,7 @@ use crate::storage::encryption::argon2id::{derive_key, Argon2Params};
 use crate::storage::encryption::key::SecureKey;
 use crate::storage::engine::page::{Page, PageType, CONTENT_SIZE, HEADER_SIZE};
 use crate::storage::engine::pager::Pager;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{ApiKey, AuthError, Role, User, UserId};
 
@@ -152,6 +153,13 @@ pub struct KeyPair {
     pub master_secret: Vec<u8>,
     /// 32-byte certificate derived from master secret (admin keeps this).
     pub certificate: Vec<u8>,
+}
+
+impl Drop for KeyPair {
+    fn drop(&mut self) {
+        self.master_secret.zeroize();
+        self.certificate.zeroize();
+    }
 }
 
 impl KeyPair {
@@ -254,8 +262,8 @@ impl From<VaultError> for AuthError {
     }
 }
 
-fn decode_certificate_hex(certificate_hex: &str) -> Result<Vec<u8>, VaultError> {
-    let certificate = hex::decode(certificate_hex.trim()).map_err(|_| VaultError::InvalidCredential("certificate must contain 64 hexadecimal characters; use REDDB_VAULT_PASSPHRASE for a password".into()))?;
+fn decode_certificate_hex(certificate_hex: &str) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let certificate = Zeroizing::new(hex::decode(certificate_hex.trim()).map_err(|_| VaultError::InvalidCredential("certificate must contain 64 hexadecimal characters; use REDDB_VAULT_PASSPHRASE for a password".into()))?);
     if certificate.len() != 32 {
         return Err(VaultError::InvalidCredential(
             "certificate must contain exactly 32 bytes (64 hexadecimal characters)".into(),
@@ -635,25 +643,9 @@ impl Vault {
     }
 
     fn passphrase_key(passphrase: &str, salt: &[u8; 16]) -> Result<SecureKey, VaultError> {
-        if passphrase.is_empty() || passphrase.len() > 4096 {
-            return Err(VaultError::InvalidCredential(
-                "passphrase must contain 1 to 4096 bytes".into(),
-            ));
-        }
-        let parameters = argon2::Params::new(19 * 1024, 2, 1, Some(32))
-            .expect("invariant: vault Argon2id parameters are valid");
-        let hasher = argon2::Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            parameters,
-        );
-        let mut bytes = [0u8; 32];
-        hasher
-            .hash_password_into(passphrase.as_bytes(), salt, &mut bytes)
-            .map_err(|_| VaultError::Encryption)?;
-        let key = SecureKey::new(&bytes);
-        bytes.fill(0);
-        Ok(key)
+        let bytes = reddb_crypto::vault::passphrase_key(passphrase, salt)
+            .map_err(VaultError::InvalidCredential)?;
+        Ok(SecureKey::new(bytes.as_ref()))
     }
 
     fn check_credential_format(pager: &Pager, expected: u8) -> Result<(), VaultError> {
@@ -721,7 +713,7 @@ impl Vault {
     /// imports derive the same wrapping key from `REDDB_CERTIFICATE`.
     /// The blob is hex-encoded so it can live inside JSONL dumps.
     pub fn seal_logical_export(&self, state: &VaultState) -> Result<String, VaultError> {
-        let plaintext = state.serialize();
+        let plaintext = Zeroizing::new(state.serialize());
         let mut nonce = [0u8; NONCE_SIZE];
         os_random::fill_bytes(&mut nonce)
             .map_err(|e| VaultError::Corrupt(format!("CSPRNG failed: {e}")))?;
@@ -796,8 +788,10 @@ impl Vault {
     ) -> Result<VaultState, VaultError> {
         let key_bytes: &[u8] = key.as_bytes();
         let key_arr: &[u8; 32] = key_bytes.try_into().map_err(|_| VaultError::Decryption)?;
-        let plaintext = aes256_gcm_decrypt(key_arr, nonce, VAULT_LOGICAL_EXPORT_AAD, ciphertext)
-            .map_err(|_| VaultError::Decryption)?;
+        let plaintext = Zeroizing::new(
+            aes256_gcm_decrypt(key_arr, nonce, VAULT_LOGICAL_EXPORT_AAD, ciphertext)
+                .map_err(|_| VaultError::Decryption)?,
+        );
         VaultState::deserialize(&plaintext)
     }
 
@@ -815,7 +809,7 @@ impl Vault {
     /// its chain) intact, so the previous vault snapshot is still
     /// readable on the next open.
     pub fn save(&self, pager: &Pager, state: &VaultState) -> Result<(), VaultError> {
-        let plaintext = state.serialize();
+        let plaintext = Zeroizing::new(state.serialize());
 
         // Fresh nonce per write — required for AES-GCM.
         let mut nonce = [0u8; NONCE_SIZE];
@@ -829,7 +823,8 @@ impl Vault {
         // treat the whole vector as one opaque blob.
 
         let cipher_total = ciphertext.len();
-        let payload_len = (NONCE_SIZE + cipher_total) as u32; // for legacy field
+        let payload_len = u32::try_from(NONCE_SIZE.saturating_add(cipher_total))
+            .map_err(|_| VaultError::Corrupt("vault payload exceeds on-disk format".into()))?;
 
         // ---- 1. Plan the chain --------------------------------------
         //
@@ -880,7 +875,10 @@ impl Vault {
         // saves recycle ids without growing the file — the old chain
         // is freed at step 6 below and becomes available the *next*
         // time we save.
-        let mut new_chain: Vec<u32> = Vec::with_capacity(chain_count);
+        let mut new_chain = Vec::new();
+        new_chain
+            .try_reserve_exact(chain_count)
+            .map_err(|_| VaultError::Corrupt("vault page chain is too large".into()))?;
         for _ in 0..chain_count {
             let page = pager
                 .allocate_page(PageType::Vault)
@@ -920,7 +918,8 @@ impl Vault {
             pager,
             &nonce,
             payload_len,
-            chain_count as u32,
+            u32::try_from(chain_count)
+                .map_err(|_| VaultError::Corrupt("vault page chain is too large".into()))?,
             first_data_page,
             &ciphertext[..header_chunk_len],
         )?;
@@ -1012,9 +1011,33 @@ impl Vault {
             return Err(VaultError::Corrupt("payload too short for nonce".into()));
         }
         let cipher_total = payload_len - NONCE_SIZE;
+        let expected_chain_count = cipher_total
+            .saturating_sub(VAULT_HEADER_CIPHER_CAPACITY)
+            .div_ceil(VAULT_DATA_CIPHER_CAPACITY);
+        if chain_count != expected_chain_count {
+            return Err(VaultError::Corrupt(format!(
+                "vault chain count {chain_count} does not match payload length {payload_len}"
+            )));
+        }
+        let page_count = pager
+            .page_count()
+            .map_err(|e| VaultError::Pager(e.to_string()))? as usize;
+        if chain_count > page_count {
+            return Err(VaultError::Corrupt(format!(
+                "vault chain count {chain_count} exceeds database page count {page_count}"
+            )));
+        }
+        if (chain_count == 0) != (next_id == 0) {
+            return Err(VaultError::Corrupt(
+                "vault chain head does not match declared chain count".into(),
+            ));
+        }
 
         // ---- Reassemble ciphertext fragments. ----------------------
-        let mut cipher = Vec::with_capacity(cipher_total);
+        let mut cipher = Vec::new();
+        cipher
+            .try_reserve_exact(cipher_total)
+            .map_err(|_| VaultError::Corrupt("vault ciphertext is too large".into()))?;
         let header_chunk_len = cipher_total.min(VAULT_HEADER_CIPHER_CAPACITY);
         let header_cipher_start = VAULT_HEADER_META_SIZE;
         cipher.extend_from_slice(
@@ -1083,8 +1106,10 @@ impl Vault {
         // ---- Decrypt the reassembled blob in one shot. -------------
         let key_bytes: &[u8] = self.key.as_bytes();
         let key_arr: &[u8; 32] = key_bytes.try_into().map_err(|_| VaultError::Decryption)?;
-        let plaintext = aes256_gcm_decrypt(key_arr, &nonce, VAULT_AAD, &cipher)
-            .map_err(|_| VaultError::Decryption)?;
+        let plaintext = Zeroizing::new(
+            aes256_gcm_decrypt(key_arr, &nonce, VAULT_AAD, &cipher)
+                .map_err(|_| VaultError::Decryption)?,
+        );
 
         let state = VaultState::deserialize(&plaintext)?;
         Ok(Some(state))
@@ -1121,6 +1146,14 @@ impl Vault {
                 .try_into()
                 .map_err(|_| VaultError::Corrupt("bad chain_count bytes".into()))?,
         ) as usize;
+        let page_count = pager
+            .page_count()
+            .map_err(|e| VaultError::Pager(e.to_string()))? as usize;
+        if chain_count > page_count {
+            return Err(VaultError::Corrupt(format!(
+                "vault chain count {chain_count} exceeds database page count {page_count}"
+            )));
+        }
         let first_id_off = chain_count_off + 4;
         let mut id = u32::from_le_bytes(
             content[first_id_off..first_id_off + 4]
@@ -1128,7 +1161,9 @@ impl Vault {
                 .map_err(|_| VaultError::Corrupt("bad first_data_page_id bytes".into()))?,
         );
 
-        let mut out = Vec::with_capacity(chain_count);
+        let mut out = Vec::new();
+        out.try_reserve_exact(chain_count)
+            .map_err(|_| VaultError::Corrupt("vault page chain is too large".into()))?;
         let mut hops = 0usize;
         while id != 0 && hops < chain_count {
             out.push(id);
@@ -1388,6 +1423,103 @@ mod tests {
     }
 
     #[test]
+    fn portable_vault_preserves_native_auth_payload_and_passphrase_contract() {
+        use reddb_engine::query::local_database::LocalDatabase;
+        use reddb_engine::storage::{
+            entity::{EntityId, RowData, UnifiedEntity},
+            manager::ManagerConfig,
+            resident_file::EmbeddedResidentStore,
+            store_wal::StoreWalAction,
+        };
+        use reddb_file::{OpenMode, StdVfs, Vfs};
+
+        let (pager, directory) = temp_pager();
+        let password = "native portable interop password";
+        let native = Vault::with_passphrase(&pager, password).expect("native key");
+        let mut state = sample_state();
+        state.master_secret = Some(vec![42; 32]);
+        let native_envelope = native.seal_logical_export(&state).expect("native envelope");
+        let path = directory.join("portable.rdb");
+        let mut mode = OpenMode::create_new();
+        mode.read = true;
+        let file = StdVfs.open(&path, mode).expect("private file");
+        let mut database = LocalDatabase::create(file, &path, 0).expect("portable database");
+        database
+            .vault_unlock(password, true)
+            .expect("initialize portable collection");
+        let mut store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("physical store");
+        let mut entity =
+            UnifiedEntity::table_row(EntityId::new(1), "red.local.vault", 1, Vec::new());
+        entity.data = reddb_engine::storage::entity::EntityData::Row(RowData::with_names(
+            vec![reddb_types::Value::Secret(
+                hex::decode(native_envelope).expect("hex"),
+            )],
+            vec!["value".into()],
+        ));
+        store
+            .publish_actions(&[StoreWalAction::upsert_entity(
+                "red.local.vault",
+                &entity,
+                None,
+                reddb_file::STORE_VERSION_CURRENT,
+            )])
+            .expect("import native envelope");
+        let mut database =
+            LocalDatabase::open(store.into_inner(), &path).expect("open imported file");
+        let key = database
+            .vault_unlock(password, false)
+            .expect("native passphrase in portable runtime");
+        database
+            .vault_put(&key, "connection:admin", Some("new credential"))
+            .expect("portable mutation");
+        let store = EmbeddedResidentStore::open(
+            database.into_inner(),
+            &path,
+            ManagerConfig::default(),
+            false,
+            0,
+        )
+        .expect("read back");
+        let (entity, _) = store
+            .get("red.local.vault", EntityId::new(1))
+            .expect("record")
+            .expect("Vault exists");
+        let Some(reddb_types::Value::Secret(blob)) = entity
+            .data
+            .as_row()
+            .and_then(|row| row.get_by_name("value"))
+        else {
+            panic!("sealed Vault")
+        };
+        let restored = Vault::unseal_logical_export_with_passphrase(&hex::encode(blob), password)
+            .expect("portable envelope in native runtime");
+        assert_eq!(restored.master_secret, state.master_secret);
+        assert_eq!(restored.bootstrapped, state.bootstrapped);
+        assert_eq!(restored.users.len(), state.users.len());
+        for (actual, expected) in restored.users.iter().zip(&state.users) {
+            assert_eq!(actual.username, expected.username);
+            assert_eq!(actual.password_hash, expected.password_hash);
+            assert_eq!(actual.tenant_id, expected.tenant_id);
+        }
+        assert_eq!(restored.api_keys.len(), state.api_keys.len());
+        assert_eq!(
+            restored.kv.get("connection:admin").map(String::as_str),
+            Some("new credential")
+        );
+        drop(store);
+        drop(native);
+        drop(pager);
+        std::fs::remove_dir_all(directory).expect("remove test files");
+    }
+
+    #[test]
     fn test_vault_state_serialize_deserialize_roundtrip() {
         let state = sample_state();
         let serialized = state.serialize();
@@ -1508,6 +1640,28 @@ mod tests {
         assert_eq!(restored2.users.len(), 2);
 
         // Clean up.
+        drop(pager);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn vault_rejects_impossible_chain_header_before_allocating() {
+        let (pager, tmp_dir) = temp_pager();
+        let keypair = KeyPair::generate();
+        let vault = Vault::with_certificate_bytes(&pager, &keypair.certificate).unwrap();
+        vault.save(&pager, &sample_state()).unwrap();
+
+        let mut header = pager.read_page_no_checksum(VAULT_HEADER_PAGE).unwrap();
+        let bytes = header.as_bytes_mut();
+        let chain_count_offset = HEADER_SIZE + VAULT_HEADER_PREAMBLE_SIZE + NONCE_SIZE;
+        bytes[chain_count_offset..chain_count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        pager
+            .write_page_no_checksum(VAULT_HEADER_PAGE, header)
+            .unwrap();
+
+        assert!(matches!(vault.load(&pager), Err(VaultError::Corrupt(_))));
+        assert!(matches!(vault.save(&pager, &sample_state()), Ok(())));
+
         drop(pager);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

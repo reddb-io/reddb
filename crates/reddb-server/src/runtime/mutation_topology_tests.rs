@@ -58,10 +58,17 @@ fn admitted_rows_keep_their_index_topology_until_maintenance_finishes() {
                 let writer = scope.spawn(|| {
                     let mut engine = MutationEngine::new(&runtime).with_suppress_events();
                     engine.after_admission = Some(&hook);
-                    engine.apply(
-                        "topology_records".to_string(),
-                        (0..batch_size).map(row).collect(),
-                    )
+                    let rows = (0..batch_size)
+                        .map(|id| {
+                            let mut row = row(id);
+                            if operation == "tenant_drop" {
+                                row.fields
+                                    .push(("tenant_key".to_string(), Value::text("tenant-a")));
+                            }
+                            row
+                        })
+                        .collect();
+                    engine.apply("topology_records".to_string(), rows)
                 });
                 admitted_receive
                     .recv_timeout(Duration::from_secs(10))

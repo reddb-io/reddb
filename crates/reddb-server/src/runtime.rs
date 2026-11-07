@@ -499,6 +499,16 @@ pub struct RuntimeQueryResult {
 }
 
 impl RuntimeQueryResult {
+    /// Pure materialized results can receive late read-budget admission.
+    /// Command acknowledgements must preserve already committed side effects.
+    pub(crate) fn is_materialized_read(&self) -> bool {
+        self.statement_type == "select"
+            && matches!(
+                self.statement,
+                "table" | "graph" | "join" | "path" | "vector" | "hybrid" | "select"
+            )
+    }
+
     /// Construct a result representing a DML operation (insert/update/delete).
     pub fn dml_result(
         query: String,
@@ -941,31 +951,89 @@ pub const METRIC_RESULT_CACHE_EVICT_TOTAL: &str = "result_cache_evict_total";
 pub(crate) const ASK_ANSWER_CACHE_NAMESPACE: &str = "runtime.ask_answer_cache";
 const RMW_LOCK_SHARDS: usize = 64;
 
+type RmwLockShard = parking_lot::Mutex<HashMap<String, std::sync::Weak<RmwRowLock>>>;
+
 struct RmwLockTable {
-    shards: Vec<parking_lot::Mutex<HashMap<String, Arc<parking_lot::Mutex<()>>>>>,
+    shards: Vec<Arc<RmwLockShard>>,
+}
+
+struct RmwRowLock {
+    mutex: Arc<parking_lot::Mutex<()>>,
+    shard: std::sync::Weak<RmwLockShard>,
+    key: String,
+}
+
+struct OwnedRmwRowLockGuard {
+    // Unlock before dropping the identity owner and removing its weak entry.
+    _guard: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
+    _owner: Arc<RmwRowLock>,
+}
+
+impl RmwRowLock {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.mutex.lock()
+    }
+
+    fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        self.mutex.try_lock()
+    }
+
+    fn lock_owned(self: Arc<Self>) -> OwnedRmwRowLockGuard {
+        let guard = self.mutex.lock_arc();
+        OwnedRmwRowLockGuard {
+            _guard: guard,
+            _owner: self,
+        }
+    }
+}
+
+impl Drop for RmwRowLock {
+    fn drop(&mut self) {
+        let Some(shard) = self.shard.upgrade() else {
+            return;
+        };
+        let mut shard = shard.lock();
+        // A new owner may already have replaced an expired weak entry while
+        // this destructor was waiting for the shard. Preserve that new lock.
+        if shard
+            .get(&self.key)
+            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+        {
+            shard.remove(&self.key);
+        }
+    }
 }
 
 impl RmwLockTable {
+    fn row_key(logical_id: crate::storage::EntityId) -> String {
+        format!("row:{}", logical_id.raw())
+    }
+
     fn new() -> Self {
         let shards = (0..RMW_LOCK_SHARDS)
-            .map(|_| parking_lot::Mutex::new(HashMap::new()))
+            .map(|_| Arc::new(parking_lot::Mutex::new(HashMap::new())))
             .collect();
         Self { shards }
     }
 
-    fn lock_for(&self, collection: &str, key: &str) -> Arc<parking_lot::Mutex<()>> {
+    fn lock_for(&self, collection: &str, key: &str) -> Arc<RmwRowLock> {
         use std::hash::{Hash, Hasher};
-
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         collection.hash(&mut hasher);
         key.hash(&mut hasher);
         let shard_idx = (hasher.finish() as usize) % self.shards.len();
         let map_key = format!("{collection}\u{1f}{key}");
         let mut shard = self.shards[shard_idx].lock();
-        shard
-            .entry(map_key)
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
-            .clone()
+        if let Some(lock) = shard.get(&map_key).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(RmwRowLock {
+            mutex: Arc::new(parking_lot::Mutex::new(())),
+            shard: Arc::downgrade(&self.shards[shard_idx]),
+            key: map_key.clone(),
+        });
+        shard.insert(map_key, Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -1069,9 +1137,17 @@ struct RuntimeInner {
     /// of the budget above, and the live usage they report into it.
     pub(crate) memory_accounting: Arc<crate::storage::memory_pools::MemoryAccounting>,
     memory_reservations: parking_lot::Mutex<memory_admission::MemoryReservations>,
+    mvcc_maintenance: parking_lot::Mutex<mvcc_maintenance::MvccMaintenance>,
     indices: IndexCatalog,
     pool_config: ConnectionPoolConfig,
     pool: Mutex<PoolState>,
+    /// One execution budget for every network transport attached to this
+    /// runtime. HTTP, gRPC, RedWire and PG-wire must acquire from the same
+    /// object before entering synchronous engine work; embedded calls remain
+    /// direct and synchronous.
+    execution_admission:
+        parking_lot::RwLock<crate::transport::execution_admission::ExecutionAdmission>,
+    execution_queue_timeout_ms: AtomicU64,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
     index_store: index_store::IndexStore,
@@ -1413,6 +1489,49 @@ pub struct RedDBRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Storage replay can reach the owning runtime without keeping it alive.
+pub(crate) struct WeakRuntime(std::sync::Weak<RuntimeInner>);
+
+impl WeakRuntime {
+    pub(crate) fn upgrade(&self) -> Option<RedDBRuntime> {
+        self.0.upgrade().map(|inner| RedDBRuntime {
+            background_tasks: None,
+            inner,
+        })
+    }
+}
+
+impl RedDBRuntime {
+    pub(crate) fn execution_admission(
+        &self,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        self.inner.execution_admission.read().clone()
+    }
+
+    pub(crate) fn configure_execution_admission(
+        &self,
+        active_max: usize,
+        queued_max: usize,
+        queue_timeout_ms: u64,
+    ) -> crate::transport::execution_admission::ExecutionAdmission {
+        let admission =
+            crate::transport::execution_admission::ExecutionAdmission::new(active_max, queued_max);
+        *self.inner.execution_admission.write() = admission.clone();
+        self.inner
+            .execution_queue_timeout_ms
+            .store(queue_timeout_ms, AtomicOrdering::Release);
+        admission
+    }
+
+    pub(crate) fn execution_queue_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.inner
+                .execution_queue_timeout_ms
+                .load(AtomicOrdering::Acquire),
+        )
+    }
+}
+
 pub struct RuntimeConnection {
     id: u64,
     uses_pool_slot: bool,
@@ -1477,8 +1596,10 @@ pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;
 pub mod continuous_materialized_view;
+mod control_event_index;
 pub mod control_events;
 pub(crate) mod ddl;
+mod delete_publication;
 pub mod disk_space_monitor;
 mod dml_target_scan;
 pub mod evidence_export;
@@ -1503,7 +1624,7 @@ mod impl_dml_chain;
 mod impl_dml_claim;
 mod impl_dml_crypto;
 mod impl_dml_returning;
-mod impl_dml_support;
+pub(crate) mod impl_dml_support;
 mod impl_dml_tenant;
 mod impl_dml_ttl;
 mod impl_dml_update_analysis;
@@ -1544,8 +1665,18 @@ mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
 mod index_store;
+mod paged_btree_index;
+mod paged_count;
+mod paged_hash_index;
 #[cfg(test)]
-pub(crate) use index_store::MutationTestPhase;
+mod startup_io_budget;
+#[cfg(test)]
+pub(crate) use index_store::{IndexMethodKind as QualificationIndexMethodKind, MutationTestPhase};
+#[cfg(test)]
+mod cold_keyed_models;
+mod hash_candidate_memory;
+#[cfg(test)]
+mod index_intersection_memory;
 pub mod integrity_tombstone;
 mod join_filter;
 mod keyed_spine;
@@ -1563,6 +1694,7 @@ pub(crate) mod materialization_limit;
 /// (ADR 0073 §2).
 pub mod memory_accounting;
 pub(crate) mod memory_admission;
+pub(crate) mod memory_buffers;
 pub(crate) mod metric_descriptor_catalog;
 pub(crate) mod mutation;
 #[cfg(test)]
@@ -1573,6 +1705,8 @@ pub(crate) mod mvcc_lifecycle;
 pub(crate) mod mvcc_maintenance;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
+pub(crate) mod owned_query_result;
+pub use owned_query_result::OwnedQueryResult;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;
 pub mod query_audit;
@@ -1581,18 +1715,18 @@ pub(crate) mod query_exec;
 pub(crate) mod query_latency_telemetry;
 pub mod query_request;
 pub(crate) mod queue_lifecycle;
+mod queue_storage_index;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;
 pub mod quota_bucket;
 pub(crate) mod ranking_descriptor_catalog;
 mod record_search;
 mod red_schema;
-pub(crate) mod replica_queue_store;
 pub mod resource_limits;
 mod result_cache_runtime;
 pub(crate) mod retention_filter;
 pub(crate) mod retention_sweeper;
-mod rls_injection;
+pub(crate) mod rls_injection;
 pub mod schema_diff;
 pub mod schema_vocabulary;
 pub(crate) mod score_sketch;
@@ -1631,8 +1765,9 @@ pub mod mvcc {
         capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
         clear_current_snapshot, clear_current_tenant, current_connection_id, current_tenant,
         entity_visible_under_current_snapshot, entity_visible_with_context,
-        set_current_auth_identity, set_current_connection_id, set_current_snapshot,
-        set_current_tenant, snapshot_bundle, with_snapshot_bundle, SnapshotBundle, SnapshotContext,
+        set_current_auth_identity, set_current_auth_principal, set_current_connection_id,
+        set_current_snapshot, set_current_tenant, snapshot_bundle, with_snapshot_bundle,
+        SnapshotBundle, SnapshotContext,
     };
 }
 

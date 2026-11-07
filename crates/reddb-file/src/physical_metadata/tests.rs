@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn imported_sidecar_cleanup_preserves_database_and_unrecognized_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data.rdb");
+    let wal = crate::layout::unified_wal_path(&data);
+    let backup = directory.path().join("data.rdb.meta.rdbx.seq-backup");
+    let other = directory.path().join("other.rdb.meta.rdbx");
+    for path in [&data, &wal, &backup, &other] {
+        fs::write(path, b"preserve").unwrap();
+    }
+    let retired = [
+        crate::layout::physical_metadata_binary_path(&data),
+        crate::layout::physical_metadata_json_path(&data),
+        crate::layout::physical_metadata_journal_path(&data, 7),
+    ];
+    for path in &retired {
+        fs::write(path, b"imported").unwrap();
+    }
+    for _ in 0..2 {
+        remove_imported_physical_metadata_sidecars(&data).unwrap();
+        for path in &retired {
+            assert!(!path.exists());
+        }
+        for path in [&data, &wal, &backup, &other] {
+            assert_eq!(fs::read(path).unwrap(), b"preserve");
+        }
+    }
+}
+
+#[test]
 fn physical_metadata_documents_validate_json_before_publish() {
     assert!(encode_physical_metadata_json_document(r#"{"ok":true}"#).is_ok());
     assert!(encode_physical_metadata_binary_document(r#"{"ok":true}"#).is_ok());

@@ -204,12 +204,12 @@ pub fn encode(fields: &[(&str, &Value)], out: &mut Vec<u8>) -> Result<(), DocBod
 ///
 /// Fields are returned in the same order they were encoded.
 pub fn decode(data: &[u8]) -> Result<Vec<(String, Value)>, DocBodyError> {
-    let (n, table) = parse_header(data)?;
+    let (n, table) = parse_header_entries(data)?;
     let header_end = 7 + n * ENTRY_SIZE; // where the keys section begins
     let mut key_cursor = header_end;
     let mut result = Vec::with_capacity(n);
 
-    for &(key_len, val_offset) in &table {
+    for (key_len, val_offset) in table {
         // Read field name
         let key_end = key_cursor + key_len as usize;
         if key_end > data.len() {
@@ -235,12 +235,12 @@ pub fn decode(data: &[u8]) -> Result<Vec<(String, Value)>, DocBodyError> {
 /// (e.g. so a `WHERE`/projection on a promoted field can route to the body)
 /// without paying the cost of a full [`decode`].
 pub fn field_names(data: &[u8]) -> Result<Vec<String>, DocBodyError> {
-    let (n, table) = parse_header(data)?;
+    let (n, table) = parse_header_entries(data)?;
     let header_end = 7 + n * ENTRY_SIZE; // where the keys section begins
     let mut key_cursor = header_end;
     let mut names = Vec::with_capacity(n);
 
-    for &(key_len, _val_offset) in &table {
+    for (key_len, _val_offset) in table {
         let key_end = key_cursor + key_len as usize;
         if key_end > data.len() {
             return Err(DocBodyError::OffsetOutOfBounds);
@@ -261,11 +261,11 @@ pub fn field_names(data: &[u8]) -> Result<Vec<String>, DocBodyError> {
 /// encoded bytes are passed to [`value_codec::decode`]; everything else
 /// is skipped as raw bytes.
 pub fn read_field_by_name(data: &[u8], name: &str) -> Result<Option<Value>, DocBodyError> {
-    let (n, table) = parse_header(data)?;
+    let (n, table) = parse_header_entries(data)?;
     let header_end = 7 + n * ENTRY_SIZE;
     let mut key_cursor = header_end;
 
-    for &(key_len, val_offset) in &table {
+    for (key_len, val_offset) in table {
         let key_end = key_cursor + key_len as usize;
         if key_end > data.len() {
             return Err(DocBodyError::OffsetOutOfBounds);
@@ -312,6 +312,14 @@ fn version_error(version: u8) -> DocBodyError {
 /// Does **not** validate that field names or values are within bounds — that
 /// is deferred to the decode functions that actually walk those sections.
 pub fn parse_header(data: &[u8]) -> Result<(usize, Vec<(u16, u32)>), DocBodyError> {
+    let (count, entries) = parse_header_entries(data)?;
+    Ok((count, entries.collect()))
+}
+
+/// Borrow the validated offset table; field reads need no temporary index allocation.
+fn parse_header_entries(
+    data: &[u8],
+) -> Result<(usize, impl ExactSizeIterator<Item = (u16, u32)> + '_), DocBodyError> {
     if data.len() < 7 {
         return Err(DocBodyError::TruncatedData);
     }
@@ -328,20 +336,12 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Vec<(u16, u32)>), DocBodyErro
         return Err(DocBodyError::TruncatedData);
     }
 
-    let mut table = Vec::with_capacity(n);
-    for i in 0..n {
-        let base = 7 + i * ENTRY_SIZE;
-        let key_len = u16::from_le_bytes([data[base], data[base + 1]]);
-        let val_offset = u32::from_le_bytes([
-            data[base + 2],
-            data[base + 3],
-            data[base + 4],
-            data[base + 5],
-        ]);
-        table.push((key_len, val_offset));
-    }
-
-    Ok((n, table))
+    let entries = data[7..table_end].chunks_exact(ENTRY_SIZE).map(|entry| {
+        let key_len = u16::from_le_bytes([entry[0], entry[1]]);
+        let val_offset = u32::from_le_bytes([entry[2], entry[3], entry[4], entry[5]]);
+        (key_len, val_offset)
+    });
+    Ok((n, entries))
 }
 
 /// Encode `fields` as a **dictionary-aware** (v2) document body container.
@@ -600,6 +600,58 @@ mod tests {
 
         let missing = read_field_by_name(&buf, "z").expect("lookup");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn borrowed_field_reads_match_owned_offsets_and_preserve_first_duplicate() {
+        let fields = [
+            ("", Value::Null),
+            ("cidade", Value::text("São Paulo")),
+            ("重复", Value::Integer(7)),
+            ("cidade", Value::text("Recife")),
+        ];
+        let references: Vec<_> = fields.iter().map(|(key, value)| (*key, value)).collect();
+        let mut bytes = Vec::new();
+        encode(&references, &mut bytes).expect("encode fixture");
+        let (_, offsets) = parse_header(&bytes).expect("owned header");
+        for (index, (name, _)) in fields[..3].iter().enumerate() {
+            assert_eq!(
+                read_field_by_name(&bytes, name).expect("borrowed lookup"),
+                Some(decode_value_at_offset(&bytes, offsets[index].1).expect("owned offset"))
+            );
+        }
+        assert_eq!(read_field_by_name(&bytes, "absent"), Ok(None));
+
+        // Reading an early field must not decode an unrelated corrupt value.
+        bytes[7 + 3 * ENTRY_SIZE + 2..7 + 4 * ENTRY_SIZE].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            read_field_by_name(&bytes, "cidade"),
+            Ok(Some(Value::text("São Paulo")))
+        );
+        assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn borrowed_field_reads_reject_truncated_headers_and_out_of_bounds_fields() {
+        let mut bytes = Vec::new();
+        encode(&[("x", &Value::Integer(1))], &mut bytes).expect("encode fixture");
+        for length in 0..7 + ENTRY_SIZE {
+            assert_eq!(
+                read_field_by_name(&bytes[..length], "x"),
+                Err(DocBodyError::TruncatedData)
+            );
+        }
+        let mut invalid = bytes.clone();
+        invalid[7..9].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(
+            read_field_by_name(&invalid, "x"),
+            Err(DocBodyError::OffsetOutOfBounds)
+        );
+        bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            read_field_by_name(&bytes, "x"),
+            Err(DocBodyError::OffsetOutOfBounds)
+        );
     }
 
     /// `field_names` lists the keys in encode order without decoding values.

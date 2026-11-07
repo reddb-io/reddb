@@ -199,9 +199,12 @@ What changes is purely physical: when a chunk **seals**, a columnar
 collection emits an RDCC `ColumnBlock` instead of a row-sealed chunk, and
 records it in the chunk's `columnar_page`. On read, that block is pruned by
 the per-column **sparse granule index** (min/max per granule, for range
-predicates) and the **per-granule bloom** (for equality predicates) before
-any surviving granule is decoded. Open (unsealed) chunks are unaffected —
-ingestion and recent-data queries behave identically to the row engine.
+predicates) and the **per-granule bloom** (for equality predicates). A range
+that excludes all granules skips column decoding; if any survive, RDCC v1
+decodes the complete column streams. The `read_bridge_points` runtime API
+uses this reader; general SQL execution is not yet wired to this read bridge.
+Open (unsealed) chunks are unaffected — ingestion and recent-data queries
+behave identically to the row engine.
 
 ### When to use columnar vs row
 

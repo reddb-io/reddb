@@ -668,8 +668,7 @@ impl RedDBServer {
     }
 
     pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
-        let ops = crate::runtime::impl_kv::KvAtomicOps::new(&self.runtime);
-        match ops.delete(crate::catalog::CollectionModel::Kv, collection, key) {
+        match self.entity_use_cases().delete_kv(collection, key) {
             Ok(true) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -726,7 +725,7 @@ impl RedDBServer {
 
         HttpResponse {
             status: 200,
-            body,
+            body: body.into(),
             content_type: "text/event-stream",
             extra_headers: Vec::new(),
         }
@@ -768,11 +767,15 @@ impl RedDBServer {
     }
 
     pub(crate) fn handle_get_entity(&self, collection: &str, id: u64) -> HttpResponse {
-        match self.runtime.db().store().get(collection, EntityId::new(id)) {
-            Some(entity) => {
+        match self
+            .runtime
+            .get_collection_entity(collection, EntityId::new(id))
+        {
+            Ok(Some(entity)) => {
                 json_response(200, crate::presentation::entity_json::entity_json(&entity))
             }
-            None => json_error(404, format!("entity not found: {id}")),
+            Ok(None) => json_error(404, format!("entity not found: {id}")),
+            Err(err) => json_error(403, err.to_string()),
         }
     }
 
@@ -1089,7 +1092,7 @@ impl BatchOutcome {
 fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
     HttpResponse {
         status: outcome.status,
-        body: outcome.body,
+        body: outcome.body.into(),
         content_type: "application/json",
         extra_headers: Vec::new(),
     }

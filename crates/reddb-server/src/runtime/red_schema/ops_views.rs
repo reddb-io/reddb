@@ -135,7 +135,9 @@ pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedR
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let forks = reddb_file::OperationalManifest::for_db_path(path)
+    let forks = db
+        .store()
+        .operational_manifest_for_path(path)
         .list_forks()
         .map_err(RedDBError::Io)?;
     Ok(forks
@@ -161,8 +163,8 @@ pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedR
 pub(super) fn subscriptions_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         SUBSCRIPTION_COLUMNS
             .iter()
@@ -231,7 +233,7 @@ pub(super) fn subscriptions_snapshot(
         }
     }
 
-    records
+    Ok(records)
 }
 fn outbox_dlq_count(store: &UnifiedStore, target_queue: &str) -> u64 {
     let dlq = format!("{target_queue}_outbox_dlq");
@@ -255,8 +257,8 @@ fn subscription_queue_mode(store: &UnifiedStore, queue: &str) -> String {
 pub(super) fn retention_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&std::collections::HashSet<String>>,
-) -> Vec<UnifiedRecord> {
-    let snapshot = runtime.db().catalog_model_snapshot();
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         RETENTION_COLUMNS
             .iter()
@@ -270,7 +272,7 @@ pub(super) fn retention_snapshot(
         .map(|d| d.as_millis())
         .unwrap_or(0);
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|collection| {
@@ -290,14 +292,23 @@ pub(super) fn retention_snapshot(
             // simple rather than reach for zone-map min lookups
             // that don't exist on the schemaless `created_at`
             // axis yet.
-            let cutoff = retention_ms.map(|ret| (now_ms as i64).saturating_sub(ret as i64));
+            let cutoff = retention_ms.map(|ret| {
+                super::super::retention_sweeper::cutoff_ms(
+                    u64::try_from(now_ms).unwrap_or(u64::MAX),
+                    ret,
+                )
+            });
             let mut oldest_ts: Option<i64> = None;
             let mut expired_count: u64 = 0;
             if let Some(manager) = store.get_collection(&collection.name) {
                 manager.for_each_entity(|entity| {
                     let ts = match ts_column.as_deref() {
-                        Some("created_at") => Some(entity.created_at as i64),
-                        Some("updated_at") => Some(entity.updated_at as i64),
+                        Some("created_at") => i64::try_from(entity.created_at)
+                            .ok()
+                            .and_then(|value| value.checked_mul(1_000)),
+                        Some("updated_at") => i64::try_from(entity.updated_at)
+                            .ok()
+                            .and_then(|value| value.checked_mul(1_000)),
                         Some(name) => entity
                             .data
                             .as_row()
@@ -347,7 +358,7 @@ pub(super) fn retention_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 pub(super) fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<UnifiedRecord> {
     let schema = Arc::new(
@@ -411,7 +422,7 @@ pub(super) fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<Unified
 pub(super) fn queue_pending_snapshot(
     runtime: &RedDBRuntime,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
+) -> RedDBResult<Vec<UnifiedRecord>> {
     use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
     let schema = Arc::new(
@@ -422,12 +433,12 @@ pub(super) fn queue_pending_snapshot(
     );
     let store = runtime.db().store();
     let Some(manager) = store.get_collection("red_queue_meta") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     // Queue → lock_deadline_ms lookup from the catalog descriptor hot
     // fields. Falls back to the engine-wide default when unset.
-    let snapshot = runtime.db().catalog_model_snapshot();
+    let snapshot = runtime.try_catalog()?;
     let queue_lock_ms: HashMap<String, u64> = snapshot
         .collections
         .iter()
@@ -528,7 +539,7 @@ pub(super) fn queue_pending_snapshot(
             ],
         ));
     }
-    records
+    Ok(records)
 }
 /// Issue #535 — QueueLifecycle slice 8.
 ///
@@ -544,10 +555,10 @@ pub(super) fn queues_snapshot(
     runtime: &RedDBRuntime,
     tenant: Option<&str>,
     visible_collections: Option<&HashSet<String>>,
-) -> Vec<UnifiedRecord> {
+) -> RedDBResult<Vec<UnifiedRecord>> {
     use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
 
-    let snapshot = runtime.db().catalog_model_snapshot();
+    let snapshot = runtime.try_catalog()?;
     let schema = Arc::new(
         QUEUE_COLUMNS
             .iter()
@@ -611,7 +622,7 @@ pub(super) fn queues_snapshot(
         }
     }
 
-    snapshot
+    Ok(snapshot
         .collections
         .into_iter()
         .filter(|c| c.model == CollectionModel::Queue)
@@ -665,7 +676,7 @@ pub(super) fn queues_snapshot(
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 fn row_u64(row: &crate::storage::unified::entity::RowData, field: &str) -> Option<u64> {
     match row.get_field(field)? {

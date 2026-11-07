@@ -1,5 +1,95 @@
 # @reddb-io/sdk
 
+## 1.28.25
+
+## 1.28.24
+
+## 1.28.23
+
+## 1.28.22
+
+## 1.28.21
+
+## 1.28.20
+
+## 1.28.19
+
+## 1.28.18
+
+## 1.28.17
+
+## 1.28.16
+
+## 1.28.15
+
+## 1.28.14
+
+## 1.28.13
+
+## 1.28.12
+
+## 1.28.11
+
+## 1.28.10
+
+## 1.28.9
+
+## 1.28.8
+
+## 1.28.7
+
+## 1.28.6
+
+## 1.28.5
+
+## 1.28.4
+
+## 1.28.3
+
+## 1.28.2
+
+## 1.28.1
+
+## 1.28.0
+
+## 1.27.13
+
+## 1.27.12
+
+## 1.27.11
+
+## 1.27.10
+
+### Patch Changes
+
+- [#2564](https://github.com/reddb-io/reddb/pull/2564) [`9e2dadb`](https://github.com/reddb-io/reddb/commit/9e2dadb7b40195ec8fa02e679799775a779a6593) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix memory ownership through query results, binary encoders and RedWire sends; admit index candidates before allocation and release completed transport buffers.
+
+  Fix checkpoint progress and cold MVCC reclamation so committed data can outgrow the resident arena, active transactions remain visible, and paused cleanup does not retain page generations that force full-history copies. Preserve cold catalog models, counts and audit visibility.
+
+  Add explicit opt-in disk residency for standalone local single-file stores, generation-bound native HASH/BTREE projections, and an offline compactor that verifies persisted records while preserving its source. Preparing disk-resident files fences older writers; retain an independent unconverted backup for rollback. Replicated, remote and serverless profiles remain rejected by the explicit disk-residency option.
+
+  Keep the feature disabled by default. Historical-copy and workload measurements describe the tested scenarios and do not establish a global process-memory ceiling. CI now reports the first test failure without automatic retries and isolates client release-size artifacts from test runners.
+
+## 1.27.9
+
+## 1.27.8
+
+## 1.27.7
+
+## 1.27.6
+
+## 1.27.5
+
+## 1.27.4
+
+## 1.27.3
+
+## 1.27.2
+
+## 1.27.1
+
+## 1.27.0
+
 ## 1.26.8
 
 ## 1.26.7

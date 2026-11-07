@@ -140,6 +140,8 @@ pub enum SegmentError {
     InvalidState(SegmentState),
     /// Internal error
     Internal(String),
+    /// A persisted row could not be read before its mutation was admitted.
+    BackingRead(String),
 }
 
 impl std::fmt::Display for SegmentError {
@@ -151,6 +153,7 @@ impl std::fmt::Display for SegmentError {
             Self::Full => write!(f, "segment is full"),
             Self::InvalidState(state) => write!(f, "invalid operation for state: {:?}", state),
             Self::Internal(msg) => write!(f, "internal error: {}", msg),
+            Self::BackingRead(msg) => write!(f, "backing read failed: {msg}"),
         }
     }
 }
@@ -746,6 +749,14 @@ impl GrowingSegment {
         }
     }
 
+    pub(super) fn sequence_id_next(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn restore_sequence_id_next(&self, next: u64) {
+        self.sequence.fetch_max(next, Ordering::SeqCst);
+    }
+
     /// Get next sequence number
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::SeqCst)
@@ -1067,6 +1078,31 @@ impl GrowingSegment {
         } else {
             self.release_memory(previous - current);
         }
+    }
+
+    /// Boot-time representation compaction. The manager proves exclusive
+    /// ownership before calling this; published segments are never rewritten.
+    pub(crate) fn compact_recovered_rows(&mut self, schema: &std::sync::Arc<Vec<String>>) -> usize {
+        let mut removed = 0usize;
+        let mut added = 0usize;
+        let mut compacted = 0;
+        for entity in self
+            .entities
+            .values_mut()
+            .chain(self.flat_entities.iter_mut())
+        {
+            let before = super::memory_size::entity_bytes(entity);
+            if let EntityData::Row(row) = &mut entity.data {
+                if row.compact_with_schema(schema) {
+                    removed = removed.saturating_add(before);
+                    added = added.saturating_add(super::memory_size::entity_bytes(entity));
+                    compacted += 1;
+                }
+            }
+        }
+        self.release_memory(removed);
+        self.add_memory(added);
+        compacted
     }
 
     /// This segment's approximate resident bytes. One relaxed load — the

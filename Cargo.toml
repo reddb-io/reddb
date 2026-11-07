@@ -59,7 +59,7 @@ cast_possible_truncation = "warn"
 
 [package]
 name = "reddb-io"
-version = "1.26.8"
+version = "1.28.25"
 edition.workspace = true
 # Cargo auto-discovers every top-level `tests/*.rs` file as a separate
 # integration-test binary. This crate has 269 such files; keep discovery off
@@ -170,9 +170,9 @@ name = "grouped_timeseries_retention"
 path = "tests/grouped/timeseries_retention.rs"
 
 [dependencies]
+reddb-engine = { workspace = true }
 reddb-wire = { workspace = true }
-reddb-grpc-proto = { workspace = true }
-reddb-client = { workspace = true, features = ["http"] }
+reddb-client = { workspace = true, features = ["http", "redwire-tls"] }
 reddb-server = { workspace = true }
 reddb-file = { workspace = true }
 reddb-types = { workspace = true }
@@ -192,9 +192,12 @@ otel = ["reddb-server/otel"]
 ai-ner-network = ["reddb-server/ai-ner-network"]
 local-models = ["reddb-server/local-models"]
 embedded = ["reddb-client/embedded"]
+grpc = ["reddb-client/grpc"]
 redwire = ["reddb-client/redwire"]
 
 [dev-dependencies]
+# Torn-page fixtures use the shared pager's in-file recovery offsets.
+reddb-engine = { workspace = true }
 # Tests at the umbrella level reach into the published-driver
 # layer of `reddb-client` (RedWire codec + frame, embedded
 # integration smoke). The crate-root dep keeps `default-features

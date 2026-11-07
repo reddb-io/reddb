@@ -10,6 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod ai_policy_codec;
+mod cleanup;
+pub use cleanup::remove_imported_physical_metadata_sidecars;
 mod json_helpers;
 mod types;
 

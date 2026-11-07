@@ -58,6 +58,11 @@ impl<P: PageStore> BTree<P> {
 
     /// Get value for a key
     pub fn get(&self, key: &[u8]) -> BTreeResult<Option<Vec<u8>>> {
+        self.get_with_budget(key, usize::MAX)
+    }
+
+    /// Bound value materialization before allocating overflow or decode buffers.
+    pub fn get_with_budget(&self, key: &[u8], limit_bytes: usize) -> BTreeResult<Option<Vec<u8>>> {
         let root_id = self.root_page_id();
         if root_id == 0 {
             return Ok(None);
@@ -82,7 +87,11 @@ impl<P: PageStore> BTree<P> {
             match search_leaf(&page, key)? {
                 SearchResult::Found(pos) => {
                     let (_, stored) = read_leaf_cell(&page, pos)?;
-                    let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                    let value = value_layout::decode_with_budget(
+                        self.pager.as_ref(),
+                        &stored,
+                        limit_bytes,
+                    )?;
                     return Ok(Some(value));
                 }
                 SearchResult::NotFound(_) => {
@@ -109,7 +118,8 @@ impl<P: PageStore> BTree<P> {
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
                 let (_, stored) = read_leaf_cell(&page, pos)?;
-                let value = value_layout::decode(self.pager.as_ref(), &stored)?;
+                let value =
+                    value_layout::decode_with_budget(self.pager.as_ref(), &stored, limit_bytes)?;
                 Ok(Some(value))
             }
             SearchResult::NotFound(_) => Ok(None),
@@ -120,8 +130,9 @@ impl<P: PageStore> BTree<P> {
     ///
     /// Applies the value-layout spill ladder before touching the tree:
     /// the 256 MB ceiling rejects here without any allocation; values
-    /// at or below `OVERFLOW_THRESHOLD` go inline raw; larger values may
-    /// inline compressed or spill into an [`crate::storage::overflow::OverflowChain`].
+    /// at or below `COMPRESSION_THRESHOLD` go inline raw; larger values
+    /// select raw/compressed bytes and spill beyond `OVERFLOW_THRESHOLD`
+    /// into an [`crate::storage::overflow::OverflowChain`].
     /// The encoded bytes are then committed through [`Self::insert_encoded`].
     pub fn insert(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
         let _writer = self.writer.lock();
@@ -300,6 +311,58 @@ impl<P: PageStore> BTree<P> {
         // Key is new — plain insert path. Reuse the bytes we already
         // encoded above instead of re-running LZ4 / re-allocating.
         self.insert_encoded(key, &new_stored)
+    }
+
+    /// Upsert inline values without allocating, freeing or changing tree links.
+    /// The caller must make every value durable in its WAL before
+    /// calling this method. Returns false without writing if any item needs a
+    /// structural update or an overflow chain.
+    pub fn try_upsert_inline_without_splits(
+        &self,
+        items: &[(Vec<u8>, Vec<u8>)],
+    ) -> BTreeResult<bool> {
+        let _writer = self.writer.lock();
+        let root_id = self.root_page_id();
+        if root_id == 0 && !items.is_empty() {
+            return Ok(false);
+        }
+        let mut pages = std::collections::BTreeMap::<u32, (Page, Vec<(Vec<u8>, Vec<u8>)>)>::new();
+        for (key, value) in items {
+            if key.len() > MAX_KEY_SIZE {
+                return Err(BTreeError::KeyTooLarge(key.len()));
+            }
+            let Some(new_value) = value_layout::encode_inline_without_pages(value)? else {
+                return Ok(false);
+            };
+            let (leaf_id, _) = self.find_leaf(root_id, key)?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(leaf_id) {
+                let page = self.pager.read_page(leaf_id)?;
+                let entries = read_leaf_entries(&page)?;
+                entry.insert((page, entries));
+            }
+            let (_, entries) = pages.get_mut(&leaf_id).expect("leaf was loaded");
+            match entries.binary_search_by(|(existing, _)| existing.as_slice().cmp(key)) {
+                Ok(position) => {
+                    if value_layout::pointer_head(&entries[position].1).is_some() {
+                        return Ok(false);
+                    }
+                    entries[position].1 = new_value;
+                }
+                Err(position) => entries.insert(position, (key.clone(), new_value)),
+            }
+        }
+        // Check every leaf before writing any of them. Repacking can use dead
+        // cell space, but must never split or alter routing links.
+        for (page, entries) in pages.values_mut() {
+            if leaf_entries_size(entries) > PAGE_SIZE - LEAF_SLOT_ARRAY_OFFSET {
+                return Ok(false);
+            }
+            write_leaf_entries(page, entries)?;
+        }
+        for (page_id, (page, _)) in pages {
+            self.pager.write_page(page_id, page)?;
+        }
+        Ok(true)
     }
 
     /// Batch upsert for sorted keys landing in a small set of leaves.
@@ -694,6 +757,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -706,6 +771,8 @@ impl<P: PageStore> BTree<P> {
             position: 0,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 
@@ -719,6 +786,8 @@ impl<P: PageStore> BTree<P> {
                 position: 0,
                 pager: self.pager.clone(),
                 prefetched_next: false,
+                immutable: false,
+                immutable_leaf: None,
             });
         }
 
@@ -736,6 +805,8 @@ impl<P: PageStore> BTree<P> {
             position,
             pager: self.pager.clone(),
             prefetched_next: false,
+            immutable: false,
+            immutable_leaf: None,
         })
     }
 
@@ -922,6 +993,17 @@ impl<P: PageStore> BTree<P> {
         new_page.update_checksum();
         let new_page_id = new_page.page_id();
         self.pager.write_page(new_page_id, new_page.clone())?;
+        if old_next != 0 {
+            // Splitting a non-rightmost leaf inserts a new predecessor for the
+            // old successor. Keep its backlink coherent with the forward chain.
+            let mut successor = self.pager.read_page(old_next)?;
+            if successor.page_type()? != PageType::BTreeLeaf {
+                return Err(BTreeError::Corrupted("invalid split successor type".into()));
+            }
+            set_prev_leaf(&mut successor, new_page_id);
+            successor.update_checksum();
+            self.pager.write_page(old_next, successor)?;
+        }
 
         Ok((new_page, separator))
     }

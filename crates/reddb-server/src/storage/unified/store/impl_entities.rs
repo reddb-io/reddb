@@ -1,6 +1,10 @@
 use super::*;
 
 impl UnifiedStore {
+    pub(crate) fn canonical_collection(name: &str) -> &str {
+        reddb_engine::storage::system_collection_names::canonical_or_self(name)
+    }
+
     /// Vault versions are WAL-backed in memory until a committed checkpoint.
     /// Preparing a commit must not dirty pager pages: eviction or an auth
     /// flush could otherwise persist a version before its WAL batch exists.
@@ -61,10 +65,13 @@ impl UnifiedStore {
         entities: &[&UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
-        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
+        if self.is_read_only() || (self.pager.is_none() && self.config.embedded_wal_path.is_none())
+        {
             return Ok(());
         }
         let fv = self.format_version();
@@ -83,7 +90,10 @@ impl UnifiedStore {
             .collect();
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -143,11 +153,14 @@ impl UnifiedStore {
         entities: &[UnifiedEntity],
         skip_btree: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
+        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
         if entities.is_empty() {
             return Ok(());
         }
 
-        if self.pager.is_none() && self.config.embedded_wal_path.is_none() {
+        if self.is_read_only() || (self.pager.is_none() && self.config.embedded_wal_path.is_none())
+        {
             return Ok(());
         }
 
@@ -168,7 +181,10 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
                     serialized.into_iter().map(|(_id, record)| record).collect();
@@ -255,7 +271,9 @@ impl UnifiedStore {
     }
 
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
-        let name = name.into();
+        let name = reddb_engine::storage::system_collection_names::canonical_owned(name.into());
+        // Serialize collection identity changes with catalog/WAL publication.
+        let _publication = self.vault_publication_lock.lock();
         let mut collections = self.resident.collections.write();
 
         if collections.contains_key(&name) {
@@ -266,22 +284,6 @@ impl UnifiedStore {
         collections.insert(name.clone(), Arc::new(manager));
         drop(collections);
 
-        let create = match self.prepare_operational_collection_create(&name) {
-            Ok(create) => create,
-            Err(err) => {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        };
-        if let Some(create) = create {
-            if let Err(err) = create.publish().map_err(StoreError::Io) {
-                let mut collections = self.resident.collections.write();
-                collections.remove(&name);
-                return Err(err);
-            }
-        }
-
         self.mark_paged_registry_dirty();
         self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
 
@@ -290,13 +292,16 @@ impl UnifiedStore {
 
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
-        self.resident
-            .get_or_create_collection(name, &self.config.manager_config)
+        self.resident.get_or_create_collection(
+            reddb_engine::storage::system_collection_names::canonical_owned(name.into()),
+            &self.config.manager_config,
+        )
     }
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.resident.get_collection(name)
+        self.resident
+            .get_collection(Self::canonical_collection(name))
     }
 
     /// Get the context index for cross-structure search.
@@ -311,7 +316,7 @@ impl UnifiedStore {
     /// store's internal buffer is cleared for that collection.
     pub fn take_replayed_turbo_inserts(&self, collection: &str) -> Option<Vec<(u64, Vec<f32>)>> {
         let mut map = self.replayed_turbo_inserts.lock();
-        map.remove(collection)
+        map.remove(Self::canonical_collection(collection))
     }
 
     pub(crate) fn take_replayed_probabilistic_deltas(&self) -> Vec<(u8, u8, String, Vec<Vec<u8>>)> {
@@ -326,7 +331,36 @@ impl UnifiedStore {
     /// key's earlier rows. Appending instead grew the store on every boot,
     /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
-        let manager = self.get_or_create_collection("red_config");
+        // Historical best-effort adapter. Authoritative callers propagate the
+        // result of try_set_config_tree instead of ignoring failed persistence.
+        self.try_set_config_tree(prefix, json).unwrap_or_default()
+    }
+
+    pub fn try_set_config_tree(
+        &self,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        self.try_set_key_value_tree("red_config", prefix, json)
+    }
+
+    /// Storage control documents are isolated from application CONFIG reads.
+    pub fn try_set_storage_metadata(
+        &self,
+        key: &str,
+        value: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        self.try_set_key_value_tree("red.storage.metadata", key, value)
+    }
+
+    fn try_set_key_value_tree(
+        &self,
+        collection: &str,
+        prefix: &str,
+        json: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        let manager = self.get_or_create_collection(collection);
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
         // Existing rows per key, with the value each one holds.
@@ -334,18 +368,28 @@ impl UnifiedStore {
             .iter()
             .map(|(key, _)| (key.clone(), Vec::new()))
             .collect();
-        for entity in manager.query_all(|_| true) {
+        let mut capture = |entity: &UnifiedEntity| {
             if let EntityData::Row(row) = &entity.data {
-                let Some(named) = row.named.as_ref() else {
-                    continue;
-                };
-                if let Some(reddb_types::Value::Text(key)) = named.get("key") {
+                if let Some(reddb_types::Value::Text(key)) = row.get_field("key") {
                     if let Some(rows) = previous.get_mut(key.as_ref()) {
-                        rows.push((entity.id, named.get("value").cloned()));
+                        rows.push((entity.id, row.get_field("value").cloned()));
                     }
                 }
             }
+            true
+        };
+        if manager.has_backing() {
+            for (key, _) in &pairs {
+                manager.try_for_each_key_entity(key, &mut capture)?;
+            }
+        } else {
+            manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
+        let batch_system = collection == "red_config"
+            && prefix == "red.system"
+            && self.config.embedded_wal_path.is_some()
+            && !Self::deferred_store_wal_capture_active();
+        let mut system_rows = Vec::new();
         let mut saved = 0;
         for (key, value) in pairs {
             let stale = previous.remove(&key).unwrap_or_default();
@@ -359,13 +403,10 @@ impl UnifiedStore {
                 }
             }
             let stale: Vec<EntityId> = stale.into_iter().map(|(id, _)| id).collect();
-            // Insert before removing the old rows: a failure in between
-            // leaves a duplicate that readers resolve to the newest row,
-            // never a missing key.
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
-                    table: Arc::from("red_config"),
+                    table: Arc::from(collection),
                     row_id: 0,
                 },
                 EntityData::Row(RowData {
@@ -381,41 +422,69 @@ impl UnifiedStore {
                     schema: None,
                 }),
             );
-            if self.insert_auto("red_config", entity).is_ok() {
+            if batch_system {
+                system_rows.push((entity, stale));
                 saved += 1;
-                if !stale.is_empty() {
-                    let _ = self.delete_batch("red_config", &stale);
-                }
+                continue;
+            }
+            // Insert before removing multiple old rows: a failure in between
+            // leaves a duplicate that readers resolve to the newest row.
+            self.insert_auto(collection, entity)?;
+            saved += 1;
+            if !stale.is_empty() {
+                self.delete_batch(collection, &stale)?;
             }
         }
-        saved
+        if !system_rows.is_empty() {
+            self.write_system_config_batch(system_rows)?;
+        }
+        Ok(saved)
     }
 
     /// Read a single config value from `red_config` by dot-notation key.
     /// When a key has several rows the newest one wins, like every other
     /// `red_config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
-        let manager = self.get_collection("red_config")?;
+        // Historical best-effort adapter; bootstrap and authoritative runtime
+        // callers use try_get_config so a fault cannot become a default value.
+        self.try_get_config(key).ok().flatten()
+    }
+
+    pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
+        self.try_get_key_value("red_config", key)
+    }
+
+    pub fn try_get_storage_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<reddb_types::Value>, StoreError> {
+        self.try_get_key_value("red.storage.metadata", key)
+    }
+
+    fn try_get_key_value(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Result<Option<reddb_types::Value>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        let _publication = manager
+            .has_backing()
+            .then(|| self.vault_publication_lock.lock());
         let mut latest: Option<(u64, reddb_types::Value)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_key_entity(key, |entity| {
             if let EntityData::Row(row) = &entity.data {
-                if let Some(named) = &row.named {
-                    let key_matches = named
-                        .get("key")
-                        .and_then(|v| match v {
-                            reddb_types::Value::Text(s) => Some(s.as_ref() == key),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-                    if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
-                        if let Some(value) = named.get("value") {
-                            latest = Some((entity.id.raw(), value.clone()));
-                        }
+                let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
+                if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
+                    if let Some(value) = row.get_field("value") {
+                        latest = Some((entity.id.raw(), value.clone()));
                     }
                 }
             }
-        }
-        latest.map(|(_, value)| value)
+            true
+        })?;
+        Ok(latest.map(|(_, value)| value))
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted
@@ -424,6 +493,19 @@ impl UnifiedStore {
     /// single-file artifact.
     pub fn set_aux_metadata(&self, bytes: Vec<u8>) {
         self.resident.set_aux_metadata(bytes)
+    }
+
+    /// Persist single-file contracts through the same commit fence as rows.
+    /// Memory-only stores retain the same auxiliary snapshot behavior.
+    pub(crate) fn persist_aux_metadata(&self, bytes: Vec<u8>) -> Result<(), StoreError> {
+        let bytes = reddb_engine::catalog::codec::canonicalize_collection_contract_blob(&bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        let _publication = self.vault_publication_lock.lock();
+        self.finish_paged_write([StoreWalAction::SetAuxMetadata {
+            bytes: bytes.clone(),
+        }])?;
+        self.resident.set_aux_metadata(bytes);
+        Ok(())
     }
 
     /// Read the opaque store-level auxiliary metadata blob. Empty when unset.
@@ -438,8 +520,8 @@ impl UnifiedStore {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         let _vault_guard = self.vault_publication_lock.lock();
-        let drop = self.prepare_operational_collection_drop(name)?;
         let manager = {
             let mut collections = self.resident.collections.write();
 
@@ -459,6 +541,12 @@ impl UnifiedStore {
         if let Some(tree) = self.btree_indices.write().remove(name) {
             self.retire_btree(tree);
         }
+        if let Some(index) = self.key_indices.write().remove(name) {
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
+        }
+        self.secondary_index_specs.write().remove(name);
 
         self.resident
             .entity_cache
@@ -487,20 +575,19 @@ impl UnifiedStore {
         self.finish_paged_write([StoreWalAction::DropCollection {
             name: name.to_string(),
         }])?;
-        if let Some(drop) = drop {
-            drop.finish().map_err(StoreError::Io)?;
-        }
 
         Ok(())
     }
 
     /// Insert an entity into a collection
     pub fn insert(&self, collection: &str, entity: UnifiedEntity) -> Result<EntityId, StoreError> {
+        let collection = Self::canonical_collection(collection);
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
         let mut entity = entity;
+        entity.canonicalize_system_collection_names();
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
         } else {
@@ -534,11 +621,10 @@ impl UnifiedStore {
         // Captured transactions stay WAL-only until commit; pager flushes must
         // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| !Self::deferred_store_wal_capture_active())
-        {
+        if let Some(pager) = self.pager.as_ref().filter(|_| {
+            !Self::deferred_store_wal_capture_active()
+                && self.config.resident_memory_bytes_max.is_none()
+        }) {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -600,6 +686,10 @@ impl UnifiedStore {
         collection: &str,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
+        let collection = Self::canonical_collection(collection);
+        for entity in &mut entities {
+            entity.canonicalize_system_collection_names();
+        }
         // A transaction can begin after checkpoint visibility is frozen.
         // Fence the entire row batch, including its captured or committed WAL.
         let _publication = self.vault_publication_lock.lock();
@@ -767,7 +857,10 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree && !Self::deferred_store_wal_capture_active() {
+        if !skip_btree
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -831,10 +924,12 @@ impl UnifiedStore {
         collection: &str,
         entity: UnifiedEntity,
     ) -> Result<EntityId, StoreError> {
+        let collection = Self::canonical_collection(collection);
         // Include the WAL append in the checkpoint publication fence.
         let _publication = self.vault_publication_lock.lock();
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
+        entity.canonicalize_system_collection_names();
         if entity.id.raw() == 0 {
             entity.id = self.next_entity_id();
         } else {
@@ -875,7 +970,10 @@ impl UnifiedStore {
         // both or neither. Otherwise the rebuild re-inserts this row from the
         // manager and one of the two B-tree inserts fails on a duplicate key,
         // or lands mid-rebuild and tears the tree.
-        let paged_btree = if persist_record && !Self::deferred_store_wal_capture_active() {
+        let paged_btree = if persist_record
+            && !Self::deferred_store_wal_capture_active()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             self.get_or_create_btree(collection)
         } else {
             None
@@ -959,30 +1057,21 @@ impl UnifiedStore {
     /// the current in-memory state even when the paged B-tree image has not been
     /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Prefer the live manager state to avoid stale reads after manager.update().
-        if let Some(entity) = self
-            .get_collection(collection)
-            .and_then(|manager| manager.get(id))
-        {
-            return Some(entity);
-        }
+        // Historical best-effort adapter. Authoritative host reads use try_get
+        // so a failed cold read cannot become a successful "missing" result.
+        self.try_get(collection, id, usize::MAX).ok().flatten()
+    }
 
-        // Fall back to the paged B-tree image if the manager does not currently hold the row.
-        if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read();
-            if let Some(btree) = btree_indices.get(collection) {
-                let key = id.raw().to_be_bytes();
-                if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok((entity, _)) =
-                        Self::deserialize_entity_record(&value, self.format_version())
-                    {
-                        return Some(entity);
-                    }
-                }
-            }
-        }
-
-        None
+    pub fn try_get(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get(id, limit_bytes)
     }
 
     /// Resolve a table row by stable logical identity.
@@ -1022,6 +1111,49 @@ impl UnifiedStore {
     ) -> Vec<UnifiedEntity> {
         self.resident
             .table_row_versions_by_logical_id(collection, logical_id)
+    }
+
+    pub(crate) fn try_for_each_table_row_version(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(), StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(());
+        };
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            !matches!(entity.kind, EntityKind::TableRow { .. })
+                || entity.logical_id() != logical_id
+                || visit(entity)
+        })
+    }
+
+    pub(crate) fn try_get_table_row_by_logical_id(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        if let Some(entity) = manager.try_get(logical_id, usize::MAX)? {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+                && entity.xmax == 0
+            {
+                return Ok(Some(entity));
+            }
+        }
+        // Preserve the current-row policy: first live version, otherwise the
+        // last matching physical version. Retain only one owned candidate.
+        let mut selected = None;
+        self.try_for_each_table_row_version(collection, logical_id, |entity| {
+            selected = Some(entity.clone());
+            entity.xmax != 0
+        })?;
+        manager.restore_owned_row_schemas(selected.iter_mut());
+        Ok(selected)
     }
 
     pub fn vacuum_mvcc_history(
@@ -1162,6 +1294,19 @@ impl UnifiedStore {
         }
     }
 
+    /// Preserve I/O failures when fetching indexed query candidates.
+    pub fn try_get_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        read_bytes_max: usize,
+    ) -> Result<Vec<Option<UnifiedEntity>>, StoreError> {
+        match self.get_collection(collection) {
+            Some(manager) => manager.try_get_many(ids, read_bytes_max),
+            None => Ok(vec![None; ids.len()]),
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
         self.resident.get_any(id)
@@ -1183,6 +1328,7 @@ impl UnifiedStore {
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
+        let collection = Self::canonical_collection(collection);
         let publication = self.vault_publication_lock.lock();
         // Invalidate entity cache (read-lock probe; no write lock when cold).
         self.resident.entity_cache.remove(id.raw());
@@ -1197,7 +1343,10 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some() {
+        if self.pager.is_some()
+            && !self.is_read_only()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1235,6 +1384,7 @@ impl UnifiedStore {
         collection: &str,
         ids: &[EntityId],
     ) -> Result<Vec<EntityId>, StoreError> {
+        let collection = Self::canonical_collection(collection);
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1262,7 +1412,10 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         let mut updated_tree = false;
-        if self.pager.is_some() {
+        if self.pager.is_some()
+            && !self.is_read_only()
+            && self.config.resident_memory_bytes_max.is_none()
+        {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 updated_tree = true;
@@ -1327,6 +1480,19 @@ impl UnifiedStore {
         self.get_collection(collection)?.get_metadata(id)
     }
 
+    /// Fallible metadata access for authoritative reads and mutation preimages.
+    pub fn try_get_metadata(
+        &self,
+        collection: &str,
+        id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<Metadata>, StoreError> {
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        manager.try_get_metadata(id, limit_bytes)
+    }
+
     /// Add a cross-reference between entities
     pub fn add_cross_ref(
         &self,
@@ -1337,6 +1503,8 @@ impl UnifiedStore {
         ref_type: RefType,
         weight: f32,
     ) -> Result<(), StoreError> {
+        let source_collection = Self::canonical_collection(source_collection);
+        let target_collection = Self::canonical_collection(target_collection);
         let registry_dirty = self.resident.add_cross_ref_in_memory(
             source_collection,
             source_id,
@@ -1592,7 +1760,7 @@ fn flatten_config_json(
         crate::serde_json::Value::Null => {
             out.push((prefix.to_string(), Value::Null));
         }
-        crate::serde_json::Value::Array(arr) => {
+        crate::serde_json::Value::Array(_) => {
             let json_str = crate::serde_json::to_string(value).unwrap_or_default();
             out.push((prefix.to_string(), Value::text(json_str)));
         }

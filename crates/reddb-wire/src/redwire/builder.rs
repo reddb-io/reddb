@@ -306,6 +306,41 @@ pub fn rewrap_length_prefixed_handler_response(raw_bytes: &[u8], correlation_id:
     build_dispatch_reply_frame(correlation_id, kind, raw_bytes[5..].to_vec())
 }
 
+/// Borrow a legacy payload while constructing only its RedWire metadata. The
+/// caller can admit the exact encoded allocation before making its one copy.
+pub struct BorrowedLegacyReply<'a> {
+    frame: Frame,
+    payload: &'a [u8],
+}
+
+impl<'a> BorrowedLegacyReply<'a> {
+    pub fn new(raw: &'a [u8], correlation_id: u64) -> Result<Self, super::codec::FrameError> {
+        use super::codec::FrameError;
+        if raw.len() < 5 {
+            return Err(FrameError::Truncated);
+        }
+        let payload = &raw[5..];
+        let length = payload
+            .len()
+            .checked_add(FRAME_HEADER_SIZE)
+            .filter(|length| *length <= MAX_FRAME_SIZE as usize)
+            .ok_or(FrameError::InvalidLength(u32::MAX))?;
+        let kind = MessageKind::from_u8(raw[4]).unwrap_or(MessageKind::Error);
+        let frame = build_reply_frame(correlation_id, kind, Vec::new())
+            .expect("empty uncompressed reply is valid for every kind");
+        assert_eq!(length, FRAME_HEADER_SIZE + payload.len());
+        Ok(Self { frame, payload })
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        FRAME_HEADER_SIZE + self.payload.len()
+    }
+
+    pub fn encode_into(&self, buffer: &mut Vec<u8>) {
+        super::codec::encode_uncompressed_payload_into(&self.frame, self.payload, buffer);
+    }
+}
+
 pub fn build_query_frame(correlation_id: u64, sql: &str) -> Result<Frame, BuildError> {
     build_request_frame(correlation_id, MessageKind::Query, sql.as_bytes().to_vec())
 }
@@ -367,6 +402,30 @@ fn is_payload_compressible(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_legacy_reply_matches_existing_bridge_without_payload_allocation() {
+        for kind in [crate::legacy::MSG_RESULT, crate::legacy::MSG_ERROR, 255] {
+            for size in [0, 1, 4096, 192 * 1024] {
+                let raw = crate::legacy::build_legacy_frame(kind, &vec![b'x'; size]);
+                let reply = BorrowedLegacyReply::new(&raw, 123).unwrap();
+                assert_eq!(reply.payload.as_ptr(), raw[5..].as_ptr());
+                assert_eq!(reply.frame.payload.capacity(), 0);
+                let mut bytes = Vec::with_capacity(reply.encoded_len());
+                reply.encode_into(&mut bytes);
+                assert_eq!(bytes.len(), bytes.capacity());
+                assert_eq!(
+                    bytes,
+                    super::super::codec::encode_frame(&rewrap_length_prefixed_handler_response(
+                        &raw, 123
+                    ))
+                );
+            }
+        }
+        assert!(BorrowedLegacyReply::new(&[0; 4], 1).is_err());
+        let oversized = vec![0; MAX_FRAME_SIZE as usize];
+        assert!(BorrowedLegacyReply::new(&oversized, 1).is_err());
+    }
 
     #[test]
     fn reply_to_propagates_correlation_id() {

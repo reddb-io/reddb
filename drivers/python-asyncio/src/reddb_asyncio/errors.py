@@ -79,10 +79,27 @@ class HttpError(RedDBError):
 
     code = "HTTP_ERROR"
 
-    def __init__(self, message: str, *, status: int, body: str = "") -> None:
-        super().__init__(message, payload={"status": status, "body": body})
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        body: str = "",
+        code: str | None = None,
+        retry_after_secs: float | None = None,
+        details: Any = None,
+    ) -> None:
+        payload = {
+            "status": status,
+            "body": body,
+            "retry_after_secs": retry_after_secs,
+            "details": details,
+        }
+        super().__init__(message, code=code, payload=payload)
         self.status = status
         self.body = body
+        self.retry_after_secs = retry_after_secs
+        self.details = details
 
 
 __all__ = [

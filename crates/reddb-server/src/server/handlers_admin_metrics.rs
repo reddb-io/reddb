@@ -1345,12 +1345,12 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_result_cache_evict_total {evicts}");
         }
 
-        // HTTP handler-thread pool metrics — issue #573 slice 4.
-        // Renders four series (`http_active_handler_threads`,
-        // `http_handler_cap`, `http_handler_rejected_total`,
-        // `http_handler_duration_seconds`) so operators can observe
-        // saturation against the bounded handler-thread cap.
-        self.http_metrics().render(&mut body, self.http_limiter());
+        // HTTP admission and synchronous-execution metrics.
+        self.http_metrics().render_with_execution(
+            &mut body,
+            self.http_limiter(),
+            self.execution_admission(),
+        );
 
         // Issue #1239 — HTTP request/error volume by method, matched route
         // template, and status class. Read from the operational telemetry
@@ -1360,7 +1360,7 @@ impl RedDBServer {
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",
-            body: body.into_bytes(),
+            body: body.into_bytes().into(),
             extra_headers: Vec::new(),
         }
     }

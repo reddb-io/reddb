@@ -1310,6 +1310,36 @@ mod tests {
     }
 
     #[test]
+    fn openai_prompt_payload_default_seed_is_portable_and_matches_audit() {
+        use crate::runtime::ai::{determinism_decider, provider_capabilities::Registry};
+
+        let applied = determinism_decider::decide(
+            determinism_decider::Inputs {
+                question: "what is the meaning of life?",
+                sources_fingerprint: "abc123",
+            },
+            Registry::default().capabilities("openrouter"),
+            determinism_decider::Overrides::default(),
+            determinism_decider::Settings::default(),
+        );
+        let payload = build_openai_prompt_payload(
+            "google/gemini-2.5-flash-lite",
+            "hello",
+            applied.temperature,
+            applied.seed,
+            None,
+            false,
+        );
+        let parsed = JsonValue::from(parse_json(&payload).expect("valid json"));
+        let seed = parsed
+            .get("seed")
+            .and_then(JsonValue::as_u64)
+            .expect("default seed");
+        assert!(seed <= i32::MAX as u64);
+        assert_eq!(Some(seed), applied.seed);
+    }
+
+    #[test]
     fn openai_prompt_payload_enables_stream_options() {
         let payload =
             build_openai_prompt_payload("gpt-4.1-mini", "hello", Some(0.0), None, None, true);

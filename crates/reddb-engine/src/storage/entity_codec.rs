@@ -11,6 +11,10 @@ use reddb_file::{
 };
 use std::collections::HashMap;
 
+fn persistent_name(name: &str) -> &str {
+    super::system_collection_names::canonical_or_self(name)
+}
+
 /// Write entity to binary buffer
 pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
     // Entity ID
@@ -19,6 +23,7 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
     // EntityKind
     match &entity.kind {
         EntityKind::TableRow { table, row_id } => {
+            let table = persistent_name(table);
             buf.push(0);
             write_varu32(buf, table.len() as u32);
             buf.extend_from_slice(table.as_bytes());
@@ -42,18 +47,21 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
             buf.extend_from_slice(&edge.weight.to_le_bytes());
         }
         EntityKind::Vector { collection } => {
+            let collection = persistent_name(collection);
             buf.push(3);
             write_varu32(buf, collection.len() as u32);
             buf.extend_from_slice(collection.as_bytes());
         }
         EntityKind::TimeSeriesPoint(ref ts) => {
+            let series = persistent_name(&ts.series);
             buf.push(4);
-            write_varu32(buf, ts.series.len() as u32);
-            buf.extend_from_slice(ts.series.as_bytes());
+            write_varu32(buf, series.len() as u32);
+            buf.extend_from_slice(series.as_bytes());
             write_varu32(buf, ts.metric.len() as u32);
             buf.extend_from_slice(ts.metric.as_bytes());
         }
         EntityKind::QueueMessage { queue, position } => {
+            let queue = persistent_name(queue);
             buf.push(5);
             write_varu32(buf, queue.len() as u32);
             buf.extend_from_slice(queue.as_bytes());
@@ -64,17 +72,31 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
     // EntityData
     match &entity.data {
         EntityData::Row(row) => {
-            if let Some(ref named) = row.named {
-                // Named row: type 6 = Row with named HashMap.
-                // Sort by key so the on-disk byte sequence is
-                // deterministic — replication relies on hashing the
-                // serialized record to detect divergence, and a
-                // HashMap-iteration-order race produces spurious
-                // mismatches.
+            if row.named.is_some()
+                || row
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.len() == row.columns.len())
+            {
+                // Both resident representations encode the same named record.
+                // Compaction must not lose field names on the next checkpoint.
                 buf.push(6);
-                write_varu32(buf, named.len() as u32);
-                let mut entries: Vec<_> = named.iter().collect();
-                entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                let mut entries: Vec<_> = if let Some(named) = &row.named {
+                    named
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value))
+                        .collect()
+                } else {
+                    row.schema
+                        .as_ref()
+                        .expect("validated schema")
+                        .iter()
+                        .map(String::as_str)
+                        .zip(&row.columns)
+                        .collect()
+                };
+                write_varu32(buf, entries.len() as u32);
+                entries.sort_by(|a, b| a.0.cmp(b.0));
                 for (key, value) in entries {
                     write_varu32(buf, key.len() as u32);
                     buf.extend_from_slice(key.as_bytes());
@@ -209,8 +231,9 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
         write_varu64(buf, cross_ref.target.raw());
         buf.push(cross_ref.ref_type.to_byte());
         if format_version >= STORE_VERSION_V2 {
-            write_varu32(buf, cross_ref.target_collection.len() as u32);
-            buf.extend_from_slice(cross_ref.target_collection.as_bytes());
+            let target_collection = persistent_name(&cross_ref.target_collection);
+            write_varu32(buf, target_collection.len() as u32);
+            buf.extend_from_slice(target_collection.as_bytes());
             buf.extend_from_slice(&cross_ref.weight.to_le_bytes());
             write_varu64(buf, cross_ref.created_at);
         }
@@ -249,32 +272,64 @@ pub fn read_entity_binary(
     position: &mut usize,
     format_version: u32,
 ) -> RdbFileResult<UnifiedEntity> {
-    let mut reader = NativeReader::new(bytes, position);
+    read_entity_from_reader(&mut NativeReader::new(bytes, position), format_version)
+}
+
+pub fn read_entity_binary_with_budget(
+    bytes: &[u8],
+    position: &mut usize,
+    format_version: u32,
+    budget: &mut reddb_file::native_value::DecodeBudget,
+) -> RdbFileResult<UnifiedEntity> {
+    budget.elements::<UnifiedEntity>(1)?;
+    read_entity_from_reader(
+        &mut NativeReader::with_budget(bytes, position, budget),
+        format_version,
+    )
+}
+
+fn read_entity_from_reader(
+    reader: &mut NativeReader<'_, '_>,
+    format_version: u32,
+) -> RdbFileResult<UnifiedEntity> {
     let id = EntityId::new(reader.variable_u64()?);
     let kind = match reader.byte()? {
-        0 => EntityKind::TableRow {
-            table: reader.string()?.into(),
-            row_id: reader.variable_u64()?,
-        },
-        1 => EntityKind::GraphNode(Box::new(GraphNodeKind {
-            label: reader.string()?,
-            node_type: reader.string()?,
-        })),
-        2 => EntityKind::GraphEdge(Box::new(GraphEdgeKind {
-            label: reader.string()?,
-            from_node: reader.string()?,
-            to_node: reader.string()?,
-            weight: u32::from_le_bytes(reader.fixed()?),
-        })),
+        0 => {
+            let table = super::system_collection_names::canonical_owned(reader.string()?);
+            reader.reserve_bytes(table.len().saturating_add(2 * std::mem::size_of::<usize>()))?;
+            EntityKind::TableRow {
+                table: table.into(),
+                row_id: reader.variable_u64()?,
+            }
+        }
+        1 => {
+            reader.reserve_elements::<GraphNodeKind>(1)?;
+            EntityKind::GraphNode(Box::new(GraphNodeKind {
+                label: reader.string()?,
+                node_type: reader.string()?,
+            }))
+        }
+        2 => {
+            reader.reserve_elements::<GraphEdgeKind>(1)?;
+            EntityKind::GraphEdge(Box::new(GraphEdgeKind {
+                label: reader.string()?,
+                from_node: reader.string()?,
+                to_node: reader.string()?,
+                weight: u32::from_le_bytes(reader.fixed()?),
+            }))
+        }
         3 => EntityKind::Vector {
-            collection: reader.string()?,
+            collection: super::system_collection_names::canonical_owned(reader.string()?),
         },
-        4 => EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
-            series: reader.string()?,
-            metric: reader.string()?,
-        })),
+        4 => {
+            reader.reserve_elements::<TimeSeriesPointKind>(1)?;
+            EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
+                series: super::system_collection_names::canonical_owned(reader.string()?),
+                metric: reader.string()?,
+            }))
+        }
         5 => EntityKind::QueueMessage {
-            queue: reader.string()?,
+            queue: super::system_collection_names::canonical_owned(reader.string()?),
             position: reader.variable_u64()?,
         },
         tag => return Err(invalid(format!("Unknown EntityKind type: {tag}"))),
@@ -282,20 +337,21 @@ pub fn read_entity_binary(
     let mut data = match reader.byte()? {
         0 => {
             let count = reader.count(1)?;
+            reader.reserve_elements::<reddb_types::Value>(count)?;
             let mut columns = Vec::with_capacity(count);
             for _ in 0..count {
                 columns.push(reader.value()?);
             }
             EntityData::Row(RowData::new(columns))
         }
-        1 => EntityData::Node(NodeData::with_properties(read_properties(&mut reader)?)),
+        1 => EntityData::Node(NodeData::with_properties(read_properties(reader)?)),
         2 => {
             let mut edge = EdgeData::new(f32::from_le_bytes(reader.fixed()?));
-            edge.properties = read_properties(&mut reader)?;
+            edge.properties = read_properties(reader)?;
             EntityData::Edge(edge)
         }
         3 => {
-            let mut vector = VectorData::new(read_vector(&mut reader)?);
+            let mut vector = VectorData::new(read_vector(reader)?);
             if format_version >= STORE_VERSION_V6 && reader.byte()? != 0 {
                 vector.content = Some(reader.string()?);
             }
@@ -311,6 +367,7 @@ pub fn read_entity_binary(
             } else {
                 if format_version >= STORE_VERSION_V5 {
                     let count = reader.count(2)?;
+                    reader.reserve_map::<String, String>(count)?;
                     tags = HashMap::with_capacity(count);
                     for _ in 0..count {
                         tags.insert(reader.string()?, reader.string()?);
@@ -319,7 +376,7 @@ pub fn read_entity_binary(
                 None
             };
             let fields = if format_version >= STORE_VERSION_V12 {
-                read_properties(&mut reader)?
+                read_properties(reader)?
             } else {
                 HashMap::new()
             };
@@ -342,7 +399,7 @@ pub fn read_entity_binary(
         }),
         6 => EntityData::Row(RowData {
             columns: Vec::new(),
-            named: Some(read_properties(&mut reader)?),
+            named: Some(read_properties(reader)?),
             schema: None,
         }),
         tag => return Err(invalid(format!("Unknown EntityData type: {tag}"))),
@@ -350,14 +407,18 @@ pub fn read_entity_binary(
     let created_at = reader.variable_u64()?;
     let updated_at = reader.variable_u64()?;
     let count = reader.count(3)?;
+    reader.reserve_elements::<EmbeddingSlot>(count)?;
+    reader.reserve_elements::<EmbeddingSlot>(count)?;
     let mut embeddings = Vec::with_capacity(count);
     for _ in 0..count {
         let name = reader.string()?;
-        let vector = read_vector(&mut reader)?;
+        let vector = read_vector(reader)?;
         let model = reader.string()?;
         embeddings.push(EmbeddingSlot::new(name, vector, model));
     }
     let count = reader.count(3)?;
+    reader.reserve_elements::<CrossRef>(count)?;
+    reader.reserve_elements::<CrossRef>(count)?;
     let mut cross_refs = Vec::with_capacity(count);
     for _ in 0..count {
         let source = EntityId::new(reader.variable_u64()?);
@@ -365,7 +426,7 @@ pub fn read_entity_binary(
         let ref_type = RefType::from_byte(reader.byte()?);
         let (collection, weight, created_at) = if format_version >= STORE_VERSION_V2 {
             (
-                reader.string()?,
+                super::system_collection_names::canonical_owned(reader.string()?),
                 f32::from_le_bytes(reader.fixed()?),
                 reader.variable_u64()?,
             )
@@ -403,6 +464,7 @@ pub fn read_entity_binary(
         entity.set_xmax(reader.variable_u64()?);
     }
     if !embeddings.is_empty() || !cross_refs.is_empty() {
+        reader.reserve_elements::<EntityAux>(1)?;
         entity.embeddings_mut().extend(embeddings);
         entity.cross_refs_mut().extend(cross_refs);
     }
@@ -413,6 +475,7 @@ fn read_properties(
     reader: &mut NativeReader<'_, '_>,
 ) -> RdbFileResult<HashMap<String, reddb_types::Value>> {
     let count = reader.count(2)?;
+    reader.reserve_map::<String, reddb_types::Value>(count)?;
     let mut properties = HashMap::with_capacity(count);
     for _ in 0..count {
         properties.insert(reader.string()?, reader.value()?);
@@ -422,6 +485,7 @@ fn read_properties(
 
 fn read_vector(reader: &mut NativeReader<'_, '_>) -> RdbFileResult<Vec<f32>> {
     let count = reader.count(4)?;
+    reader.reserve_elements::<f32>(count)?;
     let mut vector = Vec::with_capacity(count);
     for _ in 0..count {
         vector.push(f32::from_le_bytes(reader.fixed()?));

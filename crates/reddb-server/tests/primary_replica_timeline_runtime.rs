@@ -28,7 +28,14 @@ fn runtime_persists_timeline_history_for_failover_promotion() {
     let path = runtime
         .primary_replica_timeline_history_path()
         .expect("timeline history path");
-    let from_disk = reddb_file::TimelineHistory::read_from_path(path).expect("read timeline");
+    assert!(
+        !path.exists(),
+        "timeline metadata stays inside the database"
+    );
+    let from_disk = runtime
+        .primary_replica_timeline_history()
+        .expect("read timeline")
+        .expect("history");
     assert_eq!(from_disk.current(), Some(reddb_file::TimelineId(2)));
     assert_eq!(from_disk.ancestor_lsn(reddb_file::TimelineId(2)), Some(42));
     assert_eq!(from_disk.entries[1].reason, "promote replica-a");
@@ -64,7 +71,14 @@ fn runtime_appends_timeline_history_for_second_failover_promotion() {
     let path = runtime
         .primary_replica_timeline_history_path()
         .expect("timeline history path");
-    let from_disk = reddb_file::TimelineHistory::read_from_path(path).expect("read timeline");
+    assert!(
+        !path.exists(),
+        "timeline metadata stays inside the database"
+    );
+    let from_disk = runtime
+        .primary_replica_timeline_history()
+        .expect("read timeline")
+        .expect("history");
     assert_eq!(from_disk.current(), Some(reddb_file::TimelineId(3)));
     assert_eq!(from_disk.ancestor_lsn(reddb_file::TimelineId(2)), Some(42));
     assert_eq!(from_disk.ancestor_lsn(reddb_file::TimelineId(3)), Some(77));
@@ -81,10 +95,9 @@ fn runtime_timeline_promotion_survives_atomic_crash_points() {
     }
 
     for point in [
-        "atomic_after_tmp_write",
-        "atomic_after_tmp_sync",
-        "atomic_after_rename",
-        "atomic_after_dir_sync",
+        "timeline_before_wal",
+        "timeline_after_wal",
+        "timeline_after_sync",
     ] {
         let data_path = primary_replica_file::temp_data_path(&format!(
             "primary_replica_timeline_crash_{point}"
@@ -96,11 +109,10 @@ fn runtime_timeline_promotion_survives_atomic_crash_points() {
         runtime
             .record_failover_timeline_promotion("replica-a", 42)
             .expect("initial promotion timeline");
-        let path = runtime
-            .primary_replica_timeline_history_path()
-            .expect("timeline history path");
-        let initial =
-            reddb_file::TimelineHistory::read_from_path(&path).expect("read initial timeline");
+        let initial = runtime
+            .primary_replica_timeline_history()
+            .expect("read timeline")
+            .expect("history");
         // The child is the next writer; an embedded store admits one at a time.
         drop(runtime);
 
@@ -119,8 +131,15 @@ fn runtime_timeline_promotion_survives_atomic_crash_points() {
             "child should crash at {point}, status={child:?}"
         );
 
-        let history =
-            reddb_file::TimelineHistory::read_from_path(&path).expect("timeline remains decodable");
+        let recovered =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&data_path)).expect("recover WAL");
+        let history = recovered
+            .primary_replica_timeline_history()
+            .expect("read timeline")
+            .expect("history");
+        if point == "timeline_after_sync" {
+            assert_eq!(history.current(), Some(reddb_file::TimelineId(3)));
+        }
         assert!(
             history.current() == Some(reddb_file::TimelineId(2))
                 || history.current() == Some(reddb_file::TimelineId(3)),
@@ -134,6 +153,7 @@ fn runtime_timeline_promotion_survives_atomic_crash_points() {
             assert_eq!(history.entries[2].reason, "promote replica-b");
         }
 
+        drop(recovered);
         primary_replica_file::cleanup(&data_path);
     }
 }

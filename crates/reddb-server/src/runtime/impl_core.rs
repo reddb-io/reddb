@@ -66,9 +66,9 @@ pub use super::execution_context::{
     capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
     clear_current_snapshot, clear_current_tenant, current_auth_identity_for_audit,
     current_connection_id, current_tenant, entity_visible_under_current_snapshot,
-    entity_visible_with_context, set_current_auth_identity, set_current_connection_id,
-    set_current_snapshot, set_current_tenant, snapshot_bundle, with_snapshot_bundle,
-    SnapshotBundle, SnapshotContext,
+    entity_visible_with_context, set_current_auth_identity, set_current_auth_principal,
+    set_current_connection_id, set_current_snapshot, set_current_tenant, snapshot_bundle,
+    with_snapshot_bundle, SnapshotBundle, SnapshotContext,
 };
 pub(crate) use super::execution_context::{
     config_read_permitted, current_auth_identity, current_config_value, current_kv_value,
@@ -293,6 +293,7 @@ impl RedDBRuntime {
         if scope.is_empty() {
             return self.execute_query(query);
         }
+        self.check_scope_override_privilege(&scope)?;
         let _scope_guard = ScopeOverrideGuard::install(scope);
         self.execute_query(query)
     }
@@ -364,12 +365,10 @@ impl RedDBRuntime {
         // results before they reach any consumer. Fast no-op (one relaxed
         // atomic load) unless an input-stream digest mismatch has tombstoned
         // a RID range on this store.
-        if let Ok(ref mut query_result) = result {
-            if query_result.statement_type == "select" {
-                self.filter_integrity_tombstoned(&mut query_result.result);
+        result = result.and_then(|mut value| {
+            if value.statement_type == "select" {
+                self.filter_integrity_tombstoned(&mut value.result)?;
             }
-        }
-        result = result.and_then(|value| {
             super::query_budget::check_result(self.resource_limits(), &value)?;
             Ok(value)
         });
@@ -391,12 +390,7 @@ impl RedDBRuntime {
             "delete" => crate::telemetry::slow_query_logger::QueryKind::Delete,
             _ => crate::telemetry::slow_query_logger::QueryKind::Internal,
         };
-        let lowered = query.to_ascii_lowercase();
-        let logged_query = if lowered.contains("secret") || lowered.contains("vault") {
-            "secret statement (SQL redacted)".to_string()
-        } else {
-            query.to_string()
-        };
+        let logged_query = redact_sql_for_slow_log(query);
         self.inner
             .slow_query_logger
             .record(kind, elapsed_ms, logged_query, &scope);
@@ -588,6 +582,7 @@ impl RedDBRuntime {
         // requests and an early `?` return still pops cleanly.
         match crate::runtime::within_clause::try_strip_within_prefix(query) {
             Ok(Some((scope, inner))) => {
+                self.check_scope_override_privilege(&scope)?;
                 let _scope_guard = ScopeOverrideGuard::install(scope);
                 // Re-enter the inner path, NOT `execute_query`, so the
                 // slow-query lifecycle hook records exactly one row per
@@ -621,6 +616,7 @@ impl RedDBRuntime {
         // an error (matches PG semantics: SET LOCAL only takes effect
         // within an active transaction).
         if let Some(value) = parse_set_local_tenant(query)? {
+            self.check_scope_tenant_privilege(value.as_deref())?;
             let conn_id = current_connection_id();
             if !self.inner.transaction_state.in_transaction(conn_id) {
                 return Err(RedDBError::Query(
@@ -747,7 +743,6 @@ impl RedDBRuntime {
                 return Err(err);
             }
         };
-        let frame_iface: &dyn super::statement_frame::ReadFrame = &frame;
         let query_audit_started = std::time::Instant::now();
 
         let query_result = match expr {
@@ -1290,7 +1285,7 @@ impl RedDBRuntime {
                 self.check_config_read_privilege()?;
                 let store = self.inner.db.store();
                 let all_collections = store.list_collections();
-                if !all_collections.contains(&"red_config".to_string()) {
+                if !all_collections.contains(&"red.config".to_string()) {
                     if as_json {
                         return Ok(show_config_json_result(
                             query,
@@ -1313,8 +1308,8 @@ impl RedDBRuntime {
                     });
                 }
                 let manager = store
-                    .get_collection("red_config")
-                    .ok_or_else(|| RedDBError::NotFound("red_config".to_string()))?;
+                    .get_collection("red.config")
+                    .ok_or_else(|| RedDBError::NotFound("red.config".to_string()))?;
                 let entities = manager.query_all(|_| true);
                 let mut latest = std::collections::BTreeMap::<String, (u64, Value, Value)>::new();
                 for entity in entities {
@@ -1592,9 +1587,7 @@ impl RedDBRuntime {
                         match self
                             .inner
                             .transaction_state
-                            .rollback_to_savepoint(conn_id, name)?
-                        {
-                            Some(rollback) => {
+                            .rollback_to_savepoint_with(conn_id, name, |rollback| {
                                 self.rollback_vault_savepoint(conn_id, rollback.savepoint_xid);
                                 let reverted_updates = self.revive_versioned_updates_since(
                                     conn_id,
@@ -1602,7 +1595,10 @@ impl RedDBRuntime {
                                 );
                                 let revived =
                                     self.revive_tombstones_since(conn_id, rollback.savepoint_xid);
-                                let reverted_updates = reverted_updates?;
+                                reverted_updates.map(|updates| (updates, revived))
+                            })?
+                        {
+                            Some((rollback, (reverted_updates, revived))) => {
                                 (
                                     "rollback_to_savepoint",
                                     format!(
@@ -3246,6 +3242,11 @@ impl RedDBRuntime {
         for candidate in candidates {
             let (collection, old_id, new_id, xid, previous_xmax) = &candidate;
             let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                super::index_store::MutationTestPhase::BeforeUndoTopology,
+            );
             let topology_guard = topology_lock.read();
             let mut guard = self.inner.pending_versioned_updates.write();
             let Some(pending) = guard.get_mut(&conn_id) else {
@@ -3516,6 +3517,36 @@ impl RedDBRuntime {
             bookmark: None,
             notice: None,
         })
+    }
+}
+
+fn redact_sql_for_slow_log(query: &str) -> String {
+    let lowered = query.to_ascii_lowercase();
+    if lowered.contains("secret") || lowered.contains("vault") {
+        return "secret statement (SQL redacted)".to_string();
+    }
+    let credential_candidate = lowered.contains("password")
+        && ((lowered.contains("create") && lowered.contains("user"))
+            || (lowered.contains("alter") && lowered.contains("user")));
+    if !credential_candidate {
+        return query.to_string();
+    }
+    match parse_multi(query) {
+        Ok(QueryExpr::CreateUser(stmt)) => {
+            let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+            format!("CREATE USER {target} PASSWORD '***' ROLE {}", stmt.role)
+        }
+        Ok(QueryExpr::AlterUser(stmt))
+            if stmt
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, reddb_rql::ast::AlterUserAttribute::Password(_))) =>
+        {
+            let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+            format!("ALTER USER {target} PASSWORD '***'")
+        }
+        Ok(_) => "credential statement (SQL redacted)".to_string(),
+        Err(_) => "credential statement (SQL redacted)".to_string(),
     }
 }
 
@@ -3933,6 +3964,26 @@ mod security_gate_tests {
         }
     }
 
+    struct ScopedIdentityGuard;
+
+    impl ScopedIdentityGuard {
+        fn install(tenant: &str, username: &str, role: Role) -> Self {
+            crate::runtime::execution_context::set_current_auth_principal(
+                crate::auth::UserId::scoped(tenant, username),
+                role,
+            );
+            set_current_tenant(tenant.to_string());
+            Self
+        }
+    }
+
+    impl Drop for ScopedIdentityGuard {
+        fn drop(&mut self) {
+            clear_current_auth_identity();
+            clear_current_tenant();
+        }
+    }
+
     fn runtime_with_user(username: &str, role: Role) -> RedDBRuntime {
         let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
             enabled: true,
@@ -3965,6 +4016,124 @@ mod security_gate_tests {
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         runtime.set_auth_store(std::sync::Arc::clone(&store));
         (runtime, store)
+    }
+
+    #[test]
+    fn tenant_credential_cannot_override_credential_scope() {
+        use crate::runtime::within_clause::{FieldOverride, ScopeOverride};
+
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        store
+            .create_user_in_tenant(Some("acme"), "admin", "pw", Role::Admin)
+            .expect("tenant admin");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(store);
+        let _identity = ScopedIdentityGuard::install("acme", "admin", Role::Admin);
+
+        runtime
+            .execute_query("WITHIN TENANT 'acme' SELECT 1")
+            .expect("own tenant remains valid");
+        for sql in [
+            "WITHIN TENANT 'globex' SELECT 1",
+            "WITHIN TENANT NULL SELECT 1",
+            "WITHIN TENANT 'acme' USER 'other' SELECT 1",
+            "WITHIN TENANT 'acme' AS ROLE 'read' SELECT 1",
+        ] {
+            assert!(runtime.execute_query(sql).is_err(), "must reject {sql}");
+        }
+        assert!(runtime
+            .execute_query_with_scope(
+                "SELECT 1",
+                ScopeOverride {
+                    tenant: FieldOverride::Set("globex".to_string()),
+                    ..ScopeOverride::default()
+                },
+            )
+            .is_err());
+
+        set_current_connection_id(44_201);
+        runtime.execute_query("BEGIN").expect("begin");
+        assert!(runtime.execute_query("SET LOCAL TENANT 'globex'").is_err());
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        clear_current_connection_id();
+    }
+
+    #[test]
+    fn tenant_admin_sql_user_lifecycle_is_tenant_bounded() {
+        let store = std::sync::Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        store
+            .create_user_in_tenant(Some("acme"), "admin", "pw", Role::Admin)
+            .expect("tenant admin");
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime.set_auth_store(std::sync::Arc::clone(&store));
+        let _identity = ScopedIdentityGuard::install("acme", "admin", Role::Admin);
+
+        runtime
+            .execute_query("CREATE USER acme.alice PASSWORD 'pw' ROLE read")
+            .expect("same-tenant create");
+        assert!(runtime
+            .execute_query("CREATE USER globex.alice PASSWORD 'pw' ROLE read")
+            .is_err());
+        assert!(runtime
+            .execute_query("ALTER USER globex.alice PASSWORD 'owned'")
+            .is_err());
+        let cross_tenant_allow = crate::auth::policies::Policy::from_json_str(
+            r#"{
+                "id":"tenant-cross-user",
+                "version":1,
+                "statements":[{
+                    "effect":"allow",
+                    "actions":["user:create","user:password:change"],
+                    "resources":["user:tenant/globex/*"]
+                }]
+            }"#,
+        )
+        .expect("cross-tenant policy");
+        store.put_policy(cross_tenant_allow).expect("put policy");
+        store
+            .attach_policy(
+                crate::auth::store::PrincipalRef::User(crate::auth::UserId::scoped(
+                    "acme", "admin",
+                )),
+                "tenant-cross-user",
+            )
+            .expect("attach policy");
+        assert!(runtime
+            .execute_query("CREATE USER globex.bob PASSWORD 'pw' ROLE read")
+            .is_err());
+        assert!(store.get_user(Some("globex"), "alice").is_none());
+        assert!(store.get_user(Some("globex"), "bob").is_none());
+    }
+
+    #[test]
+    fn slow_log_redacts_user_password_statements() {
+        for sql in [
+            "CREATE USER alice PASSWORD 'super-secret' ROLE admin",
+            "CREATE USER acme.alice PASSWORD 'super-secret' ROLE read",
+            "ALTER USER alice PASSWORD 'super-secret'",
+            "AlTeR UsEr acme.alice PaSsWoRd 'super-secret'",
+            "EXPLAIN CREATE USER alice PASSWORD 'super-secret' ROLE read",
+            "EXPLAIN ALTER USER alice PASSWORD 'super-secret'",
+            "ALTER USER alice PASSWORD 'unterminated",
+        ] {
+            let redacted = redact_sql_for_slow_log(sql);
+            assert!(!redacted.contains("super-secret"), "leaked from {sql}");
+            assert!(!redacted.contains("unterminated"), "leaked from {sql}");
+        }
+        assert_eq!(
+            redact_sql_for_slow_log("SELECT password FROM accounts"),
+            "SELECT password FROM accounts"
+        );
     }
 
     #[test]

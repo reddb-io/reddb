@@ -39,6 +39,9 @@ mod e2e_meta_json_sidecar_policy;
 #[path = "multimodel_query/e2e_multimodel_flow.rs"]
 mod e2e_multimodel_flow;
 
+#[path = "multimodel_query/e2e_nested_queries_multimodel_json.rs"]
+mod e2e_nested_queries_multimodel_json;
+
 #[path = "dml_updates/e2e_ordered_multimodel_update_batches.rs"]
 mod e2e_ordered_multimodel_update_batches;
 
@@ -47,6 +50,9 @@ mod e2e_reserved_system_fields;
 
 #[path = "sql_window/e2e_show_sample.rs"]
 mod e2e_show_sample;
+
+#[path = "sql_window/e2e_global_select.rs"]
+mod e2e_global_select;
 
 #[path = "timeseries_metrics/e2e_slo_descriptor_catalog.rs"]
 mod e2e_slo_descriptor_catalog;

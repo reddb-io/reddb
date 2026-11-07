@@ -3,6 +3,7 @@
 //! every row.
 
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 #[test]
 fn full_range_after_create_index_returns_all_rows() {
@@ -35,10 +36,32 @@ fn full_range_after_create_index_returns_all_rows() {
     let r = rt
         .execute_query("SELECT * FROM users WHERE age BETWEEN 0 AND 200")
         .unwrap();
-    assert_eq!(
-        r.result.records.len(),
-        N,
-        "full-range select_range returned {} of {N}",
-        r.result.records.len()
-    );
+    let mut ids = r
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("id") {
+            Some(Value::Integer(id)) => *id,
+            other => panic!("expected integer id, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    let upper = i64::try_from(N).expect("fixture size fits i64");
+    assert_eq!(ids, (0..upper).collect::<Vec<_>>());
+
+    let explain = rt
+        .explain_query("SELECT * FROM users WHERE age BETWEEN 0 AND 200")
+        .expect("range query should explain");
+    let mut nodes = vec![&explain.logical_plan.root];
+    let mut observed = Vec::new();
+    while let Some(node) = nodes.pop() {
+        observed.push((node.operator.as_str(), node.details.get("index")));
+        if node.operator == "index_seek"
+            && node.details.get("index").map(String::as_str) == Some("idx_age")
+        {
+            return;
+        }
+        nodes.extend(&node.children);
+    }
+    panic!("expected idx_age index_seek, got {observed:?}");
 }

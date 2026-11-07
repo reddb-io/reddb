@@ -1,7 +1,80 @@
 use super::*;
 use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
+const PHYSICAL_METADATA_KEY: &str = "physical";
+
+#[cfg(test)]
+fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
+    if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
+        eprintln!(
+            "runtime qualification phase=checkpoint_metadata name={name} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 impl RedDB {
+    /// Physical metadata follows the same WAL and checkpoint boundary as data.
+    /// Legacy sidecars are import sources only, never a publication target.
+    pub(crate) fn persist_physical_metadata_record(
+        &self,
+        metadata: &PhysicalMetadataFile,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Err("physical metadata operations are not allowed in read-only mode".into());
+        }
+        let value = crate::serde_json::Value::String(metadata.to_document_json(false)?);
+        self.store
+            .try_set_storage_metadata(PHYSICAL_METADATA_KEY, &value)?;
+        Ok(())
+    }
+
+    fn load_internal_physical_metadata(
+        &self,
+    ) -> Result<Option<PhysicalMetadataFile>, Box<dyn std::error::Error>> {
+        let Some(value) = self.store.try_get_storage_metadata(PHYSICAL_METADATA_KEY)? else {
+            return Ok(None);
+        };
+        let Value::Text(document) = value else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid internal physical metadata record",
+            )
+            .into());
+        };
+        Ok(Some(PhysicalMetadataFile::from_document_json(
+            &document,
+            "invalid internal physical metadata record",
+        )?))
+    }
+
+    fn has_legacy_metadata_sidecars(&self) -> std::io::Result<bool> {
+        let Some(path) = self.path() else {
+            return Ok(false);
+        };
+        Ok(
+            PhysicalMetadataFile::metadata_binary_path_for(path).try_exists()?
+                || PhysicalMetadataFile::metadata_path_for(path).try_exists()?
+                || !PhysicalMetadataFile::journal_paths_for_data_path(path)?.is_empty(),
+        )
+    }
+
+    /// Called only after the internal record has reached a successful checkpoint.
+    /// Failed imports and read-only opens must leave the legacy source intact.
+    pub(crate) fn remove_imported_metadata_sidecars(
+        &self,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only
+            || !self.has_legacy_metadata_sidecars()?
+            || self.load_internal_physical_metadata()?.is_none()
+        {
+            return Ok(());
+        }
+        reddb_file::physical_metadata::remove_imported_physical_metadata_sidecars(path)?;
+        Ok(())
+    }
+
     pub fn is_replica_role(&self) -> bool {
         matches!(
             self.options.replication.role,
@@ -15,9 +88,9 @@ impl RedDB {
         }
 
         // Export pruning is only meaningful for persistent mode where we
-        // have a metadata sidecar that tracks file-backed export artifacts.
+        // track file-backed export artifacts in the internal metadata record.
         if self.options.mode == StorageMode::Persistent {
-            let Some(path) = self.path() else {
+            let Some(_) = self.path() else {
                 return Ok(());
             };
 
@@ -27,7 +100,7 @@ impl RedDB {
             };
 
             self.prune_export_registry(&mut metadata.exports);
-            metadata.save_for_data_path(path)?;
+            self.persist_physical_metadata_record(&metadata)?;
         }
 
         let _ = self.sweep_ttl_expired_entities()?;
@@ -100,6 +173,14 @@ impl RedDB {
             return false;
         };
 
+        Self::entity_metadata_expired_at(entity, &metadata, now_ms)
+    }
+
+    pub(crate) fn entity_metadata_expired_at(
+        entity: &crate::storage::UnifiedEntity,
+        metadata: &crate::storage::unified::metadata::Metadata,
+        now_ms: u64,
+    ) -> bool {
         if metadata
             .get("_expires_at")
             .and_then(Self::metadata_u64)
@@ -346,23 +427,57 @@ impl RedDB {
 
     /// Get a key-value pair by key, returning the value and entity id
     ///
-    /// Scans the collection for an entity whose named field `key` matches.
+    /// Clone only the selected value. Legacy positional rows without an
+    /// indexed key use their collection schema in the borrowed fallback scan.
     pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
         let manager = self.store.get_collection(collection)?;
-        let entities = manager.query_all(|_| true);
-        for entity in entities {
-            if let EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    if let Some(Value::Text(ref k)) = named.get("key") {
-                        if &**k == key {
-                            let value = named.get("value").cloned().unwrap_or(Value::Null);
-                            return Some((value, entity.id));
-                        }
-                    }
-                }
-            }
+        if let Some(value) = manager.project_key_entity(key, None, false, |entity| {
+            (
+                entity
+                    .data
+                    .as_row()
+                    .and_then(|row| row.get_field("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                entity.id,
+            )
+        }) {
+            return Some(value);
         }
-        None
+        let columns = manager.column_schema();
+        let key_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "key"));
+        let value_index = columns
+            .as_ref()
+            .and_then(|names| names.iter().position(|name| name == "value"));
+        let mut found = None;
+        manager.for_each_entity(|entity| {
+            let EntityData::Row(row) = &entity.data else {
+                return true;
+            };
+            let legacy = row.named.is_none() && row.schema.is_none();
+            let stored_key = row.get_field("key").or_else(|| {
+                if legacy {
+                    key_index.and_then(|index| row.columns.get(index))
+                } else {
+                    None
+                }
+            });
+            if matches!(stored_key, Some(Value::Text(stored)) if stored.as_ref() == key) {
+                let value = row.get_field("value").or_else(|| {
+                    if legacy {
+                        value_index.and_then(|index| row.columns.get(index))
+                    } else {
+                        None
+                    }
+                });
+                found = Some((value.cloned().unwrap_or(Value::Null), entity.id));
+                return false;
+            }
+            true
+        });
+        found
     }
 
     /// Delete a key-value pair by key, returning whether it was found and removed
@@ -382,20 +497,29 @@ impl RedDB {
 
     pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent {
+            // A damaged authoritative record must never fall back to stale sidecars.
+            let has_internal_metadata = self.load_internal_physical_metadata()?.is_some();
             // Load metadata without persisting (avoids blocking catalog snapshot on boot)
             match self.load_or_bootstrap_physical_metadata(false) {
                 Ok(metadata) => {
                     crate::reserved_fields::validate_physical_metadata_contracts(&metadata)
                         .map_err(|err| err.to_string())?;
+                    if !has_internal_metadata && !self.options.read_only {
+                        self.persist_physical_metadata_record(&metadata)?;
+                    }
                 }
                 Err(error)
                     if error
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(crate::physical::is_collection_contract_decode_error) =>
                 {
-                    return Err(error)
+                    return Err(error);
                 }
-                Err(_) => {}
+                Err(error) => {
+                    if self.has_legacy_metadata_sidecars()? {
+                        return Err(error);
+                    }
+                }
             }
             // Skip repair on boot — deferred to first explicit persist_metadata() call.
             // This avoids the recursive catalog_model_snapshot → physical_metadata loop
@@ -439,17 +563,63 @@ impl RedDB {
         {
             return Ok(());
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Ok(());
         };
 
+        #[cfg(test)]
+        let qualification_started = std::time::Instant::now();
         let _publication = self.store.vault_publication_lock.lock();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "publication-lock");
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "previous-metadata");
         let collection_roots = self.physical_collection_roots();
-        let indexes = self
-            .native_physical_state()
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "collection-roots");
+        let native_state = self.native_physical_state();
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-state");
+        let mut indexes = native_state
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
+        if let Some(previous) = previous.as_ref() {
+            // Paged contract edits publish the internal record first. Do not
+            // resurrect a dropped collection from the older native registry.
+            // Preserve unrelated orphan descriptors without a removal proof.
+            let absent = |name: &str| {
+                !collection_roots.contains_key(name)
+                    && !previous
+                        .collection_contracts
+                        .iter()
+                        .any(|contract| contract.name == name)
+            };
+            let mut removed: BTreeSet<&str> = previous
+                .superblock
+                .collection_roots
+                .keys()
+                .map(String::as_str)
+                .filter(|name| absent(name))
+                .collect();
+            let mut seen = BTreeSet::new();
+            for event in previous.manifest_events.iter().rev() {
+                if seen.insert(event.collection.as_str())
+                    && matches!(&event.kind, crate::physical::ManifestEventKind::Remove)
+                    && absent(&event.collection)
+                {
+                    removed.insert(event.collection.as_str());
+                }
+            }
+            indexes.retain(|index| {
+                !index
+                    .collection
+                    .as_deref()
+                    .is_some_and(|collection| removed.contains(collection))
+            });
+        }
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "index-state");
         let mut metadata = PhysicalMetadataFile::from_state(
             self.options.clone(),
             self.catalog_snapshot(),
@@ -462,8 +632,11 @@ impl RedDB {
         // chunk bounds / routing / TTL) onto the same metadata path as
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
-        metadata.save_for_data_path(path)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "metadata-assembled");
         self.persist_native_physical_header(&metadata)?;
+        #[cfg(test)]
+        metadata_qualification_phase(&qualification_started, "native-header");
         Ok(())
     }
 
@@ -471,7 +644,7 @@ impl RedDB {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(false);
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Ok(false);
         };
         let Some(native_state) = self.native_physical_state() else {
@@ -482,9 +655,8 @@ impl RedDB {
         }
 
         let _publication = self.store.vault_publication_lock.lock();
-        let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
-        metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(true)
     }
@@ -519,6 +691,28 @@ impl RedDB {
             && catalog_complete == Some(true)
     }
 
+    fn native_state_is_summary_free_legacy(native_state: &NativePhysicalState) -> bool {
+        let header = native_state.header;
+        header.manifest_page == 0
+            && header.manifest_checksum == 0
+            && header.registry_page == 0
+            && header.registry_checksum == 0
+            && header.recovery_page == 0
+            && header.recovery_checksum == 0
+            && header.catalog_page == 0
+            && header.catalog_checksum == 0
+            && header.metadata_state_page == 0
+            && header.metadata_state_checksum == 0
+            && header.vector_artifact_page == 0
+            && header.vector_artifact_checksum == 0
+            && native_state.manifest.is_none()
+            && native_state.registry.is_none()
+            && native_state.recovery.is_none()
+            && native_state.catalog.is_none()
+            && native_state.metadata_state.is_none()
+            && native_state.vector_artifact_pages.is_none()
+    }
+
     pub(crate) fn load_or_bootstrap_physical_metadata(
         &self,
         persist_bootstrapped: bool,
@@ -530,12 +724,27 @@ impl RedDB {
             return Err("database path is not available".into());
         };
         let _publication = self.store.vault_publication_lock.lock();
+        let internal_metadata = match self.load_internal_physical_metadata()? {
+            Some(metadata) => {
+                // The internal document is authoritative. Only load all native
+                // summaries when their header proves a newer publication needs
+                // reconciliation; ordinary catalog reads need no artifact I/O.
+                let native_ahead = self.store.physical_file_header().is_some_and(|header| {
+                    Self::repair_policy_for_inspection(
+                        &Self::inspect_native_header_against_metadata(header, &metadata),
+                    ) == NativeHeaderRepairPolicy::NativeAheadOfMetadata
+                });
+                if !native_ahead {
+                    return Ok(metadata);
+                }
+                Some(metadata)
+            }
+            None => None,
+        };
         let native_state = self.native_physical_state();
-
-        let metadata = if persist_bootstrapped && !self.options.read_only {
-            PhysicalMetadataFile::load_for_data_path(path)
-        } else {
-            PhysicalMetadataFile::inspect_for_data_path(path)
+        let metadata = match internal_metadata {
+            Some(metadata) => Ok(metadata),
+            None => PhysicalMetadataFile::inspect_for_data_path(path),
         };
         match metadata {
             Ok(metadata) => {
@@ -550,7 +759,6 @@ impl RedDB {
                         let bootstrapped =
                             self.metadata_from_native_state(native_state, Some(&metadata));
                         if persist_bootstrapped && !self.options.read_only {
-                            bootstrapped.save_for_data_path(path)?;
                             self.persist_native_physical_header(&bootstrapped)?;
                         }
                         return Ok(bootstrapped);
@@ -559,37 +767,27 @@ impl RedDB {
                 Ok(metadata)
             }
             Err(err) => {
-                if crate::physical::is_collection_contract_decode_error(&err) {
+                if crate::physical::is_collection_contract_decode_error(&err)
+                    || self.has_legacy_metadata_sidecars()?
+                {
                     return Err(err.into());
                 }
                 let Some(native_state) = native_state else {
                     return Err(err.into());
                 };
-                // Accept the bootstrap when the native state is either
-                // (a) fully populated and consistent (the original
-                // contract), or (b) trivially empty — a freshly created
-                // database with no collections written yet. Without (b)
-                // a brand-new data file can never reach
-                // `readiness_for_query = true`, because the bootstrap
-                // refuses to run until the registry/catalog/recovery
-                // structures are "complete", which they never become
-                // until the bootstrap has already run once.
-                //
-                // The emptiness check is conservative: header.sequence
-                // must still be at its initial value AND all three
-                // physical state summaries must be absent. Anything
-                // else falls through to the original error so we never
-                // paper over partially corrupted files.
-                let is_fresh_empty = native_state.header.sequence == 0
-                    && native_state.registry.is_none()
-                    && native_state.catalog.is_none()
-                    && native_state.recovery.is_none();
-                if !is_fresh_empty && !Self::native_state_is_bootstrap_complete(&native_state) {
+                // Summary-free paged files predate native registry/catalog/recovery
+                // publication. Their catalog sequence can legitimately advance during
+                // an in-place identity migration, so sequence zero is not a format
+                // discriminator. Admit only the exact legacy shape: every summary
+                // pointer and checksum is zero. A non-zero unreadable pointer remains a
+                // partial/corrupt publication and must fail closed.
+                if !Self::native_state_is_summary_free_legacy(&native_state)
+                    && !Self::native_state_is_bootstrap_complete(&native_state)
+                {
                     return Err(err.into());
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
                 if persist_bootstrapped && !self.options.read_only {
-                    metadata.save_for_data_path(path)?;
                     self.persist_native_physical_header(&metadata)?;
                 }
                 Ok(metadata)
@@ -598,6 +796,14 @@ impl RedDB {
     }
 
     pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
+        if self
+            .load_internal_physical_metadata()
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Some("internal_record");
+        }
         let path = self.path()?;
         let native_state = self.native_physical_state();
         let metadata = PhysicalMetadataFile::inspect_for_data_path(path).ok();
@@ -631,7 +837,7 @@ impl RedDB {
         let catalog_name = catalog.name.clone();
         let catalog_total_entities = catalog.total_entities;
         let catalog_total_collections = catalog.total_collections;
-        let indexes = self.physical_index_state();
+        let indexes = self.physical_index_state_from_native_state(native_state, previous);
 
         let mut manifest =
             crate::api::SchemaManifest::now(self.options.clone(), catalog.total_collections);
@@ -880,11 +1086,15 @@ impl RedDB {
         &self,
         mut indexes: Vec<PhysicalIndexState>,
     ) -> Vec<PhysicalIndexState> {
-        let native_artifacts = self
-            .native_physical_state()
-            .and_then(|state| state.registry)
-            .map(|registry| registry.vector_artifacts)
+        let native_state = self.native_physical_state();
+        let native_artifacts = native_state
+            .as_ref()
+            .and_then(|state| state.registry.as_ref())
+            .map(|registry| registry.vector_artifacts.as_slice())
             .unwrap_or_default();
+        let artifact_pages = native_state
+            .as_ref()
+            .and_then(|state| state.vector_artifact_pages.as_ref());
         for index in &mut indexes {
             let Some(collection) = index.collection.as_deref() else {
                 continue;
@@ -895,7 +1105,12 @@ impl RedDB {
             let Some(artifact) = native_artifacts.iter().find(|artifact| {
                 artifact.collection == collection && artifact.artifact_kind == artifact_kind
             }) else {
-                index.build_state = "metadata-only".to_string();
+                index.build_state = if index.backend == "memory-budget-deferred" {
+                    "deferred-memory-budget"
+                } else {
+                    "metadata-only"
+                }
+                .to_string();
                 continue;
             };
             index.entries = artifact.vector_count as usize;
@@ -904,9 +1119,9 @@ impl RedDB {
             index.artifact_kind = Some(artifact.artifact_kind.clone());
             index.artifact_checksum = Some(artifact.checksum);
             index.build_state = "artifact-published".to_string();
-            if let Some(pages) = self.native_vector_artifact_pages() {
+            if let Some(pages) = artifact_pages {
                 index.artifact_root_page = pages
-                    .into_iter()
+                    .iter()
                     .find(|page| {
                         page.collection == artifact.collection
                             && page.artifact_kind == artifact.artifact_kind
@@ -998,6 +1213,18 @@ impl RedDB {
                 if index.build_state == "catalog-derived" {
                     index.build_state = "registry-loaded".to_string();
                 }
+            }
+            if index.backend == "memory-budget-deferred"
+                || previous.is_some_and(|metadata| {
+                    metadata.indexes.iter().any(|previous| {
+                        previous.name == index.name && previous.backend == "memory-budget-deferred"
+                    })
+                })
+            {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
             }
         }
 
@@ -1262,7 +1489,7 @@ impl RedDB {
         if self.options.read_only {
             return Err("physical metadata operations are not allowed in read-only mode".into());
         }
-        let Some(path) = self.path() else {
+        let Some(_) = self.path() else {
             return Err("database path is not available".into());
         };
 
@@ -1276,12 +1503,14 @@ impl RedDB {
         let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
 
         if metadata.indexes.is_empty() {
-            metadata.indexes = self.physical_index_state();
+            metadata.indexes = self
+                .native_physical_state()
+                .map(|state| self.physical_index_state_from_native_state(&state, Some(&metadata)))
+                .unwrap_or_else(|| self.physical_index_state());
         }
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
         let result = mutator(&mut metadata);
-        metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(result)
     }
@@ -1291,7 +1520,7 @@ impl RedDB {
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
-            return Ok(());
+            return self.persist_physical_metadata_record(metadata);
         }
 
         let _publication = self.store.vault_publication_lock.lock();
@@ -1340,7 +1569,34 @@ impl RedDB {
             .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         // Build payload artifacts once, on the publication path. Observers use
         // the persisted summaries instead of rebuilding search indexes.
-        let vector_artifact_records = self.native_vector_artifact_records();
+        let build = self.native_vector_artifact_records()?;
+        let vector_artifact_records = build.records;
+        let mut metadata = metadata.clone();
+        for index in &mut metadata.indexes {
+            let Some(kind) = Self::native_artifact_kind_for_index(index.kind) else {
+                continue;
+            };
+            let Some(collection) = &index.collection else {
+                continue;
+            };
+            if build.deferred_collections.contains(collection) {
+                index.backend = "memory-budget-deferred".to_string();
+                index.build_state = "deferred-memory-budget".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_root_page = None;
+                index.artifact_checksum = None;
+            } else if let Some((summary, _)) =
+                vector_artifact_records.iter().find(|(summary, _)| {
+                    &summary.collection == collection && summary.artifact_kind == kind
+                })
+            {
+                index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+                index.build_state = "artifact-published".to_string();
+                index.artifact_kind = Some(kind.to_string());
+                index.artifact_checksum = Some(summary.checksum);
+            }
+        }
+        let metadata = &metadata;
         let artifact_summaries = vector_artifact_records
             .iter()
             .map(|(summary, _)| summary.clone())
@@ -1397,6 +1653,7 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
+        self.persist_physical_metadata_record(metadata)?;
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
         self.store.publish_detached_native_blob_pages()?;
@@ -1445,4 +1702,335 @@ fn current_unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod catalog_observation_tests {
+    use super::*;
+
+    #[test]
+    fn summary_free_legacy_native_state_rebuilds_a_missing_sidecar_after_catalog_publication() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("legacy-summary-free.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        let runtime = crate::RedDBRuntime::with_options(options).expect("paged runtime");
+        runtime
+            .execute_query("CREATE TABLE retained (value INTEGER)")
+            .expect("retained table");
+        runtime
+            .execute_query("INSERT INTO retained (value) VALUES (17)")
+            .expect("retained row");
+        runtime.checkpoint().expect("publish retained row");
+
+        let db = runtime.db();
+        let store = db.store();
+        let mut header = store.physical_file_header().expect("physical header");
+        assert_ne!(
+            header.collection_roots_page, 0,
+            "fixture retains native roots"
+        );
+        header.sequence = header
+            .sequence
+            .checked_add(1)
+            .expect("next catalog sequence");
+        header.manifest_page = 0;
+        header.manifest_checksum = 0;
+        header.registry_page = 0;
+        header.registry_checksum = 0;
+        header.recovery_page = 0;
+        header.recovery_checksum = 0;
+        header.catalog_page = 0;
+        header.catalog_checksum = 0;
+        header.metadata_state_page = 0;
+        header.metadata_state_checksum = 0;
+        header.vector_artifact_page = 0;
+        header.vector_artifact_checksum = 0;
+        store
+            .update_physical_file_header(header)
+            .expect("publish legacy catalog sequence");
+
+        let legacy = db.native_physical_state().expect("legacy native state");
+        assert!(RedDB::native_state_is_summary_free_legacy(&legacy));
+        let mut unreadable_publication = legacy.clone();
+        unreadable_publication.header.registry_page = u32::MAX;
+        assert!(
+            !RedDB::native_state_is_summary_free_legacy(&unreadable_publication),
+            "a non-zero unreadable summary pointer must still fail closed"
+        );
+
+        let binary = PhysicalMetadataFile::metadata_binary_path_for(&path);
+        let json = PhysicalMetadataFile::metadata_path_for(&path);
+        db.delete_kv("red.storage.metadata", PHYSICAL_METADATA_KEY)
+            .expect("legacy fixture");
+        if binary.exists() {
+            std::fs::remove_file(binary).expect("remove binary sidecar");
+        }
+        if json.exists() {
+            std::fs::remove_file(json).expect("remove JSON sidecar");
+        }
+        for journal in PhysicalMetadataFile::journal_paths_for_data_path(&path)
+            .expect("list metadata journals")
+        {
+            std::fs::remove_file(journal).expect("remove metadata journal");
+        }
+
+        let metadata = db
+            .load_or_bootstrap_physical_metadata(true)
+            .expect("summary-free legacy state must bootstrap internal metadata");
+        assert_eq!(
+            metadata.superblock.collection_roots.get("retained"),
+            db.physical_collection_roots().get("retained")
+        );
+        assert!(!PhysicalMetadataFile::metadata_binary_path_for(&path).exists());
+        assert!(db.load_internal_physical_metadata().unwrap().is_some());
+        let rows = runtime
+            .execute_query("SELECT value FROM retained")
+            .expect("retained row remains queryable");
+        assert_eq!(rows.result.records.len(), 1);
+    }
+
+    #[test]
+    fn legacy_paged_drop_does_not_resurrect_derived_index_descriptors() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("drop-descriptors.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("paged profile");
+        {
+            let runtime = crate::RedDBRuntime::with_options(options).expect("paged runtime");
+            runtime
+                .execute_query("CREATE TABLE retained_source (value INTEGER)")
+                .expect("retained table");
+            runtime
+                .execute_query("INSERT INTO retained_source (value) VALUES (17)")
+                .expect("retained row");
+            runtime.checkpoint().expect("initial checkpoint");
+        }
+        // Managed legacy files also reopen with the default embedded options.
+        // That path edits contracts without rebuilding every native artifact.
+        let options = RedDBOptions::persistent(&path).with_memory_budget(64 * 1024 * 1024);
+        {
+            let runtime =
+                crate::RedDBRuntime::with_options(options.clone()).expect("legacy reopen");
+            assert!(runtime.db().is_paged());
+            assert_eq!(
+                runtime.db().options().storage_profile.deploy_profile,
+                crate::storage::DeployProfile::Embedded
+            );
+            // Exercise both distinct names and recreation after a removal proof.
+            for cycle in 0..6 {
+                let table = format!("discarded_source_{}", cycle % 4);
+                runtime
+                    .execute_query(&format!("CREATE TABLE {table} (value INTEGER)"))
+                    .expect("temporary table");
+                runtime.checkpoint().expect("publish derived descriptors");
+                let before = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(before
+                    .indexes
+                    .iter()
+                    .any(|index| index.collection.as_deref() == Some(table.as_str())));
+                runtime
+                    .execute_query(&format!("DROP TABLE {table}"))
+                    .expect("drop temporary table");
+                for _ in 0..2 {
+                    runtime.checkpoint().expect("checkpoint after drop");
+                    let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                    assert!(
+                        !metadata.indexes.iter().any(|index| index
+                            .collection
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("discarded_source_"))),
+                        "a dropped collection's derived descriptors were resurrected"
+                    );
+                    let native = runtime
+                        .db()
+                        .native_registry_summary()
+                        .expect("native registry");
+                    assert!(!native.indexes.iter().any(|index| {
+                        index
+                            .collection
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("discarded_source_"))
+                    }));
+                }
+                if cycle == 0 {
+                    // Model the consistent sidecar/native pair left by an older
+                    // writer. Its final Remove event is a durable removal proof.
+                    let ghost = before
+                        .indexes
+                        .iter()
+                        .find(|index| index.collection.as_deref() == Some(table.as_str()))
+                        .expect("old derived descriptor")
+                        .clone();
+                    runtime
+                        .db()
+                        .update_physical_metadata(|metadata| {
+                            assert!(metadata.manifest_events.iter().any(|event| {
+                                event.collection == table
+                                    && matches!(
+                                        &event.kind,
+                                        crate::physical::ManifestEventKind::Remove
+                                    )
+                            }));
+                            metadata.indexes.push(ghost.clone());
+                            let mut orphan = ghost.clone();
+                            orphan.name = "audited_legacy_orphan".into();
+                            orphan.collection = Some("audited_missing_source".into());
+                            orphan.artifact_root_page = None;
+                            orphan.artifact_checksum = None;
+                            metadata.indexes.push(orphan.clone());
+                            orphan.name = "global_descriptor".into();
+                            orphan.collection = None;
+                            metadata.indexes.push(orphan);
+                        })
+                        .expect("simulate old metadata without deleting any rows");
+                    runtime
+                        .checkpoint()
+                        .expect("repair a confirmed old removal");
+                }
+                let metadata = runtime.db().physical_metadata().expect("physical metadata");
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "audited_legacy_orphan"));
+                assert!(metadata
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == "global_descriptor"));
+            }
+        }
+        let runtime = crate::RedDBRuntime::with_options(options).expect("second legacy reopen");
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("retained_source")
+                .expect("retained source")
+                .count(),
+            1
+        );
+        let metadata = runtime.db().physical_metadata().expect("physical metadata");
+        assert!(!metadata.indexes.iter().any(|index| {
+            index
+                .collection
+                .as_deref()
+                .is_some_and(|name| name.starts_with("discarded_source_"))
+        }));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.collection.as_deref() == Some("retained_source")));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "audited_legacy_orphan"));
+        assert!(metadata
+            .indexes
+            .iter()
+            .any(|index| index.name == "global_descriptor"));
+    }
+
+    #[test]
+    fn index_reconciliation_reads_one_native_observation() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let runtime = crate::RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("catalog.rdb"))
+                .with_storage_profile(crate::StorageDeployPreset::Serverless.selection())
+                .expect("paged profile")
+                .with_capability(Capability::FullText),
+        )
+        .expect("runtime");
+        for number in 0..4 {
+            runtime
+                .execute_query(&format!("CREATE TABLE source_{number} (payload TEXT)"))
+                .expect("table");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO source_{number} (payload) VALUES ('searchable payload')"
+                ))
+                .expect("row");
+        }
+        runtime.checkpoint().expect("published artifacts");
+        let db = runtime.db();
+        let pager = db.store.pager().expect("paged store");
+        let reads = || {
+            let stats = pager.cache_stats();
+            stats.hits + stats.misses
+        };
+        let before = reads();
+        let native = db.native_physical_state().expect("native state");
+        let observation_reads = reads() - before;
+        let artifacts = native.registry.expect("registry").vector_artifacts;
+        let pages = native.vector_artifact_pages.expect("artifact pages");
+        let indexes: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_kind == "text.fulltext")
+            .map(|artifact| PhysicalIndexState {
+                name: format!("{}::fulltext", artifact.collection),
+                kind: IndexKind::FullText,
+                collection: Some(artifact.collection.clone()),
+                enabled: true,
+                entries: 0,
+                estimated_memory_bytes: 0,
+                last_refresh_ms: None,
+                backend: "catalog-derived".into(),
+                artifact_kind: None,
+                artifact_root_page: None,
+                artifact_checksum: None,
+                build_state: "catalog-derived".into(),
+            })
+            .collect();
+        assert!(indexes.len() >= 4, "fixture must publish all four indexes");
+        let declarations = indexes.clone();
+        let before = reads();
+        let indexes = db.reconcile_index_states_with_native_artifacts(indexes);
+        let reconciliation_reads = reads() - before;
+        for index in indexes {
+            let artifact = artifacts
+                .iter()
+                .find(|artifact| {
+                    Some(&artifact.collection) == index.collection.as_ref()
+                        && artifact.artifact_kind == "text.fulltext"
+                })
+                .expect("published artifact");
+            let page = pages
+                .iter()
+                .find(|page| {
+                    page.collection == artifact.collection
+                        && page.artifact_kind == artifact.artifact_kind
+                })
+                .expect("artifact root");
+            assert_eq!(index.artifact_root_page, Some(page.root_page));
+            assert_eq!(index.artifact_checksum, Some(artifact.checksum));
+            assert_eq!(index.entries, artifact.vector_count as usize);
+            assert_eq!(index.build_state, "artifact-published");
+        }
+        assert_eq!(
+            reconciliation_reads, observation_reads,
+            "catalog reconciliation must not reread artifact pages per index"
+        );
+
+        // An undecodable artifact directory must retain the existing fallback,
+        // not reuse the successful observation from the preceding call.
+        let page_id = native.header.vector_artifact_page;
+        let mut page = pager.read_page(page_id).expect("artifact directory");
+        page.as_bytes_mut()[crate::storage::engine::HEADER_SIZE..].fill(0);
+        pager
+            .write_page(page_id, page)
+            .expect("corrupt artifact directory");
+        assert!(db.native_vector_artifact_pages().is_none());
+        let indexes = db.reconcile_index_states_with_native_artifacts(declarations);
+        for index in indexes {
+            assert_eq!(index.artifact_root_page, None);
+            assert!(
+                index.artifact_checksum.is_some(),
+                "registry remains available"
+            );
+            assert_eq!(index.build_state, "artifact-published");
+        }
+    }
 }

@@ -319,7 +319,11 @@ finishes.
   phantom protection beyond materialized logical-row reads, and full
   multi-model SSI are out of scope.
 - Manual `VACUUM` is supported for table-row history and tombstone GC.
-  An autovacuum daemon is out of scope.
+  Standalone runtimes using the embedded deployment profile also reclaim
+  obsolete table-row versions in bounded background batches, respecting
+  active snapshots. Replicated profiles require a distributed retention
+  boundary and do not run this automatic collector. See
+  [maintenance qualification](../testing/storage-growth-regressions.md#maintenance-cost-under-sustained-load).
 - Current secondary indexes plus MVCC recheck/fallback provide the
   table-row correctness target. Historical secondary indexes are out
   of scope.
