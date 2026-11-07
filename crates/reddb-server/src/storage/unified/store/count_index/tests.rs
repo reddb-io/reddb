@@ -374,7 +374,13 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "storage::unified::store::count_index::tests::interrupted_count_batch_preserves_rows_and_can_rebuild", "--nocapture"])
         .env(CHILD, &path).env("REDDB_TEST_COUNT_BATCH_ROWS", rows.to_string()).env("REDDB_TEST_COUNT_BATCH_STAGE", stage).output().unwrap();
-        assert_eq!(result.status.code(), Some(exit_code), "crash stage {stage}");
+        assert_eq!(
+            result.status.code(),
+            Some(exit_code),
+            "crash stage {stage}: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
         let store = UnifiedStore::open_with_config(&path, config()).unwrap();
         let expected = (rows + u64::from(stage == "finished")) as usize;
         assert_eq!(store.get_collection("rows").unwrap().count(), expected);
