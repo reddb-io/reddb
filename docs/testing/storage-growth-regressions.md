@@ -128,10 +128,17 @@ cargo test -p reddb-io-server --test populated_cold_start populated_startup_50_g
 This fixture exercises decompression and actual persisted records but is highly
 compressible and uses an OS-warm cache. It is not a 50 GiB populated *file*, a
 high-cardinality small-row workload, a SQL benchmark, cold physical I/O, or a
-remote-storage measurement. A missing visibility-count projection is registered
-at boot but built by the next checkpoint; COUNT falls back to a normal scan until
-then. The harness reports that checkpoint separately and checks the following
-reopen. Its timings do not establish a production SLO.
+remote-storage measurement. A missing visibility-count projection is built in
+background batches against a pinned immutable generation. Each batch publishes
+its private pages in an ownership epoch; only the finished projection becomes
+visible to COUNT. A crash discards the unfinished tree through the retirement
+ledger and a later worker retries from the beginning. If a checkpoint replaces
+the source generation, the build restarts; frequent checkpoints can delay
+completion. COUNT falls back to the ordinary scan until publication. Batch size
+does not bound a slow fsync or an individual large value's decode time. The
+harness samples concurrent reads and writes during the build, reports the
+subsequent checkpoint separately, and verifies the writes after reopen. Its
+timings do not establish a production SLO.
 The serverless generation crash matrix separately
 checks that the selected published generation hydrates to queryable rows after
 each publication interruption; the partial-cache/source fixture checks failed

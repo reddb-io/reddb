@@ -20,11 +20,13 @@ impl super::RedDBRuntime {
             std::thread::Builder::new().name("reddb-count-projection".into()),
             move |stopped| {
                 let mut build = None;
+                let mut delay = std::time::Duration::from_millis(20);
                 loop {
-                    std::thread::park_timeout(std::time::Duration::from_millis(20));
+                    std::thread::park_timeout(delay);
                     if stopped.load(Ordering::Acquire) { break; }
                     let Some(inner) = weak.upgrade() else { break };
                     let store = inner.db.store();
+                    delay = std::time::Duration::from_millis(20);
                     if build.is_none() {
                         for collection in store.list_collections() {
                             match store.start_count_build(&collection) {
@@ -33,12 +35,13 @@ impl super::RedDBRuntime {
                                 Err(error) => tracing::warn!(%error, %collection, "count projection preparation failed"),
                             }
                         }
+                        if build.is_none() { delay = std::time::Duration::from_secs(1); }
                     }
                     if let Some(current) = build.as_mut() {
                         match current.step(&store) {
                             Ok(true) => build = None,
                             Ok(false) => {}
-                            Err(error) => { tracing::warn!(%error, "count projection batch failed"); build = None; }
+                            Err(error) => { tracing::warn!(%error, "count projection batch failed"); build = None; delay = std::time::Duration::from_secs(1); }
                         }
                     }
                 }

@@ -241,7 +241,7 @@ fn populated_startup_child() {
                         < std::time::Duration::from_secs(if rows <= 1024 { 60 } else { 1800 }),
                     "count projection did not complete"
                 );
-                if samples >= 128 {
+                if samples >= 4096 {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     continue;
                 }
