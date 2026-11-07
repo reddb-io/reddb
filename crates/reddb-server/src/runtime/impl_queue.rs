@@ -2655,32 +2655,34 @@ pub(super) fn load_queue_message_views_with_runtime(
         // RLS on + no Messages policy for this role = deny-default.
         return Ok(Vec::new());
     }
-    let filter_arc = rls_filter.map(std::sync::Arc::new);
-    let rt_arc = runtime;
-    Ok(manager
-        .scan(snap_ctx.as_ref(), move |entity| {
+    let mut views = Vec::new();
+    manager.try_scan_for_each(
+        snap_ctx.as_ref(),
+        manager.backing_read_bytes_max().unwrap_or(usize::MAX),
+        |entity| {
             if !matches!(entity.kind, EntityKind::QueueMessage { .. }) {
-                return false;
+                return true;
             }
-            if let (Some(filter), Some(rt)) = (filter_arc.as_ref(), rt_arc) {
-                return crate::runtime::query_exec::evaluate_entity_filter_with_db(
+            if let (Some(filter), Some(rt)) = (rls_filter.as_ref(), runtime) {
+                if !crate::runtime::query_exec::evaluate_entity_filter_with_db(
                     Some(&rt.inner.db),
                     entity,
                     filter,
                     queue,
                     queue,
-                );
+                ) {
+                    return true;
+                }
+            }
+            if let Some(mut view) = queue_message_view_from_entity(entity.clone()) {
+                view.available_at_ns = read_message_available_at_ns(store, queue, view.id);
+                view.ordering_key = read_message_ordering_key(store, queue, view.id);
+                views.push(view);
             }
             true
-        })
-        .into_iter()
-        .filter_map(queue_message_view_from_entity)
-        .map(|mut view| {
-            view.available_at_ns = read_message_available_at_ns(store, queue, view.id);
-            view.ordering_key = read_message_ordering_key(store, queue, view.id);
-            view
-        })
-        .collect())
+        },
+    )?;
+    Ok(views)
 }
 
 fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageView> {

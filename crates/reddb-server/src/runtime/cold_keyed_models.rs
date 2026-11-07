@@ -3850,3 +3850,37 @@ fn cold_queue_group_and_wait_cap_survive_checkpoint() {
         .expect("persisted consumer group remains readable");
     assert!(read.result.records.is_empty());
 }
+
+#[test]
+fn cold_queue_projection_reads_backing_and_propagates_read_limits() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE QUEUE cold_projection")
+        .expect("queue");
+    for payload in [Value::text("first"), Value::text("x".repeat(32 * 1024))] {
+        runtime
+            .enqueue_event_payload("cold_projection", payload)
+            .expect("seed");
+    }
+    runtime.db().store().persist().expect("checkpoint");
+    install_indexed_cold(&runtime, "cold_projection", 4096);
+    assert!(
+        runtime
+            .execute_query("SELECT payload FROM QUEUE cold_projection LIMIT 10")
+            .is_err(),
+        "an unreadable cold message must not become an empty or partial result"
+    );
+    install_indexed_cold(&runtime, "cold_projection", 128 * 1024);
+    let result = runtime
+        .execute_query("SELECT payload FROM QUEUE cold_projection LIMIT 10")
+        .expect("retry");
+    assert_eq!(result.result.records.len(), 2);
+    assert_eq!(
+        result.result.records[0].get("payload"),
+        Some(&Value::text("first"))
+    );
+    assert_eq!(
+        result.result.records[1].get("payload"),
+        Some(&Value::text("x".repeat(32 * 1024)))
+    );
+}
