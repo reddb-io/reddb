@@ -972,12 +972,13 @@ impl PrimaryReplication {
     }
 
     pub fn retention_floor_lsn(&self) -> Option<u64> {
+        // A slot update publishes its durability result while holding this lock.
+        // Check the error only after joining that same publication boundary.
+        let slots = self.slots.read().unwrap_or_else(|e| e.into_inner());
         if self.ensure_slot_metadata_durable().is_err() {
             return Some(0);
         }
-        self.slots
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        slots
             .values()
             .filter(|slot| slot.invalidation_reason.is_none())
             .map(|slot| slot.restart_lsn)

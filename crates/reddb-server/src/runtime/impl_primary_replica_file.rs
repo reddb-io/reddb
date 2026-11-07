@@ -321,6 +321,8 @@ impl RedDBRuntime {
     pub fn primary_replica_slot_catalog(
         &self,
     ) -> RedDBResult<Option<reddb_file::ReplicationSlotCatalog>> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         if let Some(primary) = self.inner.db.replication.as_ref() {
             primary
                 .ensure_slot_metadata_durable()
