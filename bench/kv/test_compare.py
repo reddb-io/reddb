@@ -86,6 +86,56 @@ class FakeClient:
 
 
 class CompareTests(unittest.TestCase):
+    def test_matrix_waits_for_listener_readiness(self):
+        import run_batch_matrix as matrix
+        with patch.object(matrix, "command", side_effect=[RuntimeError("booting"), ""]) as command, \
+                patch.object(matrix.time, "sleep"):
+            matrix.wait_ready("client", "server", 5000)
+        self.assertEqual(command.call_count, 2)
+
+    def test_matrix_readiness_timeout_fails_the_capture(self):
+        import run_batch_matrix as matrix
+        with patch.object(matrix, "command", side_effect=RuntimeError("unavailable")), \
+                patch.object(matrix.time, "monotonic", side_effect=[0, 61]):
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                matrix.wait_ready("client", "server", 5000)
+
+    def test_queue_verification_rejects_loss_duplicates_and_wrong_payloads(self):
+        from queue_compare import payload, validate
+        validate([payload(1, 100), payload(0, 100)], [0, 1], 100)
+        for values in ([payload(0, 100)], [payload(0, 100)] * 2,
+                       [payload(0, 100), "wrong"]):
+            with self.assertRaises(ValueError):
+                validate(values, [0, 1], 100)
+
+    def test_http_pipeline_preserves_prefetched_responses_and_checks_every_value(self):
+        import socket
+        for query in (False, True):
+            for bad_index in (None, 1):
+                client, server = socket.socketpair()
+                client.settimeout(1)
+                try:
+                    connection = compare.RedClient.__new__(compare.RedClient)
+                    connection.connection = Mock(sock=client, host="localhost", port=5000)
+                    connection.collection, connection.query = "fixture", query
+                    responses = []
+                    for index in range(3):
+                        value = "wrong" if index == bad_index else compare.payload(index, 100)
+                        body = {"value": value}
+                        if query:
+                            body = {"result": {"records": [{"values": body}]}}
+                        raw = json.dumps(body).encode()
+                        responses.append(f"HTTP/1.1 200 OK\r\nContent-Length: {len(raw)}\r\n\r\n".encode() + raw)
+                    server.sendall(b"".join(responses))
+                    if bad_index is None:
+                        connection.batch("get", [0, 1, 2], 100)
+                    else:
+                        with self.assertRaises(compare.ProtocolError):
+                            connection.batch("get", [0, 1, 2], 100)
+                finally:
+                    client.close()
+                    server.close()
+
     def test_zero_only_cpu_telemetry_does_not_claim_zero_cpu_under_load(self):
         sample = dict(started_unix_ms=1000, finished_unix_ms=3000, operations=10000,
                       throughput_ops_s=5000, batch_p50_us=100, batch_p95_us=200, batch_p99_us=300)

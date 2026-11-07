@@ -1,0 +1,18 @@
+{
+  "status": "partial",
+  "kv_cells_with_successful_recovery": 12,
+  "reddb_queue_rounds": 6,
+  "reddb_queue_recovery": "passed at both batch sizes",
+  "rabbit_queue_rounds": 3,
+  "stopped_at": "recovery_rabbit_1",
+  "reason": "32 messages had publisher confirms, but the newly created quorum queue did not become usable after SIGKILL/restart; consumer timed out",
+  "rabbit_raft_observation": {
+    "state": "follower",
+    "term": 0,
+    "last_log_index": 0
+  },
+  "rabbit_recovery_log": "name_not_registered",
+  "startup_failure": "A fixed 5-second startup delay was insufficient; later orchestration polls listener readiness. No timed samples were replaced.",
+  "continuation": "../queues-batching-established-2026-11-07",
+  "upstream_reference": "https://github.com/rabbitmq/rabbitmq-server/discussions/17710"
+}
